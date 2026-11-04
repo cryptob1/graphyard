@@ -104,7 +104,7 @@ export async function inspectProducerCredentials(root: string, profiles: Produce
   return withAccountHealth(root, 'producer', profiles, health, probe);
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>;
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; run?: Partial<MasterRun>;
   /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
   installSupervisor?: boolean;
   /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
@@ -153,7 +153,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // records among them, and any field a future command adds to the schema, so rerunning setup (as
   // `up`'s master-loop step does) can no longer drop an identity another command wrote and strand
   // every goal in acceptance drafting.
-  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
+  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }

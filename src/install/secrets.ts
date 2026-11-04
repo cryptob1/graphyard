@@ -56,7 +56,7 @@ export const installRecordSchema = z.object({
   service: z.string().min(1).nullable().default(null),
   url: z.string().nullable().default(null),
   /** The coordinates `install --apply` reached the deployment with, so `principal add|remove` reaches the same one (GY-1879). */
-  deployment: z.object({ sshHost: z.string().min(1).nullable(), sshUser: z.string().min(1), local: z.boolean(), port: z.number().int().positive().nullable(), image: z.string().min(1).nullable() }).strict().nullable().default(null),
+  deployment: z.object({ local: z.boolean(), port: z.number().int().positive().nullable(), image: z.string().min(1).nullable() }).nullable().default(null),
   principals: z.array(principalRecordSchema).default([]),
   github: z.object({ appId: z.number().int().positive(), installationId: z.number().int().positive(), slug: z.string().min(1), webhookFingerprint: z.string().length(12), ciAppIds: z.array(z.number().int().positive()).default([]) }).nullable().default(null),
   /**

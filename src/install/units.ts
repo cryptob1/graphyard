@@ -56,8 +56,6 @@ export const legacyInstallUnits: InstallUnits = { version: 1, slug: null, master
 
 /** The install's deploy unit (GY-2877), named beside its loop unit: `graphyard-deploy.service` for the legacy alias, `graphyard-deploy-OWNER-NAME.service` otherwise. */
 export const deployUnitOf = (units: Pick<InstallUnits, 'master'>) => units.master.replace(/^graphyard-master/, 'graphyard-deploy');
-/** Every unit an install owns, by exact name or template: what its harness may restart. */
-export const ownedUnits = (units: InstallUnits) => [units.master, deployUnitOf(units), units.executorTemplate];
 
 /** The command that records an install's own units in its checkout: `master init` resolves and writes them. */
 export const initialiseUnitsCommand = 'graphyard master init';
@@ -201,10 +199,6 @@ export class ForeignUnitRefusal extends Error {
   constructor(readonly unitPath: string, readonly checkout: string, root: string) {
     super(`${unitPath} runs another installation (${checkout}), not this checkout (${root}); Graphyard never overwrites or restarts another install's unit`);
   }
-}
-export function assertUnitOwned(path: string, root: string, home = homedir()) {
-  const checkout = foreignUnitCheckout(path, root, home);
-  if (checkout) throw new ForeignUnitRefusal(path, checkout, root);
 }
 
 /** The names an install of REPOSITORY at ROOT takes when it records none yet: what `resolveInstallUnits` writes. */

@@ -1,0 +1,13 @@
+{
+  "id": "merge-current-candidate",
+  "title": "Rework stops stale merge trials and fallback",
+  "description": "Real temporary Postgres and Git exercise native writer trials across typed rework and replacement claims, preserving history and ownership without stale pushes or delivery; unchanged candidates still land.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "current candidate native regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-current-candidate.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

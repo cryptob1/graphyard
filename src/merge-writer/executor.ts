@@ -42,6 +42,25 @@ export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 
   return 0;
 }
 
+/** Whether trial results still belong to this implementation and policy. */
+export function mergeCandidateObsolete(current: Work | undefined, selected: Work = current!): string | null {
+  if (!current) return `${selected.key} is no longer available`;
+  const reason = current.stage === 'done' || current.observation?.merged ? 'already delivered'
+    : current.reworkRequested ? 'returned for rework'
+    : current.lease || current.epoch !== selected.epoch || current.submission?.epoch !== current.epoch ? 'implementation ownership changed'
+    : !current.candidate || !current.submission || current.observation?.source !== 'control-plane' ? 'no submitted control-plane candidate'
+    : current.candidate.sha.toLowerCase() !== selected.candidate?.sha.toLowerCase()
+      || current.candidate.baseSha !== selected.candidate?.baseSha ? 'candidate changed'
+    : current.policyRevision !== selected.policyRevision ? 'policy changed' : null;
+  return reason ? `${current.key}: ${reason}; obsolete merge stays queued` : null;
+}
+
+/** Opening and landing also require the current build and review gates. */
+export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
+  return mergeCandidateObsolete(current, selected)
+    ?? (!gate(current!, 'build') || !gate(current!, 'review') ? `${current!.key}: build or review gate no longer passes; obsolete merge stays queued` : null);
+}
+
 /** One queued control-plane candidate, oldest submission first. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
 export interface MergeQueue {
@@ -714,13 +733,8 @@ export interface MergePorts {
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
   holds(sha: string): Promise<boolean>;
-  /**
-   * GY-1927: the automatic-merging hold standing over the item's candidate, read afresh from the
-   * plane (`GET /api/auto-merge?work=ID`), or null. Asked before a merge opens and again just
-   * before its push, so a merge selected from an older snapshot lands nothing once the hold is
-   * recorded. Absent, nothing is held here (the plane still refuses an intent under a hold).
-   */
-  hold?(item: Pick<Work, 'id' | 'key'>): Promise<string | null>;
+  /** Fresh authoritative candidate/policy/rework/ownership check at opening and landing. */
+  hold?(item: Work): Promise<string | null>;
   /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`, under the attempt `item` names (GY-1852). */
   record(item: Pick<Work, 'id' | 'key'> & { mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent): Promise<unknown>;
   /** GY-2963: where the flight's trial is while it runs, recorded on the in-flight entry and the item's ledger; absent, the trial is not reported step by step. */
@@ -767,12 +781,13 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     if (state.state === 'pushed') throw new Error(`${item.key}: ${state.mergeSha.slice(0, 12)} is recorded pushed but ${ports.baseBranch} does not hold it`);
   }
-  // GY-1927: a head the automatic-merging hold stands over opens no merge; it stays queued for the decision that releases it.
+  // Already-pushed reconciliation above retains its original intent and proof bindings.
   const held = async () => ports.hold ? ports.hold(item) : null;
-  const opening = await held();
-  if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
   let pushes = 0, baseTip = await ports.fetch();
   for (let attempt = 0; attempt <= ports.retrials; attempt++) {
+    const opening = await held();
+    if (opening) return { outcome: 'requeued', reason: opening, pushes };
+
     const merged = await ports.merge(head, baseTip, item);
     if ('conflict' in merged) {
       const reason = trialFailureReason({ conflict: merged.conflict })!;
@@ -802,17 +817,17 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
       ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
-    const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
-    if (failure) {
-      await ports.record(item, { kind: 'refused', head, reason: failure });
-      if (baseHeld || preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
-      return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
-    }
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
     const landing = await held();
     if (landing) {
       await ports.record(item, { kind: 'refused', head, reason: landing });
       return { outcome: 'requeued', reason: landing, pushes };
+    }
+    const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
+    if (failure) {
+      await ports.record(item, { kind: 'refused', head, reason: failure });
+      if (baseHeld || preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
+      return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
     }
     pushes += 1;
     const pushed = await ports.push(mergeSha, baseTip);

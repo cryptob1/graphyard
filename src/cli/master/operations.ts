@@ -1,4 +1,4 @@
-// Concern: `graphyard master` operations subcommands — status, the confined master's restart request, dispatch, merge, recover.
+// Concern: `graphyard master` operations subcommands — status, the confined master's restart request, dispatch, recover.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { dispatchWork, listHerdrAgents, readWorkerCredential } from '../../master.js';
@@ -21,14 +21,11 @@ export const confinedMaster = (env: NodeJS.ProcessEnv = process.env) => env[mast
 /** `master recover`: repin the known-good coordinator (GY-1529). */
 export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --admin-token-stdin (the admin credential on stdin; the pin returns to the previous known-good SHA without --to)';
 
-/** What `graphyard master merge` answers: Graphyard runs no merge of its own. */
-export const mergeAnswer = 'The control plane merges: the loop\'s merge writer trial-merges each submitted head whose gates pass, runs its proofs and pushes it to the base branch. There is no merge to run by hand.';
-
 /** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
 export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
 const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart: unit => defaultChildRun('systemctl', ['--user', 'restart', unit], { timeoutMs: 60_000 }) };
 
-/** Reading status and acting on one item: dispatch, merge. */
+/** Reading status and acting on one item: dispatch. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator } = session;
   if (id === 'status') return print(await masterStatusReport(root, master, masterApi));
@@ -53,8 +50,6 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     }
     return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now));
   }
-  // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
-  if (id === 'merge') return print({ merged: false, result: mergeAnswer });
   // GY-1529: repin the coordinator the loop runs from (previous known-good, or --to SHA), restart its unit, record the move.
   if (id === 'recover') {
     const { values } = parseArgs({ args, options: { to: { type: 'string' }, reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });

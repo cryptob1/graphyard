@@ -39,7 +39,6 @@ export const masterCommands = defineCommands([
       '  master status                 One page: the serving commit against main, open items, the',
       '                                merge writer, live sessions and free worker profiles',
       '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
-      '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); credential paths stay operator-only',
       '  master run [--once] [--interval SECONDS]',
