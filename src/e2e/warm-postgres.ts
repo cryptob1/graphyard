@@ -1,7 +1,7 @@
 // The warm start for a disposable Postgres cluster: the suite's test databases and the merge
 // trial's E2E serve. Measured cold, a cluster on a disk-backed tmpdir spent 4–8 s in initdb and
 // 3–7 s in its shutdown checkpoint, both fsync, beside about 0.1 s migrating the schema. So one
-// template cluster is built per schema digest and Postgres build under the tmpdir — fsync off, its
+// template cluster is built per schema generation, digest and Postgres build under the tmpdir — fsync off, its
 // `graphyard_template` database migrated — and each disposable cluster is a copy of that directory.
 // A DDL change is a new digest, so the next copy builds its template afresh; a template another
 // digest left is removed once it is an hour old. Only throwaway clusters use it: fsync off loses
@@ -46,7 +46,7 @@ export async function templateCluster(port: number, options: { code?: SchemaCode
   const code = options.code ?? currentSchemaCode(), root = options.root ?? tmpdir();
   const binaries = await postgresBinaries();
   const version = execFileSync(binaries.postgres, ['--version'], { encoding: 'utf8' }).trim();
-  const directory = join(root, `${prefix}${createHash('sha256').update(`${version}\n${schemaGenerationDigest(code)}`).digest('hex').slice(0, 16)}`);
+  const directory = join(root, `${prefix}${createHash('sha256').update(`${version}\n${code.generation}\n${schemaGenerationDigest(code)}`).digest('hex').slice(0, 16)}`);
   if (existsSync(join(directory, 'PG_VERSION'))) return directory;
   const staging = `${directory}.${process.pid}-${randomBytes(4).toString('hex')}`, passwordFile = `${staging}.password`;
   try {

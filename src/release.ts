@@ -126,6 +126,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
   // GY-3076: persist browser sign-in session digests across server restarts.
   'sha256:a0047ee2fd35c862cfd4e38f8bf33620933ea67ebe26f5092acca63f83eb9a5b',
+  // GY-3088: the work index and work tables' session, queue and pane definitions.
+  'sha256:661c3ea67aac115ddefbbbe929990108ae67c6a8f2bb22d34ce583be417b6274',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
