@@ -9,12 +9,12 @@ Graphyard owns leases, append-only history and gates independently of Herdr. Her
 
 ## One trip to Done
 
-1. **Ready:** released, unblocked work names proofs; features receive a spec check.
-2. **Build:** a worker claims a lease/worktree and submits its exact commit, ending the lease. Workers push nothing.
-3. **Review:** sensitive changes wait for independent approval; every feature also gets product review.
-4. **Test and acceptance:** the writer tests the merged tree and counts proof cases; sensitive changes need required manual attestations.
-5. **Done:** passing gates allow the writer to push main. Done means merged.
-6. **Delivery:** the separate deploy supervisor serves main; required checks establish live verification.
+1. **Ready**: released, unblocked work names proofs; features receive a spec check.
+2. **Build**: a worker claims a lease/worktree and submits its exact commit, ending the lease. Workers push nothing.
+3. **Review**: sensitive changes wait for independent approval; every feature also gets product review.
+4. **Test and acceptance**: the writer tests the merged tree and counts proof cases; sensitive changes need required manual attestations.
+5. **Done**: passing gates allow the writer to push main. Done means merged.
+6. **Delivery**: the separate deploy supervisor serves main; required checks establish live verification.
 
 A cycle can complete while every item remains stuck. Check item history, merge ledger, served commit and required case results to measure progress.
 
@@ -38,7 +38,7 @@ Product review walks every feature's preview (or served app plus diff). Approval
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Bootstrap: one supervised worker. Normal operation: master, loop and independent sessions.
+Text equivalent: in bootstrap the human operator supervises one worker. In normal operation, the master decides, the loop runs routine actions, and independent worker, reviewer and producer sessions act under their own identities.
 
 ![Authority of operator, Graphyard, runtime, reviewer and producer.](diagrams/roles-and-authority.svg)
 
@@ -48,4 +48,4 @@ Each session has its own identity ([legend](glossary.md#diagram-legend)).
 
 ![Control plane: callers, engine, Postgres, loop and merge writer, git remote.](diagrams/control-plane-components.svg)
 
-Mutations and history commit in locked transactions without external I/O. Gates bind change number, head/base SHA and policy revision. Later trusted results supersede earlier ones. Only the writer pushes main; no arbitrary lifecycle-state endpoint exists. See [delivery](delivery.md).
+Gates are deterministic checks of one candidate, bound to its change number, head/base SHA and policy revision. Mutations and history commit in locked transactions without external I/O. Later trusted results supersede earlier ones. Only the writer pushes main; no arbitrary lifecycle-state endpoint exists. See [delivery](delivery.md).
