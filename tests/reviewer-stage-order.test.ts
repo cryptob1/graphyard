@@ -47,7 +47,7 @@ test('integration:reviewer-stage-order — approval starts the GY-3044 trial wit
     const order: string[] = [];
     const run: MergeTrialRun = {
       build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: ['tests/flows.test.ts'],
-      proofs: {}, durationMs: 1, logTail: '',
+      proofs: Object.fromEntries(cases.map(name => [`e2e:${name}`, { executed: missing && name === badCase ? 0 : 1, failed: name === badCase ? 1 : 0 }])), durationMs: 1, logTail: '',
       e2e: cases.map(name => ({ proof: `e2e:${name}`, case: name,
         executed: missing && name === badCase ? 0 : 1, failed: name === badCase ? 1 : 0,
         ...(name === badCase ? missing ? { missing: true } : { failingStep: 'step 1 failed' } : {}),
