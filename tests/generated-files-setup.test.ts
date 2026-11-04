@@ -103,22 +103,21 @@ test('integration:generated-files-setup — installers derive the assignment fro
   try { assert.equal(generatedFilesAssignment(listOnly)?.value, 'docs/a.md,docs/b.md'); } finally { await rm(listOnly, { recursive: true, force: true }); }
 });
 
-test('integration:generated-files-setup — init --scan --apply sets the derived line beside GRAPHYARD_PRINCIPALS', async () => {
-  const dependencies = (tokens: { count: number }) => ({ url: 'https://graphyard.example',
-    token: () => `secret-${++tokens.count}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
+test('integration:generated-files-setup — init --scan --apply reports the derived line and leaves provisioning to install', async () => {
+  const dependencies = { url: 'https://graphyard.example', now: () => new Date('2030-01-01T00:00:00Z') };
   const declared = await fixtureRepo({ ...ordersApi, 'scripts/check-docs.mjs': manifestScript });
   try {
     const proposal = await scanProposal(declared, { url: 'https://graphyard.example', runtimes: [] });
-    const result = await applyProposal(declared, proposal, dependencies({ count: 0 }));
+    const result = await applyProposal(declared, proposal, dependencies);
     assert.equal(result.generatedFiles, 'GRAPHYARD_GENERATED_FILES=docs/index.md,docs/list.md');
-    assert.match(result.next, /Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment, with GRAPHYARD_GENERATED_FILES=docs\/index\.md,docs\/list\.md beside it/);
+    assert.match(result.next, /Run graphyard install --apply/);
   } finally { await rm(declared, { recursive: true, force: true }); }
   const undeclared = await fixtureRepo(ordersApi);
   try {
     const proposal = await scanProposal(undeclared, { url: 'https://graphyard.example', runtimes: [] });
-    const result = await applyProposal(undeclared, proposal, dependencies({ count: 0 }));
+    const result = await applyProposal(undeclared, proposal, dependencies);
     assert.equal(result.generatedFiles, null);
-    assert.match(result.next, /Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment, no agent runtime was detected/);
+    assert.match(result.next, /Run graphyard install --apply/);
   } finally { await rm(undeclared, { recursive: true, force: true }); }
 });
 

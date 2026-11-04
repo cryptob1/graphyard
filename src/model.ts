@@ -5,7 +5,6 @@ export * from './model/proof.js';
 export * from './model/review.js';
 export * from './model/policy.js';
 export * from './model/work.js';
-export * from './model/retired-queue.js';
 export * from './model/evidence.js';
 export * from './model/lease-end.js';
 export * from './model/delegation.js';
