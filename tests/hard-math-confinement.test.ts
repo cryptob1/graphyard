@@ -7,6 +7,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { credentialMaskFor } from '../src/master/confinement.js';
 import { launcherCoordinatorRoot, startAgentSession } from '../src/master/launch.js';
+import { startHeadlessSession } from '../src/headless-session.js';
 import { runConfinement } from '../src/runner/roles.js';
 
 test('integration:hard-math-smoke — non-CLI native launch denies oracle and authority while retaining only assigned credentials', async () => {
@@ -43,6 +44,22 @@ test('integration:hard-math-smoke — non-CLI native launch denies oracle and au
       assert.ok(end > 0 && words[0].endsWith('bwrap'), 'native session launch actually carries the wrapper');
       check([...words.slice(0, end + 1)], own, role === 'worker' ? reviewer : worker);
     }
+    // Headless review answers are posted by the launcher; the child holds no role token.
+    const headless = await startHeadlessSession({ name: 'benchmark-headless-review', work: 'GY-1', subject: 'boundary',
+      kind: 'pi', args: [], environment: {}, directory: worktree, coordinatorRoot: root,
+      credentialMask: credentialMaskFor(config, { credentialFile: null }, join(base, 'config-home')),
+      prompt: 'Boundary probe', answer: async output => output,
+      exec: async (command, args) => {
+        const end = args.indexOf('--');
+        assert.ok(command.endsWith('bwrap') && end >= 0, 'headless launch carries the explicit-root wrapper');
+        const result = spawnSync(command, [...args.slice(0, end + 1), '/bin/sh', '-c',
+          'for path do if test -r "$path"; then echo readable; else echo denied; fi; done',
+          'probe', coordinator, producer, reviewer, oracleFile, sourceCredential], { encoding: 'utf8', timeout: 30_000 });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout, 'denied\ndenied\ndenied\ndenied\ndenied\n');
+        return 'confined';
+      } });
+    assert.equal(await headless.settled, 'confined');
     // Headless producers use the same explicit-root path, keeping their own token only.
     const wrapper = runConfinement({ coordinatorRoot: root, credentialMask: credentialMaskFor(config, { credentialFile: producer }, join(base, 'config-home')) });
     assert.ok(wrapper);

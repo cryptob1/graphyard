@@ -34,7 +34,8 @@ checks, explicitly select an already provisioned pinned interpreter.
 
 The embedded `runner.ts` passes its isolated coordinator checkout explicitly to
 native worker, reviewer, spec-check and producer launches (including headless
-producers). Confinement does not depend on CLI entry-point detection. Each session
+reviews, spec checks and producers). Headless review children hold no role token;
+the launcher posts their answers. Confinement does not depend on CLI entry-point detection. Each session
 keeps its assigned credential and runtime login; the existing credential mask
 hides the other installation credentials, source installation and frozen oracle.
 `hard-math-confinement.test.ts` exercises the embedded daemon’s worker dispatch
