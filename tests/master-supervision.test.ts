@@ -362,12 +362,14 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     // 5. The shared test guard: under the test runner, a home outside the system temporary
     //    directory is refused at the installer, whatever the test passed and before it reads or
     //    writes anything — the real user home included, which this proof leaves exactly as found.
-    const realDirectory = join(homedir(), '.config/systemd/user');
+    const guardedHome = await temporaryDirectory('guarded-supervisor-home', process.cwd());
+    process.env.HOME = guardedHome; process.env.XDG_CONFIG_HOME = join(guardedHome, '.config');
+    const realDirectory = join(guardedHome, '.config/systemd/user');
     assert.throws(() => testSuiteHomeGuard(realDirectory), (error: unknown) => error instanceof LoopSupervisorRefusal && /test suite may not write/.test(error.message));
     assert.doesNotThrow(() => testSuiteHomeGuard(join(home, '.config/systemd/user')), 'a temp-rooted home passes');
     // The test-runner mark is this process's own, so the host's `env` — the documented way a test
     // redirects HOME, and the argument a test that "forgot" leaves empty — cannot switch the guard
-    // off: every host below resolves the unit directory to the real user home and every one is refused.
+    // off: every host below resolves to the fixture home outside tmpdir and every one is refused.
     const hosts: Record<string, Partial<Parameters<typeof installLoopSupervisor>[1]>> = {
       'home: real': { home: homedir() },
       'env: {}': { env: {} },
