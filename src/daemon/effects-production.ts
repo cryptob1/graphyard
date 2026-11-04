@@ -1,3 +1,4 @@
+import { workerVerificationPump } from './worker-verification.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -59,9 +60,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
+  const verifyWorkers = workerVerificationPump(root, () => current().hostId, mutate);
   let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
-    snapshot: deps.snapshot,
+    snapshot: async () => {
+      const snapshot = await deps.snapshot();
+      await verifyWorkers();
+      return snapshot;
+    },
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     credentials: profiles => inspectWorkerCredentials(root, profiles),

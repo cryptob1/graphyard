@@ -1,3 +1,4 @@
+import { takeWorkerVerifications, finishWorkerVerification } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
 import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
@@ -32,6 +33,12 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
 
 /** Work mutations: the human-only waits, the merge writer's record and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  { method: 'POST', path: '/api/worker-verifications/take', async handle(context) {
+    return takeWorkerVerifications(context.services, context.actor, await parseJson(context));
+  } },
+  { method: 'POST', path: '/api/worker-verifications/finish', async handle(context) {
+    return finishWorkerVerification(context.services, context.actor, await parseJson(context));
+  } },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
     async handle(context, [id]) {
