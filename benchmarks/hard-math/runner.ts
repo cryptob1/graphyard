@@ -264,6 +264,10 @@ async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:st
   for(const role of ['worker','reviewer','producer','master']) if(!roles.some(r=>r.name===role && r.concurrency>0 && r.accounts.length)) throw new Error(`No configured eligible ${role} role`);
   c.receipt.accountLimits=registry.accounts.map((a:any)=>({account:a.name,enabled:a.enabled,maxSessions:a.maxSessions,quota:a.quota}));
   await c.plane.call('agent-registry/apply',c.coordinator,{runtimes:registry.runtimes,models:registry.models,accounts:registry.accounts.map(({quota,smoke,unjudged,...a}:any)=>a),roles,reason:'Bounded benchmark: existing eligible accounts, capability then known cost, existing availability/capacity preserved'});
+  for(const account of registry.accounts) {
+    const {observedAt,observedBy,source,...quota}=account.quota;
+    await c.plane.call(`agent-registry/accounts/${encodeURIComponent(account.name)}/quota`,c.coordinator,{quota,reason:'Preserve existing source account availability and exhaustion holds for this bounded run'});
+  }
   const prefix=c.config.id.slice(0,20), credentialFile=join(c.install,'benchmark-coordinator.token');
   const master=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:source.cliPath,repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:source.hostId,masterAgentName:`hm-${prefix}-master`,herdrInstance:source.herdrInstance,herdrWorkspace:source.herdrWorkspace,
     workers:c.workers.map((w,i)=>({name:`hm-worker-${i}`,principal:w.id,agentName:`hm-${prefix}-w${i}`,mode:'launch',kind:source.workers.find(w=>w.mode==='launch')?.kind,credentialFile:join(c.install,`${w.id}.token`),accounts:source.workers.find(w=>w.mode==='launch')?.accounts,agentArgs:[],approvals:'auto',environment:{}})),
