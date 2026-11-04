@@ -4,7 +4,6 @@ import type { Validation } from '../validation.js';
 import type { Delivery } from '../delivery.js';
 import type { OperatorAgents } from '../operator-agent.js';
 import type { AgentRegistry } from '../agent-registry.js';
-import type { ProductionDelivery } from '../production-delivery.js';
 import type { delegationLimits } from '../delegation.js';
 import type { DelegationLimitReport } from './limits.js';
 import type { BuildIdentity } from '../protocol-version.js';
@@ -23,7 +22,7 @@ export interface Services {
   build: BuildIdentity;
   /** Production deployment observation, when the process hosts one. */
   production: ProductionWatch | null;
-  validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents; productionDelivery: ProductionDelivery;
+  validation: Validation; delivery: Delivery; operatorAgents: OperatorAgents;
   /** The fleet: runtimes, accounts, models and roles, and the sessions chosen from them. */
   agentRegistry: AgentRegistry;
   /** The closed-question responder (GY-109), or null when none is configured and every such proof takes its ordinary path. */

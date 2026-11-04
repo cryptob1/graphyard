@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
-import { ProductionWatch, observationLine, productionProvider, resolvedWatchEnvironment, startProductionWatch } from '../production-watch.js';
+import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
@@ -40,9 +40,8 @@ export async function main(options: MainOptions = {}) {
   const knownPrincipals = credentials.map(credential => credential.id);
   const build = buildIdentity();
   // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
-  const provider = productionProvider(process.env, null, fetch, await resolvedWatchEnvironment(store.pool));
-  // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
-  const production = new ProductionWatch(store, { provider, github: null, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || null });
+  const provider = productionProvider(process.env, fetch);
+  const production = new ProductionWatch(store, { provider, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main' });
   const http = server(engine, credentials, artifacts, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
