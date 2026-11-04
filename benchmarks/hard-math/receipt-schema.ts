@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { currentEvidence } from '../../src/model/evidence.js';
+import { evidenceProves } from '../../src/model/mechanical-proofs.js';
+import type { Work } from '../../src/model.js';
 const sha=z.string().regex(/^[0-9a-f]{40}$/), hash=z.string().regex(/^[0-9a-f]{64}$/);
 export const budgetSchema=z.object({authorization:z.string().min(1),maxAgentSeconds:z.number().positive(),maxTokens:z.number().positive().nullable(),maxCost:z.number().positive().nullable(),currency:z.literal('USD'),priceSource:z.object({url:z.string().url().nullable(),date:z.string().nullable(),reason:z.string().nullable()})});
 export const configSchema=z.object({id:z.string().regex(/^[a-zA-Z0-9._-]+$/),mode:z.enum(['team','single']),seed:z.union([z.literal(1),z.literal(2),z.literal(3)]),profileVersion:z.literal('v1'),wallClockSeconds:z.number().int().positive().max(3600).default(3600),budget:budgetSchema,eligibleModels:z.array(z.string().min(1)).min(1),sourceRoot:z.string().min(1),oraclePython:z.string().min(1),oracleDirectory:z.string().min(1),runDirectory:z.string().min(1),credentialDirectory:z.string().min(1),usageCommand:z.array(z.string()).min(1).optional()});
@@ -44,9 +47,13 @@ export function validateReceipt(value:unknown):Receipt {
       if(!record.observation?.reviews?.some((a:any)=>a.sha===w.candidate && a.state==='APPROVED')) throw new Error(`Missing independent approval: ${w.key}`);
       if(r.kind==='real-agent' && !r.sessions.some(s=>s.work===w.key && s.implementation?.epoch===w.epoch && (s.implementation.pane || s.implementation.agentName))) throw new Error(`Missing actual implementation handle: ${w.key}`);
       const trial=record.mergeLedger.trial;
-      if(trial?.build!=='pass' || !Object.values(trial.proofs??{}).length || Object.values(trial.proofs).some((p:any)=>p.executed<1 || p.failed!==0)) throw new Error(`Missing authoritative proof trial: ${w.key}`);
+      const required=record.criteria.flatMap((ac:any)=>ac.proofs.filter((proof:string)=>/^(unit|integration|e2e):/.test(proof)));
+      if(required.some((proof:string)=>!trial?.proofs?.[proof]) || trial?.build!=='pass' || !Object.values(trial.proofs??{}).length || Object.values(trial.proofs).some((p:any)=>p.executed<1 || p.failed!==0)) throw new Error(`Missing authoritative proof trial: ${w.key}`);
       if(w.repairs>2) throw new Error('Repair bound exceeded');
     }
+    const finalRecord=r.work.at(-1)!.record as Work;
+    const certificate=currentEvidence(finalRecord,'manual:certified-artifact');
+    if(!certificate || !evidenceProves('manual:certified-artifact',certificate) || certificate.executed<1) throw new Error('Missing independent final candidate certification');
     if(r.artifact.sha!==r.work.at(-1)!.merge) throw new Error('Artifact is not the pushed final merge');
     if(r.mode==='team' && !r.overlaps.length) throw new Error('No three distinct overlapping implementation sessions');
   }

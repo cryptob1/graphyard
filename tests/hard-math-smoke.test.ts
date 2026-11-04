@@ -61,8 +61,12 @@ test('integration:hard-math-smoke — real scratch Postgres/control plane and Gi
   for(const edit of [
     (r:any)=>{r.work[0].record.delivery=null;},
     (r:any)=>{delete r.work[0].record.pipeline;},(r:any)=>{r.work[0].record.workspaces=[];},(r:any)=>{r.artifact.sha='f'.repeat(40);},
-    (r:any)=>{r.work[0].record.observation.reviews=[];},(r:any)=>{r.overlaps=[];},(r:any)=>{r.cost=0;},
+    (r:any)=>{r.overlaps=[];},(r:any)=>{r.cost=0;},
   ]) {const bad=structuredClone(receipt);edit(bad);assert.throws(()=>validateReceipt(bad));}
+  const unreviewed=structuredClone(receipt);(unreviewed.work[0].record as any).observation.reviews=[];
+  assert.throws(()=>validateReceipt(unreviewed),/Missing independent approval/,'benchmark receipt rejects a missing review regardless of the production queue policy');
+  const uncertified=structuredClone(receipt);(uncertified.work.at(-1)!.record as any).evidence=[];
+  assert.throws(()=>validateReceipt(uncertified),/Missing independent final candidate certification/);
   assert.throws(()=>comparison(receipt,{...receipt,mode:'single'}),/actual team/);
 });
 

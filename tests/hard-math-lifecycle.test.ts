@@ -8,7 +8,7 @@ import { command } from '../benchmarks/hard-math/process.js';
 import { registerRun, writeRunOwner, runsDirectory, endRun } from '../src/runner/registry.js';
 import { sourceCapacity } from '../benchmarks/hard-math/capacity.js';
 import { emptyRegistry } from '../src/model/registry.js';
-import { overlappingWorkers } from '../benchmarks/hard-math/receipt-schema.js';
+import { overlappingWorkers, comparison, receiptSchema, validateReceipt } from '../benchmarks/hard-math/receipt-schema.js';
 
 test('hard math cleanup stops only run-owned master, item and headless sessions and releases leases',async()=>{
   const root=await temporaryDirectory('hard-math-cleanup'),directory=join(runsDirectory(root),'proof');
@@ -62,9 +62,7 @@ test('hard math overlap requires actual handles and three different implementati
   assert.deepEqual(overlappingWorkers(sessions),[]);
 });
 
-test('hard math comparison accepts equal existing time caps with unavailable money and rejects unequal bounds',async()=>{
-  const {comparison,receiptSchema}=await import('../benchmarks/hard-math/receipt-schema.js');
-  const receipt=(mode:'team'|'single')=>receiptSchema.parse({
+const syntheticReceipt=(mode:'team'|'single')=>receiptSchema.parse({
     version:1,id:`synthetic-${mode}`,kind:'real-agent',mode,configDigest:'a'.repeat(64),graphyardCommit:'a'.repeat(40),graphyardVersion:'unit',
     profileVersion:'v1',profileDigest:'a'.repeat(64),generatorDigest:'a'.repeat(64),contractDigest:'a'.repeat(64),seed:1,startingCommit:'b'.repeat(40),oracleDigest:'a'.repeat(64),
     startedAt:'2026-01-01T00:00:00Z',endedAt:'2026-01-01T00:00:01Z',outcome:'FAIL',reason:'Synthetic validation input; no agents ran',
@@ -72,7 +70,9 @@ test('hard math comparison accepts equal existing time caps with unavailable mon
     eligibleModels:['existing'],accountLimits:[],sourceCapacity:[],runtimeReceipts:[],cleanup:{complete:true,errors:[]},wallClockLimitSeconds:60,
     work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,costReason:'Unavailable subscription allocation',agentSeconds:0,wallClockMs:1000,comparativeSelection:'untested',speedupClaim:false,
   });
-  const team=receipt('team'),single=receipt('single'),result=comparison(team,single);
+
+test('hard math comparison accepts equal existing time caps with unavailable money and rejects unequal bounds',async()=>{
+  const team=syntheticReceipt('team'),single=syntheticReceipt('single'),result=comparison(team,single);
   assert.equal(result.team.correct,false);assert.equal(result.team.cost,null);
   assert.equal(result.monetaryParityProven,false);assert.equal(result.costAdvantageProven,false);
   assert.throws(()=>comparison(team,{...single,budget:{...single.budget,maxAgentSeconds:61}}),/bounds/);
@@ -148,4 +148,29 @@ test('hard math real API creates/releases the frozen plan with revisions, binds 
     await new Promise<void>(resolve=>http?http.close(()=>resolve()):resolve());
     await store?.close();await database.stop();policy.setRepositoryPolicy(previousPolicy);
   }
+});
+
+
+test('hard math receipt independently requires approval, certification and positive trial proof counts',()=>{
+  const receipt=syntheticReceipt('single'),head='c'.repeat(40),merge='d'.repeat(40),base='b'.repeat(40);
+  receipt.kind='controlled-fixture';receipt.outcome='PASS';
+  receipt.sessions=[{id:'synthetic-session',role:'worker',work:'GY-1',principal:'worker',runtime:'synthetic',account:'synthetic',model:'synthetic',reason:'Synthetic receipt validation only',startedAt:receipt.startedAt,endedAt:receipt.endedAt,record:{},implementation:null}];
+  const record={criteria:[{proofs:['unit:workbench-contract','e2e:workbench']}],key:'GY-1',stage:'done',lease:null,policyRevision:1,candidate:{sha:head,baseSha:base},delivery:{mergeSha:merge},pipeline:{attempts:[{epoch:1}]},workspaces:[{epoch:1,owner:'worker'}],
+    observation:{reviews:[{sha:head,state:'APPROVED',reviewer:'independent'}]},mergeLedger:{state:'reconciled',trial:{build:'pass',proofs:{'unit:workbench-contract':{executed:1,failed:0},'e2e:workbench':{executed:2,failed:0}}}},
+    evidence:[{proof:'manual:certified-artifact',sha:head,baseSha:base,policyRevision:1,producer:'independent-producer',trusted:true,result:'pass',executed:8,skipped:0}]};
+  receipt.work=[{component:'single',id:'synthetic-item',key:'GY-1',epoch:1,candidate:head,merge,attempts:1,reviews:1,repairs:0,record}];
+  receipt.artifact={sha:merge,cli:true,api:true,ui:true,cases:8,oracleDigest:receipt.oracleDigest};
+  assert.doesNotThrow(()=>validateReceipt(receipt));
+  const missingReview=structuredClone(receipt);(missingReview.work[0].record as any).observation.reviews=[];
+  assert.throws(()=>validateReceipt(missingReview),/Missing independent approval/);
+  const otherHeadReview=structuredClone(receipt);(otherHeadReview.work[0].record as any).observation.reviews[0].sha=base;
+  assert.throws(()=>validateReceipt(otherHeadReview),/Missing independent approval/);
+  for(const edit of [(r:any)=>{r.evidence=[];},(r:any)=>{r.evidence[0].result='fail';},(r:any)=>{r.evidence[0].sha=base;},(r:any)=>{r.evidence[0].producer='worker';}]) {
+    const bad=structuredClone(receipt);edit(bad.work[0].record);
+    assert.throws(()=>validateReceipt(bad),/Missing independent final candidate certification/);
+  }
+  const uncounted=structuredClone(receipt);(uncounted.work[0].record as any).mergeLedger.trial.proofs['unit:workbench-contract'].executed=0;
+  assert.throws(()=>validateReceipt(uncounted),/Missing authoritative proof trial/);
+  const missingE2e=structuredClone(receipt);delete (missingE2e.work[0].record as any).mergeLedger.trial.proofs['e2e:workbench'];
+  assert.throws(()=>validateReceipt(missingE2e),/Missing authoritative proof trial/);
 });

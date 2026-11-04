@@ -6,7 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
-import { mergeOne, nextToMerge, runMergeTrial } from '../../src/merge-writer/executor.js';
+import { mergeOne, runMergeTrial } from '../../src/merge-writer/executor.js';
 import { defaultChildRun } from '../../src/child-runner.js';
 import { git, command } from './process.js';
 import { generate } from './generator.js';
@@ -77,11 +77,12 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     await command(process.execPath,['--test','tests/contract.test.mjs'],{cwd:directory});
     await command(process.execPath,['--input-type=module','-e',"import {parseRequest} from './src/contract.mjs';import assert from 'node:assert/strict';assert.throws(()=>parseRequest({coefficients:['0'],precisionBits:64}),{code:'ZERO_POLYNOMIAL'});"],{cwd:directory});
     await c.plane.call(`work/${item.id}/evidence`,c.producer,{proof:'unit:workbench-contract',sha:item.candidate.sha,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:'pass',executed:1,skipped:0,exercise:{behaviour:'Contract fixture without zero polynomial rejection',result:'fail',executed:1}});
-    assert.equal(nextToMerge([await c.plane.call(`work/${item.id}`,c.coordinator)],{},Date.now()),null,'review must gate delivery');
     const reviewToken=randomBytes(32).toString('hex');
     await c.plane.call(`work/${item.id}/review-launch`,c.coordinator,{reviewer:'controlled-independent-reviewer',head:item.candidate.sha,baseTip:item.observation.mergeBase??item.candidate.baseSha,tokenHash:createHash('sha256').update(reviewToken).digest('hex'),expiresAt:new Date(Date.now()+120_000).toISOString()});
     await c.plane.call(`work/${item.id}/review-verdict`,reviewToken,{event:'APPROVE',body:'Controlled fixture review; not a real coding-agent review.',sha:item.candidate.sha,token:reviewToken});
-    return c.plane.call(`work/${item.id}`,c.coordinator);
+    const reviewed=await c.plane.call(`work/${item.id}`,c.coordinator);
+    assert.ok(reviewed.observation.reviews.some((r:any)=>r.sha===item.candidate.sha && r.state==='APPROVED' && r.reviewer==='controlled-independent-reviewer'),'fixture obtains independent exact-head approval before its canonical merge call');
+    return reviewed;
   };
   // Three claimed, registered, distinct worktrees remain open together before any submits.
   const first=await Promise.all(c.receipt.work.slice(0,3).map(claim));
@@ -98,7 +99,7 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
         assert.equal(await c.certify(item),false,'known bad starter must fail the external producer');
         item=await c.plane.call(`work/${item.id}`,c.coordinator);
         assert.ok(item.evidence.some((e:any)=>e.proof==='manual:certified-artifact' && e.trusted && e.result==='fail'));
-        assert.equal(nextToMerge([item],{},Date.now()),null,'failed independent certification blocks merge');
+        assert.equal(item.delivery??null,null,'controlled failed certification is retained before rework and any canonical merge call');
         await c.plane.call(`work/${item.id}/rework`,c.operator,{reason:'External exact oracle rejected controlled integration fault',previousWorkerStopped:true});
         attempt=await claim(work,i);item=await submit(attempt,true);
       }

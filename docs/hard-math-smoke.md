@@ -177,3 +177,27 @@ and epoch cleanup. It also confirms stale revisions, coordinator use of a worker
 epoch and client-supplied timestamps are refused. This is API regression coverage;
 full native Git delivery/repair/container checks remain required, and no actual
 agent result is claimed.
+
+
+The native `e38dfc5ee` diagnostic reports eleven of thirteen cases passing,
+including cleanup/limits. Its two failures came from a fixture assertion that
+normal deltas must wait in the merge queue for approval. Production deliberately
+allows normal deltas to receive post-merge review; sensitive deltas require
+pre-merge approval. The fixture now posts independent exact-head approval before
+its canonical `mergeOne` call without asserting a different production policy.
+Missing or wrong-head approval is rejected by the benchmark receipt validator.
+
+The next merge/proof steps were checked against `mergeWriterReads`, `mergeOne`,
+`runMergeTrial` and the merge-record API. The ordinary trial runs the seed's
+`npm test` and bound `e2e:workbench` case, records actual proof counts, then pushes
+with the base-tip lease and reconciles the observed merge. Manual certification
+of a normal delta is likewise a benchmark obligation rather than a production
+queue hold: its failed producer fact is retained, and the controlled driver
+requests rework before invoking merge. Final receipt validation now explicitly
+requires independent passing certification bound to the final candidate and
+policy, in addition to the separately verified pushed artifact, reviewed heads
+and positive trial proof counts. No production gate or risk classification was
+changed, and no sensitive files were manufactured. Focused receipt tests reject
+missing/wrong-head review, missing/failed/stale/dependent certification, missing
+required mechanical proofs and zero trial proof counts; these synthetic validation inputs are not run receipts or
+actual-agent success evidence. Full native delivery/repair still needs its rerun.
