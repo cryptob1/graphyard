@@ -11,7 +11,7 @@ A worker submits its commit, Graphyard checks gates, the merge writer trials and
 
 ## Merge writer
 
-Up to four oldest heads share a trial and push; failed batches retry individually. Ledger order: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Push uses `git push --force-with-lease`; a moved tip retrials. Lost replies replay idempotently. A superseded intent is refused and the current head queued again. Status: `mergeWriter.queue`.
+`run.mergeWriter.parallel` (3) batches of ≤4 oldest heads trial concurrently on stacked commits, pushing in order; failed batches retry individually, re-trialling those above. Ledger: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Leased pushes retrial moved tips. Lost replies replay idempotently. Superseded intents are refused; current heads requeue. Status: `mergeWriter.queue`, `inFlights`.
 
 ## The merger
 

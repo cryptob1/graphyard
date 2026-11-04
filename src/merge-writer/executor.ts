@@ -1,4 +1,4 @@
-// Concern: the control-plane merge executor (GY-1524) — the serial queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
+// Concern: the control-plane merge executor (GY-1524) — the queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import type { Work } from '../model.js';
 import { riskOf } from '../model/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
@@ -636,14 +636,24 @@ export interface MergePorts {
   fetch(): Promise<string>;
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
-  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984). */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void): Promise<MergeTrialRun>;
+  /**
+   * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
+   * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
+   */
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, share?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
    * Absent, nothing is previewed.
    */
   preview?(mergeSha: string, files: readonly string[], item: Pick<Work, 'key'>): Promise<PreviewVerdict | null>;
+  /**
+   * Whether the tip a trial ran on is the tip it would land on (batch.ts `mergeStack`): answered once
+   * every queue position before this one has finished. False discards the verdict, which is the
+   * stacked positions' as much as this head's, and the head is trialled again on the tip as it stands.
+   * Absent, every trial lands where it ran.
+   */
+  lands?(baseTip: string): Promise<boolean>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -722,6 +732,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
         durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
       throw error;
     }
+    if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
     // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
     const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
     const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
