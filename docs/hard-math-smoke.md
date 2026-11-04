@@ -32,10 +32,16 @@ image with installed Chromium. The oracle environment is read-only in nested
 trials; no host HOME or implicit Python fallback is used. For focused host
 checks, explicitly select an already provisioned pinned interpreter.
 
+The embedded `runner.ts` passes its isolated coordinator checkout explicitly to
+native worker, reviewer, spec-check and producer launches (including headless
+producers). Confinement does not depend on CLI entry-point detection. Each session
+keeps its assigned credential and runtime login; the existing credential mask
+hides the other installation credentials, source installation and frozen oracle.
+
 ```sh
 npm run build
 npm run docs:check
-HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts
+HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts tests/hard-math-confinement.test.ts
 ```
 
 The bound case `e2e:hard-math-smoke` runs the same head's smoke file. It starts real

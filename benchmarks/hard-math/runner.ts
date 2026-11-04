@@ -205,7 +205,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       master=await configureMaster(context,source!,producers);
       applyHerdrConfig(master);
       state=emptyDaemonState(master);launcher=new Launcher(3);
-      effects=daemonEffects(repository.root,master,{snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>{enforce();return plane!.call(path,coordinator.token,data);},run:boundedRun,fetcher:(input,init)=>fetch(input,{...init,signal:AbortSignal.any([abort.signal,...(init?.signal?[init.signal]:[])])})});
+      effects=daemonEffects(repository.root,master,{coordinatorRoot:repository.root,snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>{enforce();return plane!.call(path,coordinator.token,data);},run:boundedRun,fetcher:(input,init)=>fetch(input,{...init,signal:AbortSignal.any([abort.signal,...(init?.signal?[init.signal]:[])])})});
       const dispatchTick=effects.dispatchTick!;
       effects.dispatchTick=snapshot=>{enforce();return pendingTick=dispatchTick(snapshot);};
       const checked=new Map<string,boolean>();
