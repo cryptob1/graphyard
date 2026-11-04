@@ -535,6 +535,35 @@ test('unit:e2e-command-child-error — the reproduced initdb locale failure name
   assert.ok(summarize(report).includes(`the command exited 1: ${error}`), 'the operator sees the actual child startup error');
 });
 
+test('unit:e2e-command-long-stack — a real child failure retains its test and locale cause before 80 trailing frames, with secrets redacted before selection', async () => {
+  const dir = await repository({});
+  const secret = 'private-child-credential';
+  await secretsFile(dir, 'any', `CHILD_TOKEN=${secret}\n`);
+  const name = 'native Postgres starts with the installed locale';
+  const error = 'Error: Postgres init script failed (code: 1, signal: null). ERROR OUTPUT: initdb: error: invalid locale settings; check LANG and LC_* environment variables';
+  const stack = Array.from({ length: 80 }, (_, i) => `    at frame${i} (file:///child.cjs:${i + 1}:1)`);
+  await writeFile(join(dir, 'fail.cjs'), `process.stderr.write(${JSON.stringify([
+    `\u001b[31m✖ ${name} ${secret}\u001b[0m`, `  ${error} ${secret}`, ...stack,
+  ].join('\n'))}); process.exitCode = 7;`);
+  const cases = await loadCases(await repository({ 'long-stack.json': commandCase('long-stack', `${JSON.stringify(process.execPath)} fail.cjs`, { secrets: ['CHILD_TOKEN'] }) }));
+  const report = await runCases(cases, generalOptions(dir));
+  const failed = report.cases[0];
+  assert.equal(failed.outcome, 'fail');
+  const reason = failed.failingStep!.reason;
+  assert.match(reason, /^the command exited 7:/);
+  assert.ok(reason.includes(name), reason);
+  assert.ok(reason.includes(error), reason);
+  assert.ok(reason.length <= 'the command exited 7: '.length + 500);
+  const output = failed.attemptResults[0].steps![0].output;
+  assert.equal(output.length, 50);
+  assert.ok(output.some(line => line.includes(name)));
+  assert.ok(output.some(line => line.includes(error)));
+  assert.equal(output.at(-1), stack.at(-1));
+  assert.ok(JSON.stringify(report).includes('[secret:CHILD_TOKEN]'));
+  assert.ok(!JSON.stringify(report).includes(secret), 'no selected diagnostic or recorded output leaks the credential');
+  assert.ok(summarize(report).includes(error));
+});
+
 test('unit:e2e-agent-step-verdict — an agent step opens the target URL plus path, gives agent-browser the goal, the success criteria and the VERDICT instruction, records the verdict and screenshot path, and fails on a missing verdict or a timeout', async () => {
   const dir = await repository({});
   const fake = await fakeAgentBrowser(dir);
