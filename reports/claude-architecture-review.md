@@ -79,7 +79,7 @@ GY-3051: the native fixture was rerun at `e38dfc5`. No actual agent has succeede
 **Smallest fix:** record a short-lived attempt as a failed dispatch action, the one kind of record that already turns into a master wake.
 1. In `closeStep` (`cycle.ts:206-217`), when an ended implementation attempt lived less than a short window (`resumeExitWindowMs`, 60 s, already in `src/master/session-resume.ts:28`) and committed nothing, write one `state.actions` row through the existing `record()`, with:
    - a stable key per item, `early-exit:${item.id}`;
-   - `kind: 'dispatch'`, `state: 'failed'`, `epoch: null`;
+   - `kind: 'dispatch'`, `work: item.key`, `state: 'failed'`, `epoch: null`;
    - `detail` set to the release cause plus the screen tail from finding 2, with no epoch number in it;
    - `attempts` counting consecutive early exits.
 
