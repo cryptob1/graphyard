@@ -5,8 +5,6 @@ import { Store } from '../store.js';
 import { waitForDatabase } from '../store/pools.js';
 import { Engine } from '../engine.js';
 import { demand } from '../model.js';
-import { Validation } from '../validation.js';
-import { Delivery } from '../delivery.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -51,9 +49,7 @@ export async function main(options: MainOptions = {}) {
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
-  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), process.env.GITHUB_REPOSITORY ?? '');
-  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
-  const delivery = new Delivery(validation);
+  const { validation, delivery } = http.services;
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
 
   // Startup validation (GY-1127): artifact expiry and the full validation reconcile took minutes

@@ -17,7 +17,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // GY-1992 AC-2: an item stored while the scope-request machinery ran still reads. Its document
 // carries the retired scope fields and a standing scope-refusal blocker, and its history carries the
 // scope events and requirements payloads of that time; every reader of either answers, the gates name
-// no scope, and the next evaluation drops the fields and clears the blocker, so the item dispatches.
+// no scope, and the startup migration drops the fields and clears the blocker, so the item dispatches.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -44,13 +44,13 @@ const get = async (path: string, actor: Principal = coordinator) => {
   return { status: response.status, body: await response.json() as any };
 };
 
-test('unit:old-scope-history-loads — a document and history carrying scopeRequest, carriedScopeRequest, scopeDecision, scopeWithdrawn and a scope-refusal blocker load and evaluate; the gates name no scope and the blocker clears', async () => {
+test('unit:retired-fields-migrated — startup removes retired document fields and scope-refusal blockers, keeps the stage and history, and the item still evaluates and dispatches', async () => {
   let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Stored before GY-1992', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   const at = new Date(Date.now() - 3_600_000).toISOString();
   const request = { epoch: 1, paths: ['src/b.ts'], reason: 'needs b', requestedBy: worker.id, at };
   const decision = { state: 'refused', reason: 'outside what the criteria imply', at, decidedBy: 'graphyard', waitedMs: 1000, paths: ['src/b.ts'], requestedBy: worker.id, requestedAt: at, epoch: 1, treeRead: true };
-  const stored = { ...work, plannedFiles: ['src/a.ts'], scopeRequest: { ...request, decision }, carriedScopeRequest: { ...request, decision }, scopeDecision: decision,
+  const stored = { ...work, queue: { position: 1 }, queueSequence: 2, queueHistory: [], queueEjection: null, lane: 'repair', escalation: { reason: 'old' }, plannedFiles: ['src/a.ts'], scopeRequest: { ...request, decision }, carriedScopeRequest: { ...request, decision }, scopeDecision: decision,
     scopeWithdrawn: { epoch: 1, at }, heldGroundings: [{ decision: randomUUID(), from: 1, to: 2, paths: ['src/b.ts'] }], blocker: `Scope request refused: ${decision.reason}`,
     agentRequests: [{ id: randomUUID(), type: 'scope-request', epoch: 1, requestedBy: worker.id, at, reason: 'needs b', paths: ['src/b.ts'], decider: 'graphyard', releasedLease: false, state: 'resolved', resolvedAt: at, resolution: 'refused' }] };
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(stored)]);
@@ -61,14 +61,25 @@ test('unit:old-scope-history-loads — a document and history carrying scopeRequ
   await event(operator.id, 'requirements', { liveScopeWidening: true, before: { plannedFiles: ['src/a.ts'] }, plannedFiles: ['src/a.ts', 'src/b.ts'], answers: { epoch: 1, at }, work: { ...stored, plannedFiles: ['src/a.ts', 'src/b.ts'] } });
   await event(operator.id, 'decision.requested', { id: randomUUID(), action: 'requirements', input: { plannedFiles: ['src/a.ts', 'src/b.ts'], answers: { epoch: 1, at } }, reason: 'widen' });
 
+  // Simulate a database not yet migrated by this release, then run the real startup migration.
+  await store.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  await store.init();
+  const migrated = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
+  for (const field of ['queue', 'queueSequence', 'queueHistory', 'queueEjection', 'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings', 'lane', 'escalation']) assert.ok(!(field in migrated), `${field} is migrated away`);
+  assert.equal(migrated.blocker, null);
+  assert.equal(migrated.stage, work.stage, 'migration keeps the stored stage');
+  await store.init();
+  assert.deepEqual((await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document, migrated, 'a second startup leaves the document unchanged');
+
   // Every reader of the stored document and its history answers.
   for (const path of [`work/${work.id}`, 'board', 'status', 'work-snapshot?view=coordination', `events?work=${work.id}`]) {
     const read = await get(path, coordinator);
     assert.equal(read.status, 200, `${path}: ${JSON.stringify(read.body).slice(0, 500)}`);
   }
 
-  // The next evaluation drops the retired fields and the refusal they left, and names no scope.
+  // Evaluation after migration retains the same stage and names no scope.
   const evaluated = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  assert.equal(evaluated.stage, work.stage, 'the migrated item evaluates as before');
   for (const field of ['plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings']) assert.ok(!(field in evaluated), `${field} is dropped`);
   assert.equal(evaluated.blocker, null);
   assert.doesNotMatch(JSON.stringify(evaluated.gates), /scope/i);
