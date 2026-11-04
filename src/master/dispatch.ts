@@ -1,6 +1,6 @@
 export { shellQuote } from '../shell-quote.js';
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
@@ -28,7 +28,7 @@ import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessio
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { carryTranscript, freshLaunch, readAttemptLaunch, resumeLaunchVariable, resumePlan, type AttemptLaunch } from './session-resume.js';
-import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch } from './dispatch-reservation.js';
+import { dispatchedFile, DispatchReservedError, profileLaunchedFile, reclaimableAgent } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
@@ -58,7 +58,7 @@ export interface DispatchOptions {
   claimBy?: number;
   /** Closes, bounded, the pane of a finished session a launch takes its profile's name back from (GY-1322); closeHerdrPane by default. */
   closePane?: (pane: string) => Promise<void>;
-  /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
+  /** A fresh runtime inventory for safe pane reclamation. */
   agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
@@ -179,12 +179,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
     rework = appliedReworkBrief(work);
-    // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
-    // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
-    const unreserve = await reserveDispatch(root, work, profile, observedAt);
-    try {
-      const visible = (await currentAgents(root, profile, agents, observedAt, run, options.agents)).find(agent => agent.name === profile.agentName);
-      if (visible && (!reclaimableAgent(profile, visible, allWork, now) || await launchedSinceSnapshot(root, profile, allWork)))
+    // Inventory only identifies an old pane to reclaim. The registry selection below reserves capacity.
+    {
+      const visible = (options.agents ? await options.agents() : agents).find(agent => agent.name === profile.agentName);
+      if (visible && !reclaimableAgent(profile, visible, allWork, now))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
       // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
       // closed, bounded, and the launch goes on as on a profile with no agent.
@@ -244,9 +242,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               let epoch: number;
               ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
               claimedEpoch = epoch;
-              // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
+              // History supports session resume and status; it never grants or reserves a slot.
               const at = new Date().toISOString();
               // It also names the runtime session the next attempt may resume (GY-2971).
+              await mkdir(resolve(root, '.graphyard/dispatch'), { recursive: true }).catch(() => {});
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at, runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...resumed }), { mode: 0o600 }).catch(() => {});
               // The dispatch record names the runtime and account the session runs on, the preference
               // that ordered the accounts (GY-1772), every account whose runtime failed to start
@@ -279,7 +278,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         }
         break;
       }
-    } finally { await unreserve(); }
+    }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   // The epoch the launch claimed rides the result (GY-1791): the launcher registered the session

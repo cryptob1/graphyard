@@ -2,6 +2,8 @@
 // when that session's work is over (GY-2944), so a finished review or proof stops consuming its
 // role's concurrency. The launch recorded the registry session on its ledger record
 // (`record.session`); this is the release side of that promise.
+import type { Work } from '../model.js';
+import { handleEpoch } from '../model/session-launch-window.js';
 import { httpFleetClient, type FleetClient } from '../fleet.js';
 import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { readProducerLedger } from '../producer.js';
@@ -12,7 +14,7 @@ import type { MasterConfig } from './profiles.js';
 /** The review or proof session whose slot is released: what the item's session handle carries. */
 export interface RegistrySlot { key: string; id: string; kind: 'review' | 'proof'; head: string | null; pane: string | null; agentName: string | null }
 /** A live registry session of this host no Herdr pane backs, with the pane that would back it. */
-export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string; agentName: string | null; completedReview?: boolean }
+export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string; agentName: string | null; completedReview?: boolean; completedImplementation?: boolean }
 
 /**
  * The live reviewer or producer sessions of `host` that no pane of `agents` backs (GY-2945): a
@@ -25,12 +27,23 @@ export interface OrphanedRegistrySession { id: string; role: string; work: strin
  * has left the open-work snapshot; the dispatcher can release it on the first confirmed miss.
  */
 export function orphanedRegistrySessions(registry: AgentRegistry, host: string | null | undefined, agents: { pane_id?: string }[] | null,
-  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string }[], now: number): OrphanedRegistrySession[] {
+  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string }[], now: number, work: readonly Work[] = []): OrphanedRegistrySession[] {
   if (!agents) return [];
   const panes = new Set(agents.map(agent => agent.pane_id).filter((pane): pane is string => !!pane)), named = new Map(records.filter(record => record.session).map(record => [record.session!, record]));
   const orphans: OrphanedRegistrySession[] = [];
   for (const session of liveSessions(registry)) {
-    if (session.host !== host || (session.role !== 'reviewer' && session.role !== 'producer')) continue;
+    if (session.host !== host) continue;
+    if (session.role === 'worker') {
+      const item = work.find(item => item.key === session.work);
+      if (!item?.submission || (item.lease && Date.parse(item.lease.expiresAt) > now)) continue;
+      const handle = item.sessions?.find(handle => handle.kind === 'implementation' && handle.state === 'finished'
+        && handle.principal === session.principal && handleEpoch(handle) === item.submission!.epoch
+        && Date.parse(handle.endedAt ?? handle.updatedAt) >= Date.parse(session.selectedAt));
+      if (handle?.pane && !panes.has(handle.pane)) orphans.push({ id: session.id, role: session.role, work: session.work,
+        pane: handle.pane, agentName: handle.agentName, completedImplementation: true });
+      continue;
+    }
+    if (session.role !== 'reviewer' && session.role !== 'producer') continue;
     if (now - Date.parse(session.selectedAt) < launchGraceMs) continue;
     const record = named.get(session.id);
     if (!record?.pane || record.runtime === 'pi' || panes.has(record.pane)) continue;

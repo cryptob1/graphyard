@@ -1,3 +1,4 @@
+import { type SessionInventory, sessionAgents, sessionInventory } from './session-inventory.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -10,7 +11,7 @@ import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, s
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import type { AgentRegistry } from './model/registry.js';
-import { inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { inspectProducerCredentials, listHerdrAgents, profileAccount, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { assertOutsideWorktrees, readCredentialFile } from './private-file.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
@@ -18,7 +19,7 @@ import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from './master/registry-slot.js';
-import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
@@ -339,18 +340,19 @@ export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerP
 }
 
 export interface DispatchEffects {
+  inventory?: () => Promise<SessionInventory>;
   /** The work snapshot, read within `timeoutMs`: the tick's own read bound, which grows while ticks fail (GY-1373). */
   snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>;
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
-  agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
+  agents: () => RuntimeSession[] | null | Promise<RuntimeSession[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
-  reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
-  launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  reconcileReviews: (work: Work[], agents: RuntimeSession[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
+  reconcileProducers: (work: Work[], agents: RuntimeSession[] | null) => Promise<{ producers: ProducerRecord[] }>;
+  launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: RuntimeSession[], observedAt: string) => Promise<unknown>;
   /** GY-2989: the product review of a user-facing feature, launched like a review on the same reviewer lanes. A dispatcher wired without it waits the request instead. */
-  launchProductReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
-  launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  launchProductReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: RuntimeSession[], observedAt: string) => Promise<unknown>;
+  launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: RuntimeSession[], observedAt: string) => Promise<unknown>;
   /**
    * Records a launched reviewer or producer session's durable handle on the item. Without it a
    * launched session is visible only in this host's own ledger, which is the relaying the handle
@@ -374,7 +376,7 @@ export interface DispatchEffects {
    * /ready, as the master's operator-agent identity), `recordFindings` keeps the other findings in project memory, and
    * `settlePostMerge` records on the ledger what was done so a verdict is filed once.
    */
-  launchPostMergeReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  launchPostMergeReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: RuntimeSession[], observedAt: string) => Promise<unknown>;
   createWork?: (body: unknown, requestId: string) => Promise<{ key: string }>;
   recordFindings?: (work: Work, record: ReviewRecord, findings: string[]) => Promise<unknown>;
   settlePostMerge?: (record: ReviewRecord, outcome: PostMergeOutcome) => Promise<unknown>;
@@ -404,7 +406,7 @@ export interface DispatchEffects {
    * Hands the tick's snapshot and agent list to the loop beside it (GY-1490, daemon/loop-wake.ts),
    * which wakes its sleep for anything new its next cycle acts on. It never fails the tick.
    */
-  observeLoopSubjects?: (work: Work[], agents: HerdrAgent[] | null, clock: number) => void;
+  observeLoopSubjects?: (work: Work[], agents: RuntimeSession[] | null, clock: number) => void;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -610,7 +612,7 @@ export function reportClosure(entry: SessionReportEntry): SessionClosure {
  * named pane behind, still reported `idle`. That absence is the fact the report needs (a dead
  * worker otherwise stays "Builds code" for as long as its pane stays open), so it is made explicit.
  */
-export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
+export const herdrSessionListing = (agents: RuntimeSession[]): RuntimeSession[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
 export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string; requestedAt?: string; answeredAt?: string }
@@ -774,7 +776,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
-  const herdr = await effects.agents();
+  const inventoryRead = await effects.inventory?.();
+  const herdr = inventoryRead ? (inventoryRead.available ? sessionAgents(inventoryRead) : null) : await effects.agents();
   // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
   try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
   const { reviews, released } = await effects.reconcileReviews(snapshot.work, herdr);
@@ -827,7 +830,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     if (document) {
       const misses: Record<string, string> = {};
       tick.registryClosed = [];
-      for (const orphan of orphanedRegistrySessions(document, config.hostId, herdr, [...reviews, ...producers], clock)) {
+      for (const orphan of orphanedRegistrySessions(document, config.hostId, herdr, [...reviews, ...producers], clock, snapshot.work)) {
         const first = Date.parse(cursor.registryMisses[orphan.id] ?? '');
         const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
         misses[orphan.id] = new Date(firstMissedAt).toISOString();
@@ -836,17 +839,15 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         // A completed verdict already settled the ledger. Its item may be
         // absent from this snapshot, so the handle-based close step cannot release its slot.
         // Once its pane is gone it needs no second miss, including after a loop restart.
-        if (!orphan.completedReview && !Number.isFinite(first)) continue;
-        const reason = `${orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+        if (!orphan.completedReview && !orphan.completedImplementation && !Number.isFinite(first)) continue;
+        const reason = `${orphan.completedImplementation ? 'the submitted implementation is finished and ' : orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
         try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
         catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
       }
       cursor.registryMisses = misses;
     }
   }
-  const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
-  // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
-  // each profile's sessions against its limit; the requests wait and the tick says so.
+  // An unreadable inventory cannot confirm whether a launch name is already running.
   // A released pane is matched by its (pane, name) pair, as the reconcile pass matched it, in the
   // inventory and in the recorded handles alike (GY-1075): `observeSessions` above read the
   // inventory before the close, so a running handle on that pane still says running until a later
@@ -880,14 +881,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
    * settled (GY-1716): its request is still open, so no fact closes the handle, and only a
    * replacement launched into the slot it held can answer that request.
    */
-  const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
-    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName)
-      && !vanishedSettledSession(handle, handle.kind === 'review' ? reviews : handle.kind === 'proof' ? producers : [], herdr, config.hostId))
-    .map(handle => ({ name: handle.agentName! })));
-  // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
-  // cannot be taken again, whatever state it is in, and that check is theirs to make.
-  const room = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => profileSessions(profile, [...inventory(), ...held()], records);
-  const atLimit = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => { const sessions = room(profile, records); return `${profile.name}: at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit})`; };
   const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string, answeredAt?: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, requestedAt: request.requestedAt, ...(request.group ? { group: request.group } : {}), ...(answeredAt ? { answeredAt } : {}) });
   /**
    * GY-1429: a review request a reviewer already answered settles only once the item's observation
@@ -988,7 +981,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // relaunches as the exhausted one does, so the launch restricts it to the same profiles).
   const spentRequest = (records: DispatchedSession[], request: DispatchRequest) => { const retry = sessionRetry(records, request.id, now()); return retry.exhausted || retry.settled && retry.attempts >= dispatchFailureLimit; };
   const runtimeRelaunch = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
-    if (kind !== 'producer' || !runtimeProfiles(item, request, records)?.some(profile => room(profile, producers).free > 0)) return false;
+    if (kind !== 'producer' || !runtimeProfiles(item, request, records)?.length) return false;
     delete cursor.abandoned[request.id];
     return true;
   };
@@ -1044,23 +1037,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return turn;
   };
   // Launch over `profiles` in order, each in its own name's turn. Room is read again once the name
-  // is this launch's: the launch it waited on may have just taken the last slot of that name, and a
-  // profile left without room is passed over like one without quota. A launch every profile of which
-  // lost its room meanwhile is a capacity wait (null), not a failure.
-  const launchInTurns = async <P extends ReviewerProfile | ProducerProfile>(request: DispatchRequest, profiles: P[], hasRoom: (profile: P) => boolean, launch: (profile: P) => Promise<unknown>, exhausted?: (profile: P, exit: InstantExit) => Promise<string>) => {
-    let passed = 0;
-    try {
-      return await launchWithFailover(profiles, profile => reserveName(profile.agentName, async () => {
-        if (!hasRoom(profile)) { passed++; throw Object.assign(new Error(`${profile.agentName} has no free slot`), { accountsExhausted: true, capacityExhausted: true }); }
-        const result = await launch(profile);
-        started.push({ name: launchedName(profile, request, result) });
-        return result;
-      }), exhausted);
-    } catch (error) {
-      if (passed === profiles.length && (error as { accountsExhausted?: boolean })?.accountsExhausted) return null;
-      throw error;
-    }
-  };
+  // is this launch's. The registry chooses and reserves the slot inside the launcher.
+  const launchInTurns = async <P extends ReviewerProfile | ProducerProfile>(request: DispatchRequest, profiles: P[], launch: (profile: P) => Promise<unknown>, exhausted?: (profile: P, exit: InstantExit) => Promise<string>) =>
+    launchWithFailover(profiles, profile => reserveName(profile.agentName, async () => {
+      const result = await launch(profile);
+      started.push({ name: launchedName(profile, request, result) });
+      return result;
+    }), exhausted);
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
     // A product review (GY-2989) launches like a review on the same reviewer lanes — one session per
     // head, reviewer concurrency and capacity.
@@ -1078,8 +1061,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
-      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, review.id);
-      const busy = () => wait('review', item, review, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+      const withRoom = () => preferFreshProfiles(candidates, reviews, review.id);
+      const busy = () => wait('review', item, review, `${launchWaitWording.busy}: registry slots are occupied; set concurrency on the registry reviewer role`);
       if (!profile) wait('review', item, review, reason!);
       else if (!withRoom().length) busy();
       else {
@@ -1087,7 +1070,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // The session is registered before its runtime starts and its coordinates written once it
           // has (GY-172), where every Graphyard reader looks — so watching this reviewer never means
           // reading this host's local ledger, and the session report observes it from the start.
-          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+          const launched = await launchInTurns(review, withRoom(), candidate => {
             const handle = launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
             return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchReview(item, review, candidate, inventory(), observedAt))), result => coordinates(candidate, review, result), attachTo);
           }, effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
@@ -1134,13 +1117,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else {
       const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
-      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
-      const busy = () => wait('review', item, request, `product review: ${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}`);
+      const withRoom = () => preferFreshProfiles(candidates, reviews, request.id);
+      const busy = () => wait('review', item, request, `product review: ${launchWaitWording.busy}: registry slots are occupied`);
       if (!profile) wait('review', item, request, `product review: ${reason!}`);
       else if (!withRoom().length) busy();
       else {
         try {
-          const launched = await launchInTurns(request, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+          const launched = await launchInTurns(request, withRoom(), candidate => {
             const handle = launchedSessionHandle('review', request, `${item.key}: product review ${request.sha.slice(0, 12)}`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
             return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchProductReview!(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
           }, effects.holdAccount ? exhaustedAtLaunch('review', item, request) : undefined);
@@ -1204,16 +1187,16 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // A spent request relaunching for a producer-runtime fault (GY-1153) launches only on the
           // profiles `runtimeProfiles` names; any other request on every available profile, freshest first.
           const relaunch = spentRequest(producers, request) ? runtimeProfiles(item, request, producers) ?? [] : null;
-          const eligible = (profile: ProducerProfile) => (!relaunch || relaunch.some(entry => entry.name === profile.name)) && room(profile, producers).free > 0;
+          const eligible = (profile: ProducerProfile) => (!relaunch || relaunch.some(entry => entry.name === profile.name));
           const usable = () => preferFreshProfiles(available.filter(eligible), producers, request.id);
           const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
             : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
-            : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
+            : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : `${profile.name}: registry slot unavailable`).join('; ')}); set concurrency on the registry producer role`);
           if (!available.some(eligible)) { busy(); continue; }
           producerLaunches.push(afterEarlier(available.map(profile => profile.agentName), async () => {
             if (!usable().length) { busy(); return; }
             try {
-              const launched = await launchInTurns(request, usable(), eligible, candidate => {
+              const launched = await launchInTurns(request, usable(), candidate => {
                 const handle = launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal);
                 return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchProducer(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
               }, effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
@@ -1259,13 +1242,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
       const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
-      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
-      const busy = () => wait('review', item, request, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+      const withRoom = () => preferFreshProfiles(candidates, reviews, request.id);
+      const busy = () => wait('review', item, request, `${launchWaitWording.busy}: registry slots are occupied; set concurrency on the registry reviewer role`);
       if (!profile) { wait('review', item, request, reason!); continue; }
       if (!withRoom().length) { busy(); continue; }
       try {
         // The delivered item names no live request, so no session handle is recorded on it: the ledger holds the session.
-        const launched = await launchInTurns(request, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+        const launched = await launchInTurns(request, withRoom(), candidate => {
           const handle = launchedSessionHandle('review', request, `${item.key}: post-merge review ${request.sha.slice(0, 12)}`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
           return registeredLaunch(undefined, handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchPostMergeReview!(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
         }, effects.holdAccount ? exhaustedAtLaunch('review', item, request) : undefined);
@@ -1362,6 +1345,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   const observationWakes = new Map<string, number>();
   return {
     snapshot: deps.snapshot,
+    inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),

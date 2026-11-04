@@ -214,7 +214,6 @@ function derivedSessionName(profile: { agentName: string }, tag: string, attempt
   return assertSessionName(`${shortened}-${digest}-${tail}`);
 }
 export function sessionAgentName(profile: { agentName: string; concurrency?: number }, session: { id: string; requestId?: string; attempt?: number }) {
-  if (profileConcurrency(profile) === 1) return profile.agentName;
   const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
   return derivedSessionName(profile, tag, session.attempt ?? 1);
 }

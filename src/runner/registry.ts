@@ -7,7 +7,7 @@ import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, 
 
 /**
  * The runs this process started (GY-169). A headless run has no pane, so Herdr cannot list it;
- * the loop reads this registry beside its Herdr inventory instead (master.ts listHerdrAgents). A
+ * the loop reads it through the headless SessionInventory source. A
  * live run reads as a working session under its session name; an ended one, and a run this process
  * never started, is absent: the same "gone" a closed pane is, judged by the same supervision. An
  * ended run's record stays readable here for a while after.
@@ -58,16 +58,6 @@ export const registeredRun = (name: string) => { prune(); return runs.get(name) 
 export const liveRun = (name: string) => { const entry = registeredRun(name); return entry && entry.endedAt === null ? entry : null; };
 /** Every registered run this process is watching that has not ended. */
 export const liveRuns = () => { prune(); return [...runs.values()].filter(entry => entry.endedAt === null); };
-
-/** The live runs as Herdr-shaped sessions: no pane, and a working status. */
-export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {
-  return liveRuns().map(entry => ({ name: entry.name, agent: entry.agent ?? 'pi', agent_status: 'working' }));
-}
-/** The Herdr inventory with this process's runs beside it; a name Herdr lists wins. */
-export function withRunnerAgents<A extends { name?: string }>(agents: A[]): (A | ReturnType<typeof runnerAgents>[number])[] {
-  const named = new Set(agents.map(agent => agent.name));
-  return [...agents, ...runnerAgents().filter(agent => !named.has(agent.name))];
-}
 
 /** Test seam: forget every run. */
 export function clearRuns() { for (const entry of runs.values()) if (entry.endedAt === null) entry.run.cancel('the registry was cleared'); runs.clear(); watched.clear(); }

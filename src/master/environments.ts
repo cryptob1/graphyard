@@ -10,7 +10,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
+import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -18,7 +18,7 @@ import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { failureText } from '../disk-space.js';
 import { shellQuote } from '../shell-quote.js';
-import { describeObservedExhaustion, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
+import { heldObservation, describeObservedExhaustion, providerIdentity } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, imported here exactly as
@@ -192,21 +192,11 @@ const environmentLogSchema = z.object({
   skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
     cause: z.enum(['exhausted', 'logged-out', 'unconfigured', 'cross-runtime']).default('exhausted') }).strict()).max(50).default([]),
-  // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
-  // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
+  // Attribution and diagnostics only; legacy exhausted entries are discarded on read.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
-  exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable(),
-    identity: z.string().nullable().optional(), home: z.string().optional(), kind: z.string().optional(), reported: z.boolean().optional() }).strict()).default({}),
+  exhausted: z.unknown().optional(),
 }).strict();
-/**
- * An account a running session exhausted. The provider's own usage endpoint may lag behind the
- * session that hit the limit, and OpenCode and Cursor expose no quota to read at all, so what a
- * session printed is kept here and every launch skips the account until `until`: the reset time
- * the notice named, or an hour when it named none. `identity` is the provider login the account held
- * when it was spent (GY-1573), so a home logged in afresh later neither frees the spent subscription's
- * other accounts nor passes the hold to its new one; absent when it could not be read. `home` and `kind` are the home and runtime the session ran on (GY-1574). `reported` false
- * marks a hold the agent registry has not yet heard of, so every loop cycle sends it again until it has.
- */
+/** A runtime limit notice reported to the registry, with its reset or a one-hour fallback. */
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
@@ -235,55 +225,37 @@ export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>)
   return resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.environments.json`);
 }
 export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>): Promise<EnvironmentLog> {
-  try { return environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))) as EnvironmentLog; }
+  try { return { ...environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))), exhausted: {} } as EnvironmentLog; }
   catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {} }; }
 }
-/**
- * Record that a session exhausted `environment` mid-work, so no launch selects it before it resets,
- * with the login it was spent on: read from the home its launch last ran in (a registry account's own
- * home, not a same-named configured one), else a configured home's, else the identity last recorded.
- * Given `report`, the hold also goes to the agent registry at once (GY-1573), so an account on the same login is refused on
- * every host before this one asks for another session; a report that fails stays pending, resent every cycle until delivered.
- */
+/** Report a runtime's exhaustion directly to the registry; failures remain errors for reconciliation to retry. */
 export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
-  report?: { registry?: Pick<FleetClient, 'observe'>; fetch?: typeof fetch }) {
-  const log = await readEnvironmentLog(config);
+  report?: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch }) {
   const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
-  const launched = log.environments[environment] as EnvironmentHealth | undefined;
-  const home = launched?.home ? { kind: launched.kind, home: launched.home } : config.environments?.find(entry => entry.name === environment);
-  // A login file unreadable just now (a runtime mid-write) falls back to the identity the log last read for it.
-  const read = home ? await providerIdentity(home.kind, home.home) : undefined;
-  const identity = observed.identity !== undefined ? observed.identity : read !== undefined ? read : launched?.identity;
-  const future = Number.isFinite(reset) && reset > now; // a reset already past (a notice read late) names none: the fallback hour holds the account alone
-  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null, reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString(), ...identity === undefined ? {} : { identity }, ...home ? { home: home.home, kind: home.kind } : {},
-    ...report && reportable(environment) ? { reported: false } : {} };
-  log.exhausted = { ...Object.fromEntries(Object.entries(log.exhausted).filter(([, held]) => Date.parse(held.until) > now)), [environment]: entry };
-  await atomicPrivateWrite(environmentLogPath(config), log);
-  if (report) await reportPendingExhaustions(config, report, now).catch(() => reportPendingExhaustions(config, report, now)).catch(() => {}); // a transient failure is retried at once (GY-1574)
+  const future = Number.isFinite(reset) && reset > now;
+  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null,
+    reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString() };
+  const registry = report?.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report?.fetch ?? fetch) : null);
+  if (!registry?.observe || !config.hostId) throw new Error('Reporting account exhaustion requires the control-plane registry');
+  if (entry.identity === undefined && registry.document) {
+    const document = await registry.document();
+    const account = document.accounts.find(account => account.name === environment && account.credential.host === config.hostId);
+    const runtime = document.runtimes.find(runtime => runtime.name === account?.runtime);
+    const identity = account?.credential.home && runtime ? await providerIdentity(runtime.launch.kind, account.credential.home) : undefined;
+    entry.identity = identity === undefined ? account?.quota.identity : identity;
+  }
+  await registry.observe({ host: config.hostId, observations: [{ account: environment, quota: heldObservation(environment, entry) }] });
   return entry;
 }
-const reportable = (environment: string) => /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(environment), observeTimeoutMs = 5_000; // a profile's or runtime's own login stays on this host
-/** Send the agent registry every hold this host has not yet reported (GY-1573), apart from any role's selection, so a report lost to a timeout cannot leave a shared-login twin launchable on another host. */
-export async function reportPendingExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'environments'>>, report: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch; timeoutMs?: number } = {}, now = Date.now()) {
-  const known = await readEnvironmentLog(config), pending: (readonly [string, ObservedExhaustion])[] = []; // a hold saved before `reported` or `identity` existed too, its login reconstructed once
-  for (const [name, held] of Object.entries(known.exhausted ?? {})) if (Date.parse(held.until) > now && held.reported !== true && reportable(name)) {
-    const launched = known.environments[name] as EnvironmentHealth | undefined, entry = await reconstructedHold(held, launched, launched?.home ? launched : config.environments?.find(entry => entry.name === name));
-    if (entry) pending.push([name, entry]);
-  }
-  if (pending.some(([name, held]) => known.exhausted[name].identity === undefined && held.identity !== undefined)) await keepIdentities(config, pending); // kept before any report (GY-1574): a source relogin while it fails moves no hold
-  if (!pending.length || !config.hostId) return 0;
-  const registry = report.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report.fetch ?? fetch, report.timeoutMs ?? observeTimeoutMs) : null); if (!registry?.observe) return 0;
-  const document = registry.document && await registry.document(), sends = pending.map(([name, held]) => [name, held, registryHoldObservations(document, config.hostId!, name, held, known.environments[name])] as const); // a hold spent on another home or runtime goes to the accounts on its login, never as the same-named one (GY-1574)
-  const observations = sends.flatMap(([, , quota]) => quota ?? []), settled = sends.filter(([, , quota]) => quota).map(([name, held]) => [name, held] as const); if (observations.length) await registry.observe({ host: config.hostId, observations });
-  await keepIdentities(config, settled, true); return observations.length; // a hold naming no shared login owes nothing and settles too
+/** Current exhaustion is read from the registry, never from the executor's environment log. */
+export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
+  if (!config.url) return {};
+  const document = await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).document();
+  return Object.fromEntries(document.accounts.filter(account => account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)).map(account => [account.name, {
+    at: account.quota.observedAt ?? new Date(now).toISOString(), until: account.quota.resetsAt ?? new Date(now + unknownResetHoldMs).toISOString(),
+    resetsAt: account.quota.resetsAt, reason: account.quota.reason ?? 'quota exhausted', role: 'worker', profile: '', work: null,
+  }]));
 }
-async function keepIdentities(config: Pick<MasterConfig, 'credentialFile'>, pending: (readonly [string, ObservedExhaustion])[], reported?: true) { // each pending hold keeps its login, marked reported once delivered; one recorded again meanwhile stays pending
-  const log = await readEnvironmentLog(config); for (const [name, held] of pending) if (log.exhausted[name]?.at === held.at && log.exhausted[name]?.until === held.until) log.exhausted[name] = { ...log.exhausted[name], ...held.identity === undefined ? {} : { identity: held.identity }, ...reported ? { reported } : {} };
-  await atomicPrivateWrite(environmentLogPath(config), log);
-}
-/** The accounts still held by an observed exhaustion at `now`. */
-export const observedExhaustions = async (config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> =>
-  Object.fromEntries(Object.entries((await readEnvironmentLog(config)).exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
 export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string; group?: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
@@ -294,23 +266,7 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
   await atomicPrivateWrite(environmentLogPath(config), log);
 }
 
-/**
- * The account a launch runs on: the first of the profile's accounts that is logged in with quota
- * left. Every account passed over is recorded with its reason. A profile that names no accounts
- * launches exactly as configured, on whatever its environment variables select.
- *
- * When the control plane's agent registry defines the role, the registry decides instead: the
- * control plane chooses the first eligible account of the role — placed on this host, logged in,
- * within quota, under its session and concurrency limits — and records the choice and its reason
- * (see fleet.ts). The profile then supplies only the Graphyard identity the session acts under.
- * A role the registry does not define yet launches from the profile's own accounts, as before.
- *
- * A reviewer or producer launch stays on its profile's own runtime (GY-1306): each starts in a
- * freshly allocated managed checkout, and a profile's harness, arguments and trust step are its
- * own runtime's, so an account of another kind the profile lists is passed over, with the reason
- * recorded, and a profile none of whose own-runtime accounts is healthy waits for one rather than
- * starting, say, codex under a claude profile into a folder codex has never trusted.
- */
+/** Every launch reserves its account and slot in the control-plane registry before starting. */
 export const sameRuntimeRoles: readonly LaunchRole[] = ['reviewer', 'producer'];
 export const crossRuntimeSkip = (role: LaunchRole, profile: { name: string; kind?: string }, account: { name: string; kind: string }) =>
   `${account.name} runs ${account.kind}, not ${profile.kind}: a ${role} launch of profile ${profile.name} starts only on ${profile.kind} accounts, so it waits for one rather than starting ${account.kind} in a checkout its ${profile.kind} launch prepared`;
@@ -318,61 +274,14 @@ export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
 /** The agent registry session a launch was chosen under, or undefined when no registry chose it. */
 export const registrySessionOf = (selected: Pick<LaunchSelection, 'account'> | null | undefined) => selected?.account && 'fleet' in selected.account ? selected.account.fleet.session : undefined;
 export interface LaunchSelection { account: LaunchAccount | null; health: EnvironmentHealth | null; skipped: AccountSkip[]; /** Gives a registry session back when the launch it was chosen for failed; false when the registry could not be told. */ release?: (reason: string) => Promise<boolean> }
-/**
- * The registry chooses from what this host reports of each login, so an account a session here saw
- * spent is reported spent (GY-182): whichever role found out, the registry hands it to no role
- * before its reset, and records the hold for every other executor too. Nothing changes while no
- * account is held.
- */
-export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
-  const held = await observedExhaustions(config, probe.now?.() ?? Date.now()); if (!Object.keys(held).length) return probe;
-  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs) : null); if (!client) return probe;
-  let document: Awaited<ReturnType<FleetClient['document']>> | undefined; const launched = (await readEnvironmentLog(config)).environments; // a same-named hold is judged by the registry account's home (GY-1574)
-  return { ...probe, registry: { document: async () => (document = await client.document()), end: (session, reason, outcome) => client.end(session, reason, outcome),
-    select: async request => { const registry = document ?? await client.document().catch(() => undefined); return client.select({ ...request, observations: request.observations.map(entry => ({ ...entry, quota: heldOverlay(held, entry.account, entry.quota, registryLogin(registry, config.hostId, entry.account), launched[entry.account]) })) }); } } };
-}
-/** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
+/** The registry's reservation, also recorded locally for launch attribution. */
 export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
-  const fleet = await selectFleetSession(config, role, profile, await heldAwareProbe(config, probe));
+  const fleet = await selectFleetSession(config, role, profile, probe);
   if (fleet) await recordEnvironmentLog(config, fleet.health ? [fleet.health] : [], fleet.skipped, fleet.account ? { key: selectionKey(role, profile.name), environment: fleet.account.name, kind: fleet.account.kind, at: new Date(probe.now?.() ?? Date.now()).toISOString(), work: probe.work ?? null, group: probe.group } : undefined).catch(() => {}); // the registry's choice is the selection too (GY-1582)
   return fleet;
 }
 export async function selectAccount(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; accounts?: string[]; principal?: string; kind?: string; environment?: Record<string, string> }, probe: FleetProbe = {}): Promise<LaunchSelection> {
-  const fleet = await selectRegistryAccount(config, role, profile, probe);
-  if (fleet) return fleet;
-  const at = new Date(probe.now?.() ?? Date.now()).toISOString();
-  const checked: EnvironmentHealth[] = [], skipped: AccountSkip[] = [];
-  const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
-  const known = Object.keys(held).length ? (await readEnvironmentLog(config)).environments : {};
-  if (!profile.accounts?.length) {
-    const own = ownLoginHold(held, profile);
-    if (own) {
-      const skip: AccountSkip = { at, role, profile: profile.name, environment: own.key, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), work: probe.work ?? null, cause: 'exhausted' };
-      await recordEnvironmentLog(config, [], [skip]).catch(() => {});
-      throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skip.reason}`, [skip]);
-    }
-    await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null, group: probe.group }).catch(() => {});
-    return { account: null, health: null, skipped: [] as AccountSkip[] };
-  }
-  for (const name of profile.accounts) {
-    const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-    if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
-    if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
-    // What a session itself reported outranks the provider's usage read, which may lag or not exist.
-    if (spentHere(held[name], environment, known[name])) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
-    const twin = await heldTwin(config.environments ?? [], held, name, known);
-    if (twin) { skipped.push({ at, role, profile: profile.name, environment: name, reason: twin.reason, work: probe.work ?? null, cause: 'exhausted' }); continue; }
-    const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
-    checked.push(health);
-    if (health.healthy) {
-      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null, group: probe.group }).catch(() => {});
-      return { account: environment, health, skipped };
-    }
-    // `checkAgentEnvironment` reports exactly two faults: not logged in, or quota spent.
-    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null, cause: health.loggedIn ? 'exhausted' : 'logged-out' });
-  }
-  await recordEnvironmentLog(config, checked, skipped).catch(() => {});
-  throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
+  return selectRegistryAccount(config, role, profile, probe);
 }
 
 /**
@@ -492,43 +401,11 @@ export async function sharedGitDirectory(root: string) {
 export interface ProfileAccountHealth { environment: string; healthy: boolean; reason: string | null; quota: string; resetsAt: string | null }
 export async function inspectProfileAccounts<T extends { available: boolean; reason: string | null }>(config: Pick<MasterConfig, 'environments' | 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profiles: { name: string; accounts?: string[]; kind?: string; environment?: Record<string, string> }[], health: Record<string, T>, probe: EnvironmentProbe = {}) {
   const result: Record<string, T & { accounts?: ProfileAccountHealth[] }> = { ...health };
-  const now = probe.now?.() ?? Date.now(), held = await observedExhaustions(config, now);
-  const known = Object.keys(held).length ? (await readEnvironmentLog(config)).environments : {};
-  // A role the agent registry defines is judged from the registry: every profile of the role
-  // launches on the same ordered accounts, so they share one answer.
-  const fleet = await fleetRoleHealth(config, role, probe).catch(() => null);
+  const fleet = await fleetRoleHealth(config, role, probe);
   for (const profile of profiles) {
-    if (fleet) {
-      // What a session on this host printed outranks the registry's last probe (GY-182).
-      const accounts = withHeldAccounts(fleet.accounts, held), usable = fleet.available && accounts.some(account => account.healthy);
-      if (result[profile.name]?.available !== false) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable,
-        reason: usable ? null : !fleet.available ? fleet.reason : `No eligible account for ${role}: ${accounts.map(account => account.reason).filter(Boolean).join('; ')}`, accounts };
-      continue;
-    }
     if (result[profile.name]?.available === false) continue;
-    if (!profile.accounts?.length) {
-      const own = ownLoginHold(held, profile);
-      if (own) result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: false, reason: `No healthy agent account: ${describeObservedExhaustion(`${profile.name}'s own account`, own.held)}`,
-        accounts: [{ environment: own.key, healthy: false, reason: describeObservedExhaustion(`${profile.name}'s own account`, own.held), quota: 'exhausted', resetsAt: own.held.resetsAt }] };
-      continue;
-    }
-    const accounts: ProfileAccountHealth[] = [];
-    for (const name of profile.accounts) {
-      const environment = (config.environments ?? []).find(candidate => candidate.name === name);
-      if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
-      // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
-      if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
-      if (spentHere(held[name], environment, known[name])) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
-      const twin = await heldTwin(config.environments ?? [], held, name, known);
-      if (twin) { accounts.push({ environment: name, healthy: false, reason: twin.reason, quota: 'exhausted', resetsAt: twin.held.resetsAt }); continue; }
-      const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
-      // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.
-      const ceiling = probe.ceilingPercent ?? config.run.quotaCeilingPercent ?? defaultQuotaCeilingPercent;
-      const resets = checked.quota === 'exhausted' ? checked.usage.filter(usage => usage.percent >= ceiling).map(usage => usage.resetsAt ? Date.parse(usage.resetsAt) : Number.NaN).filter(value => Number.isFinite(value) && value > now) : [];
-      accounts.push({ environment: name, healthy: checked.healthy, reason: checked.reason, quota: checked.quota, resetsAt: resets.length ? new Date(Math.max(...resets)).toISOString() : null });
-    }
-    const usable = accounts.some(account => account.healthy);
-    result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T), available: usable, reason: usable ? null : `No healthy agent account: ${accounts.map(account => account.reason).join('; ')}`, accounts };
+    result[profile.name] = { ...(result[profile.name] ?? { available: true, reason: null } as T),
+      available: fleet?.available ?? false, reason: fleet?.reason ?? `Role ${role} must be configured in the control-plane registry`, accounts: fleet?.accounts ?? [] };
   }
   return result;
 }

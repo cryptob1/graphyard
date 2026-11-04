@@ -1,3 +1,6 @@
+import { AgentRegistry } from '../src/agent-registry.js';
+import { proposedRuntimes } from '../src/model/registry.js';
+import { headlessInventory } from '../src/session-inventory.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -14,7 +17,7 @@ import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/maste
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
 import { launchSpecCheck } from '../src/spec-check.js';
 import { reviewBindingFile } from '../src/review-post.js';
-import { liveRun, withRunnerAgents } from '../src/runner/registry.js';
+import { liveRun } from '../src/runner/registry.js';
 import { headlessArgs, headlessKind, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -53,6 +56,10 @@ before(async () => {
   head = git('rev-parse', 'HEAD');
   git('checkout', '-q', base);
   await setupMaster(root, { url, token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w', run: { worktreeRoot: await temporaryDirectory('headless-review-checkouts', join(process.cwd(), '.graphyard')) } });
+  const config = await loadMasterConfig(root);
+  await new AgentRegistry(store).mutate(coordinator, 'apply', { runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
+    models: [{ name: 'opus', id: 'opus' }], accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host: config.hostId, home: null } }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency: 4, policy: { args: ['--setting-sources', 'user'] } }], reason: 'headless test registry' }, randomUUID());
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: reviewer, kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
 });
 after(async () => {
@@ -103,7 +110,7 @@ const until = async (what: string, check: () => Promise<boolean> | boolean) => {
   assert.fail(`timed out waiting for ${what}`);
 };
 const settled = async (id: string) => {
-  await until('the review run to end', async () => !liveRun(reviewer) && (await readReviewLedger(root)).reviews.some(record => record.id === id && (record.verdict || record.state !== 'pending')));
+  await until('the review run to end', async () => (await readReviewLedger(root)).reviews.some(record => record.id === id && !liveRun(record.agentName) && (record.verdict || record.state !== 'pending')));
   return (await readReviewLedger(root)).reviews.find(record => record.id === id)!;
 };
 
@@ -117,7 +124,7 @@ test('integration:headless-review — a review request is one headless run whose
   assert.deepEqual(commands.filter(([command]) => command !== 'git'), [], 'no Herdr command ran');
   // While it runs, the run is a working session under its name, so slots and supervision see it.
   await until('the run to start', () => fake.runs.length === 1);
-  assert.deepEqual(withRunnerAgents([]).find(agent => agent.name === launched.agentName), { name: launched.agentName, agent: 'claude', agent_status: 'working' });
+  assert.deepEqual(headlessInventory().sessions.find(session => session.name === launched.agentName), { name: launched.agentName, runtime: 'claude', state: 'working', pane: null, workspace: null });
   const [running] = (await readReviewLedger(root)).reviews;
   const token = JSON.parse(await readFile(join(running!.sessionDirectory, reviewBindingFile), 'utf8')).verdictToken as string;
   const [child] = fake.runs;
@@ -233,9 +240,9 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   assert.equal(runs.length, 1, 'a spent account is not run again');
   assert.equal(record.state, 'failed');
   assert.match(record.resolution!, /stopped on its provider's limit notice: You've hit your session limit/);
-  const held = (await observedExhaustions(config))['profile:reviewer-claude'];
+  const held = (await observedExhaustions(config))['reviewer-account'];
   assert.ok(held, 'the account is held');
-  assert.deepEqual([held.role, held.work, held.until], ['reviewer', 'GY-9107', resetsAt.toISOString()]);
+  assert.equal(held.until, resetsAt.toISOString());
   // The next launch skips the held account: with no other account on the profile it is refused before anything runs.
   await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
   assert.equal(runs.length, 1);

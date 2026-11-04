@@ -8,7 +8,7 @@ import { nameForLaunch } from '../session-name.js';
 import { masterHarness, masterPrompt } from './harness.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type FleetProbe, httpFleetClient, selectFleetSession } from '../fleet.js';
-import { accountLaunch, heldAwareProbe, readEnvironmentLog } from './environments.js';
+import { accountLaunch, readEnvironmentLog } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
@@ -59,7 +59,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   const name = nameForLaunch(retry, () => config.masterAgentName);
   if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no master session is launched into it; the launch is made again once Herdr answers`);
   if (herdr.agents.some(agent => agent.name === name)) throw new Error(`Master session ${name} is already visible in Herdr; the loop adopts it instead of launching a second`);
-  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, await heldAwareProbe(config, { runtime: herdr, ...(config.forPerson ? { group: config.forPerson } : {}), ...probe }));
+  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, { runtime: herdr, ...(config.forPerson ? { group: config.forPerson } : {}), ...probe });
   if (!selected) throw masterRoleUnconfigured(`No agent registry role decides the master session`);
   const kind = selected.account.kind;
   let plan: ReturnType<typeof accountLaunch>;

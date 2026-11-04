@@ -15,11 +15,11 @@ import type { SandboxExec } from './worker-sandbox.js';
 import {
   accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
   herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, profileAccount, recordObservedExhaustion, prepareSessionHarness, readCredentialFile,
-  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
+  selectAccount, sessionAgentName, startAgentSession,
   type PromptDelivery, type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
-import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
@@ -96,9 +96,6 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     ? (selected => selected ? { profile: selected, reason: null } : { profile: null, reason: `no configured reviewer profile is named ${profileName}` })(config.reviewers.find(item => item.name === profileName))
     : selectReviewerProfile(config);
   if (!profile) throw new Error(`No reviewer profile to launch ${work.key}'s spec checker from: ${reason}. Write one with graphyard master environments --apply`);
-  // A spec checker takes one of the reviewer profile's sessions: its pending reviews and live panes hold the rest.
-  const sessions = profileSessions(profile, agents, (await readReviewLedger(root)).reviews);
-  if (!sessions.free) throw new Error(`${profileAtLimit('Reviewer', profile, sessions)}; ${work.key}'s spec check launches when a session ends`);
   const run = dependencies.run;
   // The base branch tip the dispatch cycle last fetched: what the item's named files look like before any worker starts.
   let baseTip: string;

@@ -50,7 +50,7 @@ function requested(): Work {
   return item;
 }
 
-test('unit:role-capacity-slot-wait — a reviewer or producer launch the registry refuses for its role\'s concurrency limit waits for a slot: not counted as a refusal, no backoff and no quota hold, and it launches on the next tick once a slot frees', async () => {
+for (const proof of ['unit:registry-slot-followups', 'unit:role-capacity-slot-wait']) test(`${proof} — a reviewer or producer launch the registry refuses for its role\'s concurrency limit waits for a slot: not counted as a refusal, no backoff and no quota hold, and it launches on the next tick once a slot frees`, async () => {
   const cfg = await config(), item = requested();
   const full = (role: string) => Object.assign(new NoHealthyAccountError(`No healthy agent account for ${role} profile p: role ${role} is at its concurrency limit (1 of 1 live)`, []), { roleAtCapacity: `role ${role} is at its concurrency limit (1 of 1 live)` });
   let slots = false;

@@ -1,10 +1,12 @@
+import type { RuntimeSession } from '../model/sessions.js';
+import { sessionAgents } from '../session-inventory.js';
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
 import { existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
-import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
+import type { MasterConfig, WorkerProfile } from '../master.js';
 import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
@@ -99,7 +101,7 @@ export class Launcher {
 export interface Cycle {
   config: MasterConfig; state: DaemonState; effects: DaemonEffects; now: () => number;
   snapshot: Awaited<ReturnType<DaemonEffects['snapshot']>>; clock: number;
-  herdr: { agents: HerdrAgent[]; available: boolean };
+  herdr: { agents: RuntimeSession[]; available: boolean };
   credentials: Awaited<ReturnType<DaemonEffects['credentials']>>;
   performed: DaemonAction[]; launcher: Launcher; reservedProfiles: Set<string>;
 }
@@ -128,7 +130,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   };
 
   const read = (await step('snapshot', async () => {
-    const [snapshot, herdr] = await Promise.all([effects.snapshot(), Promise.resolve(effects.herdr ? effects.herdr() : effects.agents()).then(read => Array.isArray(read) ? { agents: read, available: true } : read)]);
+    const [snapshot, herdr] = await Promise.all([effects.snapshot(), Promise.resolve(effects.inventory ? effects.inventory().then(inventory => ({ agents: sessionAgents(inventory), available: inventory.available })) : effects.herdr ? effects.herdr() : effects.agents()).then(read => Array.isArray(read) ? { agents: read, available: true } : read)]);
     return { snapshot, herdr, credentials: await effects.credentials(config.workers) };
   }))!;
   const observed = Date.parse(read.snapshot.now), clock = Number.isFinite(observed) ? observed : now();
@@ -741,7 +743,7 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string) 
  * runtime exited names itself; either is treated as absent — the pane closes, and the role's next
  * account launches the master in the same cycle. A pane with ordinary output is adopted as today.
  */
-async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]) {
+async function masterPaneFailover(cycle: Cycle, handle: RuntimeSession, open: Work[]) {
   const { state, effects, clock } = cycle;
   const sessions = effects.masterSession!;
   const master = state.master;

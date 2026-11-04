@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab, credentialMaskFor, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, runtimeLoginHomes, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab, credentialMaskFor, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, runtimeLoginHomes, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
 import { atomicPrivateWrite, privateFile } from './private-file.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
@@ -380,8 +380,6 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
   // The ledger's room is local state, judged before any session exists (see launchReview).
   assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: new Date().toISOString(), key: binding.key, sha: binding.sha, requestId: request.id });
-  const sessions = profileSessions(profile, agents, ledger.producers);
-  if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   const credential = await readProducerCredential(root, profile.credentialFile);
   // A closed question answers in seconds what a session takes most of an hour to; the session is
   // launched only for the proofs no confident answer decided.

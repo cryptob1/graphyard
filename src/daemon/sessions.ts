@@ -1,6 +1,7 @@
+import type { RuntimeSession } from '../model/sessions.js';
 // Concern: launched sessions — worker profile health.
 import type { Work } from '../model.js';
-import { agentAssignment, finishedAgentStates, reclaimableAgent, type WorkerProfile, type HerdrAgent } from '../master.js';
+import { agentAssignment, finishedAgentStates, reclaimableAgent, type WorkerProfile } from '../master.js';
 import { type DaemonAction, type DaemonState, profileCooldownMs } from './state.js';
 
 export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy: boolean; reason: string | null }
@@ -14,7 +15,7 @@ export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy:
  * so a fleet that just drained dispatches. A finished session a live lease still owns is `busy`,
  * and its reason names the agent's state, the lease and the remedy.
  */
-export function profileHealth(profiles: WorkerProfile[], credentials: Record<string, { available: boolean; reason: string | null }>, agents: HerdrAgent[], state: DaemonState, now: number, work: readonly Work[] = []): ProfileHealth[] {
+export function profileHealth(profiles: WorkerProfile[], credentials: Record<string, { available: boolean; reason: string | null }>, agents: RuntimeSession[], state: DaemonState, now: number, work: readonly Work[] = []): ProfileHealth[] {
   return profiles.map(profile => {
     const credential = credentials[profile.name] ?? { available: true, reason: null };
     const found = agents.find(candidate => candidate.name === profile.agentName);
@@ -30,7 +31,7 @@ export function profileHealth(profiles: WorkerProfile[], credentials: Record<str
   });
 }
 /** Why an agent holding a launch profile's name keeps it from dispatch, with the remedy when the agent is finished. No parentheses: refusals list each reason inside them. */
-function agentReason(profile: WorkerProfile, agent: HerdrAgent, work: readonly Work[], now: number) {
+function agentReason(profile: WorkerProfile, agent: RuntimeSession, work: readonly Work[], now: number) {
   const status = agent.agent_status ?? 'present';
   if (!finishedAgentStates.includes(status)) return `Herdr agent ${profile.agentName} is ${status}`;
   const owner = agentAssignment(profile, agent, work, now);

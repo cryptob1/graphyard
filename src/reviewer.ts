@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, profileAccount, recordObservedExhaustion, loadStoredMasterConfig, markReprompted, onSelectedSession, prepareSessionHarness, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, profileAccount, recordObservedExhaustion, loadStoredMasterConfig, markReprompted, onSelectedSession, prepareSessionHarness, profileConcurrency, registrySessionOf, readSessionScreen, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerProfile } from './master.js';
 import { atomicPrivateWrite, readCredentialFile, privateFile } from './private-file.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
@@ -907,13 +907,6 @@ export async function launchReview(root: string, work: Work, profileName: string
     // record could not be written must never leave a running pane behind that holds the agent's name.
     try { assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId }); }
     catch (error) { return { refusal: error as Error }; }
-    // Every pending session of the profile holds a slot (GY-1072), whether or not the inventory this
-    // launch was handed shows it yet: launches answering different requests from one stale
-    // inventory each take a name of their own, so only the ledger, read under this lock, keeps them
-    // within the limit. A pending record whose session died is settled by reconciliation.
-    const reserved = ledger.reviews.filter(entry => entry.state === 'pending' && entry.profile === profile.name).map(entry => ({ name: entry.agentName }));
-    const sessions = profileSessions(profile, [...agents, ...reserved], ledger.reviews);
-    if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
     const requestedAt = now().toISOString();
     // Read before this launch's own record joins the ledger: the rounds before this one. A control-plane
     // re-review takes its earlier round from the item's own observation (GY-1988): its verdicts are
@@ -1049,7 +1042,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no
       // accepted answer settles as a session that finished without one, and the request relaunches.
-      if (answered) void answered.then(({ reviewId, event }) => reviewId === null ? undefined : updateReviewLedger(root, ledger => {
+      if (answered) void answered.finally(() => selected.release?.(`the headless review of ${work.key} finished`)).then(({ reviewId, event }) => reviewId === null ? undefined : updateReviewLedger(root, ledger => {
         const entry = ledger.reviews.find(candidate => candidate.id === id);
         if (entry?.state === 'pending' && !entry.verdict) entry.verdict = { state: verdictStateOf(event), reviewer: reviewerIdentity, reviewId, submittedAt: now().toISOString() };
       }), failure => updateReviewLedger(root, async ledger => {
