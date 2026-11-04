@@ -55,4 +55,6 @@ Init enables its user unit and lingering. To move hosts: `master init --token-st
 
 Default URL: `127.0.0.1:4310`. Up prints a single-use 10-minute sign-in link; `graphyard login` mints another from the operator credential. Sessions last 30 days. Needs you holds human requests; Settings → Agents shows fleet readiness.
 
+Every dashboard page, including an open work item, names the configured repository prominently at the top, above the release line. The name wraps on narrow screens; item controls and navigation remain available.
+
 [Stage labels](glossary.md#plain-stage-labels) distinguish merged, live and verified. The release line and `master status` show the managed app's serving commit, URL and build/check failures, or no deployment configured. They never substitute Graphyard's control-plane build.
