@@ -1,0 +1,15 @@
+{
+  "id": "refused-intent-base-advance",
+  "title": "Recover the original proven merge after later main advances",
+  "description": "Temporary real PostgreSQL and Git exercise a false orphan refusal, the original passing trial and push, unrelated first-parent progress, refreshed candidate observation and idempotent canonical recovery. Original evidence is unchanged; mismatched bindings, invalidated policy, head, approval and proof remain held while unrelated work progresses.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "original-flight recovery after observed base advance",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=integration:refused-intent-base-advance tests/merge-executor.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

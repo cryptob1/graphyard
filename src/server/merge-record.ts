@@ -2,14 +2,13 @@ import { createHash } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, type Evidence, type Principal, type Work } from '../model.js';
+import { demand, evaluate, type Evidence, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
 import { save, eventWorkSql } from '../store.js';
 import { evaluateLandability } from '../model/landability.js';
 import { exactApproval } from '../model/review.js';
-import { riskOf } from '../model/risk-class.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
@@ -112,8 +111,10 @@ async function demandOrphanRecovery(db: pg.PoolClient, work: Work, all: Work[], 
   const tried = rows.findLast(row => row.kind === 'merge-writer.trial')?.work as Work | undefined;
   for (const bound of [original, tried]) {
     demand(bound?.policyRevision === work.policyRevision && bound?.candidate?.sha === work.candidate?.sha
-      && bound?.candidate?.baseSha === work.candidate?.baseSha
-      && (riskOf(work).risk !== 'sensitive' || JSON.stringify(exactApproval(bound!)) === JSON.stringify(exactApproval(work)))
+      && bound?.candidate?.baseSha === original?.candidate?.baseSha
+      && bound?.mergeLedger?.head === ledger.head && bound?.mergeLedger?.baseTip === ledger.baseTip
+      && bound?.mergeLedger?.mergeSha === ledger.mergeSha
+      && JSON.stringify(exactApproval(bound!)) === JSON.stringify(exactApproval(work))
       && bound?.gates.some(gate => gate.name === 'review' && gate.passed), reason, 409);
   }
   const latest = rows.findLast(row => row.kind === 'merge.trial');
@@ -126,9 +127,12 @@ async function demandOrphanRecovery(db: pg.PoolClient, work: Work, all: Work[], 
     && trial.build === 'pass' && trial.tests.files > 0 && trial.tests.passed === trial.tests.files && trial.tests.failed.length === 0
     && (!trial.preview || (trial.preview.mergeSha === trial.mergeSha && trial.preview.result === 'pass'))
     && (trial.e2e ?? []).every(entry => entry.executed > 0 && entry.failed === 0 && !entry.missing), reason, 409);
-  work.mergeLedger = ledger;
+  // Observe current invalidation, but judge the flight against the base/delta it actually
+  // proved. Later main can already contain the fix; that observation is no retrial target.
   engine.evaluate(work, all, now);
-  demand(evaluateLandability(work, all, now).verdict === 'landable'
+  const flight: Work = { ...work, candidate: tried!.candidate, observation: tried!.observation, mergeLedger: ledger };
+  demand(!work.reworkRequested && evaluateLandability(flight, all, now).verdict === 'landable'
+    && evaluate(flight, all, now).gates.some(gate => gate.name === 'review' && gate.passed)
     && work.gates.some(gate => gate.name === 'review' && gate.passed), reason, 409);
 }
 
