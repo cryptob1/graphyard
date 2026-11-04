@@ -19,7 +19,7 @@ The next environment regression of any kind will loop the same way.
 
 The smallest high-value changes:
 
-- Feed early exits into the profile cooldown that already exists (1).
+- Record an early exit as a failed dispatch action, so the existing master wake carries its cause and the existing stall backoff slows the item (1).
 - Read the pane before closing it (2).
 - Record the runtime that actually launched (3).
 - Let a worker block *on another item* as a dependency rather than as free text (4).
@@ -29,16 +29,18 @@ None of these adds a new layer or a manual gate. Each one either reuses existing
 
 ## Existing open repairs (not new findings)
 
+Status as of 2026-11-04 01:30 UTC, from `graphyard status` and the operator's notes. Each judgement holds for the head named; a later head needs its own look.
+
 | Item | Pending head | Problem it fixes | Judgement |
 |---|---|---|---|
-| GY-3059 | `5b6f6c419d01` (PR 743) | A mise trust prompt or idle shell is taken for a started agent; launches miss the installed runtime environment. | Right fix for the trigger. It changes only start detection (`src/master/launch.ts`, `confinement.ts`), so it does not cover a runtime that passes start detection and then exits. See finding 1. |
+| GY-3059 | `5b6f6c419d01` (PR 743) | A mise trust prompt or idle shell is taken for a started agent; launches miss the installed runtime environment. | Right fix for the trigger. At that head it changes only start detection (`src/master/launch.ts`, `confinement.ts`), so it does not cover a runtime that passes start detection and then exits. See finding 1. |
 | GY-3060 | `43989d0af489` (PR 741) | `src/master/conversation.ts:84,151,179` read a whole transcript with `readFile`, which fails past 2 GiB. `src/daemon/cycle.ts:618-625` then `return`s before the master wake and heartbeat. | Confirmed on base. This is why nothing woke the master during the crash loops. Keep the fix narrow: a continuity failure must never skip the wake. |
-| GY-3063 | `f758761150ac` (PR 753, under review) | The Landlock socket rule implicitly denies REFER, so renames within worker storage fail with EXDEV. | Correct, narrow repair. No comment. |
+| GY-3063 | `f758761150ac` (PR 753; approved, full canonical trial running) | The Landlock socket rule implicitly denies REFER, so renames within worker storage fail with EXDEV. | Correct, narrow repair. No comment. |
 | GY-3064 | preserved `6539a743b455`, waiting on GY-3061 | Master rework guidance is missing from pre-submit retries (`src/master/dispatch.ts`, `rework-brief.ts`). | Correct. Its own blocker is the case for finding 4. |
 | GY-3065 | none yet | Verification slots owned by a container-namespace PID are never reclaimed. | Correct. Keep the fix inside `verification-slots.ts`. |
-| GY-3066 | `52979855a64c` (PR 752; 13 main-containment fixture failures being repaired) | A stopping loop recorded a false orphan/unpushed refusal on GY-3061's live intent. The real trial then passed and pushed `2982438`, but `reconcileIntents` ignores refused states. | Correct direction: reconcile against the original intent and base. Do not retry on current main, where the fix would become its own baseline. |
+| GY-3066 | `ec2bc13fdfef7ded417a08bed06645e82dccd6f3` (PR 752; 71 native affected tests passed, plus its own verify and base exercise; independent review pending). An earlier head, `52979855a64c`, had 13 main-containment fixture failures. | A stopping loop recorded a false orphan/unpushed refusal on GY-3061's live intent. The real trial then passed and pushed `2982438`, but `reconcileIntents` ignores refused states. | Correct direction: reconcile against the original intent and base. Do not retry on current main, where the fix would become its own baseline. |
 
-The GY-3051 benchmark fixture (3 failing) is not a real-agent success and is outside this review.
+GY-3051: the native fixture was rerun at `e38dfc5`. No actual agent has succeeded on it yet. It is outside this review.
 
 ## Findings, ranked
 
@@ -70,20 +72,30 @@ The GY-3051 benchmark fixture (3 failing) is not a real-agent success and is out
 - A worker slot and an attempt are burned every 5 minutes for as long as the cause lasts. That was 12 hours here.
 - The items it blocks wait the whole time.
 - The ledger grows with every cycle (see finding 5).
-- No signal reaches the master or `master status`.
+- No signal reaches the master: profile cooldowns are not wake causes (see below).
 
-**Smallest fix:** treat a short-lived attempt as a failed launch, using the records that already exist.
-1. Stop clearing the profile failure at dispatch time (`cycle.ts:587`). Clear it where the close step sees an attempt end after it outlived a short window (for example `resumeExitWindowMs`, 60 s, which already exists in `src/master/session-resume.ts:28`) or after it committed.
-2. In `closeStep` (`cycle.ts:206-217`), when the ended attempt lived less than that window and committed nothing, call `recordProfileFailure(state, profile, cause)`. `profileHealth` (`src/daemon/sessions.ts:27`) then refuses the profile with "Cooling off after a failed launch …", and that refusal reason is already part of dispatch output, so other healthy profiles take the item.
+**Throttling alone is not enough.** `masterCauses` (`src/daemon/master-stalled-delivery.ts:34-52`) reads only work items and `state.actions`. It never reads `state.profiles`, where `recordProfileFailure` writes. A profile cooldown therefore never wakes the master, and a failure shared by every profile (one host environment, one runtime binary) still retries forever, just rotating through profiles. The fix has to put the cause where the master's wake already looks.
 
-   Do not reuse `recordAccountStartFailure` here. It is written (`dispatch.ts:322`) but only `record`/`clear` read it back (`dispatch.ts:324,331`); no account selection consults it. Either make selection read it or delete it. It is a second, unread copy of this fact.
+**Smallest fix:** record a short-lived attempt as a failed dispatch action, the one kind of record that already turns into a master wake.
+1. In `closeStep` (`cycle.ts:206-217`), when an ended implementation attempt lived less than a short window (`resumeExitWindowMs`, 60 s, already in `src/master/session-resume.ts:28`) and committed nothing, write one `state.actions` row through the existing `record()`, with:
+   - a stable key per item, `early-exit:${item.id}`;
+   - `kind: 'dispatch'`, `state: 'failed'`, `epoch: null`;
+   - `detail` set to the release cause plus the screen tail from finding 2, with no epoch number in it;
+   - `attempts` counting consecutive early exits.
 
-**Validation:** a dispatch test with a fake runtime that starts and exits 1 within 5 s:
-- the second cycle refuses that profile with the exit cause;
-- a different healthy profile takes the item;
-- an attempt that lives past the window clears the failure.
+   `masterCauses` (`master-stalled-delivery.ts:46-50`) already turns a failed `dispatch` row into a wake cause, and `epoch: null` keeps it current across epochs. The subject key and the digest stay stable while the failure text is unchanged, so `cycle.ts:609-646` wakes the master **once per distinct failure**, not once per crash. The master then has the cause in hand and acts on it with its existing typed commands (file or advance the repair, mark the account, block the item). No new process and no approval step.
+2. In `dispatchStep` (`cycle.ts:441-449`), skip an item whose `early-exit:` row has reached `actionStallThreshold` attempts until `actionStallDelay(attempts)` has passed. Both helpers already exist (`src/model/action-progress.ts`). This item-level backoff is independent of which profile the next launch would use, so a shared failure grows from a 5-minute to a 30-minute retry instead of looping at full speed.
+3. Clear the row, and the profile failure, when an attempt outlives the window or commits. Also stop clearing the profile failure at dispatch time (`cycle.ts:587`), so the existing per-profile cooldown (`recordProfileFailure`, called from the same branch) still steers a single bad profile aside.
 
-On the incident data, GY-3064 would have spent about 3 attempts instead of 125.
+   Do not use `recordAccountStartFailure` for this. It is written (`dispatch.ts:322`), but only its own `record`/`clear` helpers read it back (`dispatch.ts:324,331`), and no account selection consults it. Either make selection read it or delete it: it is a second, unread copy of this fact.
+
+**Validation:** a daemon-cycle test with a fake runtime that starts and exits 1 within 5 s, repeated across two profiles:
+- the first early exit produces exactly one master wake whose prompt contains the exit cause;
+- further identical exits produce no further wake, but a changed failure text produces one;
+- after the stall threshold, the item is not re-dispatched before `actionStallDelay`, whichever profile is free;
+- an attempt that lives past the window clears the row, and a later early exit wakes again.
+
+No counterfactual: this review did not measure or simulate how many of GY-3064's 125 attempts the fix would have saved. The wake itself also depends on GY-3060, because on base a continuity failure returns before any wake is sent (`cycle.ts:618-625`).
 
 ### 2. The only record of *why* the runtime exited is closed unread (new, high)
 
