@@ -101,3 +101,51 @@ test('hard math snapshots distinguish unclaimed work from missing claim history 
   assert.match(failureStack(error)!,/TypeError: located runner failure/);
   assert.ok(failureStack(error)!.includes('hard-math-lifecycle.test.ts'));
 });
+
+test('hard math real API creates/releases the frozen plan with revisions, binds worker sessions and cleans active epochs',async()=>{
+  const [{default:EmbeddedPostgres},{Store},{Engine},{server},{freePort},{createItems},{operator,credential},policy]=await Promise.all([
+    import('embedded-postgres'),import('../src/store.js'),import('../src/engine.js'),import('../src/server.js'),import('../src/cli/test-isolation.js'),
+    import('../benchmarks/hard-math/runner.js'),import('../benchmarks/hard-math/isolation.js'),import('../src/model/repository-policy.js'),
+  ]);
+  const {randomUUID}=await import('node:crypto');
+  const root=await temporaryDirectory('hard-math-api'),port=await freePort(),databaseDir=await temporaryDirectory('postgres',root);
+  const database=new EmbeddedPostgres({databaseDir,user:'graphyard',password:'testing-only',port,persistent:false,onLog:()=>{},onError:()=>{},postgresFlags:['-h','127.0.0.1']});
+  const previousPolicy=policy.repositoryPolicy();
+  policy.setRepositoryPolicy({...previousPolicy,e2e:{pendingOutcomes:'non-blocking',serve:{command:'true',url:'http://127.0.0.1:9',readySeconds:1}}});
+  let store:InstanceType<typeof Store>|undefined,http:ReturnType<typeof server>|undefined;
+  try {
+    await database.initialise();await database.start();
+    store=new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/postgres`);await store.init();
+    const admin=credential('api-admin','admin'),coordinator=credential('api-coordinator','coordinator'),producer=credential('api-proof','producer',['unit:workbench-contract','manual:certified-artifact']);
+    const workers=[0,1,2].map(i=>credential(`api-worker-${i}`,'worker'));
+    http=server(new Engine(store,120,'scratch/hard-math'),[admin,coordinator,producer,...workers]);
+    await new Promise<void>(resolve=>http!.listen(0,'127.0.0.1',resolve));
+    const url=`http://127.0.0.1:${(http.address() as {port:number}).port}`;
+    const call=async(path:string,token:string,body?:unknown)=>{
+      const response=await fetch(`${url}/api/${path}`,{method:body===undefined?'GET':'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json','Idempotency-Key':randomUUID()},body:body===undefined?undefined:JSON.stringify(body)});
+      const result=await response.json();if(!response.ok) throw new Error(`${response.status}: ${JSON.stringify(result)}`);return result as any;
+    };
+    const plane={call},master=await operator(plane as any,admin.token);
+    const c={root,plane,coordinator:coordinator.token,operator:master,signal:new AbortController().signal,config:{id:'api-contract',mode:'team',seed:1},receipt:{work:[]}} as any;
+    await createItems(c);assert.equal(c.receipt.work.length,8);
+    const claimed=[];
+    for(let i=0;i<3;i++) {
+      const item=(await call('assignments/claim',workers[i].token,{work:c.receipt.work[i].id})).assigned;
+      assert.ok(item?.lease);assert.equal(item.lease.owner,workers[i].id);
+      const handle={id:`${workers[i].id}:${item.epoch}`,kind:'implementation',principal:workers[i].id,epoch:item.epoch,runtime:'controlled-fixture',host:'scratch',subject:'Real API controlled lifecycle',state:'running'};
+      await assert.rejects(call(`work/${item.id}/session`,coordinator.token,handle),/Lease missing/);
+      await assert.rejects(call(`work/${item.id}/session`,workers[i].token,{...handle,startedAt:new Date().toISOString()}),/400|startedAt|Unrecognized/);
+      await call(`work/${item.id}/session`,workers[i].token,handle);claimed.push(item);
+    }
+    await assert.rejects(call(`work/${claimed[0].id}/ready`,master,{reason:'Stale intent must be refused',expectedRevision:claimed[0].revision}),/revision changed/);
+    await stopRun(c,undefined,async()=>{});
+    for(const claimedItem of claimed) {
+      const item=await call(`work/${claimedItem.id}`,coordinator.token);
+      assert.equal(item.lease,null);assert.ok(item.sessions.every((s:any)=>s.state==='finished'));
+      assert.equal(item.pipeline.attempts[0].epoch,claimedItem.epoch);
+    }
+  } finally {
+    await new Promise<void>(resolve=>http?http.close(()=>resolve()):resolve());
+    await store?.close();await database.stop();policy.setRepositoryPolicy(previousPolicy);
+  }
+});

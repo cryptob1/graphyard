@@ -150,3 +150,30 @@ leases. Controlled fixtures remain controlled fixtures. Actual team rebuild and
 explicit fair comparison are authorized on existing accounts and run after
 ordinary verification and delivery, retaining honest success or failure receipts.
 No purchase, raised limit or invented dollar authorization is involved.
+
+
+The mutation audit uses `src/engine.ts`, `src/model/sessions.ts`,
+`src/server/routes/actions.ts`, `src/server/review-verdict.ts`,
+`src/server/waits.ts` and `src/agent-registry.ts` as authority. The native
+`f73aeddd2` run passed nine of twelve cases; three stopped at release's missing
+revision. The following bindings now apply in the runner and controlled driver:
+
+| Mutation | Identity and authoritative binding |
+| --- | --- |
+| Create | Scoped operator, explicit run/goal reason, frozen criteria/dependencies. |
+| Ready | Operator, reason and `expectedRevision` from creation; this API accepts no policy revision field. |
+| Claim/workspace | Worker claims by work ID; the returned epoch binds its own workspace mutation. |
+| Running handle | Worker identity and live epoch; timestamps belong to the server. |
+| Submit/finished handle | Worker submits epoch/head from its registered branch; coordinator closes the handle without the expired implementation epoch. |
+| Evidence | Independent producer, candidate SHA/base SHA, current `policyRevision`, execution and exercise facts. Fixture tests execute the submitted checkout. |
+| Review | Coordinator registers observed merge base/head and token hash; independent review token posts the matching verdict. |
+| Rework | Operator reason and stopped-worker attestation; next epoch uses the already linked branch in a fresh worktree, retaining the prior tree detached. |
+| Cleanup | Coordinator closes handles, reports interruption for the current lease epoch and ends registry session UUIDs with a reason. |
+| Registry configuration | Coordinator supplies the existing apply/quota/selection schemas; no task revision fields are accepted. |
+
+A focused real Postgres/HTTP test now exercises the actual runner's eight-item
+creation/release path, three worker claims, ownership-bound session registration
+and epoch cleanup. It also confirms stale revisions, coordinator use of a worker
+epoch and client-supplied timestamps are refused. This is API regression coverage;
+full native Git delivery/repair/container checks remain required, and no actual
+agent result is claimed.

@@ -66,7 +66,7 @@ export async function createItems(context:RunContext) {
     });
     ids.set(component.id,item.id);
     context.receipt.work.push({component:component.id,id:item.id,key:item.key,epoch:0,candidate:null,merge:null,attempts:0,reviews:0,repairs:0,record:item});
-    await context.plane.call(`work/${item.id}/ready`,context.operator,{reason:`Run ${context.config.id}: release ${component.id} under the frozen-v1 work plan; preserve its dependencies, independent proofs and review gates.`});
+    await context.plane.call(`work/${item.id}/ready`,context.operator,{expectedRevision:item.revision,reason:`Run ${context.config.id}: release ${component.id} under the frozen-v1 work plan; preserve its dependencies, independent proofs and review gates.`});
   }
 }
 export async function execute(configInput:unknown,fixture?: (context:RunContext)=>Promise<void>):Promise<Receipt> {

@@ -33,14 +33,21 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     const worker=c.workers[index%c.workers.length];
     const selected=await c.plane.call('assignments/claim',worker.token,{work:work.id});
     assert.equal(selected.assigned?.id,work.id,JSON.stringify(selected));
-    const item=await c.plane.call(`work/${work.id}`,c.coordinator),epoch=item.epoch,branch=`graphyard/${item.key.toLowerCase()}-${epoch}`;
+    const item=await c.plane.call(`work/${work.id}`,c.coordinator),epoch=item.epoch;
+    const previous=item.submission?item.workspaces.find((w:any)=>w.epoch===item.submission.epoch):null;
+    const branch=previous?.branch??`graphyard/${item.key.toLowerCase()}-${epoch}`;
     const directory=join(c.directory,`${item.key}-${epoch}`);
-    const baseTip=await writer.fetch();await git(c.root,'worktree','add','-q','-b',branch,directory,baseTip);
+    const baseTip=await writer.fetch();
+    if(previous) {
+      await git(previous.path,'checkout','--detach');
+      await git(c.root,'worktree','add','-q',directory,branch);
+      await git(directory,'merge','--no-edit',baseTip);
+    } else await git(c.root,'worktree','add','-q','-b',branch,directory,baseTip);
     await c.plane.call(`work/${item.id}/workspace`,worker.token,{epoch,branch,host:'scratch',path:directory});
     const selection=await c.plane.call('agent-registry/select',c.coordinator,{role:'worker',host:'scratch',work:item.key,principal:worker.id});
     assert.equal(selection.selected,true,JSON.stringify(selection));
     assert.notEqual(selection.account.name,'fixture-limited');
-    await c.plane.call(`work/${item.id}/session`,c.coordinator,{id:`${worker.id}:${epoch}`,kind:'implementation',principal:worker.id,epoch,runtime:'controlled-fixture',host:'scratch',agentName:`fixture-${index}`,subject:`Controlled executor ${work.component}`,workspace:item.key,startedAt:new Date().toISOString(),state:'running'});
+    await c.plane.call(`work/${item.id}/session`,worker.token,{id:`${worker.id}:${epoch}`,kind:'implementation',principal:worker.id,epoch,runtime:'controlled-fixture',host:'scratch',agentName:`fixture-${index}`,subject:`Controlled executor ${work.component}`,workspace:item.key,state:'running'});
     return {work,item,worker,directory,branch,selection};
   };
   const submit=async(a:Attempt,correct:boolean)=>{
@@ -60,18 +67,19 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     const head=await git(a.directory,'rev-parse','HEAD');
     const item=await c.plane.call(`work/${a.item.id}/submit`,a.worker.token,{epoch:a.item.epoch,head});
     assert.equal(item.lease,null);
-    await c.plane.call(`work/${a.item.id}/session`,c.coordinator,{id:`${a.worker.id}:${a.item.epoch}`,kind:'implementation',principal:a.worker.id,epoch:a.item.epoch,runtime:'controlled-fixture',host:'scratch',subject:'Controlled executor finished',state:'finished',outcome:'submitted'});
+    await c.plane.call(`work/${a.item.id}/session`,c.coordinator,{id:`${a.worker.id}:${a.item.epoch}`,kind:'implementation',principal:a.worker.id,runtime:'controlled-fixture',host:'scratch',subject:'Controlled executor finished',state:'finished',outcome:'submitted'});
     await c.plane.call(`agent-registry/sessions/${a.selection.session.id}/end`,c.coordinator,{reason:'Controlled executor submitted'});
     return item;
   };
   const proofAndReview=async(item:any)=>{
-    // Execute the actual seed tests, and a negative contract assertion, before recording a proof.
-    await command(process.execPath,['--test','tests/contract.test.mjs'],{cwd:c.root});
-    await command(process.execPath,['--input-type=module','-e',"import {parseRequest} from './src/contract.mjs';import assert from 'node:assert/strict';assert.throws(()=>parseRequest({coefficients:['0'],precisionBits:64}),{code:'ZERO_POLYNOMIAL'});"],{cwd:c.root});
+    // Execute the submitted checkout, and a negative contract assertion, before binding its proof.
+    const directory=item.workspaces.find((w:any)=>w.epoch===item.submission.epoch).path;
+    await command(process.execPath,['--test','tests/contract.test.mjs'],{cwd:directory});
+    await command(process.execPath,['--input-type=module','-e',"import {parseRequest} from './src/contract.mjs';import assert from 'node:assert/strict';assert.throws(()=>parseRequest({coefficients:['0'],precisionBits:64}),{code:'ZERO_POLYNOMIAL'});"],{cwd:directory});
     await c.plane.call(`work/${item.id}/evidence`,c.producer,{proof:'unit:workbench-contract',sha:item.candidate.sha,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:'pass',executed:1,skipped:0,exercise:{behaviour:'Contract fixture without zero polynomial rejection',result:'fail',executed:1}});
     assert.equal(nextToMerge([await c.plane.call(`work/${item.id}`,c.coordinator)],{},Date.now()),null,'review must gate delivery');
     const reviewToken=randomBytes(32).toString('hex');
-    await c.plane.call(`work/${item.id}/review-launch`,c.coordinator,{reviewer:'controlled-independent-reviewer',head:item.candidate.sha,baseTip:item.candidate.baseSha,tokenHash:createHash('sha256').update(reviewToken).digest('hex'),expiresAt:new Date(Date.now()+120_000).toISOString()});
+    await c.plane.call(`work/${item.id}/review-launch`,c.coordinator,{reviewer:'controlled-independent-reviewer',head:item.candidate.sha,baseTip:item.observation.mergeBase??item.candidate.baseSha,tokenHash:createHash('sha256').update(reviewToken).digest('hex'),expiresAt:new Date(Date.now()+120_000).toISOString()});
     await c.plane.call(`work/${item.id}/review-verdict`,reviewToken,{event:'APPROVE',body:'Controlled fixture review; not a real coding-agent review.',sha:item.candidate.sha,token:reviewToken});
     return c.plane.call(`work/${item.id}`,c.coordinator);
   };
