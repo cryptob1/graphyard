@@ -23,8 +23,6 @@ import { readySpecCheck } from './helpers/spec-check.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clockStart = Date.parse('2031-03-01T09:00:00Z');
 const hex = (seed: string) => createHash('sha1').update(seed).digest('hex');
-/** An id shaped like the server's UUIDs. */
-const uuid = (seed: string) => hex(seed).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, '$1-$2-$3-$4-$5');
 const minute = 60_000;
 
 function config(overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
