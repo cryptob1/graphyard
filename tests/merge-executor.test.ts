@@ -962,13 +962,30 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
   // The same real, measured flight supplies adversarial records; none may deliver a held
   // commit just because it is on main. Every mutation still goes through the typed route.
   const actualTrial = trialsBefore[0]!.payload;
-  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded'] as const).entries()) {
+  // A real second-parent ancestor satisfies ordinary reconciliation, but cannot
+  // establish that a refused flight landed on main's first-parent chain.
+  const sideNumber = 31, sideBranch = join(checkout, '.graphyard', 'worktrees', `GY-${sideNumber}-1`);
+  git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${sideNumber}-1`, sideBranch, originalBase);
+  const sideSha = heads[sideNumber] = await commit(sideBranch, 'src/side-parent.ts', 'export const side = true;\n', 'side parent');
+  const tree = git(checkout, 'merge-tree', '--write-tree', mergeSha, sideSha).split('\n')[0]!;
+  const containing = git(checkout, 'commit-tree', tree, '-p', mergeSha, '-p', sideSha, '-m', 'include side parent');
+  assert.equal(await healthy.reads.push(containing, mergeSha), 'pushed');
+  await healthy.reads.fetch();
+  assert.equal(await healthy.reads.holds(sideSha), false);
+  assert.equal(git(checkout, 'merge-base', '--is-ancestor', sideSha, containing), '');
+  const ordinary = await submittedItem(sideNumber);
+  const ordinaryRecord = (event: MergeRecordEvent) => record({ ...ordinary, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
+  await ordinaryRecord({ kind: 'intent', head: sideSha, baseTip: originalBase, mergeSha: sideSha, risk: 'normal', at: iso(start) });
+  await ordinaryRecord({ kind: 'pushed', mergeSha: sideSha, pushedAt: iso(start) });
+  await ordinaryRecord({ kind: 'reconciled', mergeSha: sideSha, observedTip: containing });
+  assert.equal((await document(ordinary.id)).stage, 'done');
+  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'second-parent', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded'] as const).entries()) {
     // Independent items retain the measured head but reserve distinct workspaces.
     const workspace = n + index + 1;
     git(checkout, 'branch', `graphyard/gy-${workspace}-1`, heads[n]!);
     const w = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture'], workspace);
     const send = (event: MergeRecordEvent) => record({ ...w, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
-    const intended = variant === 'unheld' ? sha('unheld-recovery') : mergeSha;
+    const intended = variant === 'unheld' ? sha('unheld-recovery') : variant === 'second-parent' ? sideSha : mergeSha;
     await send({ kind: 'intent', head: heads[n]!, baseTip: originalBase, mergeSha: intended, risk: 'normal', at: iso(start) });
     await send({ kind: 'refused', head: heads[n]!, reason: unpushedIntentReason(intended, 'main') });
     const trial = structuredClone(actualTrial);
@@ -977,7 +994,7 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
     if (variant === 'wrong-base') trial.baseTip = sha('wrong-base');
     if (variant === 'wrong-merge') trial.mergeSha = sha('wrong-merge');
     if (variant === 'missing-proof') delete trial.proofs['integration:recovery-fixture'];
-    if (variant === 'unheld') trial.mergeSha = intended;
+    if (variant === 'unheld' || variant === 'second-parent') trial.mergeSha = intended;
     if (variant === 'wrong-head') {
       trial.head = sha('wrong-head');
       assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'trial', ...trial })).status, 409);
@@ -1020,7 +1037,7 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
       // Canonical restart: an actual route 409 for the on-main recovery must leave
       // its original flight held while a second, eligible head still lands.
       const nextNumber = 30, nextBranch = join(checkout, '.graphyard', 'worktrees', `GY-${nextNumber}-1`);
-      git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${nextNumber}-1`, nextBranch, mergeSha);
+      git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${nextNumber}-1`, nextBranch, containing);
       heads[nextNumber] = await commit(nextBranch, 'src/after-recovery.ts', 'export const next = true;\n', 'unrelated queued change');
       const next = await submittedItem(nextNumber);
       const eventsBefore = await ledgerKinds(w.id);

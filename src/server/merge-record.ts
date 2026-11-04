@@ -139,8 +139,10 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
   const fingerprint = mergeRecordFingerprint(id, data);
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge commit is read from the checkout before the transaction, as every provider read is.
-  let held: boolean | null = null;
-  if (data.kind === 'pushed' || data.kind === 'reconciled') held = await firstParentHolds(async args => {
+  let held: boolean | null = null, recoveryHeld: boolean | null = null;
+  if (data.kind === 'reconciled') held = (await gitRunner(engine)(['merge-base', '--is-ancestor', data.mergeSha, `refs/remotes/origin/${base}`])).status === 0;
+  // Recovery requires first-parent containment; ordinary reconciliation retains its ancestry contract.
+  if (data.kind === 'pushed' || data.kind === 'reconciled') recoveryHeld = await firstParentHolds(async args => {
     const result = await gitRunner(engine)(args);
     if (result.status !== 0) throw new Error(result.stderr);
     return result.stdout;
@@ -174,7 +176,8 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       const recovering = !!ledger && orphanRefusal(ledger, base);
       const intended = ledger && (ledger.state !== 'refused' || recovering) && ledger.head === candidate ? ledger.mergeSha : null;
       demand(intended === data.mergeSha, unintendedShaRefusal(work!.key, data.mergeSha, intended), 409);
-      if (data.kind === 'reconciled' || recovering) demand(held, unheldShaRefusal(data.mergeSha, base), 409);
+      if (data.kind === 'reconciled') demand(held, unheldShaRefusal(data.mergeSha, base), 409);
+      if (recovering) demand(recoveryHeld, unheldShaRefusal(data.mergeSha, base), 409);
       if (recovering) await demandOrphanRecovery(db, work!, all, ledger!, base, engine, now);
     }
     const { kind, ...fields } = data;
