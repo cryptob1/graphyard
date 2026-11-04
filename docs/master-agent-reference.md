@@ -1,38 +1,40 @@
-<!-- page: Operate Graphyard | 7 | typed actions -->
+<!-- page: Operate Graphyard | 7 | commands and trial isolation -->
 # Master-agent reference
 
 ## Items and human waits
 
-Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused. A `blocked` reason is plain text; `master unblock GY-N REASON` clears it.
+Use `blocked GY-N EPOCH REASON` for a genuine blocker; it commits changes and ends the lease. `master unblock GY-N REASON` clears it. Use `guide park` only for the human's three decisions; `answer GY-N …` records their response. Routine requirements and repair need no human approval.
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
+`master promote --admin-token-stdin` provisions the master's operator-agent identity. Workers never receive it.
 
-Reviewers launch with `master reviewer add FILE` profiles and post verdicts through the control plane with a token bound to that launch and candidate. No reviewer GitHub App, installation binding or App credential is needed; `master reviewer setup` and `bind` are removed. Older master configs with `githubAppId` and `mergeMethod` still load.
+Use `master reviewer add FILE` to add a review profile. Reviewers post verdicts through the control plane with a token bound to the launch and candidate. Reviewer Apps, installation bindings and App credentials are gone, as are `master reviewer setup` and `bind`. Older configs with `githubAppId` and `mergeMethod` still load.
 
-Before submission, run `graphyard verify GY-N` in the assigned worktree for local criterion checks. After `complete`, the control plane requests independent review and the merge writer runs the required unit and served-head E2E proofs for the submitted head. Workers do not submit trusted evidence; results from an earlier head cannot satisfy the new head's merge gates.
+Run `verify GY-N` in the assigned worktree before submission. After `complete`, Graphyard requests independent review; the merge writer runs required unit and served-head E2E proofs for that head. Workers never submit trusted evidence; earlier-head results cannot satisfy its gates.
 
 ## Typed actions
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.
+`nextAction` names dispatch, request-review, request-rework, resync, reclaim or merge. `master dispatch GY-N PROFILE` works through normal eligibility and lease checks, including on system-driven items. `master merge` reports that only the loop's writer merges; it performs no hand merge.
 
 ## Recovery
 
-`master browser` is removed. If an older control plane reports App permissions or held integration jobs, the master uses `graphyard install --repo OWNER/NAME --plan`, then `--apply`, to install the merge writer's deploy key in place of the retired App integration.
+`master browser` is removed. If an older control plane reports App permissions or held integration jobs, use `graphyard install --repo OWNER/NAME --plan`, then `--apply`, to replace the retired App integration with the merge writer’s deploy key. `master harness claude|codex --apply` denies remote merges/reviews, token minting and mutating `gh api`.
 
-A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
+See [operations](operations.md) and [session recovery](master-agent-sessions.md). Preserve expired attempts' work for redispatch.
 
 A worker stopped on a provider limit notice also keeps its local work before redispatch to another account: uncommitted changes become a WIP commit on its attempt branch, and the next worker's prompt names that commit (or the existing HEAD for a clean tree) to read and bring forward.
 
 ### Producer-runtime faults
 
-Unacted producer requests relaunch on an untried profile.
+Unanswered requests try another profile. Never substitute worker evidence for trusted proof.
 
 ## Merge trial
 
-Workers submit after checking the implementation and bound E2E cases. Independent review judges that coverage before the automated trial; missing later trusted results do not block review. After approval of a sensitive change, the merge writer serves the submitted head's merge commit and records its required E2E results before updating main. Earlier-head results cannot satisfy that gate, and workers never submit trusted evidence themselves.
+Workers check implementation and bound E2E cases before submitting. Independent review judges coverage without waiting for later trusted results. Sensitive changes need approval before the writer serves the merge commit and records required E2E results, then updates main. Earlier-head results cannot satisfy that gate; workers never submit trusted evidence.
 
-A failed candidate trial grounds rework for that head through the merge writer. Next-action does not hold it for a base-break refresh.
+A failed candidate trial grounds rework through the merge writer; next-action does not hold it for a base-break refresh.
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests via `scripts/ci-tests.mjs`, or — without that script — the repository's `preMerge` / `npm test` / `npm run typecheck` checks (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in its own `TMPDIR` (a fresh `HOME` beside the short temporary directory, keeping nested test socket paths bounded, under a bubblewrap mask of the deploy key and coordinator credentials — npm, the static build, `e2e.serve`, and bound E2E command/agent steps all run under it, every step invocation of a case sharing one confined session's namespace so a browser an agent step opens outlives each invocation; the push child alone still holds the key), killed after 20 minutes; its checkout is removed when it ends. The fresh home preserves the host's mise config, data, state and cache directories (explicit `MISE_*_DIR` values win, otherwise host XDG/HOME defaults), alongside the npm cache; credential masks still apply. Known mise shim startup diagnostics (untrusted config or no version set for node/npm/npx) and missing exact node/npm/npx executable startup failures (including bubblewrap’s `execvp` missing-executable diagnostic even when the wrapper exits without a spawn cause or signal) during dependency installation or build follow the host-failure retry/hold path and never ground item rework. Project mise task errors and missing build dependencies such as node-gyp remain build failures and ground item rework. A failed build's refusal includes the end of its output within the 2,000-character refusal limit. A managed repository with no test check records that explicitly (`master status` / `doctor`: `trialTests`).
+See [trial checks](delivery.md#merge-trials). Trials use a separate checkout/TMPDIR, fresh HOME beside the short temporary directory to bound nested test socket paths, and bubblewrap masks hiding coordinator credentials and deploy key. Builds, previews and E2E steps share confinement; case steps share a namespace for persistent browsers. Only the push child holds the key. Trials stop after 20 minutes and remove their checkout. Missing test checks are explicit in `master status` and `doctor` (`trialTests`).
+
+The fresh home owns its npm/browser caches. Launcher tooling retains host mise config/data/state/cache paths; explicit `MISE_*_DIR` values win over host XDG/HOME defaults. Credential masks still apply. During install/build, known mise shim startup errors (untrusted config or no Node version) and missing exact node/npm/npx executables use host-failure retry/hold, including bubblewrap `execvp` errors without a spawn cause or signal. Project mise task errors and missing build dependencies such as node-gyp still ground rework. Build refusals include the output tail within the 2,000-character limit.
