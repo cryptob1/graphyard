@@ -6,7 +6,7 @@ import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
-import { dispatchSort, inFlight } from '../coordination.js';
+import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
@@ -449,7 +449,10 @@ async function dispatchStep(cycle: Cycle) {
   const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
+  const launched: Work[] = [];
   for (const item of claimable) {
+    // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
+    if (launched.some(other => sharedResources(item, other).length)) continue;
     const incident = state.actions[earlyExitKey(item)];
     if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
@@ -458,6 +461,7 @@ async function dispatchStep(cycle: Cycle) {
     if (!free) break;
     taken.add(free.profile.name);
     launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink));
+    launched.push(item);
   }
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
   // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
@@ -558,7 +562,8 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
  * configured worker profile), it releases the backlog item with the highest priority, oldest first
  * on ties, whose dependencies are all done, recording the release decision under the loop's own
  * identity with the reason. A parked item — any standing blocker — never releases, nor an
- * owner-held or loop-owned item, whose release the control plane refuses. Items the master wants
+ * owner-held or loop-owned item, whose release the control plane refuses, nor one sharing an
+ * exclusive resource with an item in flight or released (`resourceConflicts`). Items the master wants
  * held are parked, not left in backlog, so backlog means "work this next"; `master release` stays
  * for an out-of-order pull. Each release takes its response's document, so the same cycle's
  * dispatch offers the item.
@@ -574,6 +579,8 @@ async function releaseBacklog(cycle: Cycle) {
     .sort((a, b) => a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const item of candidates) {
     if (slots <= 0) break;
+    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {
       const released = await effects.release!(item, `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`) as Work | undefined;

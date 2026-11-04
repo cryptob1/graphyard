@@ -5,9 +5,24 @@ import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }
+/**
+ * The exclusive resources `work` and `other` contend for: a resource either declares that the
+ * other declares too or whose observed candidate changes it — a declared file path is a resource
+ * (GY-1992 retired plannedFiles). Two observed diffs alone hold nothing: the merge queue integrates
+ * them. An item that declares nothing is held by nobody's diff.
+ */
+export function sharedResources(work: Work, other: Work) {
+  const meets = (resources: string[], w: Work) => resources.filter(r => [...w.exclusiveResources ?? [], ...exclusionPaths(w)].some(t => pathScopesOverlap(r, t)));
+  return [...new Set([...meets(work.exclusiveResources ?? [], other), ...meets(other.exclusiveResources ?? [], work)])];
+}
+/**
+ * The resources holding `work`'s dispatch or release: those it shares with an item in flight — a
+ * live lease (kept past Done until it expires), or a standing submission through review, testing
+ * and merge — so an item waits until the other lands, not only while it builds.
+ */
 export function resourceConflicts(work: Work, all: Work[], now: number) {
-  return all.filter(w => w.id !== work.id && w.lease && Date.parse(w.lease.expiresAt) > now)
-    .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
+  return all.filter(w => w.id !== work.id && (claimedNow(w, now) || inFlight(w, now)))
+    .flatMap(w => sharedResources(work, w).map(resource => ({ resource, key: w.key })));
 }
 
 /** The paths an item is known to touch: the files its candidate was observed to change. */
@@ -38,12 +53,12 @@ export function exclusionPaths(work: Work): string[] {
   return work.candidate ? [...new Set(work.observation?.files ?? [])] : [];
 }
 /**
- * The in-flight items `work` runs beside on the same files, for the record only: dispatch is
- * optimistic and overlap holds nothing. Serialising on overlap idled most of the
+ * The in-flight items `work` runs beside on the same observed files, for the record only: observed
+ * overlap holds nothing. Serialising on overlap idled most of the
  * fleet (2026-09-24/25: ten workers idle behind items changing the same large files) to avoid a
  * conflict the merge queue and a sync round resolve anyway: whichever of two overlapping items
  * lands second is re-integrated by base refresh, or sent back for a sync on a real conflict.
- * Only exclusive resources hold dispatch (`resourceConflicts`).
+ * Only exclusive resources, file paths included, hold dispatch (`resourceConflicts`).
  */
 export function concurrentOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];

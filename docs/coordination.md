@@ -11,7 +11,7 @@ Single-fixture proofs warn: cover three cases or explain why one suffices. Revie
 
 ## Dispatch optimistically
 
-Only exclusiveResources lock dispatch. Sync and merge trials integrate path overlaps; status reports conflicts. Sessions receive matching verification maps. Failed dispatch retries next cycle.
+Only exclusiveResources, files included, hold release and dispatch until landing. Trials integrate undeclared overlaps. Sessions receive matching verification maps. Failed dispatch retries next cycle.
 
 ## Review gate: verdicts, not threads
 
