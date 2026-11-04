@@ -137,8 +137,8 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   const observing = loopObservation(work, new Date(now), allWork);
   if (observing) throw new Error(`Dispatch waits for the loop's observation: ${observing.waitingFor}`);
   if (loopObservationProofs(work)) throw new Error('Dispatch refused: the loop records this item\'s reading itself and no code worker can finish it');
-  // Planned-file overlap holds nothing: dispatch is optimistic, and the merge queue and a sync
-  // round integrate whichever of two overlapping items lands second.
+  // Observed-file overlap holds nothing: the merge queue and a sync round integrate whichever of
+  // two overlapping items lands second. A file an item declares is an exclusive resource, held above.
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
@@ -298,7 +298,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A dispatch whose preferred account's runtime never started names what happened and where the
     // session runs instead, so the fallback is on the record rather than silent (GY-417).
     fallback: selected && startFailures.length ? { failed: startFailures, note: describeStartFailures(startFailures, selected.account?.name ?? null) } : null,
-    // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
+    // Observed-file overlap is recorded with the dispatch, never held on: the item runs beside the
     // in-flight items that touch the same files and whichever lands second is re-integrated.
     overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
