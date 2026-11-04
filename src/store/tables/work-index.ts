@@ -10,7 +10,7 @@ import { coordinationDocument, coordinationRelevance, coordinationTrimSql, detoa
  *
  * Every snapshot used to load every whole document (17.7 MB on the live ledger) to decide what
  * a handful of live items needed. The index holds what those decisions select on — key, stage,
- * priority, lease owner, epoch, revision, the pull request and its state, the next action's kind
+ * priority, revision, the pull request and its state,
  * and when an action row is next due — and, for a settled delivery (`settledSql`), the summary the
  * coordination view serves in place of its document, so the coordination snapshot reads the index
  * plus only the live items' documents, and an idle claim poll reads the index alone.
@@ -46,19 +46,19 @@ const projection = `CREATE OR REPLACE FUNCTION graphyard_timestamptz(value text)
 CREATE OR REPLACE FUNCTION graphyard_number(value jsonb) RETURNS numeric LANGUAGE sql IMMUTABLE AS $work_index$
   SELECT CASE WHEN jsonb_typeof(value) = 'number' THEN (value #>> '{}')::numeric END $work_index$;
 CREATE OR REPLACE FUNCTION graphyard_index_work(p_id uuid, p_number bigint, p_document jsonb) RETURNS void LANGUAGE sql AS $work_index$
-INSERT INTO work_index AS i(id, number, key, stage, priority, owner, epoch, revision, pr, pr_state, next_action, due_at, settled, summary, trimmed)
-SELECT p_id, p_number, d.document->>'key', d.document->>'stage', ${number("d.document->'priority'")}, d.document->'lease'->>'owner',
-  ${number("d.document->'epoch'")}, ${number("d.document->'revision'")}, ${number("d.document->'candidate'->'pr'")},
+INSERT INTO work_index AS i(id, number, key, stage, priority, revision, pr, pr_state, due_at, settled, summary, trimmed)
+SELECT p_id, p_number, d.document->>'key', d.document->>'stage', ${number("d.document->'priority'")},
+  ${number("d.document->'revision'")}, ${number("d.document->'candidate'->'pr'")},
   CASE WHEN d.document->'observation'->'merged' = 'true'::jsonb THEN 'merged' ELSE d.document->'observation'->>'prState' END,
-  d.document->'nextAction'->>'kind', ${dueAt}, s.settled, x.summary,
+  ${dueAt}, s.settled, x.summary,
   CASE WHEN s.settled THEN ${coordinationTrimSql('x.summary', 0)} END
 FROM (SELECT ${detoasted('p_document')} AS document OFFSET 0) d
 CROSS JOIN LATERAL (SELECT ${settledSql} AS settled) s
 CROSS JOIN ${coordinationRelevance(0)}
 CROSS JOIN LATERAL (SELECT CASE WHEN s.settled THEN ${coordinationDocument({ keep: 0, settled: true })} END AS summary) x
 ON CONFLICT (id) DO UPDATE SET number = EXCLUDED.number, key = EXCLUDED.key, stage = EXCLUDED.stage, priority = EXCLUDED.priority,
-  owner = EXCLUDED.owner, epoch = EXCLUDED.epoch, revision = EXCLUDED.revision, pr = EXCLUDED.pr, pr_state = EXCLUDED.pr_state,
-  next_action = EXCLUDED.next_action, due_at = EXCLUDED.due_at, settled = EXCLUDED.settled, summary = EXCLUDED.summary, trimmed = EXCLUDED.trimmed
+  revision = EXCLUDED.revision, pr = EXCLUDED.pr, pr_state = EXCLUDED.pr_state,
+  due_at = EXCLUDED.due_at, settled = EXCLUDED.settled, summary = EXCLUDED.summary, trimmed = EXCLUDED.trimmed
 $work_index$;
 CREATE OR REPLACE FUNCTION graphyard_work_index_sync() RETURNS trigger LANGUAGE plpgsql AS $work_index$
 BEGIN PERFORM graphyard_index_work(NEW.id, NEW.number, NEW.document); RETURN NULL; END $work_index$;`;
@@ -69,10 +69,11 @@ export const workIndex = defineTable({
   name: 'work_index', orderBy: 'id', cache: true,
   ddl: `CREATE TABLE IF NOT EXISTS work_index (
   id uuid PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE, number bigint NOT NULL,
-  key text, stage text, priority numeric, owner text, epoch numeric, revision numeric,
-  pr numeric, pr_state text, next_action text, due_at timestamptz,
+  key text, stage text, priority numeric, revision numeric,
+  pr numeric, pr_state text, due_at timestamptz,
   settled boolean NOT NULL DEFAULT false, summary jsonb, trimmed jsonb
 );
+ALTER TABLE work_index DROP COLUMN IF EXISTS owner, DROP COLUMN IF EXISTS epoch, DROP COLUMN IF EXISTS next_action;
 ${projection}
 DO $work_index$ BEGIN
   IF obj_description('work_index'::regclass, 'pg_class') IS DISTINCT FROM '${workIndexDigest}' THEN

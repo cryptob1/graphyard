@@ -118,6 +118,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:dcefbd2e92eecbef78eb75f38e5798adcfaa3a228e7c8e59ddab7f4e95e02627',
   // GY-2986: a person's human: answer stays in the coordination view for its head whatever the base.
   'sha256:72e499b9d63b92e474fa67e9ba27b7b89db644b5f9e18d3adf9b911d4e364e06',
+  // GY-3017: retire job holds, unused work-index columns and legacy observation tables.
+  'sha256:41dc8ebf601fc88c1d2b536522b9e758d121b6fe31b80322d7a81ece2d11abb4',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

@@ -28,8 +28,7 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/status',
     async handle({ actor, req, url, services, operatorVisible }) {
       const { engine, repository, principals, limits, build, production } = services;
-      const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error,held_until FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
-      const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
+      const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
       // Observation jobs rescheduled three times in a row without an observation (GY-506): the
       // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
       const starvedJobs = actor.role === 'operator-agent' ? [] : await engine.store.starvedJobs();
@@ -61,7 +60,7 @@ export const statusRoutes = defineRoutes('status', [
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', heldJobs, starvedJobs, jobs, deploy, serving,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

@@ -12,7 +12,6 @@ import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
-import { controlPlaneAttention } from '../src/master/attention.js';
 // Time-bomb allowance (GY-1694): every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test passes (localNow pinned where the probe runs); the lone new Date() status call carries no fixture instant.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -49,13 +48,6 @@ test('master init verifies a coordinator and repository before writing private l
     const result = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
     assert.equal(result.role, 'coordinator');
     assert.deepEqual(result.attention, []); assert.match(result.next, /^Run graphyard master environments --apply .* then graphyard master start/);
-    const legacy = controlPlaneAttention({ heldJobs: 2 });
-    assert.equal(legacy.attentionItems.length, 1);
-    const held = legacy.attentionItems[0];
-    assert.equal(held.role, 'master');
-    assert.equal(held.human, false);
-    assert.match(held.next, /install --repo OWNER\/NAME --plan, then --apply/);
-    assert.doesNotMatch(held.next, /master browser|github-setup/);
     assert.equal((await stat(join(root, '.graphyard/master.json'))).mode & 0o777, 0o600);
     assert.equal(execFileSync('git', ['check-ignore', '.graphyard/master.json'], { cwd: root, encoding: 'utf8' }).trim(), '.graphyard/master.json');
     const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');

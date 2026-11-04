@@ -170,8 +170,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   await restored.init();
   // A migrated target is empty except at the checkpoints the migration seeds; those are
   // replaced by the backup's rows rather than refused as occupied state.
-  // GY-1833: the merger pin's marker is seeded too, so a backup carries the merger an install ran with.
-  assert.deepEqual(ledgerSeeded, ['merger_default_pin']);
+  assert.deepEqual(ledgerSeeded, []);
   const result = await restoreBackup(restored.pool, backup);
   assert.equal(result.fromSchema, schemaVersion); assert.deepEqual(result.tablesLeftEmpty, []);
   assert.deepEqual(await ledgerCounts(restored.pool), await ledgerCounts(source.pool));

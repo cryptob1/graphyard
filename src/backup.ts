@@ -4,7 +4,6 @@ import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
 import { retryDeadlocks } from './store/migration-locks.js';
-import { mergerDefaultPin } from './store/tables/merger-default.js';
 
 /**
  * A logical, versioned backup of the whole coordination ledger, taken from one consistent
@@ -150,7 +149,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     // rollback, so counting calls would stop at the third run, not the fifth the guide promises (GY-794).
     let attempts = 0;
     await retryDeadlocks(() => { attempts++; return restore(); }, () => attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
-    const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && name !== mergerDefaultPin.name && !backup.tables.some(t => t.name === name));
+    const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tables.some(t => t.name === name));
     return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing };
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }
   finally { db.release(); }

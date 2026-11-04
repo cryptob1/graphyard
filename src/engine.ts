@@ -1386,10 +1386,10 @@ export class Engine {
   }
   /** The item's durable observation job as the queue holds it, or null when it has none. */
   async observationJob(id: string): Promise<ObservationJobState | null> {
-    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error, held_until, held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error FROM jobs WHERE work_id=$1', [id])).rows[0];
     if (!row) return null;
     const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
-    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
+    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null };
   }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
