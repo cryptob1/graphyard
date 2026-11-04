@@ -15,8 +15,6 @@ import { actionAccount, nextAction } from '../src/model-boundary/next-action.js'
 import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { reviewNeed } from '../src/model/dispatch.js';
-import { reviewProviders } from '../src/model/review.js';
 import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } from '../src/model/sessions.js';
 import { dispatchEffects, launchedSessionHandle, runDispatchTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -167,14 +165,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(refusalAction(conflicted, 'build', conflict, undefined, new Date()), 'request-rework');
   assert.match((conflictAction.inputs as any).detail, new RegExp(`Run graphyard sync ${item.key}, resolve it and push`), 'and the detail carries the instruction the worker follows');
 
-  // The same mistake, one provider over. A `codex` or `agent` review is dispatched by the control
-  // plane's own durable observation job and never by a session an executor launches, so
-  // `reviewNeed` raises no review request for those providers — and naming `request-review` there
-  // handed an executor a row nothing could settle: no request stands, the handler refuses for want
-  // of one, and the row fails, backs off to the retry cap and is claimed again every tick forever
-  // while the item is never shown as owing a judgment. Every provider the policy supports is
-  // therefore named an action an executor can carry to completion, or an escalation where only an
-  // operator can act — never one that cannot succeed.
+  // Session review opens a request its launcher can answer.
   const reviewable = await reload(item);
   const providerProbe = (policy: Record<string, unknown>, overrides: Partial<Work> = {}) => {
     const probe = { ...structuredClone(reviewable), lease: null, policy: { ...reviewable.policy, ...policy },
@@ -182,51 +173,19 @@ test('integration:typed-next-action — the control plane names one typed action
     Object.assign(probe, evaluate(probe, [probe], new Date()));
     return probe;
   };
-  const claude = { name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 };
-  const answerable: NextActionKind[] = [...executorRunnableKinds, 'attention'];
-  for (const provider of reviewProviders) {
-    const probe = providerProbe(provider === 'agent' ? { reviewProvider: provider, reviewerProfiles: [claude] } : { reviewProvider: provider });
-    const action = nextAction(probe, [probe], new Date())!;
-    assert.equal(action.gate, 'review', `${provider}: the review gate is the one refusing`);
-    assert.ok(answerable.includes(action.kind), `${provider}: ${action.kind} is an action an executor runs or an escalation, not one nothing can complete`);
-    assert.equal(refusalAction(probe, 'review', action.refusal!, undefined, new Date()), action.kind, `${provider}: the refusal maps to the same kind, so the queue and the gate agree`);
-    reconcileAutoDispatch(probe, [probe], new Date());
-    if (provider === 'github') {
-      assert.equal(action.kind, 'request-review', 'a GitHub approval is the one review a launched session answers');
-      assert.ok(probe.autoDispatch!.review, 'so a request stands for its handler to find');
-      assert.equal((nextAction(probe, [probe], new Date())!.inputs as any).requestId, probe.autoDispatch!.review!.id, 'and the action names it');
-    } else {
-      assert.equal(action.kind, 'resync', `${provider}: the fresh reading that wakes the observation job is what requests the review and reads its verdict`);
-      assert.equal(reviewNeed(probe, undefined, new Date()).needed, false, `${provider}: no launched reviewer is asked for`);
-      assert.equal(probe.autoDispatch!.review, null, `${provider}: and none is requested, so no executor could answer a request-review`);
-      assert.match(action.reason, new RegExp(`control plane dispatches ${provider} review`));
-    }
-  }
+  const probe = providerProbe({ reviewProvider: 'github' });
+  const action = nextAction(probe, [probe], new Date())!;
+  assert.equal(action.gate, 'review');
+  assert.equal(action.kind, 'request-review');
+  assert.equal(refusalAction(probe, 'review', action.refusal!, undefined, new Date()), action.kind);
+  reconcileAutoDispatch(probe, [probe], new Date());
+  assert.ok(probe.autoDispatch!.review);
+  assert.equal((nextAction(probe, [probe], new Date())!.inputs as any).requestId, probe.autoDispatch!.review!.id);
 
-  // An agent policy whose reviewer roster is spent for this candidate has nobody left to ask.
-  // Adding reviewer capacity or selecting another provider is the operator's judgment, so it
-  // escalates — visible and owed — rather than naming a review or re-reading forever.
-  const spent = providerProbe({ reviewProvider: 'agent', reviewerProfiles: [claude] }, { reviewFailovers: [{ profile: 'claude', reviewerApp: 'claude-app', runtime: 'claude',
-    exhaustion: 'usage-limit', reason: 'the reviewer runtime reported a usage limit', at: new Date().toISOString(), sha: head, baseSha: base, policyRevision: 1, requestCommentId: 7, nextProfile: null }] } as Partial<Work>);
-  const spentAction = nextAction(spent, [spent], new Date())!;
-  assert.equal(spentAction.kind, 'attention');
-  assert.equal(spentAction.gate, 'review');
-  assert.equal(spentAction.llmRole, 'attend');
-  assert.match(spentAction.reason, /no executor step answers it: every configured reviewer profile is exhausted for [0-9a-f]{12} \(claude\)/);
-  assert.match((spentAction.inputs as any).detail, /adding reviewer capacity or selecting another review provider is the operator's decision/);
-  assert.equal(spentAction.refusal, 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider', 'and the refusal it classified is carried verbatim');
-  assert.equal(refusalAction(spent, 'review', spentAction.refusal!, undefined, new Date()), 'attention');
-
-  // A change request answers a head under every provider as well: an agent reviewer records its
-  // verdict against the dispatched request rather than as a GitHub review, and either way the
-  // item owes a new head rather than another review of this one.
-  const answered = providerProbe({ reviewProvider: 'codex' });
-  answered.observation!.agentReview = { provider: 'codex', sha: head, approved: false, verdict: 'changes-requested', requestId: 11, reason: 'the refusal is still swallowed' };
+  const answered = providerProbe({});
+  answered.observation!.reviews = [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }];
   Object.assign(answered, evaluate(answered, [answered], new Date()));
-  const answeredAction = nextAction(answered, [answered], new Date())!;
-  assert.equal(answeredAction.kind, 'request-rework');
-  assert.equal(answeredAction.llmRole, 'judge-rework', 'a new head is a judgment owed, not a step an executor runs');
-  assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
+  assert.equal(nextAction(answered, [answered], new Date())!.kind, 'request-rework');
 
   // Approved: the merge writer trials and merges it (GY-2010), so nothing is named — the item
   // waits on the writer, and its reconciled record delivers it.
@@ -632,7 +591,7 @@ test('integration:session-handles-visible — every launched session records a d
     token: '', work: snapshot.work, status: { actor: { role: 'admin' }, repository: 'owner/project', baseBranch: 'main' }, error: '', connected: true, lastUpdated: null,
     view: 'overview', setView: () => {}, filter: null, setFilter: () => {}, selected: current.id, setSelected: () => {}, creating: false, setCreating: () => {},
     busy: false, setBusy: () => {}, observedAt: Date.now(), jobs: [], query: '', setQuery: () => {}, operatorAgents: [], events: [], operatorAgentsError: null,
-    features: {}, editingRequirements: false, setEditingRequirements: () => {}, codexAvailable: false, queue: [], sessionEpoch: { current: 0 },
+    features: {}, editingRequirements: false, setEditingRequirements: () => {}, queue: [], sessionEpoch: { current: 0 },
     api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: () => {}, signOut: () => {},
   };
   const markup = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard, item: current }));

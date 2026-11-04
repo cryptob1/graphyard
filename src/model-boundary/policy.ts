@@ -2,8 +2,7 @@ import { z } from 'zod';
 import { proofSchema } from './proof.js';
 import { deploySmokeProof } from '../model/proof.js';
 import { postMergeProofRefusal, postDeployCriterionRefusal, postDeployOnlyRefusal } from '../model/post-merge-proofs.js';
-import { reviewProviders, distinct } from '../model/review.js';
-import { reviewerProfileSchema } from './review.js';
+import { reviewProviders } from '../model/review.js';
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a
 // standing obligation on the named contract paths, and the next change touching those paths
@@ -27,19 +26,8 @@ export const policySchema = z.object({
   /** Retired (GY-2876): every item follows the one review rule; kept so stored policies parse. */
   review: z.boolean().default(true),
   reviewProvider: z.enum(reviewProviders).optional(),
-  reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(),
   // Optional second confidence layer after trunk: a trusted producer smoke-tests the live
   // deployment once it serves this item's merge commit. It never gates the merge itself.
   deploySmoke: z.boolean().optional(),
-}).strict().superRefine((policy, context) => {
-  if (policy.reviewProvider !== 'agent') {
-    if (policy.reviewerProfiles) context.addIssue({ code: 'custom', message: 'Reviewer profiles require reviewProvider "agent"', path: ['reviewerProfiles'] });
-    return;
-  }
-  const profiles = policy.reviewerProfiles ?? [];
-  if (!profiles.length) context.addIssue({ code: 'custom', message: 'Agent review requires at least one reviewer profile', path: ['reviewerProfiles'] });
-  if (!distinct(profiles.map(profile => profile.name))) context.addIssue({ code: 'custom', message: 'Reviewer profile names must be unique', path: ['reviewerProfiles'] });
-  // One identity per profile keeps a verdict attributable to exactly one profile.
-  if (!distinct(profiles.map(profile => profile.reviewerApp))) context.addIssue({ code: 'custom', message: 'Each reviewer profile must name a distinct registered reviewer App', path: ['reviewerProfiles'] });
-});
+}).strict();
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');

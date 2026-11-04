@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildRun } from '../child-runner.js';
 import { checkoutGuardApplies, coordinatorCheckoutRoot } from '../master/profiles.js';
-import { underTestRunner } from '../supervisor.js';
+import { underTestRunner } from '../runtime-environment.js';
 
 /** How the coordinator checkout stands: its commit, whether HEAD is detached, and whether tracked files differ from the commit (`dirtyPaths` names them: both paths of a rename). */
 export interface CheckoutState { commit: string | null; detached: boolean | null; dirty: boolean | null; dirtyPaths: string[]; branch: string | null }

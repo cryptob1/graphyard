@@ -64,16 +64,3 @@ export function leftFlowAt(work: Work, _release?: ReleaseView): string | null {
   return work.delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
 }
 
-/**
- * GY-1904: one member of an exact candidate — a change Graphyard delivered, bound to its work item
- * and the merge commit that delivered it.
- */
-export interface CandidateMember { workId: string; key: string; mergeSha: string; mergedAt: string; pr: number | null }
-/** GY-1904: the UAT verdict recorded against an exact candidate: the release candidate tagged at its source, and what its cases found. */
-export interface CandidateValidation {
-  /** The `rc/ID` record the loop cut at the candidate's source and validated. */
-  release: string; sha: string; identity: string; result: 'pass' | 'fail'; at: string; by: string;
-  /** Each required case's verdict, and the cases or suites that failed. */
-  cases: { id: string; result: string }[]; failed: string[];
-}
-

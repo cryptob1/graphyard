@@ -290,19 +290,10 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now: Date): {
     // Mechanical proofs precede review (GY-115): producers first; a failed proof owes a new head.
     case 'proofs-pending': return { kind: 'dispatch', reason: need.reason };
     case 'proof-failed': return { kind: 'request-rework', reason: need.reason };
-    // Changes requested on this exact head — as a reviewer session's verdict, or as the verdict an agent
-    // reviewer records — means the item needs a new commit, which is a judgment's to make.
+    // A change request on this exact head needs a new commit.
     case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
     // A head that does not contain the base tip is answered by a fresh reading and base refresh.
     case 'base-not-contained': return { kind: 'resync', reason: need.reason };
-    // The control plane dispatches this provider's review itself: the fresh reading that wakes its
-    // observation job is both how the request is posted and how the verdict arrives.
-    case 'provider-dispatched': return { kind: 'resync', reason: need.reason };
-    // Nobody is left to ask. An executor cannot add reviewer capacity or change the provider.
-    case 'provider-exhausted': return { kind: 'attention', reason: need.reason };
-    // `required` is the one state a launched reviewer answers, and the three remaining states
-    // raise no review refusal at all: without a review the policy requires, an approval or a
-    // carried approval, the gate passes (or refuses only its outstanding change requests).
     case 'required': case 'not-required': case 'approved': case 'carried': return null;
   }
 }

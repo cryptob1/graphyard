@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { configHome, installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import { parseEnvValue } from '../producer.js';
+import { parseEnvValue } from '../env-file.js';
 import type { E2eStep } from './case.js';
 
 /**

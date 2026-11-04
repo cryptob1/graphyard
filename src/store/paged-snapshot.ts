@@ -10,7 +10,7 @@ import { settledSummariesSql } from './summary-sql.js';
  */
 export interface SnapshotPage { cursor?: number; pageSize: number; visible?: readonly string[] }
 
-const jobsSql = "SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs";
+const jobsSql = "SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs";
 const settledScan = 'FROM work_index i WHERE i.settled OFFSET 0';
 if (!settledSummariesSql.includes(settledScan)) throw new Error('settledSummariesSql no longer scans the settled work index as the paged snapshot expects');
 // The settled summaries of the page's numbers only: they are applied where the index is scanned,

@@ -7,7 +7,7 @@ import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHe
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
-import { processConnectAccounts } from '../../master/environments.js';
+import { processConnectAccounts } from '../../master/connect-accounts.js';
 import { recordRunningPin } from '../../master/known-good.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';

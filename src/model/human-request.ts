@@ -220,3 +220,5 @@ export function openHumanOnly(subjects: readonly HumanOnlySubject[], now: number
     .flatMap(subject => rules.flatMap(rule => rule.open(subject, now)))
     .sort((a, b) => b.waitedMs - a.waitedMs);
 }
+
+export const humanOnlyDecisions = ['goals and priorities', 'spending money or opening third-party accounts', 'issuing credentials to people'] as const;

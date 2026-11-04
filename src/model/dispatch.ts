@@ -1,6 +1,6 @@
 import type { ProducerGroup } from './mechanical-proofs.js';
 import type { Work } from './work.js';
-import { reviewProviderOf, exactApproval, reviewerProfileFor, exhaustedReviewerProfiles } from './review.js';
+import { exactApproval } from './review.js';
 import { carriedApproval } from './carry.js';
 import { behindBaseHold } from './behind-base.js';
 /**
@@ -64,20 +64,10 @@ export const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policy
  * one — and a caller that reads only the review gate's first refusal ("approval is required")
  * would keep asking for a review nobody can give. `model/next-action.ts` maps these states to the
  * action that actually moves the item, so the two readings cannot drift apart.
- *
- * The provider is decided last, and deliberately. Only a `github` review is answered by a session
- * a dispatcher launches; a `codex` or `agent` review is dispatched by the control plane's own
- * durable observation job (`processJob`), and an `agent` policy that has exhausted every reviewer
- * profile has nobody left to ask at all. Testing the provider first — as this function once did —
- * made the approval, change-request and base-tip states unreachable for those providers, so the
- * one refusal they can raise fell through to "a review is required" for a review no session will
- * ever be launched for. Every state below is therefore reachable under every provider, and the
- * three that cannot be answered by a launched reviewer say so in their own name.
  */
 export type ReviewState = 'required' | 'not-required' | 'approved' | 'carried' | 'changes-requested'
-  | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted' | 'proofs-pending' | 'proof-failed';
+  | 'base-not-contained' | 'proofs-pending' | 'proof-failed';
 export function reviewNeed(work: Work, all: Work[] = [work], now: Date): { needed: boolean; reason: string; state: ReviewState } {
-  const provider = reviewProviderOf(work.policy);
   const approval = exactApproval(work);
   if (approval) return { needed: false, state: 'approved', reason: `approved by ${approval.reviewer} on ${short(approval.sha)}` };
   const carried = carriedApproval(work);
@@ -85,20 +75,10 @@ export function reviewNeed(work: Work, all: Work[] = [work], now: Date): { neede
   const candidate = work.candidate!, observation = work.observation!;
   const changes = observation.reviews.find(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED');
   if (changes) return { needed: false, state: 'changes-requested', reason: `${changes.reviewer} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
-  // An agent reviewer records its change request as a verdict on the dispatched request rather
-  // than as a GitHub review, and it stands for exactly the same thing: this head is answered.
-  const verdict = observation.agentReview;
-  if (verdict?.verdict === 'changes-requested' && verdict.provider === provider && verdict.sha === candidate.sha)
-    return { needed: false, state: 'changes-requested', reason: `${verdict.profile ?? provider} requested changes on ${short(candidate.sha)}; the next head is reviewed afresh` };
   const behind = behindBaseHold(work);
   if (behind) return { needed: false, state: 'base-not-contained', reason: behind };
   // Review is never held for proofs: CI runs the unit tests on the head and no producer is
   // requested, so the reviewer is asked as soon as the build gate passes (docs/delivery.md).
-  // No reviewer identity is left to ask: the roster is spent for this candidate, and adding
-  // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
-  if (provider === 'agent' && !reviewerProfileFor(work))
-    return { needed: false, state: 'provider-exhausted', reason: `every configured reviewer profile is exhausted for ${short(candidate.sha)} (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); adding reviewer capacity or selecting another review provider is the operator's decision` };
-  if (provider !== 'github') return { needed: false, state: 'provider-dispatched', reason: `the control plane dispatches ${provider} review itself; a fresh reading requests it and observes the verdict` };
   return { needed: true, state: 'required', reason: `independent approval of ${short(candidate.sha)} against ${short(candidate.baseSha)} under policy revision ${work.policyRevision} is required` };
 }
 

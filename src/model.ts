@@ -4,7 +4,6 @@ export * from './model/refusal.js';
 export * from './model/proof.js';
 export * from './model-boundary/proof.js';
 export * from './model/review.js';
-export * from './model-boundary/review.js';
 export * from './model/policy.js';
 export * from './model-boundary/policy.js';
 export * from './model/work.js';

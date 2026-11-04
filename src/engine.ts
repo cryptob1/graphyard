@@ -9,7 +9,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, demand, exhaustedReviewerProfiles, reviewerProfileFor, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewFailover, type Work, type Observation, type ReviewRequest, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, demand, type Criterion, type Evidence, type Lease, type Principal, type Work, type Observation, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
 import { createSchema } from './model-boundary/work.js';
 import { criteriaSchema, resourcesSchema } from './model-boundary/policy.js';
 import { proofExerciseSchema } from './model-boundary/evidence.js';
@@ -1286,7 +1286,7 @@ export class Engine {
     if (work.lease) endLapsedAttempt(work, work.lease, now);
     recordIntervention(work, 'requirements');
     work.lease = null;
-    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    work.observation = null; work.mergeAuthorization = null;
     // A submitted implementation must be explicitly reconsidered for changed intent.
     if (work.submission) work.reworkRequested = true;
 
@@ -1398,70 +1398,10 @@ export class Engine {
   }
   /** The item's durable observation job as the queue holds it, or null when it has none. */
   async observationJob(id: string): Promise<ObservationJobState | null> {
-    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error, held_until, held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error FROM jobs WHERE work_id=$1', [id])).rows[0];
     if (!row) return null;
     const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
-    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
-  }
-  async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
-      const provider = reviewProviderOf(work.policy);
-      demand((request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
-        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
-      if (provider === 'agent') {
-        const selected = reviewerProfileFor(work);
-        demand(!!selected && selected.name === request.profile && selected.reviewerApp === request.reviewerApp && !!request.marker,
-          'Review request does not name the currently selected reviewer profile');
-      }
-      work.reviewRequest = request;
-      if (work.observation) work.observation.agentReview = provider === 'agent'
-        ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
-        : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
-      this.evaluate(work, all, now); await this.recordDispatch(db, work, now); await save(db, work, 'github', 'review.requested', now); return work;
-    });
-  }
-  /**
-  }
-  /**
-   * Record provider exhaustion for the dispatched reviewer profile and release the request so
-   * the next configured profile is selected. Failing over never approves anything: when no
-   * profile remains, the review gate stays closed with the exhaustion recorded in history.
-   */
-  async failoverReviewRequest(id: string, expectedRevision: number, input: { exhaustion: 'usage-limit' | 'timeout'; reason: string }, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
-      const request = work.reviewRequest;
-      demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
-        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
-      'Review failover requires a current agent review request');
-      const dispatched = reviewerProfileFor(work);
-      demand(dispatched && dispatched.name === request!.profile && dispatched.reviewerApp === request!.reviewerApp, 'Review failover must name the currently dispatched reviewer profile');
-      const exhausted = new Set([...exhaustedReviewerProfiles(work), dispatched!.name]);
-      const next = (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
-      const failover: ReviewFailover = { profile: dispatched!.name, reviewerApp: dispatched!.reviewerApp, runtime: dispatched!.runtime,
-        exhaustion: input.exhaustion, reason: input.reason.slice(0, 500), at: now.toISOString(), sha: request!.sha, baseSha: request!.baseSha,
-        policyRevision: request!.policyRevision, requestCommentId: request!.commentId, nextProfile: next?.name ?? null };
-      // The complete sequence stays in the append-only ledger; the document keeps recent entries.
-      work.reviewFailovers = [...(work.reviewFailovers ?? []), failover].slice(-100);
-      work.reviewRequest = null;
-      if (work.observation) work.observation.agentReview = { provider: 'agent', sha: failover.sha, approved: false,
-        profile: next?.name, reviewerApp: next?.reviewerApp,
-        reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
-          : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'github', 'review.failover', now, failover);
-      return work;
-    });
+    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null };
   }
   /**
    * Evaluate one item and return the earliest instant at which its outcome could change with no

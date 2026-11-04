@@ -88,8 +88,8 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
-  // Five callers remain after GY-3011 removed settleClaimedAction, which also named its item.
-  assert.equal((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length, 5, 'the remaining engine commands read through the bounded read, naming their item');
+  // Three callers remain after GY-3015 removed bindReviewRequest and failoverReviewRequest.
+  assert.equal((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length, 3, 'the remaining engine commands read through the bounded read, naming their item');
   assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
   assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.

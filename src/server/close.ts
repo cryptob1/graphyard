@@ -52,7 +52,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const settled = settleOpenRequests(work!, closure, now);
     // A lease, lapsed or live, ends here, as released.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
-    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, blocker: null });
+    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), blocker: null });
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
     Object.assign(work!, { mergeAuthorization: null });

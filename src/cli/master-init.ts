@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { atomicPrivateWrite, loadMasterConfig, loadStoredMasterConfig, setupMaster } from '../master.js';
+import { loadMasterConfig, loadStoredMasterConfig, setupMaster } from '../master.js';
+import { atomicPrivateWrite } from '../private-file.js';
 import { recordedMasterUrl } from '../master/config.js';
 import { initialFleetProposal } from './master-registry.js';
 import { readSecretFromStdin, type CliContext } from './context.js';
