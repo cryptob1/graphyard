@@ -1,7 +1,7 @@
 <!-- page: Understand or contribute | 2 | frozen exact-root benchmark and run receipts. -->
 # Certified real-root benchmark
 
-Implementation status: source work resumed in GY-3051 epoch 4. Build and focused
+Implementation status: source work resumed in GY-3051 epoch 5. Build and focused
 checks are available below; ordinary private-root delivery verification remains
 required before submission. No actual-agent success is claimed.
 
@@ -133,8 +133,11 @@ or usage bound. Monetary and token usage remain unknown unless an explicit
 producer meter supplies them. Allocation time includes master, workers, reviews,
 proofs and repairs; it is not a token or money estimate.
 
-Three-worker overlap is recomputed from implementation handle timestamps and
-requires distinct principals, items, branches and worktree paths. Intervals end
+Three-worker overlap in real-agent receipts starts at the recorded
+`session.runtimeStartedAt`, after runtime launch. Preparatory handle registration
+(`startedAt`) alone cannot count as implementation work. Controlled-fixture
+receipts explicitly retain their synthetic handle intervals; they never prove
+real-agent overlap. Both require distinct principals, items, branches and worktree paths. Intervals end
 no later than the authoritative attempt end, so a submitted worker waiting for
 pane cleanup cannot manufacture overlap. Registry
 selection time alone cannot establish overlap. A single comparison uses one
@@ -298,3 +301,10 @@ test reporting in the common initial repository only; frozen mathematical inputs
 and receipt requirements remain unchanged. The writer's acceptance of the
 zero-count trial is tracked as a separate production guard repair. Full native
 verification still needs a passing rerun; no actual-agent success is claimed.
+
+The preserved `4f516018cbcb627b47163c6a9d31f4c15b087589` head passed all
+20 tests in the native private-root harness (zero failed or skipped). This is
+controlled-fixture success, never actual-AI success. The runtime-overlap fix
+requires new exact-head canonical suite and bound E2E verification; the prior
+result does not waive either gate. Registry allocation timestamps and aggregate
+budgets remain unchanged.

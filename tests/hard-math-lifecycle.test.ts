@@ -7,6 +7,7 @@ import { stopRun, watchBudget } from '../benchmarks/hard-math/lifecycle.js';
 import { command } from '../benchmarks/hard-math/process.js';
 import { registerRun, writeRunOwner, runsDirectory, endRun } from '../src/runner/registry.js';
 import { sourceCapacity } from '../benchmarks/hard-math/capacity.js';
+import { receiptSession } from '../benchmarks/hard-math/snapshot.js';
 import { emptyRegistry } from '../src/model/registry.js';
 import { overlappingWorkers, comparison, receiptSchema, validateReceipt } from '../benchmarks/hard-math/receipt-schema.js';
 
@@ -62,6 +63,29 @@ test('hard math overlap requires actual handles and three different implementati
   assert.equal(overlappingWorkers(sessions)[0].milliseconds,6000);
   sessions[2].implementation.path=sessions[1].implementation.path;
   assert.deepEqual(overlappingWorkers(sessions),[]);
+});
+
+test('hard math preparation cannot count as three workers; recorded runtime overlap can',()=>{
+  const at=(second:number)=>new Date(Date.UTC(2026,0,1,0,0,second)).toISOString();
+  const allocations=[0,1,2].map(i=>({id:`slot-${i}`,role:'worker',work:`GY-${i}`,principal:`worker-${i}`,runtime:'codex',account:`account-${i}`,model:'model',reason:'Selected',selectedAt:at(0),endedAt:at(20)})) as any;
+  const items:any[]=allocations.map((s:any,i:number)=>({
+    sessions:[{id:`worker-${i}:1`,kind:'implementation',principal:s.principal,epoch:1,pane:`pane-${i}`,agentName:null,startedAt:at(1),endedAt:at(18)}],
+    workspaces:[{epoch:1,branch:`branch-${i}`,path:`/tree-${i}`}],pipeline:{attempts:[{epoch:1,endedAt:at(19)}]},
+  }));
+  const collect=(kind:'real-agent'|'controlled-fixture')=>allocations.map((s:any,i:number)=>receiptSession(kind,s,allocations,items[i]));
+  const prepared=collect('real-agent');
+  assert.ok(prepared.every((s:any)=>s.implementation===null),'registration and pane coordinates alone are preparation');
+  assert.deepEqual(overlappingWorkers(prepared),[]);
+  assert.equal(prepared[0].startedAt,at(0),'budget still includes allocation and preparation');
+  assert.equal(prepared[0].record,allocations[0],'raw registry record is retained');
+  assert.equal(overlappingWorkers(collect('controlled-fixture'))[0].milliseconds,17000,'controlled timing stays explicitly fixture-only');
+  items[0].sessions[0].runtimeStartedAt=at(3);
+  items[1].sessions[0].runtimeStartedAt=at(5);
+  assert.deepEqual(overlappingWorkers(collect('real-agent')),[],'two actual starts plus one preparation cannot count as three');
+  items[2].sessions[0].runtimeStartedAt=at(8);
+  assert.equal(overlappingWorkers(collect('real-agent'))[0].milliseconds,10000);
+  items[2].sessions[0].runtimeStartedAt=at(19);
+  assert.deepEqual(overlappingWorkers(collect('real-agent')),[],'overlapping preparations cannot hide non-overlapping runtimes');
 });
 
 const syntheticReceipt=(mode:'team'|'single')=>receiptSchema.parse({
