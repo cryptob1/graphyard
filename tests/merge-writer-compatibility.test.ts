@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -21,8 +21,6 @@ import type { MergePorts, MergeTrialRun, runMergeTrial } from '../src/merge-writ
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { completionBody } from '../src/cli/complete.js';
-import { createWorktree } from '../src/cli/workspace-worktree.js';
-import type { CliContext } from '../src/cli/context.js';
 import { masterConfigSchema } from '../src/master.js';
 import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
 import { neededRework } from '../src/daemon/rework.js';
@@ -240,23 +238,6 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   assert.match(delivery, /<dt>Merge writer<\/dt><dd>The control plane \(GitHub only a mirror\)<\/dd>/, 'the delivery view identifies the fixed merge writer without a status switch');
   for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });
-
-/** `worktree GY-N EPOCH` as the launcher runs it from the coordinator checkout, against the live plane as the worker. */
-async function worktree(id: string, epoch: number): Promise<{ path: string; branch: string }> {
-  const subject = await store.workDocument(id), printed: { path: string; branch: string }[] = [];
-  const api = async (path: string, body?: unknown, key?: string) => {
-    // The fixture's origin is a local path, so the plane's repository name is left out of the identity check.
-    if (path === 'status') return { ...(await request(coordinator, 'status')).body, repository: null };
-    const response = await request(worker, path, body, key);
-    if (response.status >= 300) throw new Error(`${path} refused (${response.status}): ${JSON.stringify(response.body)}`);
-    return response.body;
-  };
-  const cli = { args: [String(epoch)], api, print: (value: { path: string; branch: string }) => printed.push(value), repositoryRoot: () => checkout, individualHostId: () => 'worker-host' } as unknown as CliContext;
-  const previous = process.cwd();
-  process.chdir(checkout);
-  try { await createWorktree(cli, subject); } finally { process.chdir(previous); }
-  return printed[0];
-}
 
 test('unit:merge-writer-idle-cycle — an empty board runs no trial and retired shadow routes return 404', { timeout: 120_000 }, async () => {
   const master = config(), state = emptyDaemonState(master);

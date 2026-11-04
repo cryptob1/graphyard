@@ -165,7 +165,7 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
     };
     const leased = await create('Hour leased');
     await engine.execute(worker, 'claim', leased.id, {}, id());
-    const child = await create('Hour child', { dependencies: [leased.id] });
+    await create('Hour child', { dependencies: [leased.id] });
     // A backlog item nobody released: its wait runs a day out, so nothing about it is due in the hour.
     await engine.execute(operator, 'create', null,
       { type: 'chore',  title: 'Hour draft', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation', 'e2e:fixture'] }] }, id());

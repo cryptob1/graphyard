@@ -1,7 +1,5 @@
 import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { defineCommands, workMutation } from './registry.js';
 import { verifyCommand } from './verify.js';

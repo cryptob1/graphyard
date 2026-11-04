@@ -61,7 +61,6 @@ export async function main(options: MainOptions = {}) {
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
-  let validationTask: Promise<void> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
   services.readiness = false;
   const runStartupValidation = async () => {
@@ -85,10 +84,8 @@ export async function main(options: MainOptions = {}) {
         if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
       } finally {
         validating = false;
-        validationTask = null;
       }
     })();
-    validationTask = task;
     await task;
   };
   const startBackground = () => {

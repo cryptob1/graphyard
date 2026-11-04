@@ -8,7 +8,7 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { authenticated, digest, receipt, record } from './receipts.js';
 import type { Services } from './routes.js';
-import { lockedWork, workIdByRef } from '../store/locked-read.js';
+import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 type Db = pg.PoolClient;
@@ -63,8 +63,6 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     return work!;
   });
 }
-
-const readDocument = async (services: Services, ref: string): Promise<Work | undefined> => (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [ref])).rows[0]?.document;
 
 /** Cancel the item's open dispatch requests, withdraw its human-only request and resolve its agent requests. */
 export function settleOpenRequests(work: Work, closure: Closure, now: Date) {

@@ -78,7 +78,7 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 
 test('unit:idle-session-after-reprompt-is-ended — the close step ends a session idle past the window after its re-prompt (stalled, lease released, item dispatchable), re-prompts one that has had no re-prompt, and leaves a session inside the window alone', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-  const now = Date.now(), window = 10 * 60_000, clock = now + 30 * 60_000, iso = (at: number) => new Date(at).toISOString();
+  const now = Date.now(), clock = now + 30 * 60_000, iso = (at: number) => new Date(at).toISOString();
   const stalled = await item('GY-31', 'Stalled after its re-prompt');
   const limited = await item('GY-32', 'Stalled on the provider limit notice');
   const inside = await item('GY-33', 'Idle inside the window');

@@ -10,7 +10,6 @@ import { mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriter
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
-import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 

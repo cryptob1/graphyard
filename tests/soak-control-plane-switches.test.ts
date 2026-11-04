@@ -27,7 +27,6 @@ const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`a cont
 
 /** The day's script, by item ordinal and cycle. */
 const items = 80, submitEveryMs = 15 * minute, cycleMs = 2 * minute, cycles = (24 * 60) / 2;
-const mergerUnreadable = (cycle: number) => cycle > 0 && cycle % 50 < 2;
 const restartAt = (cycle: number) => cycle === 300 || cycle === 501;
 
 class World {

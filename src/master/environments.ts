@@ -1,6 +1,6 @@
 // Concern: agent environments and accounts — discovery, health, quota, selection and the launch plan.
 import { existsSync } from 'node:fs';
-import { readdir, stat, mkdir, readFile, access } from 'node:fs/promises';
+import { readdir, stat, mkdir, readFile } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
@@ -15,9 +15,9 @@ import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
-import { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
+import { describeObservedExhaustion, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
-import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage } from '../provider-usage.js';
+import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, imported here exactly as
 // they were private in this module: nothing about them is part of this path's export.
 import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';

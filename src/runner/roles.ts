@@ -8,8 +8,7 @@ import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/l
 import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
-import { z } from 'zod';
-import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
+import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied } from './registry.js';
 import { evidencePayloadSchema, graphyardTools, piRuntimeSchema, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';

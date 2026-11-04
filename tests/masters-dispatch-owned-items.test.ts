@@ -8,7 +8,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Principal } from '../src/model.js';
 import { relandItemFor } from '../src/merge-writer/serve-revert.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

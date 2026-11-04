@@ -66,7 +66,7 @@ test('unit:rework-local-branch — the local candidate head starts the workspace
 
 test('unit:rework-local-branch — a local head that differs from the candidate never starts the workspace; with no registered start to honor it refuses with the existing message', async () => {
   const { registeredReworkHead } = await import('../src/master/branch-release.js');
-  const { work, pushed, candidate } = await repository();
+  const { work, pushed } = await repository();
   // The branch moved past the submitted head: the registered candidate starts the workspace, never the moved local head.
   const moved: string[][] = [];
   assert.equal(await registeredReworkHead(work, branch, pushed, recording(moved)), pushed, 'the registered candidate is the start, not the branch tip that moved past it');

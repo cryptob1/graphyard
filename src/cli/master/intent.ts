@@ -33,7 +33,7 @@ export async function derivedIntent(id: 'create' | 'requirements', args: string[
 
 /** The master's own intent, applied at once with its operator-agent identity. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
-  const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator } = session;
+  const { id, args, print, root, master, masterToken, masterApi, masterMutation } = session;
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, forPerson: master.forPerson, token: () => agentToken(root, master, 'operatorAgent') }));
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);

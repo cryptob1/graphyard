@@ -57,7 +57,6 @@ function plane(scripts: Script[], options: { hostId?: string; delivered?: number
   const github = { merging: true };
   let now = clockStart;
   const iso = (at: number = now) => new Date(at).toISOString();
-  const scripted = (item: Work) => scripts.some(entry => entry.key === item.key);
   const work: Work[] = scripts.map((script, index) => ({
     id: `id-${script.key}`, key: script.key, title: `Deliver ${script.key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven end to end', proofs: ['integration:loop'] }],

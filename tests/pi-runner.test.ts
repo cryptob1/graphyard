@@ -30,7 +30,6 @@ for (const step of scenario.steps) {
 }
 `;
 
-const H = 'a'.repeat(40);
 const decompose = (details: unknown, isError = false) => ({ line: { type: 'tool_execution_end', toolCallId: 'call-1', toolName: testTool, result: { content: [{ type: 'text', text: isError ? 'graphyard_decompose was not recorded: input.children is required' : 'recorded' }], details }, isError } });
 const recorded = [
   { line: { type: 'session', version: 3, id: 'session-1', timestamp: '2030-01-01T00:00:00Z', cwd: '/w' } },
