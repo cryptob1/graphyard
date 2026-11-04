@@ -16,8 +16,8 @@ export async function verifyArtifact(input:{root:string;sha:string;seed:number;p
   await mkdir(input.scratch,{recursive:true});
   const wrapper=trialConfinement([...input.hidden,dirname(dirname(resolve(input.python)))],[input.root,input.scratch]);
   const env={...trialEnvironment(process.env),HOME:input.scratch,TMPDIR:input.scratch};
-  const run=(args:string[],stdin='')=>command(wrapper[0],[...wrapper.slice(1),process.execPath,...args],{cwd:input.root,input:stdin,env,signal:input.signal});
-  await command(wrapper[0],[...wrapper.slice(1),'npm','run','build'],{cwd:input.root,env,signal:input.signal});
+  const run=(args:string[],stdin='')=>command(wrapper[0],[...wrapper.slice(1),process.execPath,...args],{cwd:input.root,input:stdin,env,includeStdout:true,signal:input.signal});
+  await command(wrapper[0],[...wrapper.slice(1),'npm','run','build'],{cwd:input.root,env,includeStdout:true,signal:input.signal});
   const samples=generate(input.seed), requests=samples.map(({coefficients,precisionBits})=>({coefficients,precisionBits}));
   const cli=await run(['src/cli.mjs'],requests.map(r=>JSON.stringify(r)).join('\n')+'\n');
   const answers=cli.stdout.trim().split('\n').map(line=>JSON.parse(line));
@@ -25,7 +25,7 @@ export async function verifyArtifact(input:{root:string;sha:string;seed:number;p
   const checks=await oracle(input.python,requests.map((request,i)=>({request,output:answers[i]})),input.oracleSource,input.signal);
   if(checks.some(check=>!check.pass)) throw new Error(`CLI exact oracle rejected: ${JSON.stringify(checks)}`);
   // Both stable errors and continuation are part of the CLI contract.
-  const invalid=await command(wrapper[0],[...wrapper.slice(1),process.execPath,'src/cli.mjs'],{cwd:input.root,env,signal:input.signal,input:'{\n'+JSON.stringify({coefficients:['0'],precisionBits:64})+'\n'+JSON.stringify({coefficients:['1'],precisionBits:64})+'\n',allowFailure:true});
+  const invalid=await command(wrapper[0],[...wrapper.slice(1),process.execPath,'src/cli.mjs'],{cwd:input.root,env,includeStdout:true,signal:input.signal,input:'{\n'+JSON.stringify({coefficients:['0'],precisionBits:64})+'\n'+JSON.stringify({coefficients:['1'],precisionBits:64})+'\n',allowFailure:true});
   const errors=invalid.stdout.trim().split('\n').map(line=>JSON.parse(line));
   if(invalid.code===0 || errors[0]?.error?.code!=='INVALID_JSON' || errors[1]?.error?.code!=='ZERO_POLYNOMIAL' || errors[2]?.roots?.length!==0) throw new Error('CLI error/continuation contract failed');
   const port=await freePort(),url=`http://127.0.0.1:${port}`;

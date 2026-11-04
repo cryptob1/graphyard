@@ -274,3 +274,15 @@ consumed, requires certification before a push, and verifies rejection leads to
 repair and certification of the repaired head before its push. These are unit
 orchestration effects, not real-agent outcome evidence. Production gates, risk
 classification, frozen inputs and actual run/comparison caps remain unchanged.
+
+The native `b2e0248` artifact-only diagnostic failed before UI verification:
+the controlled lookup table retained leading coefficient zeros while the frozen
+contract parser removed them from requests. The controlled writer now uses that
+same parser for table keys. Its emitted browser module uses literal whitespace
+regexp and newline escapes; a focused adapter regression executes the emitted
+file with textarea tabs/newlines and independently checks CLI answers for all
+three frozen seeds. Credential-free artifact command failures include bounded
+structured stdout alongside stderr so CLI JSON errors remain diagnosable.
+The generator, contract and oracle are unchanged. Native CLI/API/UI certification
+and the complete eight-merge fixture still require passing reruns; controlled
+lookup tests do not demonstrate actual-agent success.

@@ -245,3 +245,14 @@ test('hard math real cycle cannot merge a final candidate arriving after the cer
   assert.deepEqual(events,['reject','repair',`certify:${fixed.candidate.sha}`,`push:${fixed.candidate.sha}`]);
   assert.equal(freshReads,0);
 });
+
+test('hard math credential-free command errors retain bounded structured stdout only when requested',async()=>{
+  const args=['-e',"process.stdout.write('x'.repeat(10000)+'\\n'+JSON.stringify({error:{code:'INVALID_REQUEST'}}));process.exitCode=1"];
+  await assert.rejects(command(process.execPath,args,{includeStdout:true}),error=>{
+    const message=(error as Error).message;
+    assert.match(message,/stdout:\n/);assert.match(message,/"code":"INVALID_REQUEST"/);assert.ok(message.length<3500);return true;
+  });
+  await assert.rejects(command(process.execPath,args),error=>{
+    assert.ok(!(error as Error).message.includes('stdout:\n'));return true;
+  });
+});

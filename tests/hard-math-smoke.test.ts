@@ -121,3 +121,29 @@ test('integration:hard-math-smoke — controlled lookup artifact independently p
   const result=await verifyArtifact({root,sha:'a'.repeat(40),seed:1,python,oracleSource,oracleDigest:await oracleDigest(),scratch,hidden:[join(process.cwd(),'.graphyard')]});
   assert.equal(result.cli,true);assert.equal(result.api,true);assert.equal(result.ui,true);assert.equal(result.cases,generate(1).length);
 });
+
+test('integration:hard-math-smoke — controlled lookup normalizes CLI keys and emitted browser whitespace through the contract',async()=>{
+  const parent=await temporaryDirectory('hard-math-adapters',process.cwd()),root=join(parent,'repository');
+  await cp(join(benchmarkRoot,'seed'),root,{recursive:true});
+  await writeControlledArtifact(root,python,oracleSource);
+  const samples=[1,2,3].flatMap(seed=>generate(seed));
+  const output=await command(process.execPath,['src/cli.mjs'],{cwd:root,input:samples.map(request=>JSON.stringify(request)).join('\n')+'\n',includeStdout:true});
+  const answers=output.stdout.trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(answers.length,samples.length);
+  const checks=await oracle(python,samples.map((request,i)=>({request,output:answers[i]})));
+  assert.ok(checks.every(c=>c.pass),JSON.stringify(checks));
+  const {runInNewContext}=await import('node:vm');
+  let submit:((event:{preventDefault():void})=>Promise<void>)|undefined;
+  const nodes:any={
+    '#form':{addEventListener:(event:string,handler:typeof submit)=>{assert.equal(event,'submit');submit=handler;}},
+    '#coefficients':{value:' 1\t0\n-2 '},'#precisionBits':{value:'64'},'#error':{textContent:''},'#results':{textContent:''},
+  };
+  const jobs:any[]=[];
+  runInNewContext(await readFile(join(root,'public/app.mjs'),'utf8'),{
+    document:{querySelector:(selector:string)=>nodes[selector]},
+    fetch:async(_url:string,options:any)=>{jobs.push(JSON.parse(options.body));return {json:async()=>({results:[{roots:[{lo:{n:'1',d:'1'},hi:{n:'1',d:'1'},multiplicity:1},{lo:{n:'2',d:'1'},hi:{n:'2',d:'1'},multiplicity:2}]}]})};},
+  });
+  assert.ok(submit);await submit({preventDefault(){}});
+  assert.deepEqual(jobs,[{jobs:[{coefficients:['1','0','-2'],precisionBits:64}]}]);
+  assert.equal(nodes['#error'].textContent,'');assert.equal(nodes['#results'].textContent.split('\n').length,2);
+});

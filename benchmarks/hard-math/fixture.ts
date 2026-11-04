@@ -14,12 +14,14 @@ import { generate } from './generator.js';
 import { oracle } from './oracle.js';
 import type { RunContext } from './runner.js';
 
-const app=`document.querySelector('#form').addEventListener('submit',async event=>{event.preventDefault();const error=document.querySelector('#error'),results=document.querySelector('#results');error.textContent='';results.textContent='';try{const request={coefficients:document.querySelector('#coefficients').value.trim().split(/\\s+/),precisionBits:Number(document.querySelector('#precisionBits').value)};const response=await fetch('/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobs:[request]})});const body=await response.json(),result=body.results?.[0];if(body.error||result.error){error.textContent=(body.error||result.error).code;return;}results.textContent=result.roots.map(root=>root.lo.n+'/'+root.lo.d+' .. '+root.hi.n+'/'+root.hi.d+' multiplicity '+root.multiplicity).join('\\n');}catch(e){error.textContent=String(e);}});\n`;
+// Keep regexp/string escapes literal in the emitted controlled ES module.
+const app=String.raw`document.querySelector('#form').addEventListener('submit',async event=>{event.preventDefault();const error=document.querySelector('#error'),results=document.querySelector('#results');error.textContent='';results.textContent='';try{const request={coefficients:document.querySelector('#coefficients').value.trim().split(/\s+/),precisionBits:Number(document.querySelector('#precisionBits').value)};const response=await fetch('/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobs:[request]})});const body=await response.json(),result=body.results?.[0];if(body.error||result.error){error.textContent=(body.error||result.error).code;return;}results.textContent=result.roots.map(root=>root.lo.n+'/'+root.lo.d+' .. '+root.hi.n+'/'+root.hi.d+' multiplicity '+root.multiplicity).join('\n');}catch(e){error.textContent=String(e);}});`+'\n';
 /** An oracle lookup fixture for controlled tests only; never an implementation solver. */
 export async function writeControlledArtifact(root:string,python:string,oracleFile:string,signal?:AbortSignal) {
   const samples=[1,2,3].flatMap(seed=>generate(seed));
   const refs=await oracle(python,samples.map(request=>({request,reference:true})),oracleFile,signal);
-  const table=Object.fromEntries(samples.map((sample,i)=>[sample.coefficients.map(BigInt).map(String).join(','),refs[i]]));
+  const {parseRequest}=await import(new URL('./seed/src/contract.mjs',import.meta.url).href);
+  const table=Object.fromEntries(samples.map((sample,i)=>[parseRequest(sample).coefficients.map(String).join(','),refs[i]]));
   await writeFile(join(root,'src/solver.mjs'),`import {parseRequest} from './contract.mjs';\nconst table=${JSON.stringify(table)};\nexport function solve(value){const {coefficients}=parseRequest(value);if(coefficients.length===1)return {roots:[]};const result=table[coefficients.map(String).join(',')];if(!result)throw {code:'INVALID_REQUEST'};return result;}\n`);
   await writeFile(join(root,'public/app.mjs'),app);
 }
