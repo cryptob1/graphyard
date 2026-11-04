@@ -1,6 +1,8 @@
 <!-- page: Understand or contribute | 1 | change code and validate -->
 # Development and dogfooding
 
+Typechecking enforces `noUnusedLocals` across source, web, and tests. Remove unused imports and bindings; retain setup calls and other side effects when discarding a result.
+
 ## Where a new feature goes
 
 | Concern | Source |

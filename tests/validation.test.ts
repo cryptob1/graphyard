@@ -1,7 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -493,7 +492,6 @@ test('proof previews reject generic and superseded validation passes just like g
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'unmeasured');
   assert.equal(proven(w, f.proof), false); await cleanup(f);
 });
-
 
 test('private artifacts bind request/attempt, authenticate reads and never enter audit bytes', async () => {
   const f = await fixture('postgres'), command = await start(f), key = id();

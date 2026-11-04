@@ -1,9 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/master.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { neededRework, proofRework } from '../src/daemon/rework.js';
 import { producerPrompt } from '../src/producer.js';
 import { piProducerPrompt } from '../src/runner/roles.js';

@@ -22,66 +22,6 @@ declare module './model/work.js' {
  */
 export interface ThreeWayMerge { clean: boolean; content: Buffer | null }
 
-interface DiffHunk { aStart: number; aLen: number; bStart: number; bLen: number }
-/** One side's changed region: base[aStart, aStart + aLen) replaced by side[bStart, bStart + bLen). */
-
-/** Beyond these the merge is left undone and the conservative blob-identity judgement stands: a heavily rewritten out-of-scope file is a refusal either way. */
-const maxMergeCore = 5_000;
-const maxMergeDistance = 1_000;
-
-const splitLines = (content: Buffer): Buffer[] => {
-  const lines: Buffer[] = [];
-  let start = 0;
-  for (let index = 0; index < content.length; index++) if (content[index] === 0x0a) { lines.push(content.subarray(start, index + 1)); start = index + 1; }
-  if (start < content.length) lines.push(content.subarray(start));
-  return lines;
-};
-
-const myersHunks = (a: number[], b: number[], offset: number): DiffHunk[] | null => {
-  // Common ends never take an edit step: trim them so the caps measure the genuinely divergent core.
-  let from = 0;
-  while (from < a.length && from < b.length && a[from] === b[from]) from++;
-  let endA = a.length, endB = b.length;
-  while (endA > from && endB > from && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
-  const coreA = a.slice(from, endA), coreB = b.slice(from, endB), max = coreA.length + coreB.length;
-  if (max === 0) return [];
-  if (max > maxMergeCore) return null;
-  const center = max, trace: Int32Array[] = [];
-  let v = new Int32Array(2 * max + 1), d = 0;
-  outer: for (d = 0; d <= max; d++) {
-    if (d > maxMergeDistance) return null;
-    trace.push(Int32Array.from(v));
-    for (let k = -d; k <= d; k += 2) {
-      let x = k === -d || (k !== d && v[center + k - 1] < v[center + k + 1]) ? v[center + k + 1] : v[center + k - 1] + 1;
-      let y = x - k;
-      while (x < coreA.length && y < coreB.length && coreA[x] === coreB[y]) { x++; y++; }
-      v[center + k] = x;
-      if (x >= coreA.length && y >= coreB.length) break outer;
-    }
-  }
-  const edits: DiffHunk[] = [];
-  let x = coreA.length, y = coreB.length;
-  for (let step = d; step >= 1; step--) {
-    const previous = trace[step], k = x - y;
-    const previousK = k === -step || (k !== step && previous[center + k - 1] < previous[center + k + 1]) ? k + 1 : k - 1;
-    const previousX = previous[center + previousK], previousY = previousX - previousK;
-    while (x > previousX && y > previousY) { x--; y--; }
-    edits.push(previousK === k + 1
-      ? { aStart: offset + from + previousX, aLen: 0, bStart: offset + from + previousY, bLen: 1 }
-      : { aStart: offset + from + previousX, aLen: 1, bStart: offset + from + previousY, bLen: 0 });
-    x = previousX; y = previousY;
-  }
-  const hunks: DiffHunk[] = [];
-  for (const edit of edits.reverse()) {
-    const last = hunks[hunks.length - 1];
-    if (last && last.aStart + last.aLen === edit.aStart && last.bStart + last.bLen === edit.bStart) { last.aLen += edit.aLen; last.bLen += edit.bLen; }
-    else hunks.push(edit);
-  }
-  return hunks;
-};
-
-const sameLines = (a: number[], b: number[]) => a.length === b.length && a.every((line, index) => line === b[index]);
-
 /**
  * Delivered work items whose observed diff covers the path. A pull request the provider reports
  * merged shipped its files whether or not its delivery is recorded yet.

@@ -93,7 +93,7 @@ test('unit:incremental-reconcile a pass after one heartbeat rereads that one doc
 
 test('unit:incremental-reconcile a change other items read re-evaluates the moved item and its readers but still rereads one document', { timeout: 120_000 }, async () => {
   const blocker = await create();
-  const dependent = await create({ dependencies: [blocker.id] });
+  await create({ dependencies: [blocker.id] });
   for (let n = 0; n < 5 && (await pass()).evaluated; n++);
   await engine.execute(operator, 'ready', blocker.id, {}, randomUUID());
   const moved = await pass();
