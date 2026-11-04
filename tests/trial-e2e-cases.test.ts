@@ -98,7 +98,7 @@ before(async () => {
 
   engine.gitRunner = gitRunnerFor(root);
   engine.baseBranch = 'main';
-  http = server(engine, principals.map(entry => ({ ...entry, token: tokens.get(entry.id)! })), null);
+  http = server(engine, principals.map(entry => ({ ...entry, token: tokens.get(entry.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
