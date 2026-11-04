@@ -16,7 +16,7 @@ function sources(directory: string): string[] {
 test('unit:barrel-imports — source imports owning master modules and the daemon barrel is gone', () => {
   assert.equal(existsSync(resolve(root, 'src/master-daemon.ts')), false);
   const violations: string[] = [];
-  for (const file of sources(resolve(root, 'src'))) {
+  for (const file of [...sources(resolve(root, 'src')), ...sources(resolve(root, 'tests'))]) {
     const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
     function visit(node: ts.Node) {
       const specifier = ts.isImportDeclaration(node) || ts.isExportDeclaration(node) ? node.moduleSpecifier
@@ -24,7 +24,8 @@ test('unit:barrel-imports — source imports owning master modules and the daemo
       if (specifier && ts.isStringLiteral(specifier)) {
         const target = resolve(dirname(file), specifier.text).replace(/\.(?:js|ts)$/, '');
         if (target === resolve(root, 'src/master-daemon') ||
-          target === resolve(root, 'src/master') && !file.startsWith(resolve(root, 'src/cli') + '/')) {
+          target === resolve(root, 'src/master') && file.startsWith(resolve(root, 'src') + '/') &&
+          !file.startsWith(resolve(root, 'src/cli') + '/')) {
           violations.push(`${relative(root, file)}: ${specifier.text}`);
         }
       }
