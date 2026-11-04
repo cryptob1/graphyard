@@ -1,5 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -413,4 +415,24 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     assert.doesNotMatch(bundle(), /127\.0\.0\.1:4310:/);
   } finally { await compose.cleanup(); }
 
+});
+
+test('unit:install-principal-roster — init --scan --apply without an install writes no second roster or credentials', async () => {
+  const fixture = await harness({ provider: 'compose' });
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_CONFIG_HOME: fixture.configHome };
+    for (const key of Object.keys(env)) if (key.startsWith('GRAPHYARD_') && key !== 'GRAPHYARD_CONFIG_HOME') delete env[key];
+    const cli = join(import.meta.dirname, '../bin/graphyard.mjs');
+    const run = (args: string[]) => promisify(execFile)(process.execPath, [cli, ...args], { cwd: fixture.root, env });
+    await run(['init', '--scan', '--url', 'https://graphyard.example']);
+    const { stdout } = await run(['init', '--scan', '--apply', '--url', 'https://graphyard.example']);
+    const result = JSON.parse(stdout);
+    assert.equal(result.principalsFile, null);
+    assert.match(result.next, /graphyard install --apply/);
+    await assert.rejects(stat(join(fixture.root, '.graphyard/principals.json')), { code: 'ENOENT' });
+    const state = JSON.parse(await readFile(join(fixture.root, '.graphyard/repository-setup.json'), 'utf8'));
+    assert.equal(state.artifacts.principals, null);
+    const proposal = JSON.parse(await readFile(join(fixture.root, '.graphyard/setup-proposal.json'), 'utf8'));
+    for (const profile of proposal.profiles.workers) await assert.rejects(stat(profile.credentialFile), { code: 'ENOENT' });
+  } finally { await fixture.cleanup(); }
 });
