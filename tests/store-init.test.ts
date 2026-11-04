@@ -240,8 +240,7 @@ test('integration:migration-deadlock-retried a live writer queued behind the mig
   } finally { await blocker.end(); await live.end(); await next.close(); await deployed.close(); }
 });
 
-
-test('a previous-generation database retires unused job and index fields and tables while preserving board rows and jobs', async () => {
+test('unit:store-init — a previous-generation database retires unused job and index fields and tables while preserving board rows and jobs', async () => {
   const store = new Store(url('retired'));
   try {
     await store.init();

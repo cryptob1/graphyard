@@ -41,7 +41,7 @@ const green = (loop: boolean) => ({
   setup: { protection: 'checks', loop },
 });
 
-test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator and operator-agent credentials an install directory kept from an old database, archives the old cursor beside itself and starts a fresh one; accepted credentials are left alone', async () => {
+test('unit:reinstall-fresh-database — up re-issues the coordinator and operator-agent credentials an install directory kept from an old database, archives the old cursor beside itself and starts a fresh one; accepted credentials are left alone', async () => {
   const { runUp, recordedCredentialAnswers } = await up();
   const { loadStoredMasterConfig, runAutonomyCommand, setupMaster } = await import('../src/master.js');
   const { daemonStatePath } = await import('../src/daemon/state.js');
