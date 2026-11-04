@@ -46,7 +46,7 @@ test('integration:trial-reuses-identical-tree — the merge writer reuses its ow
   await reads().trial(sha('c1'), [], work('GY-2', proofs), sha('f1'));
   const again = await reads().trial(sha('c2'), [], work('GY-2', proofs), sha('f1'));
   assert.equal(again.reused, undefined);
-  assert.deepEqual(ran.slice(3), [sha('c1'), sha('c2')], 'the failed tree was trialled again');
+  assert.deepEqual(ran.slice(5), [sha('c1'), sha('c2')], 'the failed tree was trialled again');
 });
 
 test('integration:trial-reuses-identical-tree — passes finishing at once are all recorded', async () => {
