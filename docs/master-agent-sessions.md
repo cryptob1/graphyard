@@ -69,7 +69,11 @@ claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-fi
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
+**Ready**: Herdr identifies the runtime with its screen or foreground process, without a prompt. An assigned agent name on an idle or working shell is insufficient. Registered absolute executable paths match their foreground executable; a `graphyard watch` supervisor alone never identifies the runtime. A different reported runtime is refused even if the requested runtime’s old banner remains. Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
+
+The launch defaults to the install process's `PATH` and `MISE_NO_CONFIG=1`; registry runtime settings override those defaults. The typed command reapplies that environment after shell startup, keeping shell activation from shadowing the installed runtime. A mise configuration trust dialog fails the launch immediately with the runtime PATH repair named; it is never granted trust or held as agent consent. Existing failed-launch cleanup closes the pane and releases its lease epoch and registry capacity. The normal acknowledgement window still requires request activity after start.
+
+When `/etc/resolv.conf` points into `/run`, the sandbox restores only its canonical public resolver file read-only after masking `/run`. Other host runtime files, control sockets and operator-home writes remain isolated. `e2e:runtime-launch-real-progress` reproduces failed and repaired `getent ahosts`, a wrapper trust dialog, and real installed-Codex worker/reviewer first requests, shell-tool results and completed responses through PTYs against a deterministic local provider, with Landlock intact and no provider credentials.
 
 #### First-run consent prompts
 

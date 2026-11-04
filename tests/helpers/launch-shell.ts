@@ -28,8 +28,9 @@ export function expandTypedCommand(command: string): TypedLaunch {
     else words.push(match[4]);
   }
   // A supervised worker: `node CLI watch KEY EPOCH -- KIND ARGS…`; otherwise the runtime leads.
-  const separator = words.indexOf('--');
-  let runtime = separator >= 0 ? words.slice(separator + 1) : words;
+  const launchWords = words[0] === '/usr/bin/env' ? words.slice(words.findIndex((word, at) => at > 0 && !word.includes('='))) : words;
+  const separator = launchWords.indexOf('--');
+  let runtime = separator >= 0 ? launchWords.slice(separator + 1) : launchWords;
   // The socket policy helper execs the runtime after bubblewrap establishes the mounts.
   if (runtime[0] === '/usr/bin/python3' && runtime[1] === '-I' && runtime[2] === '-S' && runtime[3] === '-c') {
     runtime = runtime.slice(runtime.indexOf('--') + 1);
@@ -67,8 +68,9 @@ let typedKind = 'claude';
 export function startedAtOnce(args: string[], status = 'idle'): string | null {
   const json = (result: unknown) => JSON.stringify({ result });
   if (args[0] === 'pane' && args[1] === 'run') { typedKind = expandTypedCommand(args[3]).kind; return ''; }
-  if (args[0] === 'pane' && args[1] === 'read') return `${typedKind} ready\n`;
+  if (args[0] === 'pane' && args[1] === 'read') return `${({ claude: 'Claude Code', codex: 'Codex', opencode: 'Ask anything…', cursor: 'Cursor', gemini: 'Gemini' } as Record<string, string>)[typedKind] ?? typedKind} ready\n`;
   if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: typedKind, agent_status: status, pane_id: args[2] } });
+  if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [typedKind === 'cursor' ? 'agent' : typedKind] }] } });
   if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: typedKind, agent_status: status, name: args[3] } });
   return null;
 }
