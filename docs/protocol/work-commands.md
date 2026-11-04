@@ -3,7 +3,7 @@
 
 All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; `409`: refusal, not retried.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `producerProofs`. Others: `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `producerProofs`. Review uses a recorded reviewer-session verdict; retired `codex` and `agent` policy providers are refused. The UI offers no provider selector. Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; stale revisions refused first.
 - `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
