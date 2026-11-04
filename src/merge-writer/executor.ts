@@ -190,6 +190,17 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 /** Whether a record write failed because the server already holds its key with other input: replaying it can never succeed. */
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
+/** A failed write's HTTP status: the error's own, or the `Graphyard refused PATH (NNN)` its message names; null for a transport failure or a kill. */
+export const mergeRecordStatus = (error: unknown) => {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === 'number') return status;
+  // GY-3039: the loop's mutation path throws a bare Error carrying only `confirmedRefusal` for a 4xx
+  // the control plane judged (cli/master/session.ts), so the numeric status never arrives here. A
+  // merge-record refusal is a 409 — the server's answer, adopted at once, never replayed.
+  if ((error as { confirmedRefusal?: unknown } | null)?.confirmedRefusal === true) return 409;
+  return Number(/\brefused \S+ \((\d{3})\)/.exec(error instanceof Error ? error.message : String(error))?.[1]) || null;
+};
+
 /** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
 export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Partial<Pick<TrialRun, 'logTail'>> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
@@ -814,7 +825,11 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   return { outcome: 'requeued', reason, pushes };
 }
 
-export type ReconcileOutcome = { key: string; mergeSha: string; outcome: 'reconciled' | 'requeued' };
+/** Only the orphan-intent refusal can be reconsidered after a concurrent trial actually pushed. */
+export const orphanRefusal = (state: MergeLedgerState, base: string) => !!state.mergeSha && state.refusal?.kind === 'merge'
+  && state.refusal.reason === unpushedIntentReason(state.mergeSha, base);
+
+export type ReconcileOutcome = { key: string; mergeSha: string } & ({ outcome: 'reconciled' | 'requeued' } | { outcome: 'held'; reason: string });
 /**
  * Before any new merge (AC-5): every intent with no `pushed` record, and every push no
  * reconciliation followed, is settled against the base branch as fetched now. An intent on a
@@ -823,9 +838,11 @@ export type ReconcileOutcome = { key: string; mergeSha: string; outcome: 'reconc
  * it is recorded pushed (when it was not) and
  * reconciled, delivering the item without a second push. One the base does not hold was never
  * pushed: it is refused `unpushedIntentReason`, which leaves the head queued for a fresh merge.
+ * An orphan refusal later observed on main follows the same protocol; the record route checks
+ * the original passing trial and bindings before accepting its push or reconciliation.
  */
 export async function reconcileIntents(ports: MergePorts, work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>): Promise<ReconcileOutcome[]> {
-  const pending = Object.values(ledger).filter(state => open(state) && state.mergeSha && state.head);
+  const pending = Object.values(ledger).filter(state => (open(state) || (state.state === 'refused' && orphanRefusal(state, ports.baseBranch))) && state.mergeSha && state.head);
   if (!pending.length) return [];
   const observedTip = await ports.fetch();
   const outcomes: ReconcileOutcome[] = [];
@@ -839,16 +856,25 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
     // GY-3039: the item has a new head while this intent is still open. The old merge settles as
     // refused whatever the base holds — reconciling it would deliver the newer head — so the queue
     // unblocks and the current head is trialled fresh.
+    if (state.state === 'refused' && current !== head) continue;
     if (current !== head) {
       await ports.record(item, { kind: 'refused', head, reason: supersededIntentReason(state.key, head, current) });
       outcomes.push({ key: state.key, mergeSha, outcome: 'requeued' });
       continue;
     }
     if (await ports.holds(mergeSha)) {
-      if (state.state === 'intent') await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: new Date(ports.now()).toISOString() });
-      await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
+      try {
+        if (state.state !== 'pushed') await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: new Date(ports.now()).toISOString() });
+        await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
+      } catch (error) {
+        // A confirmed recovery refusal holds only this head; never remerge its source against itself.
+        // Unknown replies still escape so the writer retains and replays the original write.
+        if (state.state !== 'refused' || mergeRecordStatus(error) !== 409) throw error;
+        outcomes.push({ key: state.key, mergeSha, outcome: 'held', reason: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
       outcomes.push({ key: state.key, mergeSha, outcome: 'reconciled' });
-    } else {
+    } else if (state.state !== 'refused') {
       await ports.record(item, { kind: 'refused', head: state.head!, reason: unpushedIntentReason(mergeSha, ports.baseBranch) });
       outcomes.push({ key: state.key, mergeSha, outcome: 'requeued' });
     }

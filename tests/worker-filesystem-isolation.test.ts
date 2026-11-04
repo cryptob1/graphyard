@@ -72,6 +72,64 @@ for (const directory of [home, unrelated, root]) {
 console.log('host writes denied');
 `;
 
+test('integration:worker-reparenting — cache publication, hardlinks and local Git receive-pack migration work inside the composed ordinary worker boundary', async () => {
+  const f = await fixture();
+  const worker = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'workspace-write'],
+    coordinatorRoot: f.root, sessionDirectory: f.worktree, credentialMask: f.mask,
+    secretsBus: null, writable: [f.slots] });
+  assert.ok(worker);
+  const operations = `
+    const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+    const { spawnSync, execFileSync } = require('node:child_process');
+    const [mode, worktree, ...storage] = process.argv.slice(1);
+    const denied = mode === 'previous';
+    for (const [index, directory] of [worktree, ...storage].entries()) {
+      const base = path.join(directory, 'reparent-' + mode + '-' + index);
+      const source = path.join(base, 'temporary'), archive = path.join(base, 'archive');
+      fs.mkdirSync(source, { recursive: true }); fs.mkdirSync(archive);
+      fs.writeFileSync(path.join(source, 'file'), 'cache');
+      fs.mkdirSync(path.join(source, 'package'));
+      fs.writeFileSync(path.join(source, 'package', 'metadata'), 'published');
+      const moves = [
+        () => fs.linkSync(path.join(source, 'file'), path.join(archive, 'linked')),
+        () => fs.renameSync(path.join(source, 'file'), path.join(archive, 'file')),
+        () => fs.renameSync(path.join(source, 'package'), path.join(archive, 'package')),
+      ];
+      for (const move of moves) {
+        if (denied) assert.throws(move, { code: 'EXDEV' }); else move();
+      }
+      if (!denied) {
+        assert.equal(fs.readFileSync(path.join(archive, 'package', 'metadata'), 'utf8'), 'published');
+        assert.equal(fs.statSync(path.join(archive, 'file')).ino, fs.statSync(path.join(archive, 'linked')).ino);
+      }
+    }
+    const source = path.join(worktree, 'push-' + mode), target = source + '.git';
+    const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', '-b', 'main', source); git('init', '-q', '--bare', target);
+    fs.writeFileSync(path.join(source, 'payload'), 'new objects');
+    git('-C', source, 'add', 'payload');
+    git('-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'payload');
+    const pushed = spawnSync('git', ['-C', source, 'push', target, 'HEAD:refs/heads/main'], { encoding: 'utf8' });
+    if (denied) {
+      assert.notEqual(pushed.status, 0);
+      assert.match(pushed.stderr, /Invalid cross-device link/);
+      assert.match(pushed.stderr, /unable to migrate objects/);
+    } else {
+      assert.equal(pushed.status, 0, pushed.stderr);
+      assert.equal(git('--git-dir', target, 'show', 'main:payload').trim(), 'new objects');
+    }
+  `;
+  // Exercise the actual policy first: reverting the source must fail on EXDEV,
+  // before any assertion about how the legacy policy is reconstructed.
+  run(worker.wrapper, f.worktree, process.execPath, ['-e', operations, 'fixed', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
+  run(worker.wrapper, f.worktree, process.execPath, ['-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
+  // Recreate the previous socket domain in the very same mount composition.
+  // Omitting REFER (including from each grant) implicitly denies reparenting.
+  const previous = worker.wrapper.map(word => word.replace('refer = 1 << 13', 'refer = 0'));
+  assert.notDeepEqual(previous, worker.wrapper);
+  run(previous, f.worktree, process.execPath, ['-e', operations, 'previous', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
+});
+
 test('integration:worker-host-filesystem-isolation — all runtimes, terminal roles, headless roles, master and merge trials deny host creation, overwrite, rename and deletion', async () => {
   const f = await fixture();
   for (const role of ['worker', 'reviewer', 'producer', 'approver', 'spec-checker']) {
