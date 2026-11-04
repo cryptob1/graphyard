@@ -7,7 +7,23 @@ export const workItems = defineTable({
   name: 'work_items', orderBy: 'number', serial: 'number',
   ddl: `CREATE TABLE IF NOT EXISTS work_items (
   id uuid PRIMARY KEY, number bigserial UNIQUE, document jsonb NOT NULL
-);`,
+);
+-- GY-3013: retire compatibility fields once at startup, rather than on every read and write.
+UPDATE work_items SET document = (document - ARRAY[
+  'queue', 'queueSequence', 'queueEjection', 'queueHistory',
+  'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
+  'escalation', 'escalations', 'containmentQuarantine', 'parent', 'children', 'split', 'decomposition',
+  'research', 'researchBrief', 'triage', 'pendingFollowUps', 'blockerProbe', 'documentation',
+  'lane', 'speedTarget', 'mechanicalPlan', 'mechanicalAnswered'
+]) || CASE WHEN document->>'blocker' LIKE 'Scope request refused%'
+  THEN '{"blocker":null}'::jsonb ELSE '{}'::jsonb END
+WHERE document ?| ARRAY[
+  'queue', 'queueSequence', 'queueEjection', 'queueHistory',
+  'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
+  'escalation', 'escalations', 'containmentQuarantine', 'parent', 'children', 'split', 'decomposition',
+  'research', 'researchBrief', 'triage', 'pendingFollowUps', 'blockerProbe', 'documentation',
+  'lane', 'speedTarget', 'mechanicalPlan', 'mechanicalAnswered'
+] OR document->>'blocker' LIKE 'Scope request refused%';`,
 });
 export const events = defineTable({
   name: 'events', orderBy: 'seq', serial: 'seq',

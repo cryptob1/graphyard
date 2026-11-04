@@ -9,7 +9,7 @@ import { boundDetail } from './text.js';
 import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState } from './state.js';
 
 /**
- * The cursor schema as GY-1960 reads and writes it: declared fields strict, unknown fields kept.
+ * The cursor validates declared fields and preserves unknown fields from newer or retired versions.
  * Built on first use, never at module scope: state.ts and this module import each other, so the
  * schema it wraps does not exist while this file's body runs.
  */
@@ -41,16 +41,8 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  // GY-1960: the cursor is forward-tolerant. A cursor a newer loop wrote carries fields this
-  // version does not declare; they parse, ride every write, and are written back unchanged, so a
-  // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
-  // Declared fields are still validated: a malformed one refuses the read as before.
-  // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
-  // GY-2186, GY-2873: records of retired machinery an older loop kept are dropped, not carried, so
-  // they do not ride forward for ever.
-  // GY-3002: the per-merge advisory trial's owed/ran ledger an older cursor kept under the strict
-  // mergeWriter object is dropped with them.
-  const { shadow: _shadow, diagnoses: _diagnoses, faults: _faults, doctor: _doctor, dispatchFailures: _dispatchFailures, stepStalls: _stepStalls, ...stored } = JSON.parse(raw);
+  // Preserve unknown cursor fields across reads and writes, including keys retired from the schema.
+  const stored = JSON.parse(raw);
   for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
   delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
   const state = toleratedStateSchema().parse(stored);
@@ -77,13 +69,6 @@ export function pruneDaemonState(state: DaemonState) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
-  // Retired fields a cursor written before GY-2874 still carries are dropped on its next write.
-  delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
-  // And those GY-2876 retired: the reclaim, memory, latency and cycle-duration readings.
-  delete state.reclaim; delete state.memory; delete state.clocks; delete state.latency;
-  for (const metric of state.metrics) for (const field of ['durationMs', 'childWaitMs', 'workMs', 'planeWaitMs', 'actionable', 'timings', 'stages', 'lead', 'production', 'postDeploy', 'postDeployFailures', 'idleMs', 'scope', 'scopeOpenMs'] as const) delete metric[field];
-  // And those GY-2877 retired: the deployment and release readings, the self-upgrade, base failures and invariants.
-  delete state.deployment; delete state.promotion; delete state.upgrade; delete state.baseFailures; delete state.invariants;
   return state;
 }
 
