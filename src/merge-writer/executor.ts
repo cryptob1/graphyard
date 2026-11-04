@@ -57,7 +57,7 @@ export function mergeCandidateHold(current: Work | undefined, selected: Work = c
 export type ProofCounts = Record<string, { executed: number; failed: number }>;
 /** The trial's verdict with the files it ran and the counts of every proof the item's criteria name. */
 export interface MergeTrialRun extends TrialRun {
-  files: string[]; proofs: ProofCounts; /** The earlier passing trial of the same tree and proofs this verdict reuses instead of running again. */ reused?: { mergeSha: string; key: string }; /** The trial checkout left behind when its removal failed (trial.ts TrialCleanupError); the verdict stands. */ leftover?: string;
+  files: string[]; proofs: ProofCounts; /** The trial checkout left behind when its removal failed (trial.ts TrialCleanupError); the verdict stands. */ leftover?: string;
   /**
    * GY-1834: the failing test files that passed on their immediate rerun of the same merge commit,
    * and the failing test names the first run reported that the rerun did not, none of them one of
