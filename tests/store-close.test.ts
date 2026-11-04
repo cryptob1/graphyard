@@ -1,7 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';

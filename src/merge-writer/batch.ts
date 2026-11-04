@@ -79,6 +79,12 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
     }
     // Retain the real batch counts before individual trials identify the head needing rework.
     if (proofFailure) return [...results, ...await alone(ports, works)];
+    let obsolete = false;
+    for (const { work, head } of batch) {
+      const held = ports.hold ? await ports.hold(work) : null;
+      if (held) { await ports.record(work, { kind: 'refused', head, reason: held }); obsolete = true; }
+    }
+    if (obsolete) return [...results, ...await alone(ports, works)];
     if (await ports.push(tip, baseTip) !== 'pushed') return [...results, ...await alone(ports, works)];
     for (const { work, mergeSha } of batch) await ports.record(work, { kind: 'pushed', mergeSha, pushedAt: at() });
     const observedTip = await ports.fetch();

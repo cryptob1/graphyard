@@ -8,7 +8,6 @@ import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type
 import { configHome, installDirectory, readInstallRecord, readToken } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
 import { parkCommand, parkInput } from './park-command.js';
 export { parkArgs, parkCommand } from './park-command.js';

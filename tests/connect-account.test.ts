@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { createElement } from 'react';
@@ -11,7 +11,8 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { connectDefaultRoles, connectProviders, parseLoginOutput, redactKey } from '../src/fleet.js';
-import { checkAgentEnvironment, hostKeyPair, processConnectAccounts, unsealToHost, writeProviderAuthFile } from '../src/master/environments.js';
+import { checkAgentEnvironment } from '../src/master/environments.js';
+import { hostKeyPair, processConnectAccounts, unsealToHost, writeProviderAuthFile } from '../src/master/connect-accounts.js';
 import { type FleetView } from '../src/model/registry.js';
 import type { Principal } from '../src/model.js';
 import { sealForHost } from '../web/seal.js';

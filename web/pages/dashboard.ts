@@ -29,7 +29,6 @@ export interface Dashboard {
   /** Which optional features have anything configured; see web/features.ts. */
   features: Features;
   editingRequirements: boolean; setEditingRequirements(value: boolean | ((value: boolean) => boolean)): void;
-  codexAvailable: boolean;
   /** Bumped on sign-out so a stale response never lands in a newer session. */
   sessionEpoch: RefObject<number>;
   api(path: string, data?: unknown): Promise<any>;

@@ -22,3 +22,5 @@ export { dispatchReservationMs, dispatchReservationDirectory, DispatchReservedEr
 // GitHub merges (docs/delivery.md): the guarded merge is gone; the merge writer's record delivers.
 export { setupAutonomy, agentToken, intentInput, attestationExercise, restartMasterLoop, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
 export { promoteCommand, promotionReason, promotionAuditFile, promotionPreconditions, PromotionRefusedError, promoteToAutonomy, assertPromotionRoute, ghLogin, type PromotionStep, type PromotionDependencies } from './master/promotion.js';
+
+export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './master/connect-accounts.js';

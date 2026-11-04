@@ -78,11 +78,7 @@ test('unit:queue-authored-tip-carry — a carried binding applies only to the ex
   assert.equal(evidenceBindsCandidate(work, evidenceRecord('unit:queue', { sha: TIP, baseSha: P })), true, 'an exact binding always applies');
   assert.equal(currentCarry({ ...work, policyRevision: 2 }), null, 'a policy revision invalidates the carry');
   assert.equal(currentCarry({ ...work, candidate: { ...work.candidate!, sha: sha40('e9') } }), null, 'another head is not the tip');
-  assert.equal(carriedApproval({ ...work, policy: { ...work.policy, reviewProvider: 'codex' } }), null, 'a GitHub approval is not a Codex verdict');
-  const agent = { ...work, policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 }] },
-    baseRefresh: refreshed({ ...carry, approval: { ...carry.approval, provider: 'agent', reviewerApp: 'claude-app' } as typeof carry.approval }) } as unknown as Work;
-  assert.equal(carriedApproval(agent)?.reviewerApp, 'claude-app');
-  assert.equal(carriedApproval({ ...agent, policy: { ...agent.policy, reviewerProfiles: [{ name: 'cursor', runtime: 'cursor', reviewerApp: 'cursor-app', timeoutSeconds: 1800 }] } } as Work), null, 'an agent approval carries only for the profile still dispatched');
+
 });
 
 test('unit:queue-real-base-tip — the review launcher refuses a candidate behind the real base tip that does not merge cleanly, and diagnose reports it', () => {

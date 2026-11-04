@@ -23,7 +23,7 @@ const SERVER = 'http://127.0.0.1:4310';
 const OPERATOR = 'octo-operator';
 const GH_TOKEN = `gho_${'g'.repeat(36)}`;
 
-const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ version: 1, url: SERVER, credentialFile: '/outside/master.token', cliPath: launcher, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-shop', mergeMethod: 'merge', workers: [], reviewers: [], producers: [],
+const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ version: 1, url: SERVER, credentialFile: '/outside/master.token', cliPath: launcher, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-shop', workers: [], reviewers: [], producers: [],
   run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } as MasterConfig['run'], ...extra });
 const identities = {
   reviewer: { slug: 'graphyard-reviewer', appId: 9, installationId: 10, credentialFile: '/outside/reviewer.json', boundAt: '2026-10-08T00:00:00.000Z' },

@@ -9,19 +9,15 @@ import { docsWords } from '../src/model/documentation.js';
 import {
   emptyProjectMemory,
   projectMemoryDigest,
-  projectMemoryWordBudget,
   recordChangeInMemory,
   recordNoteInMemory,
   retainedMemoryChanges,
   retainedMemoryNotes,
   updateProjectMemoryFromWork,
-  type MemoryNote,
-  type ProjectMemory,
 } from '../src/model/project-memory.js';
 import {
   projectMemoryPath,
   readProjectMemory,
-  syncProjectMemory,
   writeProjectMemory,
 } from '../src/project-memory.js';
 import type { Work } from '../src/model/work.js';

@@ -7,7 +7,6 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
-import { guideText } from '../src/guide.js';
 import { agentsRenderers } from '../src/cli/workspace-generated.js';
 import { regenerateManagedBlocks } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -20,7 +19,6 @@ const exec = promisify(execFile);
 const url = 'https://graphyard.example';
 const legacyBlock = '<!-- graphyard-master -->\n## Graphyard master agent\n\nRules an earlier master init wrote.\n<!-- /graphyard-master -->';
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 // Imported per test, so a tree without the GY-1493 exports fails each case rather than the file.
 const master = async () => await import('../src/master.js') as unknown as { masterInstructions: string; withoutMasterInstructions: (existing: string) => string };
 

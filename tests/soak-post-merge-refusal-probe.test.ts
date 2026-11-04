@@ -156,7 +156,7 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   cause = false;
   await tick(hour);
   const ledger = await readReviewLedger(root);
-  for (const [index, key] of keys.entries()) {
+  for (const key of keys) {
     const attempts = attemptsOf(key);
     assert.equal(attempts.length, stranded[key] + 1, `${key} launched exactly once on the first probe past the cause`);
     assert.equal(cursor.failures[requestIdOf(key)], undefined, `${key}'s refusal record is cleared by its launch`);

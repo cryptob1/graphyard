@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
-import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
+import { type DeliveryMode } from '../model/delivery-policy.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installIdFor, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
@@ -121,7 +121,6 @@ export const installCommands = defineCommands([
         // flag the session builds from the checkout this command's own code was loaded from.
         ...(values['source-root'] ? { sourceRoot: resolve(values['source-root']) } : {}),
       }, values.apply ? 'apply' : 'plan');
-      if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
       return context.print(await applyInstall(session, plan));
@@ -131,7 +130,7 @@ export const installCommands = defineCommands([
     name: 'init',
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
-      '       [--delivery local|release-candidate|per-pr] [--candidate-cron CRON|off]',
+      '       [--delivery local] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
       '                                after graphyard install, --apply reuses the install\'s identities and writes no principals file',
@@ -141,7 +140,7 @@ export const installCommands = defineCommands([
       const root = context.repositoryRoot();
       const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
         delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
-      if (values.delivery !== undefined && !(deliveryModes as readonly string[]).includes(values.delivery)) throw new Error(`Use --delivery ${deliveryModes.join(' or ')}`);
+      if (values.delivery !== undefined && values.delivery !== 'local') throw new Error('Use --delivery local');
       if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
       const cron = values['candidate-cron'];
       const choices = { ...(values.delivery ? { mode: values.delivery as DeliveryMode } : {}), ...(cron !== undefined ? { candidateSchedule: cron === 'off' ? null : cron } : {}) };
@@ -176,7 +175,7 @@ export const installCommands = defineCommands([
           applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
           drift: setupDrift(applied, fresh),
           appliedNothingElse: true,
-          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or opt out with --delivery per-pr), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or edit the proposed checks), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
       }
       let workerToken = await context.individualToken();
       if (values['token-stdin']) {

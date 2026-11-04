@@ -10,8 +10,6 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
-import { generateKeyPairSync } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { bwrapOnPath, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { dataDirectory, worktreeRoot } from '../src/install/worktree-root.js';
@@ -22,7 +20,6 @@ import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('a1'), B = sha40('b1');
 const at = '2026-09-24T10:00:00.000Z';

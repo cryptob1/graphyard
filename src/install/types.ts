@@ -72,8 +72,6 @@ export interface InstallInputs {
   workers?: number;
   producerProofs?: string[];
   reviewPolicy?: 'github' | 'agent';
-  requiredChecks?: string[];
-  reviewCount?: number;
   image?: string;
   /** Host port published by a local Compose install; the container always listens on 4310. */
   port?: number;

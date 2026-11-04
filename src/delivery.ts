@@ -581,9 +581,8 @@ export class Delivery {
       const duplicate = (await db.query('SELECT document FROM delivery_observations WHERE registration_id=$1 AND snapshot_id=$2', [registration.id, data.snapshotId])).rows[0]?.document as DeploymentObservation | undefined;
       if (duplicate) return { id: duplicate.id, authoritative: duplicate.authoritative, rejection: duplicate.rejection, duplicate: true, receivedAt: duplicate.receivedAt };
       const rejection: string[] = [];
-      let environment: Environment | null = null;
       try { await this.validation.registration(db, data.registration, 'observer'); } catch (error) { rejection.push(`Observer registration authority is revoked or superseded: ${(error as Error).message}`); }
-      try { environment = await this.environment(db, data.environment); } catch (error) { rejection.push(`Environment revision is not current: ${(error as Error).message}`); }
+      try { await this.environment(db, data.environment); } catch (error) { rejection.push(`Environment revision is not current: ${(error as Error).message}`); }
       demand(data.environment.id === registration.environment.id, 'Observer is registered for a different environment', 403);
       const outside = data.services.map(s => s.service).filter(service => !registration.services?.includes(service));
       if (outside.length) rejection.push(`Services outside this observer's scope: ${outside.join(', ')}`);

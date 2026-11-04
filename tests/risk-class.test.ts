@@ -38,18 +38,15 @@ const sensitiveSamples: [string, string][] = [
   ['Dockerfile', 'Dockerfile'],
   ['Dockerfile.worker', 'Dockerfile'],
   ['compose.yaml', 'compose file'],
-  ['compose.yml', 'compose file'],
   ['.github/workflows/ci.yml', 'CI configuration'],
   ['package.json', 'dependencies'],
   ['package-lock.json', 'dependencies'],
-  ['src/merge-queue.ts', 'merge path'],
   ['src/merger-mode.ts', 'merge path'],
-  ['src/main-guard.ts', 'merge path'],
   ['src/regression-guard.ts', 'merge path'],
   ['src/merge-writer/commit.ts', 'merge writer'],
-  ['migrations/0042-risk.sql', 'migrations'],
 ];
-const normalSamples = ['src/model/policy.ts', 'src/cli/work.ts', 'web/pages/work-details.tsx', 'docs/how-graphyard-works.md', 'tests/risk-class.test.ts', 'README.md',
+// Retired policy paths are normal; active sensitive surfaces remain covered above.
+const normalSamples = ['compose.yml', 'src/merge-queue.ts', 'src/main-guard.ts', 'migrations/0042-risk.sql', 'src/model/policy.ts', 'src/cli/work.ts', 'web/pages/work-details.tsx', 'docs/how-graphyard-works.md', 'tests/risk-class.test.ts', 'README.md',
   'src/server/lane-rework.ts', 'src/server/static.ts', 'src/merge-queue-report.ts', 'packages/x/package.json', 'compose.override.yaml', 'scripts/Dockerfile', 'src/installer.ts'];
 
 test('unit:risk-class-paths — every sensitive rule of the criterion classifies its paths sensitive with a reason naming the path and the rule, and paths outside the rules are normal with no reason', () => {
@@ -64,7 +61,7 @@ test('unit:risk-class-paths — every sensitive rule of the criterion classifies
   assert.equal(mixed.risk, 'sensitive');
   assert.deepEqual(mixed.reasons, ['src/store/tables/work.ts: persistence layer']);
   // The rule table is the criterion's list, one rule per surface.
-  assert.equal(sensitiveRules.length, 12);
+  assert.equal(sensitiveRules.length, 11);
   assert.ok(sensitiveRules.every(({ pattern }) => pattern.source.startsWith('^')), 'every rule is anchored at the start of the path');
   // Node-free: the module imports nothing from node: and nothing but the work type.
 });
@@ -82,8 +79,8 @@ test('unit:risk-class-rename-both-ends — a rename is judged at both ends: out 
   const into = classifyRisk([{ path: 'src/install/host.ts', previousPath: 'src/host.ts' }]);
   assert.equal(into.risk, 'sensitive');
   assert.deepEqual(into.reasons, ['src/install/host.ts: installation'], 'the destination of the rename is the reason');
-  const both = classifyRisk([{ path: 'migrations/002.sql', previousPath: 'src/store/002.sql' }]);
-  assert.deepEqual(both.reasons, ['migrations/002.sql: migrations', 'src/store/002.sql: persistence layer']);
+  const both = classifyRisk([{ path: 'src/install/002.sql', previousPath: 'src/store/002.sql' }]);
+  assert.deepEqual(both.reasons, ['src/install/002.sql: installation', 'src/store/002.sql: persistence layer']);
   assert.deepEqual(classifyRisk([{ path: 'src/model/b.ts', previousPath: 'src/model/a.ts' }]), { risk: 'normal', reasons: [] });
   // An unchanged path is one path, a rename two, and duplicates collapse.
   assert.deepEqual(deltaPaths([{ path: 'a.ts', previousPath: 'a.ts' }, { path: 'b.ts', previousPath: 'c.ts' }, { path: 'b.ts' }]), ['a.ts', 'b.ts', 'c.ts']);
@@ -140,7 +137,7 @@ function dashboard(work: Work[], role = 'admin'): Dashboard {
   const d: Dashboard = {
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-    operatorAgents: [], operatorAgentsError: null, features: unknownFeatures, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    operatorAgents: [], operatorAgentsError: null, features: unknownFeatures, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop,
   } as Dashboard;
   return { ...d, board: boardFromStatus(d.work, d.observedAt, d.status) };

@@ -79,7 +79,7 @@ const statusOf = (root: string, repository: string) => masterStatusReport(root, 
 } as unknown as MasterConfig, async () => ({ work: [], now: new Date().toISOString() }));
 
 test('unit:served-app-runs-required-cases — a served commit is live-verified: its own required cases run against the served URL, the pass records the verdict for that exact commit, and master status reports the same', async () => {
-  const port = await freePort(), url = `http://127.0.0.1:${port}`;
+  const port = await freePort();
   const { root, pusher, push } = await managedRepository('served-required-cases', port);
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });

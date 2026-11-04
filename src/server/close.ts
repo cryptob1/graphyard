@@ -9,7 +9,7 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { authenticated } from './receipts.js';
 import type { Services } from './routes.js';
-import { lockedWork, workIdByRef } from '../store/locked-read.js';
+import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 type Db = pg.PoolClient;
@@ -52,7 +52,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const settled = settleOpenRequests(work!, closure, now);
     // A lease, lapsed or live, ends here, as released.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
-    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, blocker: null });
+    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), blocker: null });
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
     Object.assign(work!, { mergeAuthorization: null });
@@ -64,8 +64,6 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     });
   });
 }
-
-const readDocument = async (services: Services, ref: string): Promise<Work | undefined> => (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [ref])).rows[0]?.document;
 
 /** Cancel the item's open dispatch requests, withdraw its human-only request and resolve its agent requests. */
 export function settleOpenRequests(work: Work, closure: Closure, now: Date) {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -150,7 +150,7 @@ test('restarting the loop resumes the cursor without dispatching twice', async (
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)] });
     const ready = work();
-    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } as any });
+    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true } });
     const calls: string[] = [];
     let snapshotWork: Work[] = [ready, review];
     const shared = effects({

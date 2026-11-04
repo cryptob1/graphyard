@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient } from '../src/fleet.js';
 import { loadMasterConfig, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews } from '../src/reviewer.js';

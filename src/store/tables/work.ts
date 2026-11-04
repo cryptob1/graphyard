@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
   WHERE kind='delivery.deployment-contained' AND work_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
+CREATE INDEX IF NOT EXISTS events_work_revision ON events (work_id,(payload->'work'->>'revision'),seq)
+  WHERE payload ? 'work';
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
@@ -71,19 +73,15 @@ export const jobs = defineTable({
 );
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_until timestamptz;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_reason text;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refusals int NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;
 -- Consecutive finishes that saved no observation (GY-506): the starvation count an attention
 -- item is raised at, reset by the next observation that is saved.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS unobserved int NOT NULL DEFAULT 0;
 -- Why an observation job was deferred rather than spent, recorded beside the deferral itself (GY-506).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_reason text;
 -- GY-806: when a prioritized wake made the job due (claimed ahead of polled jobs until its claim);
--- refreshed_until is unread since GY-2010. Kept on the job so every replica sharing the database sees them.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS webhook_at timestamptz;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refreshed_until timestamptz;`,
+ALTER TABLE jobs DROP COLUMN IF EXISTS refreshed_until, DROP COLUMN IF EXISTS held_on,
+  DROP COLUMN IF EXISTS refusals, DROP COLUMN IF EXISTS held_until, DROP COLUMN IF EXISTS held_reason;`,
 });
 
 export const workTables = [workItems, events, receipts, jobs];

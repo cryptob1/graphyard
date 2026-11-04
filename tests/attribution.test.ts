@@ -1,7 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -9,16 +8,15 @@ import { Engine } from '../src/engine.js';
 import { Validation, type ValidationCandidate, type ValidationRequest } from '../src/validation.js';
 import { Delivery, type Release } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
-import { currentEvidence, type Observation, type Principal, type Work } from '../src/model.js';
+import { currentEvidence, type Observation, type Principal } from '../src/model.js';
 import { server } from '../src/server.js';
-import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
+import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
-
 
 /**
  * GY-39: candidate/deployment attribution integrity, safe re-anchoring and analytics. One
@@ -139,7 +137,7 @@ async function delivered(mergeSha: string) {
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
   w = await engine.observe(w.id, w.revision, observation());
   w = await engine.execute(collector, 'evidence', w.id, { proof: 'integration:claim-safety', sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
-  const committed = { revision: (await engine.store.workItem(w.id))!.revision };
+  await engine.store.workItem(w.id);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   // GY-2010: the merge writer's ledger delivers it, as production does; no GitHub merge is observed.
   w = await deliverThroughLedger(engine, w.id, mergeSha, mergedAt);

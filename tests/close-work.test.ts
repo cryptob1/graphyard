@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';

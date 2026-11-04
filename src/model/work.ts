@@ -4,7 +4,6 @@ import type { LandingCheck, RevertedDelivery } from './landing-check.js';
 import type { MergeRefusal } from './merge-authorization.js';
 import { criteriaSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { EvaluationAttempt, Evidence } from './evidence.js';
-import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
 import type { BlockingRulingAction } from './delegation.js';
 import type { AutoDispatch } from './dispatch.js';
@@ -129,7 +128,6 @@ export interface Observation {
   clockOffset?: { min: number; max: number };
   /** The ids of the reviews recorded on this head (server/review-verdict.ts appends each verdict's), and those withdrawn. */
   reviewIds?: number[]; dismissedReviewIds?: number[];
-  agentReview?: AgentReview;
   /** Pull-request-era fields (GY-2010): a document observed before the control plane became the merge writer still loads; the control plane writes neither. */
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   /** Pull-request-era check runs; the control plane records none (`checks: []`) and no gate reads them. */
@@ -196,8 +194,6 @@ export interface Work extends Create {
   /** The last rework applied: its reason, the binding the loop sent it back on, and when (GY-1569's brief). */
   lastRework?: { reason: string; binding: string | null; at: string } | null;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
-  reviewRequest?: ReviewRequest | null;
-  reviewFailovers?: ReviewFailover[];
   /** Recorded before GY-1235 and only cleared since: GitHub merges on every passing gate, with no separate authorization. */
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */

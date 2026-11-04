@@ -4,16 +4,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, worktreeRootAttention, writeFailure, masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { daemonSummary } from '../src/daemon/run.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
@@ -36,7 +33,6 @@ const H = 'a'.repeat(40), B = 'b'.repeat(40);
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const memory: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: 200e9 });
 const free = (bytes: number): FilesystemProbe => async path => ({ probed: path, volatile: null, freeBytes: bytes });
-const future = (ms: number) => new Date(Date.now() + ms).toISOString();
 
 function herdr(calls: string[][] = []) {
   let pane = 0;

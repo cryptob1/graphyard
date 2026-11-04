@@ -7,13 +7,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { assertDispatchable, awaitRuntimeStart, consentHold, dispatchWork, loadMasterConfig, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { assertDispatchable, awaitRuntimeStart, consentHold, dispatchWork, loadMasterConfig, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, type WorkerProfile } from '../src/master.js';
 import { consentAnswers, consentHoldMs, detectConsentPrompt, readConsentHolds, writeConsentHold } from '../src/consent-prompt.js';
 import { assignmentSurrender, consentHoldProbe, supervise } from '../src/supervisor.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
-import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-23 `at`/clock stamps fixture items' createdAt/updatedAt; Date.now()/new Date() build live lease expiries only.
 
@@ -25,7 +24,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // integration:unconsented-session-releases-its-slot, manual:consent-prompt-docs-review.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('a1'), B = sha40('b1');
 const at = '2026-09-23T05:00:00.000Z';
