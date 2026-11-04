@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConnection, hostIdSchema } from '../repository-setup.js';
-import { readCredentialFile } from '../master.js';
+import { readCredentialFile } from '../private-file.js';
 import { cliRelease } from '../release.js';
 import { cliCommit } from '../protocol-version.js';
 

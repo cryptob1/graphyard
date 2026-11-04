@@ -2,7 +2,8 @@
 import { sessionName } from '../../session-name.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { assertMasterBinding, loadMasterConfig, mergeProtocolSkew, readCredentialFile } from '../../master.js';
+import { assertMasterBinding, loadMasterConfig, mergeProtocolSkew } from '../../master.js';
+import { readCredentialFile } from '../../private-file.js';
 import { cliCommit } from '../../protocol-version.js';
 import { executorHostHeader } from '../../model/registry.js';
 import type { CliContext } from '../context.js';

@@ -86,32 +86,20 @@ async function candidate(overrides: Partial<Observation> = {}) {
 
 // ---- AC-1: no open item holds a failing gate with nothing named -------------------------------
 
-test('integration:no-failing-gate-without-action — an item whose review gate refuses while no review request stands is named an action or an explicit wait, under every provider, and never left silent', async () => {
+test('integration:no-failing-gate-without-action — an item whose review gate refuses while no review request stands is named an action or an explicit wait, and never left silent', async () => {
   const now = new Date();
-  // The GY-103 state, four ways. In each one the review gate refuses and `reviewNeed` answers
-  // that no launched reviewer can be asked for this head, so `reconcileAutoDispatch` opens no
-  // request. Before this, three of the four produced the refusal "a review is required" and an
-  // action nothing could ever settle; the fourth produced no action at all.
+  // A head needing rework or a sync cannot be answered by another review.
   const item = await candidate({ reviews: [] });
-  const profiles = [{ name: 'reviewer-a', runtime: 'claude', reviewerApp: 'app-a', timeoutSeconds: 1800 }];
   const graded = (probe: Work, all: Work[] = []): Work => {
     const result = evaluate(probe, [...all, probe], now);
     return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations };
   };
-  // The head's mechanical proofs have passed: review follows them (GY-115), so the provider states
-  // below are the ones a proven head reaches.
-  const provenHead = [{ id: randomUUID(), proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, producer: 'ci-runner', trusted: true, result: 'pass' as const, executed: 3, skipped: 0, at: now.toISOString() }];
   const states: { name: string; work: Work; kind: string }[] = [
     { name: 'a reviewer requested changes on exactly this head', kind: 'request-rework',
       work: graded({ ...item, observation: { ...item.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work) },
     // GY-191: behind alone is reviewed as it stands; only a head that conflicts with the base is withheld.
     { name: 'the head does not contain the base tip and conflicts with it, so it needs a sync', kind: 'resync',
       work: graded({ ...item, observation: { ...item.observation!, baseTipContained: false, mergeable: false, conflicting: true } } as Work) },
-    { name: 'the control plane dispatches this provider through its own observation job', kind: 'resync',
-      work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'codex' } } as Work) },
-    { name: 'every configured reviewer profile is exhausted', kind: 'attention',
-      work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'agent', reviewerProfiles: profiles },
-        reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'usage-limit', reason: 'the account is out of quota', at: now.toISOString(), sha: head, baseSha: base, policyRevision: item.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work) },
   ];
   for (const state of states) {
     const review = state.work.gates.find(gate => gate.name === 'review')!;
@@ -172,7 +160,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
   const proven = {
     ...item, evidence: [{ id: randomUUID(), proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, producer: 'ci-runner', trusted: true, result: 'pass' as const, executed: 3, skipped: 0, at: now.toISOString() }],
   } as Work;
-  const profiles = [{ name: 'reviewer-a', runtime: 'claude', reviewerApp: 'app-a', timeoutSeconds: 1800 }];
   const scopeFile = { path: 'src/other.ts', status: 'modified' as const, sha: sha40('11'), baseSha: sha40('22'), additions: 0, deletions: 4, binary: false };
   const landingFile = { path: 'src/a.ts', status: 'removed' as const, sha: null, baseSha: sha40('33'), additions: 0, deletions: 0, binary: false };
   // The battery. Each entry is a real work document put through the real evaluator, so every
@@ -195,12 +182,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'requirement-review baseline', work: { ...unproven, formalReviewResetRequired: true, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'changes requested', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work },
-    { name: 'codex provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' }, observation: { ...unproven.observation!, reviews: [] } } as Work },
-    { name: 'codex reason of its own', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' },
-      observation: { ...unproven.observation!, reviews: [], agentReview: { provider: 'codex', sha: head, approved: false, reason: 'Pull request is draft; mark it ready to request code review' } } } as Work },
-    { name: 'agent provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] } } as Work },
-    { name: 'reviewer roster spent', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] },
-      reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'timeout', reason: 'the reviewer session timed out', at: now.toISOString(), sha: head, baseSha: base, policyRevision: unproven.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work },
     // The merge writer gates test and merge (GY-2010): a head it has not trialled, one it trialled
     // and has not pushed, and one whose trial it refused; no GitHub check refuses either gate.
     { name: 'trialled, not pushed', work: { ...unproven, mergeLedger: { key: unproven.key, state: 'intent', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(), pushedAt: null, observedTip: null, refusal: null, events: 2 } } as Work },
@@ -305,7 +286,7 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
     filter: null, setFilter: () => {}, selected: null, setSelected: () => {}, creating: false, setCreating: () => {},
     busy: false, setBusy: () => {}, observedAt: now.getTime(), jobs: [], query: '', setQuery: () => {}, operatorAgents: [],
     events: [], operatorAgentsError: null, features: {}, editingRequirements: false, setEditingRequirements: () => {},
-    codexAvailable: false, sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {},
+    sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {},
     action: async () => {}, setError: () => {}, signOut: () => {},
     // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
     board: boardFromStatus(computed, now.getTime(), null),

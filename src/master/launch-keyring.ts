@@ -2,7 +2,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { underTestRunner } from '../supervisor.js';
+import { underTestRunner } from '../runtime-environment.js';
 import { isSocketPath, secretsBusPath, type CoordinatorConfinement } from './confinement.js';
 
 /** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */

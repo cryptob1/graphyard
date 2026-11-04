@@ -1,3 +1,4 @@
+import { assertOutsideWorktrees, readCredentialFile } from './private-file.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -10,7 +11,7 @@ import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, s
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import type { AgentRegistry } from './model/registry.js';
-import { assertOutsideWorktrees, inspectProducerCredentials, readCredentialFile } from './master/config.js';
+import { inspectProducerCredentials } from './master/config.js';
 import { listHerdrAgents, type HerdrAgent } from './master/herdr.js';
 import { profileAccount, readEnvironmentLog, recordObservedExhaustion, selectionKey, type EnvironmentLog, type ObservedExhaustion } from './master/environments.js';
 import { profileSessions, sessionAgentName, withReviewerDefaults, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master/profiles.js';

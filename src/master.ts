@@ -23,3 +23,5 @@ export { dispatchReservationMs, dispatchReservationDirectory, DispatchReservedEr
 export { setupAutonomy, agentToken, intentInput, attestationExercise, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
 export { restartMasterLoop } from './master/loop-restart.js';
 export { promoteCommand, promotionReason, promotionAuditFile, promotionPreconditions, PromotionRefusedError, promoteToAutonomy, assertPromotionRoute, ghLogin, type PromotionStep, type PromotionDependencies } from './master/promotion.js';
+
+export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './master/connect-accounts.js';

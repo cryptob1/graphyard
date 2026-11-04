@@ -7,7 +7,7 @@ import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
 import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
 import type { FleetLaunchAccount } from '../fleet.js';
-import { registryToolsArgs } from '../master/environments.js';
+import { registryToolsArgs } from '../registry-tools.js';
 import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied } from './registry.js';
 import { evidencePayloadSchema, graphyardTools, piRuntimeSchema, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';

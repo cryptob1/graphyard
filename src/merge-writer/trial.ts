@@ -10,7 +10,7 @@ import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/tes
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import type { TrialE2eCase } from './e2e-trial.js';
-import { underTestRunner } from '../supervisor.js';
+import { underTestRunner } from '../runtime-environment.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
 import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';

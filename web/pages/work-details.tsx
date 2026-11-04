@@ -144,7 +144,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * commands, review provider, next action, agent requests, evidence — is in one
  * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, signOut }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   // The recorded blocker is written once, under Blocker as recorded (GY-1739): any other line that
@@ -158,7 +158,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const worker = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
-  const provider = item.policy.reviewProvider ?? 'github';
   const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
   const postDeployment = <PostDeployment item={item} repository={status?.repository}/>;
   // The inverted loop, as this item sees it: what the control plane says to do next, which
@@ -202,7 +201,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <ul className="left-list">{group.lines.map(text => <li key={text}><Explained sentence={text}/></li>)}</ul></section>;
   // Each required check as the test gate reads it, the same states the Test step counts.
   const checks = checkStates(item);
-  // The review gate's own verdict, whichever provider gave it (a reviewer session, Codex or an agent reviewer).
+  // The review gate's own verdict.
   const reviewGate = item.gates.find(g => g.name === 'review');
   // The risk class of the delta the merge would apply (GY-1521), judged by the repository
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
@@ -263,9 +262,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </section>
     {admin && item.stage !== 'done' && <details className="edit-menu"><summary>Edit</summary>
       <p className="muted">These change the rules for this item and need fresh proof afterwards.</p>
-      {item.policy.review && <>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
-        <button disabled={busy || provider === 'github' && !codexAvailable} onClick={() => action(item.id, 'reviewpolicy', { provider: provider === 'github' ? 'codex' : 'github', expectedPolicyRevision: item.policyRevision, reason: 'Operator changed review provider through dashboard' })}>Use {provider === 'github' ? 'Codex cloud' : 'formal GitHub'} review</button>
-        {provider !== 'github' && item.submission && <button disabled={busy || !codexAvailable} onClick={() => action(item.id, 'rereview')}>Request fresh {item.policy.reviewProvider === 'codex' ? 'Codex' : 'agent'} review</button>}</>}
       <button disabled={busy || worker.active} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>
     </details>}
     {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}
@@ -286,7 +282,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).filter(d => d.message !== item.blocker).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}
       {overlap && <p className="overlap-line">{overlap}. Coordinate the changes; this warning does not establish a semantic conflict.</p>}
-      <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{shortShas(item.observation.agentReview.reason)}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
+      <h3>Code review</h3><p>Independent reviewer session</p>
       <h3>Next action</h3>
       {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code></p>}
       {item.nextAction

@@ -424,7 +424,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
     assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory);') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory);') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes, given the directory and nothing the caller built');
     assert.match(supervisor_ts, /^export function testSuiteHomeGuard\(unitDirectory: string\) \{$/m, 'the guard takes no env or argv override');
-    assert.match(supervisor_ts, /^export const underTestRunner = \(\) =>/m, 'the runner mark is read from the real process only');
+    assert.match(source('runtime-environment.ts'), /^export const underTestRunner = \(\) =>/m, 'the runner mark is read from the real process only');
     assert.ok(installer.indexOf('assertCoordinatorCheckout(input.root') < installer.indexOf('await readFile('), 'and the WorkingDirectory is judged before the existing unit is read');
     assert.equal((await readdir(join(home, '.config/systemd/user'))).filter(name => name.endsWith('.tmp')).length, 0, 'no temporary unit file is left behind');
   } finally {

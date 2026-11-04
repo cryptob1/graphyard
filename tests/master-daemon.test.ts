@@ -156,7 +156,7 @@ test('restarting the loop resumes the cursor without dispatching twice', async (
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)] });
     const ready = work();
-    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } as any });
+    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true } });
     const calls: string[] = [];
     let snapshotWork: Work[] = [ready, review];
     const shared = effects({

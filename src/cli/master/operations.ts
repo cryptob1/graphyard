@@ -1,7 +1,8 @@
 // Concern: `graphyard master` operations subcommands — status, the confined master's restart request, dispatch, recover.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { atomicPrivateWrite, dispatchWork, listHerdrAgents, readWorkerCredential } from '../../master.js';
+import { dispatchWork, listHerdrAgents, readWorkerCredential } from '../../master.js';
+import { atomicPrivateWrite } from '../../private-file.js';
 import { loopRestartRequestPath } from '../../daemon/run.js';
 import { masterStatusReport } from '../master-status.js';
 import { unhandled, type MasterSession } from './session.js';

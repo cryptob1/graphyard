@@ -1,3 +1,4 @@
+import { simplicityParagraph } from './review-prompt.js';
 // Concern: GY-2992 — the spec check's launcher, prompt and session. When a released feature item
 // owes its spec check, the loop launches one session under a reviewer identity, fresh context: a
 // goldfish with no conversation history and no filer's knowledge, reading only the item and the
@@ -20,7 +21,7 @@ import { loadMasterConfig, readCredentialFile } from './master/config.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { profileAtLimit, profileSessions, sessionAgentName } from './master/profiles.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
-import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';

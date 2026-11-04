@@ -1,3 +1,4 @@
+export { humanOnlyDecisions } from '../model/human-request.js';
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -11,7 +12,8 @@ import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnit
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
-import { atomicPrivateText, loadMasterConfig } from './config.js';
+import { loadMasterConfig } from './config.js';
+import { atomicPrivateText } from '../private-file.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
@@ -275,7 +277,6 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 // ---- Autonomy ----------------------------------------------------------------------------------
 // Humans set goals; agents run the loop. Everything a human used to approve the master applies with
 // its own operator-agent identity. What stays human is this list, and nothing else.
-export const humanOnlyDecisions = ['goals and priorities', 'spending money or opening third-party accounts', 'issuing credentials to people'] as const;
 export const masterOperatorCapabilities = ['policy:requirements', 'policy:review-provider', 'e2e:record'] as const;
 export const autonomyReason = 'Master autonomy onboarding: the master\'s operator-agent identity';
 /** The one agent identity onboarding provisions: the master's own, which applies every decision. */
