@@ -112,7 +112,9 @@ producer meter supplies them. Allocation time includes master, workers, reviews,
 proofs and repairs; it is not a token or money estimate.
 
 Three-worker overlap is recomputed from implementation handle timestamps and
-requires distinct principals, items, branches and worktree paths. Registry
+requires distinct principals, items, branches and worktree paths. Intervals end
+no later than the authoritative attempt end, so a submitted worker waiting for
+pane cleanup cannot manufacture overlap. Registry
 selection time alone cannot establish overlap. A single comparison uses one
 implementation principal with delegation forbidden, under the same frozen
 initial repository, contracts, eligible models, independent checks and bounds.

@@ -157,8 +157,10 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
         const next=registry.sessions.filter((n:any)=>n.role===s.role && n.work===s.work && n.principal===s.principal && Date.parse(n.selectedAt)>Date.parse(s.selectedAt)).sort((a:any,b:any)=>Date.parse(a.selectedAt)-Date.parse(b.selectedAt))[0];
         const handle=handles.find((h:any)=>!next || Date.parse(h.startedAt)<Date.parse(next.selectedAt));
         const workspace=item?.workspaces?.find((w:any)=>w.epoch===handle?.epoch);
+        const attempt=item?.pipeline?.attempts?.find((a:any)=>a.epoch===handle?.epoch);
+        const implementationEnd=[handle?.endedAt,attempt?.endedAt].filter(Boolean).sort()[0]??null;
         sessions.set(s.id,{id:s.id,role:s.role,work:s.work,principal:s.principal,runtime:s.runtime,account:s.account,model:s.model,reason:s.reason,startedAt:s.selectedAt,endedAt:s.endedAt,record:s,
-          implementation:handle && workspace?{id:handle.id,epoch:handle.epoch,branch:workspace.branch,path:workspace.path,pane:handle.pane,agentName:handle.agentName,startedAt:handle.startedAt,endedAt:handle.endedAt}:null});
+          implementation:handle && workspace?{id:handle.id,epoch:handle.epoch,branch:workspace.branch,path:workspace.path,pane:handle.pane,agentName:handle.agentName,startedAt:handle.startedAt,endedAt:implementationEnd}:null});
       }
       receipt.sessions=[...sessions.values()];
       receipt.agentSeconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
