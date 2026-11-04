@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import pg from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { closePool, trackedPool } from '../src/store/pools.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
