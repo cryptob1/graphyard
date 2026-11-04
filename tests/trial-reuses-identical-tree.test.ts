@@ -27,16 +27,19 @@ test('integration:trial-reuses-identical-tree — the merge writer reuses its ow
   const first = await reads().trial(sha('a1'), [], work('GY-1', proofs), sha('f1'));
   assert.equal(first.reused, undefined);
   // A re-queue on a moved base that merges to the same tree: no second trial.
-  const second = await reads().trial(sha('a2'), [], work('GY-1', proofs), sha('f2'));
+  const second = await reads().trial(sha('a2'), [], work('GY-1', proofs), sha('f1'));
   assert.deepEqual(ran, [sha('a1')], 'the identical tree was not trialled again');
   assert.deepEqual(second.reused, { mergeSha: sha('a1'), key: 'GY-1' });
+  // The same tree on another base tip or with other changed files selects other affected tests: it runs.
+  assert.equal((await reads().trial(sha('a3'), [], work('GY-1', proofs), sha('f2'))).reused, undefined);
+  assert.equal((await reads().trial(sha('a4'), ['src/x.ts'], work('GY-1', proofs), sha('f1'))).reused, undefined);
   assert.equal(second.build, 'pass');
 
   // A different tree, or an extra proof on the same tree, runs the trial.
   await reads().trial(sha('b1'), [], work('GY-1', proofs), sha('f1'));
   const extra = await reads().trial(sha('a2'), [], work('GY-1', [...proofs, 'e2e:board']), sha('f1'));
   assert.equal(extra.reused, undefined);
-  assert.deepEqual(ran, [sha('a1'), sha('b1'), sha('a2')]);
+  assert.deepEqual(ran, [sha('a1'), sha('a3'), sha('a4'), sha('b1'), sha('a2')]);
 
   // A failed trial is never reused.
   fail = true;
@@ -60,8 +63,8 @@ test('integration:trial-reuses-identical-tree — passes finishing at once are a
   await new Promise(resolve => setTimeout(resolve, 10));
   release();
   await both;
-  const d = await reads().trial(sha('d2'), [], work('GY-3', ['unit:a']), sha('f2'));
-  const e = await reads().trial(sha('e2'), [], work('GY-4', ['unit:a']), sha('f2'));
+  const d = await reads().trial(sha('d2'), [], work('GY-3', ['unit:a']), sha('f1'));
+  const e = await reads().trial(sha('e2'), [], work('GY-4', ['unit:a']), sha('f1'));
   assert.deepEqual([d.reused?.key, e.reused?.key], ['GY-3', 'GY-4'], 'both concurrent passes were recorded');
   assert.deepEqual(ran, [sha('d1'), sha('e1')]);
 });

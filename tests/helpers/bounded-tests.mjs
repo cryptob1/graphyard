@@ -9,10 +9,11 @@ const at = args.indexOf('--durations');
 const durations = at >= 0 ? args.splice(at, 2)[1] : undefined;
 const timeoutMs = Number(args.find(arg => arg.startsWith('--file-timeout=')).split('=')[1]);
 const breadth = Number(args.find(arg => arg.startsWith('--test-concurrency='))?.split('=')[1] ?? availableParallelism());
-// The caller's reporter flags (the trial passes --test-reporter=tap with its destination) are dropped:
-// each file prints spec output and this runner reports per-file ok/not ok itself, and Node refuses a
-// child whose reporters and destinations do not pair up.
-const flags = args.filter(arg => arg.startsWith('-') && !/^--(?:file-timeout|test-concurrency|test-reporter|test-reporter-destination)=/.test(arg));
+// The caller's reporter flags pass through (the merge trial counts executed proofs from its TAP);
+// spec is added only when the caller names no reporter, since Node refuses a child whose reporters
+// and destinations do not pair up.
+const flags = args.filter(arg => arg.startsWith('-') && !/^--(?:file-timeout|test-concurrency)=/.test(arg));
+const reporter = flags.some(flag => flag.startsWith('--test-reporter=')) ? [] : ['--test-reporter=spec'];
 const files = args.filter(arg => !arg.startsWith('-'));
 if (durations) writeFileSync(durations, '');
 const children = new Set();
@@ -25,7 +26,7 @@ let next = 0;
 await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async () => {
   while (next < files.length) {
     const file = files[next++], started = Date.now();
-    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=spec', ...flags, file], {
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...reporter, ...flags, file], {
       detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     children.add(child);

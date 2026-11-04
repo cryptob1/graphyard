@@ -16,5 +16,5 @@ test('unit:bounded-runner-reporter — the per-file runner runs files when the c
   const runner = new URL('./helpers/bounded-tests.mjs', import.meta.url).pathname;
   const { stdout, stderr } = await promisify(execFile)(process.execPath, ['--import', 'tsx', runner, '--test-reporter=tap', '--test-reporter-destination=stdout', '--test-concurrency=1', '--file-timeout=60000', file], { encoding: 'utf8', env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== 'NODE_TEST_CONTEXT')) });
   assert.doesNotMatch(stdout + stderr, /must match the number of specified/);
-  assert.match(stdout, /ℹ pass 1/);
+  assert.match(stdout, /^ok 1 - passes/m, 'the caller still receives TAP, from which the merge trial counts executed proofs');
 });

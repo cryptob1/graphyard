@@ -109,8 +109,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      // A tree this writer already passed with the same proofs reuses that verdict; only its own passes are recorded, never a failure.
-      const tree = (await git('rev-parse', `${mergeSha}^{tree}`)).trim(), required = [...proofs, ...e2eProofsOf(item), ...(item.type === 'bug' ? ['bug'] : [])].sort().join(',');
+      // A tree this writer already passed with the same proofs, base tip and changed files (which pick the affected tests) reuses that verdict; only its own passes are recorded, never a failure.
+      const tree = (await git('rev-parse', `${mergeSha}^{tree}`)).trim(), required = [...proofs, ...e2eProofsOf(item), ...(item.type === 'bug' ? ['bug'] : []), `base:${baseTip}`, `files:${[...files].sort().join(':')}`].sort().join(',');
       const seen = /^[0-9a-f]{40}$/.test(tree) && (await passedTrials(options.base)).find(entry => entry.tree === tree && entry.proofs === required);
       if (seen) return { ...seen.run, reused: { mergeSha: seen.mergeSha, key: seen.key } };
       const verdict = await (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}),
