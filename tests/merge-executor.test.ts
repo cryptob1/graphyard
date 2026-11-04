@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -899,14 +899,29 @@ test('unit:oldest-item-first — among non-hotfix heads the item filed first mer
 });
 
 
-test('integration:refused-intent-push-recovery — restart delivers an actually pushed passing trial after an orphan refusal without changing its base or evidence', async () => {
-  const n = 11;
+for (const advanceBase of [false, true])
+test(`${advanceBase ? 'integration:refused-intent-base-advance' : 'integration:refused-intent-push-recovery'} — restart delivers the original proven push${advanceBase ? ' after later main and its observation advance' : ''}`, async () => {
+  const n = advanceBase ? 41 : 11;
+  const refresh = async (id: string) => {
+    const current = await document(id);
+    const observation = await engine.observeControlPlaneCandidate(current);
+    assert.ok(observation);
+    return engine.observe(id, current.revision, observation);
+  };
+  const approve = async (id: string) => {
+    const current = await document(id);
+    return engine.observe(id, current.revision, { ...current.observation!, reviews: [
+      { id: 101, reviewer: 'independent-reviewer', sha: current.candidate!.sha, state: 'APPROVED', source: 'control-plane' },
+    ] });
+  };
   const branch = join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`);
   git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${n}-1`, branch, baseTip);
   await commit(branch, 'tests/recovery.test.ts', "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('integration:recovery-fixture', () => assert.equal(2 + 2, 4));\n", 'recovery proof');
+  if (advanceBase) await commit(branch, 'src/store/recovery.ts', 'export const repaired = true;\n', 'sensitive repair');
   const boundCase = { kind: 'command' as const, name: 'bound recovery fixture', run: 'node --test tests/recovery.test.ts', timeoutSeconds: 30 };
   heads[n] = await commit(branch, 'e2e/cases/fixture.json', JSON.stringify({ id: 'fixture', title: 'Fixture', target: 'any', required: false, steps: [boundCase] }), 'bound case');
   const filed = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture']);
+  if (advanceBase) await approve(filed.id);
   let begin!: () => void, release!: () => void;
   const began = new Promise<void>(resolve => { begin = resolve; });
   const waiting = new Promise<void>(resolve => { release = resolve; });
@@ -922,8 +937,8 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
         const tap = String(await defaultChildRun('node', ['--test', '--test-reporter=tap', 'tests/app.test.ts', 'tests/recovery.test.ts'], { cwd: tree, env: isolatedTestEnvironment() }));
         await defaultChildRun('node', ['--check', 'src/app.ts'], { cwd: tree });
         const bound = JSON.parse(await readFile(join(tree, 'e2e/cases/fixture.json'), 'utf8'));
-        const result = await runCommandStep(bound.steps[0], { url: 'http://127.0.0.1:9', root: tree, env: { PATH: process.env.PATH! }, secrets: {}, run: runProcess, artifacts: scratch, session: 'recovery' });
-        assert.equal(result.record.outcome, 'pass');
+        const result = await runCommandStep(bound.steps[0], { url: 'http://127.0.0.1:9', root: tree, env: { PATH: `${dirname(process.execPath)}:${process.env.PATH!}` }, secrets: {}, run: runProcess, artifacts: scratch, session: 'recovery' });
+        assert.equal(result.record.outcome, 'pass', JSON.stringify(result));
         const { executed, failed } = countProofCases(tap, 'integration:recovery-fixture');
         assert.ok(executed > 0 && failed === 0);
         return { build: 'pass', tests: { passed: 2, failed: [], files: 2 }, files: ['tests/app.test.ts', 'tests/recovery.test.ts'], durationMs: Date.now() - trialStarted, logTail: tap,
@@ -948,11 +963,28 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
   const trialsBefore = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.trial' ORDER BY seq", [filed.id])).rows;
   const evidenceBefore = refused.evidence;
   const healthy = fixtureReads();
+  let observedBase = refused.candidate!.baseSha;
+  if (advanceBase) {
+    // Minimal sanitized facts from the actual flight: only the observed base moves.
+    git(checkout, 'checkout', '-q', '--detach', mergeSha);
+    const later = await commit(checkout, 'src/later-main.ts', 'export const later = true;\n', 'unrelated later main');
+    assert.equal(await healthy.reads.push(later, mergeSha), 'pushed');
+    await healthy.reads.fetch();
+    healthy.pushes.length = 0;
+    const refreshed = await refresh(filed.id);
+    observedBase = later;
+    assert.equal(refreshed.candidate!.baseSha, later);
+    assert.notEqual(refreshed.candidate!.baseSha, original.candidate!.baseSha);
+    assert.deepEqual(refreshed.observation!.reviews, original.observation!.reviews);
+    assert.deepEqual(refreshed.mergeLedger, refused.mergeLedger);
+    assert.deepEqual(refreshed.evidence, evidenceBefore);
+  }
   const state = emptyDaemonState(config), now = () => start;
   const effects = effectsFor({ work: async () => [await document(filed.id)], now, mergeWriter: healthy.reads });
   await runCycle(config, state, effects, now);
   const done = await document(filed.id);
   assert.deepEqual([done.stage, done.delivery?.mergeSha, done.mergeLedger?.baseTip], ['done', mergeSha, originalBase]);
+  assert.equal(done.candidate!.baseSha, observedBase, 'recovery preserves the current observation binding');
   assert.deepEqual(done.mergeLedger?.trial, refused.mergeLedger?.trial);
   assert.deepEqual(done.evidence, evidenceBefore);
   assert.deepEqual((await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.trial' ORDER BY seq", [filed.id])).rows, trialsBefore);
@@ -964,12 +996,13 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
   const actualTrial = trialsBefore[0]!.payload;
   // A real second-parent ancestor satisfies ordinary reconciliation, but cannot
   // establish that a refused flight landed on main's first-parent chain.
-  const sideNumber = 31, sideBranch = join(checkout, '.graphyard', 'worktrees', `GY-${sideNumber}-1`);
+  const sideNumber = n + 20, sideBranch = join(checkout, '.graphyard', 'worktrees', `GY-${sideNumber}-1`);
   git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${sideNumber}-1`, sideBranch, originalBase);
-  const sideSha = heads[sideNumber] = await commit(sideBranch, 'src/side-parent.ts', 'export const side = true;\n', 'side parent');
-  const tree = git(checkout, 'merge-tree', '--write-tree', mergeSha, sideSha).split('\n')[0]!;
-  const containing = git(checkout, 'commit-tree', tree, '-p', mergeSha, '-p', sideSha, '-m', 'include side parent');
-  assert.equal(await healthy.reads.push(containing, mergeSha), 'pushed');
+  const sideSha = heads[sideNumber] = await commit(sideBranch, `src/side-parent-${n}.ts`, 'export const side = true;\n', 'side parent');
+  const mainTip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  const tree = git(checkout, 'merge-tree', '--write-tree', mainTip, sideSha).split('\n')[0]!;
+  const containing = git(checkout, 'commit-tree', tree, '-p', mainTip, '-p', sideSha, '-m', 'include side parent');
+  assert.equal(await healthy.reads.push(containing, mainTip), 'pushed');
   await healthy.reads.fetch();
   assert.equal(await healthy.reads.holds(sideSha), false);
   assert.equal(git(checkout, 'merge-base', '--is-ancestor', sideSha, containing), '');
@@ -979,15 +1012,21 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
   await ordinaryRecord({ kind: 'pushed', mergeSha: sideSha, pushedAt: iso(start) });
   await ordinaryRecord({ kind: 'reconciled', mergeSha: sideSha, observedTip: containing });
   assert.equal((await document(ordinary.id)).stage, 'done');
-  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'second-parent', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded'] as const).entries()) {
+  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'second-parent', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded', ...(advanceBase ? ['original-binding-base', 'approval-superseded', 'changes-requested', 'rework'] as const : [])] as const).entries()) {
     // Independent items retain the measured head but reserve distinct workspaces.
     const workspace = n + index + 1;
     git(checkout, 'branch', `graphyard/gy-${workspace}-1`, heads[n]!);
     const w = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture'], workspace);
+    if (advanceBase) await approve(w.id);
     const send = (event: MergeRecordEvent) => record({ ...w, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
     const intended = variant === 'unheld' ? sha('unheld-recovery') : variant === 'second-parent' ? sideSha : mergeSha;
     await send({ kind: 'intent', head: heads[n]!, baseTip: originalBase, mergeSha: intended, risk: 'normal', at: iso(start) });
     await send({ kind: 'refused', head: heads[n]!, reason: unpushedIntentReason(intended, 'main') });
+    if (variant === 'original-binding-base') {
+      const current = await document(w.id);
+      await engine.observe(w.id, current.revision, { ...current.observation!,
+        candidate: { ...current.candidate!, baseSha: originalBase } });
+    }
     const trial = structuredClone(actualTrial);
     if (variant === 'failed-build') trial.build = 'fail';
     if (variant === 'failed-tests') trial.tests.failed = ['tests/unrelated.test.ts'];
@@ -1014,13 +1053,23 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
         criteria: current.criteria, dependencies: current.dependencies, exclusiveResources: current.exclusiveResources ?? [], producerProofs: current.producerProofs,
       }, randomUUID());
     }
-    if (variant === 'review' || variant === 'superseded') {
+    if (advanceBase) await refresh(w.id);
+    if (variant === 'approval-superseded' || variant === 'changes-requested') {
+      const current = await document(w.id);
+      await engine.observe(w.id, current.revision, { ...current.observation!, reviews: [
+        ...(variant === 'changes-requested' ? current.observation!.reviews : []),
+        { id: 102, reviewer: 'replacement-reviewer', sha: current.candidate!.sha,
+          state: variant === 'changes-requested' ? 'CHANGES_REQUESTED' : 'APPROVED', source: 'control-plane' },
+      ] });
+    }
+    if (variant === 'review' || variant === 'superseded' || variant === 'rework') {
       // Model changed review/candidate facts under the same locking and save path. An HTTP
       // caller has no arbitrary state endpoint; this fixture only changes the rejection input.
       await store.transaction(async (db, now) => {
         const changed = (await lockedWork(db, [w.id])).find(entry => entry.id === w.id)!;
         if (variant === 'superseded') changed.candidate = { ...changed.candidate!, sha: sha('superseded') };
-        else changed.observation = { ...changed.observation!, scopeFiles: undefined, landing: undefined, files: ['src/store/schema.ts'] };
+        else if (variant === 'rework') changed.reworkRequested = true;
+        else changed.observation = { ...changed.observation!, scopeFiles: undefined, landing: undefined, files: ['src/store/schema.ts'], reviews: [] };
         engine.evaluate(changed, [changed], now);
         await save(db, changed, admin.id, 'fixture.binding-changed', now);
       });
@@ -1036,9 +1085,9 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
     if (variant === 'policy') {
       // Canonical restart: an actual route 409 for the on-main recovery must leave
       // its original flight held while a second, eligible head still lands.
-      const nextNumber = 30, nextBranch = join(checkout, '.graphyard', 'worktrees', `GY-${nextNumber}-1`);
+      const nextNumber = n + 19, nextBranch = join(checkout, '.graphyard', 'worktrees', `GY-${nextNumber}-1`);
       git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${nextNumber}-1`, nextBranch, containing);
-      heads[nextNumber] = await commit(nextBranch, 'src/after-recovery.ts', 'export const next = true;\n', 'unrelated queued change');
+      heads[nextNumber] = await commit(nextBranch, `src/after-recovery-${n}.ts`, 'export const next = true;\n', 'unrelated queued change');
       const next = await submittedItem(nextNumber);
       const eventsBefore = await ledgerKinds(w.id);
       const healthy = fixtureReads(), cycleState = emptyDaemonState(config);

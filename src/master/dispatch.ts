@@ -160,6 +160,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
   // GY-2971: the item's last launch on this host, whose runtime session the next attempt may resume.
+  let initialHead: string | null = null, runtimeStartedAt: string | null = null;
   let resumed: { session: string | null; resumedFrom: number | null; path: string } | null = null;
   const previous = await readAttemptLaunch(root, work.key);
   // The repository's true root, through the common Git directory: a coordinator checkout that is
@@ -239,7 +240,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
               claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
@@ -284,7 +285,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // first runtime refused the prompt claims a later epoch — the record the loop, the resume fence
   // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
   // re-keys the registration once the claim is known.
-  return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
+  return { work: work.key, epoch: claimedEpoch, runtime: launched?.kind ?? null, initialHead, runtimeStartedAt, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     // Whether the attempt resumed the previous attempt's runtime session (GY-2971).
@@ -431,6 +432,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         return startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...plan.args, ...sessionHarness.args], prompt, run,
           { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(coordinatorRoot ? { coordinatorRoot } : {}) });
       };
+      const initialHead = await Promise.resolve().then(() => defaultChildRun('git', ['-C', prepared.path, 'rev-parse', 'HEAD'])).then(value => /^[0-9a-f]{40,64}$/.test(String(value).trim()) ? String(value).trim() : null, () => null);
       let started: Awaited<ReturnType<typeof open>>;
       try { started = await open(); }
       catch (error) {
@@ -449,7 +451,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane!, started.awaiting) : null;
       if (hold) writeConsentHold(started.files.stem, hold);
       return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const,
+        initialHead, runtimeStartedAt: started.runtimeStartedAt, started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const,
         resumed: { session: plan.session, resumedFrom: plan.resume ? plan.from : null, path: prepared.path } };
     } catch (error) {
       const malformedTab = (error as any)?.herdrTab as string | undefined;
