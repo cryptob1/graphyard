@@ -748,7 +748,7 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   reads.record = async (item, event) => {
     const { kind, ...payload } = event;
     rows.push({ kind: mergeRecordKinds[kind], work: item.key, payload });
-    const ledger = foldMergeLedger(rows);
+    const ledger = foldServeReverts(foldMergeLedger(rows), rows);
     for (const entry of work) entry.mergeLedger = ledger[entry.key];
   };
   let state = emptyDaemonState(config);
@@ -781,3 +781,5 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   assert.equal(tipOf(origin), reverted.revertSha ?? served);
   assert.equal(work[1]!.mergeLedger!.serveReverts!.length, 1);
 });
+
+import { foldServeReverts } from '../src/merge-writer/serve-revert-ledger.js';

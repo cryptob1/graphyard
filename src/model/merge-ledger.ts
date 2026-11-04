@@ -27,8 +27,6 @@ export const mergeTrialKind = 'merge.trial';
  */
 export const mergeTrialStepKind = 'merge.trial-step';
 
-export const mergeServeRevertKind = 'merge.serve-revert';
-
 const sha = z.string().trim().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 
@@ -40,15 +38,6 @@ export const mergePushedSchema = z.object({ mergeSha: sha, pushedAt: instant }).
 export const mergeReconciledSchema = z.object({ mergeSha: sha, observedTip: sha }).strict();
 /** `merge.refused`: a merge or a revert of `head` was refused, with why. */
 export const mergeRefusedSchema = z.object({ head: sha, reason: z.string().min(1).max(2000), kind: z.enum(['merge', 'revert']) }).strict();
-
-export const mergeServeRevertSchema = z.object({
-  serve: sha, mergeSha: sha, at: instant,
-  outcome: z.enum(['reverted', 'refused']),
-  revertSha: sha.nullable(), reason: z.string().max(2000).nullable(),
-  reland: z.string().max(100).nullable(),
-  failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable(),
-}).strict();
-export type MergeServeRevert = z.infer<typeof mergeServeRevertSchema>;
 
 export type MergeReconciled = z.infer<typeof mergeReconciledSchema>;
 const proofCounts = z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).passthrough());
@@ -136,7 +125,6 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       if (!intent) continue;
       const previous = states[intent.key];
       states[intent.key] = { key: intent.key, state: 'intent', head: intent.head, baseTip: intent.baseTip, mergeSha: intent.mergeSha, risk: intent.risk, intentAt: intent.at, pushedAt: null, observedTip: null, refusal: null, events: (previous?.events ?? 0) + 1,
-        ...(previous?.serveReverts ? { serveReverts: previous.serveReverts } : {}),
         ...(previous?.flakes?.length ? { flakes: previous.flakes } : {}) };
       byMerge.set(intent.mergeSha, intent.key); byHead.set(intent.head, intent.key);
     } else if (event.kind === mergeLedgerKinds.pushed) {
@@ -156,12 +144,6 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const state = refused && find(event, byHead, refused.head);
       if (!refused || !state) continue;
       Object.assign(state, { state: 'refused', head: refused.head, refusal: { kind: refused.kind, reason: refused.reason }, events: state.events + 1 });
-    } else if (event.kind === mergeServeRevertKind) {
-      const revert = parsed(mergeServeRevertSchema, event.payload);
-      const state = revert && find(event, byMerge, revert.mergeSha);
-      if (!revert || !state) continue;
-      state.serveReverts = [...(state.serveReverts ?? []).filter(entry => entry.serve !== revert.serve || entry.mergeSha !== revert.mergeSha), revert];
-      state.events++;
     } else if (event.kind === mergeTrialStepKind) {
       // A step moves no state and counts no event: it is the trial's newest reported step (GY-2963).
       const step = parsed(mergeTrialStepSchema, event.payload);
@@ -208,3 +190,5 @@ export function currentMergeStep(work: Pick<Work, 'candidate' | 'mergeLedger'>, 
 /** Every merge commit the folded ledger names, lower-case. */
 export const ledgerMergeShas = (ledger: Readonly<Record<string, Pick<MergeLedgerState, 'mergeSha'>>>) =>
   new Set(Object.values(ledger).flatMap(state => state.mergeSha ? [state.mergeSha.toLowerCase()] : []));
+
+import type { MergeServeRevert } from '../merge-writer/serve-revert-ledger.js';

@@ -1,7 +1,7 @@
 // Concern: the control-plane merge executor (GY-1524) — the serial queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import type { Work } from '../model.js';
 import { riskOf } from '../model/risk-class.js';
-import { mergeServeRevertKind, type MergeServeRevert, mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
+import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { parseFailedTests } from '../model/base-failure.js';
 import { leadingProof } from '../model/flake-ledger.js';
@@ -909,3 +909,5 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
   }
   return outcomes;
 }
+
+import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, evaluate, type Evidence, type Principal, type Work } from '../model.js';
-import { mergeServeRevertKind, mergeServeRevertSchema, foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
+import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
 import { save, eventWorkSql } from '../store.js';
@@ -84,7 +84,8 @@ async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBo
   // The executor's trial rows fold too (GY-1528): their proof counts are what control-plane acceptance reads. A trial's step rows fold beside them (GY-2963).
   const kinds = [...Object.values(mergeLedgerKinds), mergeServeRevertKind, mergeTrialKind, mergeTrialStepKind];
   const rows = (await db.query(`SELECT kind, payload FROM events WHERE work_id=$1 AND kind = ANY($2::text[]) ORDER BY seq`, [work.id, kinds])).rows as { kind: string; payload: unknown }[];
-  const folded = foldMergeLedger(rows.map(row => ({ kind: row.kind, payload: row.payload, work: work.key })))[work.key];
+  const events = rows.map(row => ({ ...row, work: work.key }));
+  const folded = foldServeReverts(foldMergeLedger(events), events)[work.key];
   if (folded) return folded;
   if (data.kind !== 'refused') return null;
   return { key: work.key, state: 'refused', head: data.head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: data.reason }, events: 1 };
@@ -239,3 +240,5 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     return answer();
   }));
 }
+
+import { foldServeReverts, mergeServeRevertKind, mergeServeRevertSchema } from '../merge-writer/serve-revert-ledger.js';
