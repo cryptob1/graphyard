@@ -1,4 +1,4 @@
-// Concern: merging the next few queued heads together (GY-2088) — one trial and one push for the batch, falling back to one head at a time when the batch fails.
+// Concern: merging the next few queued heads together (GY-2088) — one trial and one push for the batch, falling back to one head at a time when the batch fails — and trialling several batches at once, each stacked on the one before it.
 import type { Work } from '../model.js';
 import { riskOf } from '../model/risk-class.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
@@ -29,11 +29,12 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  * queued. The chain's tip is trialled once (the build and the tests its combined change affects,
  * with every head's proofs) and previewed; when it passes, every head is recorded intent and trial,
  * the tip is pushed once with a lease on the tip it was tested on, and every head is recorded pushed
- * and reconciled at its own merge commit. A failing trial or preview, a hold that arrives during the
- * trial, a trial timeout or a rejected push trials the heads one at a time with `mergeOne`, so only a failing head is
+ * and reconciled at its own merge commit. A rejected push, or a stacked trial whose tip did not
+ * land (`lands`), trials the batch again on the tip as it now stands, `retrials` times at most. A failing trial or preview, a hold that arrives during the
+ * trial, a trial timeout or a push rejected past the bound trials the heads one at a time with `mergeOne`, so only a failing head is
  * refused. A single head is `mergeOne`'s alone.
  */
-export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Promise<BatchResult[]> {
+export async function mergeBatch(ports: MergePorts, items: readonly Work[], retrial = 0): Promise<BatchResult[]> {
   if (items.length < 2) return alone(ports, items);
   // GY-2984: a bug item's proofs are judged on the base tip alone, so it is never batched.
   const bugs = items.filter(work => work.type === 'bug');
@@ -62,6 +63,8 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
     // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
     const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip, ports.onStep).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
     if (!run) return [...results, ...await alone(ports, works)];
+    const again = async () => [...results, ...await (retrial < ports.retrials ? mergeBatch(ports, works, retrial + 1) : alone(ports, works))];
+    if (ports.lands && !await ports.lands(baseTip)) return again();
     const proofFailure = works.some(work => requiredProofFailure(work, run));
     let failed = proofFailure || failureIsBase(run) || !!trialFailureReason({ run }), preview: PreviewVerdict | null = null;
     // A preview that could not run is no pass: each head is then previewed alone, as `mergeOne` previews it.
@@ -85,7 +88,7 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
       if (held) { await ports.record(work, { kind: 'refused', head, reason: held }); obsolete = true; }
     }
     if (obsolete) return [...results, ...await alone(ports, works)];
-    if (await ports.push(tip, baseTip) !== 'pushed') return [...results, ...await alone(ports, works)];
+    if (await ports.push(tip, baseTip) !== 'pushed') return again();
     for (const { work, mergeSha } of batch) await ports.record(work, { kind: 'pushed', mergeSha, pushedAt: at() });
     const observedTip = await ports.fetch();
     for (const { work, mergeSha, baseTip: parent } of batch) {
@@ -97,4 +100,45 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
     // A trial with no verdict, a host failure or a lost record leaves every head queued; an intent left open is reconciled against the base next cycle.
     return [...results, ...works.filter(work => !results.some(entry => entry.work === work)).map(work => ({ work, error }))];
   }
+}
+
+/**
+ * Stacked parallel trials: the positions, in queue order, each one batch (`mergeBatch`), all
+ * trialled at once — each on the tip the positions before it would leave, so the second trials on
+ * the first's merge commit and the third on the second's — with the host's cores shared among
+ * them. A position's verdict counts only once every position before it has finished, and only
+ * when they left the base at the tip it was trialled on (`lands`): a trial stacked on a position
+ * that did not land is discarded and trialled again on the tip as it now stands, so a failure
+ * re-trials only the positions stacked on it, and the positions push strictly in queue order.
+ * `onStep` names each position's trial step.
+ */
+export async function mergeStack(ports: MergePorts, positions: readonly (readonly Work[])[], onStep?: (position: number, step: string) => void): Promise<BatchResult[]> {
+  const done = positions.map(() => false), offered: (string | null)[] = positions.map(() => null);
+  let landed: string | null = null, wake = () => {}, moved = new Promise<void>(resolve => { wake = resolve; });
+  const notify = () => { const woken = wake; moved = new Promise(resolve => { wake = resolve; }); woken(); };
+  const until = async <T>(read: () => T | null): Promise<T> => { for (;;) { const value = read(); if (value !== null) return value; await moved; } };
+  // The tip a position stands on: the commit the nearest unfinished position before it is trialling, or the remote's once every one has finished.
+  const standing = (index: number) => { for (let before = index - 1; before >= 0; before--) if (!done[before]) return offered[before]; return 'remote'; };
+  const offer = (index: number, sha: string | null) => { offered[index] = sha; notify(); };
+  const portsOf = (index: number): MergePorts => ({
+    ...ports,
+    fetch: async () => { const tip = await until(() => standing(index)); return tip === 'remote' ? landed = await ports.fetch() : tip; },
+    trial: async (mergeSha, files, item, baseTip, step) => {
+      offer(index, mergeSha);
+      try { return await ports.trial(mergeSha, files, item, baseTip, step, positions.length); } finally { offer(index, null); }
+    },
+    lands: async baseTip => { await until(() => done.slice(0, index).every(Boolean) || null); return baseTip === landed; },
+    push: async (mergeSha, baseTip) => {
+      const pushed = await ports.push(mergeSha, baseTip);
+      if (pushed === 'pushed') landed = mergeSha;
+      return pushed;
+    },
+    ...(onStep ? { onStep: (step: string) => onStep(index, step) } : {}),
+  });
+  const settled = await Promise.all(positions.map(async (items, index) => {
+    try { return await mergeBatch(portsOf(index), items); }
+    catch (error) { return items.map((work): BatchResult => ({ work, error })); }
+    finally { done[index] = true; notify(); }
+  }));
+  return settled.flat();
 }
