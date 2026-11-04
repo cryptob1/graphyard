@@ -123,7 +123,8 @@ class FakeHerdr {
   named(name: string) { const session = this.find(name); assert.ok(session, `${name} is a launched session`); return session; }
 }
 
-test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
+test('unit:launch-prompt-delivery', async t => {
+await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
   // The request contracts: a positional prompt after the flags, or the runtime's own interactive
   // prompt flag; a runtime without one is refused at launch rather than pasted into (GY-184).
   for (const kind of ['claude', 'codex', 'cursor', 'opencode', 'muse', 'pi', 'gemini', 'qwen', 'copilot']) assert.equal(launchDelivery(kind), 'request');
@@ -186,7 +187,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
   } finally { await cleanup(); }
 });
 
-test('integration:never-started-vs-failed — a session that ends without doing its work is recorded as never started, in its own words, and does not spend the retry budget a genuine failure does', async () => {
+await t.test('integration:never-started-vs-failed — a session that ends without doing its work is recorded as never started, in its own words, and does not spend the retry budget a genuine failure does', async () => {
   const words = 'I haven\'t started: no fetch, no worktree, no test runs, no evidence submitted. Your message was only a pasted block with no request of your own.';
   assert.equal(sessionWords(`────────\n❯ Produce trusted evidence\n● ${words}\n✻ Baked for 2s · done 1:53 PM\n────────\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n`), `● ${words}`, 'the runtime frame is stripped, the session\'s words kept');
   assert.equal(sessionWords(null), '');
@@ -371,7 +372,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
   } finally { await cleanup(); }
 });
 
-test('integration:unacknowledged-session-recovery — the loop detects a launched session with no activity within the configured interval, re-prompts it once and records that it did, and master status shows it awaiting acknowledgement rather than running', async () => {
+await t.test('integration:unacknowledged-session-recovery — the loop detects a launched session with no activity within the configured interval, re-prompts it once and records that it did, and master status shows it awaiting acknowledgement rather than running', async () => {
   // The judgement itself, on a record: quiet through the interval means one re-prompt; sustained
   // activity, or a result, means acknowledged; a second refusal after the re-prompt means neither.
   const record = { requestedAt: iso(0) } as { requestedAt: string; acknowledgedAt?: string; repromptedAt?: string; activeSince?: string; screen?: string };
@@ -447,7 +448,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
   } finally { await cleanup(); }
 });
 
-test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line, guide claim prints it, and docs/onboarding.md states what is generated and why', async () => {
+await t.test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line, guide claim prints it, and docs/onboarding.md states what is generated and why', async () => {
   for (const fragment of ['receives its instruction as the', 'session\'s own first request, on the runtime\'s command line, never as pasted text', 'no human\nsends "go"', 'The one message such a session may later receive as a paste comes from that\nsame launcher', 'act on it without waiting for confirmation', 'Nothing else pasted into a\nsession carries that authority']) assert.ok(launchAuthorization.includes(fragment), `the authorization states: ${fragment}`);
   // GY-2972: the generated AGENTS.md block stays short and names the guide topics; the
   // authorization's paste rule prints from guide claim, and the autonomy contract that ends it
@@ -485,4 +486,6 @@ test('manual:launch-authorization-onboarding-review — a Claude Code role sessi
     assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
     assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');
   } finally { await cleanup(); }
+});
+
 });

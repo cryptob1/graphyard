@@ -15,8 +15,8 @@ import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } f
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { accountLaunch } from './environments.js';
-import { type RequestDelivery, startAgentSession } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
+import { type RequestDelivery, launchSession } from './launch.js';
+import { type HerdrAgent, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
@@ -256,15 +256,14 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       ? { CODEX_HOME: resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex')) }
       : kind === 'claude' ? { CLAUDE_CONFIG_DIR: resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude')) } : {};
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment }, null, { writable: [dirname(config.credentialFile)] });
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
+
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
     // shared master prompt (GY-898), the same one the loop's launch carries with its handover.
     // The master is confined like every other launched session (GY-1658): its configuration,
     // administration and browser-flow commands run from the coordinator root with the checkout
     // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
-    ({ delivery } = await startAgentSession(name, kind, created.pane, launch.args, masterPrompt(config), run, { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile) }));
+    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile) } }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

@@ -13,9 +13,9 @@ import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
-  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
-  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
-  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
+  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane,
+  launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
+  profileAtLimit, profileSessions, selectAccount, sessionAgentName, launchSession,
   type PromptDelivery, type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
@@ -123,12 +123,8 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const credentialMask = credentialMaskFor(config, { credentialFile: sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
-      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
-        '--label', `${work.key} spec check · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], run));
-      pane = created.pane;
-      await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
-        specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), run,
-        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
+
+      await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), workspace: config.herdrWorkspace, label: `${work.key} spec check · ${agentName}`, run, onPane: nextPane => { pane = nextPane ?? null; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask } });
       return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.

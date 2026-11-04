@@ -15,7 +15,7 @@ import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning,
 import { assertIsolatableHostControlEndpoints } from './confinement.js';
 import { bwrapOnPath, runtimeLoginHomes, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
 import type { MasterRun } from './profiles.js';
-import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
+import { createdHerdrTab, type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 import { herdrErrorText, nameRefusedByRuntime, sessionWords, type PromptDelivery } from './prompt-delivery.js';
 import { keyringEndpointWarning, keyringProbeBackoff } from './launch-keyring.js';
 import { masterRecords } from './conversation.js';
@@ -640,6 +640,41 @@ export async function startAgentSession(name: string, kind: string, pane: string
 
 export { secretsBusUnjudged, secretsBusMigration, secretsBusEndpointProblem, keyringEndpointWarning, keyringProbeBackoffMs, keyringProbeBackoffMaxMs } from './launch-keyring.js';
 export type { KeyringEndpointVerdict, KeyringProbeBackoff } from './launch-keyring.js';
+
+/** Launch every terminal role through the same pane/start/close sequence. The request is
+ * delivered by startAgentSession on the runtime command line. Coordinates are cleared only
+ * after confirmed cleanup, so a worker caller cannot release its lease beneath a live supervisor.
+ * Role-specific account reservations, harnesses and sandbox probes precede this operation.
+ */
+export async function launchSession(input: {
+  name: string; kind: string; args: string[]; text: string;
+  workspace?: string; label: string; environment?: Record<string, string>;
+  run?: ChildRun; start: SessionStart;
+  onPane: (pane: string | undefined, tab: string | undefined) => void;
+}) {
+  let pane: string | undefined, tab: string | undefined;
+  try {
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(input.workspace ? ['--workspace', input.workspace] : []),
+      '--cwd', input.start.cwd ?? input.start.directory, '--label', input.label,
+      ...Object.entries(input.environment ?? input.start.environment ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], input.run));
+    pane = created.pane; tab = created.tab;
+    input.onPane(pane, tab);
+    return await startAgentSession(input.name, input.kind, pane, input.args, input.text, input.run, input.start);
+  } catch (error) {
+    const malformedTab = (error as { herdrTab?: string })?.herdrTab;
+    if (pane || tab || malformedTab) {
+      let note: string;
+      try { note = await closeFailedLaunch(pane, tab ?? malformedTab, input.run); }
+      catch (closeError) {
+        throw Object.assign(new Error(`${error instanceof Error ? error.message : String(error)}; Herdr could not confirm cleanup: ${herdrErrorText(closeError)}`), { herdrTab: tab ?? malformedTab });
+      }
+      input.onPane(undefined, undefined);
+      if (error && typeof error === 'object') delete (error as { herdrTab?: string }).herdrTab;
+      throw withLaunchClose(error, note);
+    }
+    throw error;
+  }
+}
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane

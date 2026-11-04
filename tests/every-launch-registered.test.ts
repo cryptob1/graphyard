@@ -59,7 +59,8 @@ async function host() {
   return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };
 }
 
-test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
+test('unit:every-launch-registered', async t => {
+await t.test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
     let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered', 'e2e:fixture'] }] }, randomUUID());
@@ -122,4 +123,6 @@ test('integration:every-launch-registered — the loop\'s reviewer launches and 
     assert.equal(doomed.state, 'finished');
     assert.match(doomed.outcome!, /^the launch failed before the session started: the pane refused the runtime/);
   } finally { await cleanup(); }
+});
+
 });
