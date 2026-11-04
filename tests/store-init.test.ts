@@ -2,7 +2,7 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import pg from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { advisoryLocks, Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

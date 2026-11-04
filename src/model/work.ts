@@ -55,6 +55,7 @@ export const createSchema = z.object({
   criteria: criteriaSchema(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   exclusiveResources: resourcesSchema.optional(),
+  plannedFiles: z.array(z.string().trim().min(1).max(500)).max(200).optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and
   // integration proofs are always producer-runnable; every other manual proof stays with

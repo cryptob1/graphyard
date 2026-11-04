@@ -7,7 +7,7 @@
   "required": true,
   "steps": [
     { "kind": "http", "name": "read the test summary", "method": "GET", "path": "/api/tests", "status": 200, "expect": [{ "path": "window", "equals": 20 }, { "path": "cases", "type": "array" }] },
-    { "kind": "browser", "action": "open", "path": "/" },
+    { "kind": "browser", "action": "open", "path": "/?sign-in" },
     { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
     { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
     { "kind": "browser", "action": "click", "role": "button", "text": "Tests" },

@@ -1,7 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
 import { readImports } from '../validation-import.js';
+import type { Store } from '../store.js';
 import type { Engine } from '../engine.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
@@ -21,18 +23,41 @@ import { signinClaimFromEnv } from './routes/signin.js';
  * one-time sign-in link opened (GY-738, `HumanSignIn` below), a live operator-agent credential,
  * then an unused durable reviewer/spec-check launch. A lease command (`method` and `pathname`)
  * authenticates on the lease pool (GY-558), so an exhausted
- * general pool cannot stop a renewal before it reaches its own connections.
+ * general pool cannot stop a renewal before it reaches its own connections. A tokenless `localRead`
+ * request is the local viewer.
  */
-export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = ''): Promise<Principal> {
+export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = '', localRead = false): Promise<Principal> {
   const lease = leaseCommandRequest(method, pathname);
-  const token = String(authorization ?? '').replace(/^Bearer /, '');
+  // A browser trims the empty token's "Bearer " to "Bearer".
+  const token = String(authorization ?? '').replace(/^Bearer\s*/, '');
+  if (!token && localRead) return localViewer;
   const hash = createHash('sha256').update(token).digest();
   const configured = configuredCredential(services, hash);
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
-  const actor = configured?.actor ?? humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token) ?? await launchTokenActor(services, hash.toString('hex'));
+  const actor = configured?.actor ?? await humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token) ?? await launchTokenActor(services, hash.toString('hex'));
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;
+}
+
+/** Whoever reads the dashboard on this machine without signing in: a reader, so every action and human-only decision still needs a signed-in session. */
+export const localViewer: Principal = { id: 'local-viewer', role: 'reader', displayName: 'Local viewer' };
+const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d+))?$/i;
+/**
+ * A read addressed to the loopback host and served (or Compose-published) port. Another Host header (a
+ * DNS-rebinding page, the tailnet proxy), a forwarded request or a cross-origin browser request
+ * is not one. Headerless local clients and direct browser navigation remain readable.
+ */
+export function localRead(req: IncomingMessage) {
+  const host = loopbackHost.exec(req.headers.host ?? '');
+  // Compose publishes only on host loopback, but NAT changes both the port and socket peer.
+  // This installer-owned setting declares that boundary; direct servers still require loopback.
+  const publishedPort = process.env.GRAPHYARD_LOCAL_VIEW_PORT;
+  return req.method === 'GET' && !!host && Number(host[1] ?? 80) === (publishedPort ? Number(publishedPort) : req.socket.localPort)
+    && (!!publishedPort || ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? ''))
+    && !req.headers.forwarded && !req.headers['x-forwarded-for']
+    && (req.headers.origin === undefined || req.headers.origin === new URL(`http://${req.headers.host}`).origin)
+    && (req.headers['sec-fetch-site'] === undefined || ['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])));
 }
 
 const configuredCredential = (services: Services, hash: Buffer) => services.principals.find(p => timingSafeEqual(p.hash, hash));
@@ -115,21 +140,20 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  * run with the operator's own admin credential, asks for a one-time link; opening it in a browser
  * redeems it for a short-lived session bound to that principal and declared human, so the
  * decisions only a human may make are answered in that browser with one click. A link is single
- * use and expires in minutes; the session it opens lasts 30 days (GY-2171). Only digests are held, in
- * this process: a restart signs everyone out, and nothing about either is ever written. Both
- * tables are bounded: past the cap the entry nearest expiry goes first, so repeated
- * `graphyard login` calls cannot grow them between prunes.
+ * use and expires in minutes; the session it opens expires 90 days after its last use. Session digests, actors and expiry
+ * are persisted in Postgres; pending link digests stay in memory. Both
+ * tables are bounded: links evict the oldest entry, while session capacity refuses new
+ * sign-ins until an existing session expires or signs out.
  */
 export const signInLinkTtlMs = 10 * 60_000;
-export const signInSessionTtlMs = 30 * 86_400_000;
+export const signInSessionTtlMs = 90 * 86_400_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 export class HumanSignIn {
   private readonly links = new Map<string, { principal: Principal; expiresAt: number }>();
-  private readonly sessions = new Map<string, { actor: Principal; expiresAt: number }>();
-  constructor(private readonly clock: () => number = Date.now) {}
+  constructor(private readonly store: Store, private readonly clock: () => number = Date.now) {}
 
   /**
    * A link for the issuing principal. Only a configured admin credential declared a human session
@@ -150,26 +174,41 @@ export class HumanSignIn {
   }
 
   /** Redeem a link once: it is gone whether or not it was still valid, and a live one opens a human session for its principal. */
-  redeem(code: string) {
+  async redeem(code: string) {
     const now = this.prune(), key = digest(code), link = this.links.get(key);
     this.links.delete(key);
     demand(link && link.expiresAt > now, 'This sign-in link has expired or was already used; ask for a new one', 401);
     const token = `gyh_${randomBytes(32).toString('base64url')}`;
     const actor: Principal = { ...link!.principal, sessionKind: 'human' };
-    bounded(this.sessions, maxSignInSessions - 1);
-    this.sessions.set(digest(token), { actor, expiresAt: now + signInSessionTtlMs });
+    await this.store.transaction(async db => {
+      // Serialize pruning and insertion across server instances to keep the global size bound.
+      await db.query('LOCK TABLE human_sign_in_sessions IN EXCLUSIVE MODE');
+      await db.query('DELETE FROM human_sign_in_sessions WHERE expires_at <= $1', [new Date(now)]);
+      const { rows } = await db.query('SELECT count(*)::int AS count FROM human_sign_in_sessions');
+      demand(rows[0].count < maxSignInSessions, 'The 32-session sign-in limit is reached; sign out an existing session or wait for one to expire, then request a new sign-in link', 409);
+      await db.query('INSERT INTO human_sign_in_sessions (token_hash, actor, expires_at) VALUES ($1, $2, $3)', [digest(token), actor, new Date(now + signInSessionTtlMs)]);
+    }, { coordinationLock: false });
     return { token, actor, expiresAt: new Date(now + signInSessionTtlMs).toISOString() };
   }
 
-  /** The principal a session token stands for, or null once it has expired or was never issued. */
-  authenticate(token: string): Principal | null {
-    const now = this.prune(), session = this.sessions.get(digest(token));
-    return session && session.expiresAt > now ? { ...session.actor } : null;
+  /** The principal a session token stands for, or null once it has expired or was never issued. Use renews it: its expiry is its last use plus the session lifetime. */
+  async authenticate(token: string): Promise<Principal | null> {
+    if (!token.startsWith('gyh_')) return null;
+    const now = this.clock(), key = digest(token), expiresAt = new Date(now + signInSessionTtlMs);
+    const { rows } = await this.store.pool.query(
+      'UPDATE human_sign_in_sessions SET expires_at=GREATEST(expires_at, $3) WHERE token_hash=$1 AND expires_at > $2 RETURNING actor',
+      [key, new Date(now), expiresAt]);
+    return rows[0]?.actor ?? null;
+  }
+
+  /** Revoke only the session named by the bearer token. */
+  async signOut(token: string) {
+    await this.store.pool.query('DELETE FROM human_sign_in_sessions WHERE token_hash=$1', [digest(token)]);
   }
 
   private prune() {
     const now = this.clock();
-    for (const table of [this.links, this.sessions]) for (const [key, entry] of table) if (entry.expiresAt <= now) table.delete(key);
+    for (const [key, entry] of this.links) if (entry.expiresAt <= now) this.links.delete(key);
     return now;
   }
 }
@@ -183,7 +222,7 @@ const signIns = new WeakMap<Services, HumanSignIn>();
 /** The sign-in table of one assembled control plane. */
 export function humanSignIn(services: Services) {
   let table = signIns.get(services);
-  if (!table) signIns.set(services, table = new HumanSignIn());
+  if (!table) signIns.set(services, table = new HumanSignIn(services.engine.store));
   return table;
 }
 

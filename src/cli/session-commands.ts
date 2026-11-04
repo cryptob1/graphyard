@@ -1,5 +1,5 @@
 import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -194,15 +194,35 @@ export async function recordedOperator(root: string): Promise<{ token: string; r
  */
 export const loginCommand: CliCommand = {
   name: 'login',
-  help: ['  login                        Print a one-time link that signs the operator into the', '                                dashboard as a human for 30 days (the link is single use, 10 minutes)'],
-  async run({ api, base, print, repositoryRoot }) {
-    const recorded = process.env.GRAPHYARD_TOKEN_FILE || process.env.GRAPHYARD_TOKEN ? null : await recordedOperator(repositoryRoot());
-    // The request helper reads its credential on first use: the recorded one stands in for GRAPHYARD_TOKEN.
-    if (recorded) process.env.GRAPHYARD_TOKEN = recorded.token;
-    const link = await api('sign-in-links', {}) as { code: string; principal: string; expiresAt: string };
-    return print({ signIn: `${(recorded?.reachableUrl ?? base).replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
+  help: ['  login                        Print a one-time link that signs the operator into the', '                                dashboard as a human until 90 days unused (the link is single use, 10 minutes)'],
+  async run(context) {
+    const link = await signInLink(context, true);
+    return context.print({ signIn: link.url, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
   },
 };
+/** `login`'s one-time link, opened in this machine's default browser; printed instead when no opener runs. */
+export const openCommand: CliCommand = {
+  name: 'open',
+  help: ['  open                         Sign the operator into the dashboard in the default browser', '                                (prints the one-time link when no browser opener runs)'],
+  async run(context) {
+    const link = await signInLink(context, false);
+    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    const opened = await new Promise<boolean>(resolve => {
+      const child = spawn(opener, [link.url], { detached: true, stdio: 'ignore' });
+      child.once('spawn', () => { child.unref(); resolve(true); });
+      child.once('error', () => resolve(false));
+    });
+    return context.print(opened ? { opened: true, principal: link.principal } : { opened: false, signIn: link.url, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
+  },
+};
+/** A one-time sign-in link minted with the install's recorded operator credential; `remote` links to the tailnet address when the dashboard is served there. */
+async function signInLink({ api, base, repositoryRoot }: Parameters<CliCommand['run']>[0], remote: boolean) {
+  const recorded = process.env.GRAPHYARD_TOKEN_FILE || process.env.GRAPHYARD_TOKEN ? null : await recordedOperator(repositoryRoot());
+  // The request helper reads its credential on first use: the recorded one stands in for GRAPHYARD_TOKEN.
+  if (recorded) process.env.GRAPHYARD_TOKEN = recorded.token;
+  const link = await api('sign-in-links', {}) as { code: string; principal: string; expiresAt: string };
+  return { url: `${((remote ? recorded?.reachableUrl : null) ?? base).replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt };
+}
 /** A wait as a person reads it: minutes under an hour, then hours, then days. */
 export const waitedText = (ms: number) => ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))}m` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 86_400_000)}d`;
 
@@ -228,4 +248,4 @@ export const routedParkCommand: CliCommand = {
 };
 
 /** The session commands the CLI registers beside the master's, in the order the help prints them. */
-export const sessionCommands: CliCommand[] = [routedParkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];
+export const sessionCommands: CliCommand[] = [routedParkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand, openCommand];

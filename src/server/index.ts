@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
 import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule } from './routes.js';
-import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
+import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
@@ -73,7 +73,7 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
       const lane = url.pathname.startsWith('/api/') ? configuredActor(services, req.headers.authorization) : null;
       if (!(lane && confinedLaneProducer(lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
-        context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
+        context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname, localRead(req));
         if (await dispatch([laneProducerScope, ...apiRoutes])) return;
         return send(404, { error: 'Route not found' });
       }

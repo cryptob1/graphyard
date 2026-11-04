@@ -220,7 +220,7 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     // Muse takes its request on its command line, so it is never prompted after it starts.
     assert.equal(probes, 1, 'a Muse session seen working has started'); assert.equal(result.delivery, 'request');
     assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'rename', 'muse-pane']); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
-    assert.match(await readFile(join(root, 'assigned/.graphyard/launch/engineering-muse-1.request'), 'utf8'), /principal muse-1/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
+    assert.match(await readFile(join(root, 'assigned/.graphyard/launch/engineering-muse-1.request'), 'utf8'), /Claimed as muse-1 under lease supervision/); assert.equal(JSON.stringify(calls).includes(coordinatorToken), false); assert.equal(JSON.stringify(calls).includes(workerToken), false);
     // A Muse session that never becomes visible is closed and its epoch released; one Herdr
     // cannot confirm closed keeps the epoch fenced.
     const failedCalls: string[][] = []; let releasedEpoch = 0;

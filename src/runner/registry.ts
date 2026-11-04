@@ -18,13 +18,15 @@ import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, 
  * detached from the process that started it, so a restart leaves it running; the restarted process
  * adopts every run still live there (`adoptRuns`), keeps waiting on it, and applies its result once.
  */
-export type RunRole = 'producer';
+export type RunRole = 'producer' | 'reviewer';
 export interface RegisteredRun {
   name: string;
   role: RunRole;
   work: string;
-  /** The producer ledger record id the run answers. */
+  /** The ledger record id or spec-check launch the run answers. */
   subject: string;
+  /** The runtime the inventory names for it; `pi` unless the run says otherwise (a headless review's own runtime). */
+  agent?: string;
   run: Run<unknown>;
   /** The managed directory the run works in, when it was given one (GY-391). */
   checkout?: string;
@@ -59,7 +61,7 @@ export const liveRuns = () => { prune(); return [...runs.values()].filter(entry 
 
 /** The live runs as Herdr-shaped sessions: no pane, and a working status. */
 export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {
-  return liveRuns().map(entry => ({ name: entry.name, agent: 'pi', agent_status: 'working' }));
+  return liveRuns().map(entry => ({ name: entry.name, agent: entry.agent ?? 'pi', agent_status: 'working' }));
 }
 /** The Herdr inventory with this process's runs beside it; a name Herdr lists wins. */
 export function withRunnerAgents<A extends { name?: string }>(agents: A[]): (A | ReturnType<typeof runnerAgents>[number])[] {
