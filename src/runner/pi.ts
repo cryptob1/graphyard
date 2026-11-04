@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -105,7 +106,7 @@ export interface PiRunnerOptions {
    * write the run's output and exit to its directory under the coordinator checkout, which the
    * confinement binds read-only.
    */
-  confine?: (cwd: string | undefined) => readonly string[];
+  confine?: (cwd: string | undefined, environment: NodeJS.ProcessEnv) => readonly string[];
 }
 
 /**
@@ -171,6 +172,7 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
  * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */
 export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = [], boundSeconds?: number) {
+  if (confinement.length) args = confinedRuntimeArgs(command, args);
   const files = runFiles(directory), pending = `${files.exit}.tmp`;
   const confined = confinement.map(word => `${quoted(word)} `).join('');
   // A bound the run enforces on itself: a scratch run has no watcher once the process that
@@ -235,12 +237,13 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
         if (scratch) sweepScratchRuns(dirname(directory));
         mkdirSync(directory, { recursive: true, mode: 0o700 });
         const containment = scratch ? 'setsid' : configured.containment ?? runContainment();
-        const confinement = configured.confine?.(options.cwd) ?? [];
+        const environment = runEnvironment(process.env, { ...configured.environment, ...options.env });
+        const confinement = configured.confine?.(options.cwd, environment) ?? [];
         const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement,
           scratch ? (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds : undefined);
         // Detached: the run leads its own session and process group, holds no pipe to this process
         // (stdin is closed, so nothing can wait on a person), and is not waited on by it.
-        child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: runEnvironment(process.env, { ...configured.environment, ...options.env }), stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+        child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: environment, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
         child.on('error', error => { failure = `${command} could not be started: ${error.message}`; });
         child.unref();
         Object.assign(meta, { pid: child.pid ?? null, identity: child.pid ? processIdentity(child.pid) : null, containment, unit: launch.unit });

@@ -114,8 +114,8 @@ function world() {
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const kind = kinds.at(-1);
     if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [] } });
-    if (args[0] === 'pane' && args[1] === 'read') return `${kind} ready\n`;
+    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [{ argv: [kind] }] } });
+    if (args[0] === 'pane' && args[1] === 'read') return `${kind === 'claude' ? 'Claude Code' : kind} ready\n`;
     if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } });
     if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, name: args[3] } });
     return json({});

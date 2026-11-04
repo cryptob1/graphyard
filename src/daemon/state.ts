@@ -39,6 +39,8 @@ export const daemonActionSchema = z.object({
   owed: z.object({ work: z.object({ id: z.string(), key: z.string() }).strict(), handle: z.record(z.string(), z.unknown()) }).strict().optional(),
   /** Set on a spec-check launch (GY-2992): the session's pane, which the loop closes once the report lands or the launch expires. */
   pane: z.string().max(200).optional(),
+  /** The registered spec-check launch this pane answers; absent on older cursors. */
+  specCheckLaunch: z.string().max(200).optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
@@ -98,9 +100,11 @@ export type LoopRelease = z.infer<typeof loopReleaseSchema>;
  * never wakes twice, and the last wake's time and causes. All of it is cursor state: a restarted
  * loop adopts the live session from this record and its Herdr name rather than launching a second.
  */
-export const masterSessionSchema = z.object({
+const masterSessionRecordSchema = z.object({
   /** Native conversation identity; independent of the registry allocation and retained on rotation. */
   continuity: continuitySchema.nullable().default(null),
+  /** Immutable pre-upgrade launch request, retained before its named delivery file is reused. */
+  launchRequestRecord: z.string().nullable().default(null),
   agentName: z.string().max(200).nullable().default(null),
   pane: z.string().max(200).nullable().default(null),
   runtime: z.string().max(40).nullable().default(null),
@@ -137,6 +141,10 @@ export const masterSessionSchema = z.object({
    */
   unreleased: z.array(z.object({ session: z.string().max(200), since: z.string(), reason: z.string().max(300) }).strict()).max(20).default([]),
 }).strict();
+export const masterSessionSchema = masterSessionRecordSchema.extend({
+  /** Unread histories remain addressable with their original session and delivery provenance. */
+  recoveryFailures: z.array(z.object({ at: z.string(), error: z.string(), master: masterSessionRecordSchema }).strict()).default([]),
+});
 export type MasterSessionState = z.infer<typeof masterSessionSchema>;
 export const emptyMasterSession = (): MasterSessionState => masterSessionSchema.parse({});
 /**
@@ -157,6 +165,7 @@ export function masterSummary(master: MasterSessionState, now: number, agent?: {
   const startedAt = master.startedAt ? Date.parse(master.startedAt) : Number.NaN;
   return { session: master.agentName, pane: agent?.pane_id ?? master.pane, runtime: master.runtime, account: master.account, adopted: master.adopted,
     startedAt: master.startedAt, ageMs: Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : null,
+    recoveryFailures: master.recoveryFailures,
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching,
     state: masterSessionState(master, now, agent, screen) };
 }
@@ -283,7 +292,7 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
+  const resolved = entries.filter(([key, action]) => action.state === 'done' || action.state === 'failed' && !key.startsWith('early-exit:'));
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }

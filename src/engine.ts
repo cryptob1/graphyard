@@ -945,7 +945,7 @@ export class Engine {
           timeline.attempts.splice(timeline.attempts.indexOf(untouched), 1);
           work.workspaces = work.workspaces.filter(w => w.epoch !== data.epoch);
           work.epoch = data.epoch - 1;
-        } else endAttempt(work, data.epoch, 'released', now);
+        } else endAttempt(work, data.epoch, 'released', now, data.cause);
         work.lease = null;
       }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.

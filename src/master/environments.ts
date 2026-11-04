@@ -459,7 +459,9 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
   // The plan's variables come last: they are the recipe's, where the profile set none, or the
   // profile's own OpenCode permissions laid over the allow-all.
-  const environment: Record<string, string> = { ...contract?.environment, ...profileEnvironment, ...plan.environment };
+  // Keep the install's executable search path across interactive shell activation.
+  // mise must not load unrelated checkout/operator configuration for an agent launch.
+  const environment: Record<string, string> = { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', MISE_NO_CONFIG: '1', ...contract?.environment, ...profileEnvironment, ...plan.environment };
   if (account) {
     // A runtime that names no home variable falls back to its kind's known one, and an account
     // whose home still cannot be applied is refused rather than started on the default login (GY-180).

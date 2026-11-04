@@ -1,0 +1,14 @@
+{
+  "id": "private-root-trial-assets",
+  "title": "Installed private-root browser and Postgres assets execute",
+  "description": "Reproduce empty-home browser lookup failure, launch the pinned installed Chromium, start temporary real Postgres with its declared native links, and exercise owned scratch and actual control-endpoint masks in real namespaces.",
+  "tags": ["isolation", "trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run installed assets and namespace regressions",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/private-root-trial-assets.test.ts tests/complete-owned-recheck-scratch.test.ts tests/coordinator-os-confinement.test.ts tests/action-claim-observation.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

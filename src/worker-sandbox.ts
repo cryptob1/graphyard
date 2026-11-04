@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { rmSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 /**
  * What a worker session must be able to write, and how each runtime's sandbox is made to allow it.
@@ -65,7 +65,18 @@ export interface RuntimeSandbox {
   mode: (args: string[]) => string | null;
   grant: (paths: string[]) => string[];
   /** The command that runs `script` inside the same sandbox the arguments describe. */
-  probe: (args: string[], cwd: string, script: string[]) => { command: string; args: string[] };
+  probe: (args: string[], cwd: string, script: string[], externallyConfined?: boolean) => { command: string; args: string[] };
+}
+
+/** Only after the outer OS boundary is installed: Landlock forbids subsequent mounts, so
+ * Codex must not try to construct a second bubblewrap sandbox inside that boundary. */
+export function confinedRuntimeArgs(command: string, args: readonly string[]): string[] {
+  if (basename(command) !== 'codex') return [...args];
+  const kept = args.flatMap((arg, index) => {
+    if (arg === '--sandbox' || arg === '-s' || args[index - 1] === '--sandbox' || args[index - 1] === '-s' || arg.startsWith('--sandbox=')) return [];
+    return [arg];
+  });
+  return [...kept, '--sandbox', 'danger-full-access'];
 }
 
 const flagValue = (args: string[], ...flags: string[]) => {
@@ -99,7 +110,8 @@ export const runtimeSandboxes: Record<string, RuntimeSandbox> = {
     // states the same policy as one: the session's own root and every `--add-dir` writable under
     // workspace-write, nothing writable under read-only. Codex applies its `.git` protection to
     // the profile exactly as it does to the mode, which is what makes the probe meaningful.
-    probe: (args, cwd, script) => {
+    probe: (args, cwd, script, externallyConfined = false) => {
+      if (externallyConfined) return { command: 'codex', args: ['sandbox', '-P', ':danger-full-access', '--', ...script] };
       const writable = runtimeSandboxes.codex.mode(args) === 'workspace-write' ? [':workspace_roots', ...addedDirectories(args, cwd)] : [];
       const filesystem = [['/', 'read'], ...writable.map(path => [path, 'write'])].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(', ');
       // The launch's network grant is the profile's too: a probe that reaches GitHub (GY-1008's
@@ -160,7 +172,7 @@ export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; env
     return { runtime: kind, sandbox: null, verified: paths };
   }
   const script = ['/bin/sh', '-c', probeScript, 'sh', ...paths];
-  const inner = sandbox && sandbox.mode(launch.args) !== null ? sandbox.probe(launch.args, cwd, script) : { command: script[0], args: script.slice(1) };
+  const inner = sandbox && sandbox.mode(launch.args) !== null ? sandbox.probe(launch.args, cwd, script, wrapper.length > 0) : { command: script[0], args: script.slice(1) };
   const probe = wrapper.length ? { command: wrapper[0], args: [...wrapper.slice(1), inner.command, ...inner.args] } : inner;
   const where = wrapper.length ? ` inside the coordinator confinement (${wrapper[0]})` : '';
   let output: string;

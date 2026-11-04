@@ -8,6 +8,7 @@ import { reconcileAutoDispatch } from '../../src/model/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
 import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/auto-dispatch.js';
+import { startedAtOnce } from './launch-shell.js';
 import { temporaryDirectory } from './temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items; new Date() is the clock handed to reconcileAutoDispatch and stamps snapshots and token expiries nothing ages.
 
@@ -67,8 +68,6 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
   const run = (_command: string, args: string[]) => {
     calls.push(args);
     if (args[0] === 'tab' && args[1] === 'create') { panes++; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${panes}`, tab_id: `tab-${panes}` } } }); }
-    if (args[0] === 'pane' && (args[1] === 'run' || args[1] === 'read')) return '';
-    if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { agent: 'claude', agent_status: 'working', pane_id: args[2] } } });
     if (args[0] === 'agent' && args[1] === 'rename') { agents.push({ name: args[3], pane_id: args[2], agent_status: 'working' }); return JSON.stringify({ result: {} }); }
     if (args[0] === 'pane' && args[1] === 'close') {
       closes.push(args[2]);
@@ -77,7 +76,7 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
       const index = agents.findIndex(agent => agent.pane_id === args[2]); if (index >= 0) agents.splice(index, 1); return JSON.stringify({ result: {} });
     }
     if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
-    return JSON.stringify({ result: {} });
+    return startedAtOnce(args, 'working') ?? JSON.stringify({ result: {} });
   };
   const registerLaunch = async () => ({ launch: 'fixture-launch' });
   const effects = (items: () => Work[], config: () => MasterConfig, observe: NonNullable<Parameters<typeof reconcileReviews>[2]>['observe'] = () => null): DispatchEffects => ({

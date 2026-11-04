@@ -109,7 +109,7 @@ test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands s
     item('control-plane', ['src/app.ts'], { id: 'w2', key: 'GY-2', gates: passed, stageEnteredAt: iso(start - 60_000), candidate: candidate2, observation: { ...observation('control-plane', ['src/app.ts']), candidate: candidate2 } })];
   const trialled: string[] = [];
   const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
-    trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'unit:item-works': { executed: 1, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } } }; },
     push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);
   const cycle = () => ({ state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] }) as unknown as Cycle;
@@ -131,7 +131,7 @@ test('unit:upgrade-waits-for-trial — the merge writer reports a trial in fligh
   let release: () => void = () => {};
   const held = new Promise<void>(resolve => { release = resolve; });
   const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
-    trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'unit:item-works': { executed: 1, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } } }; },
     push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);
   const cycle = { state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] } as unknown as Cycle;
