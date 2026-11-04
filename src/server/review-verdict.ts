@@ -1,4 +1,4 @@
-import { once, digest } from '../store/mutations.js';
+import { once } from '../store/mutations.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
