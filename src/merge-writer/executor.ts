@@ -7,7 +7,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { runTrial, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
+import { runTrial, recordedTests, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
@@ -730,7 +730,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
       ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
       ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
     const landing = await held();

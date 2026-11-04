@@ -4,7 +4,7 @@ import { riskOf } from '../model/risk-class.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { criterionProofs, e2eProofsOf, failureIsBase, mergeOne, requiredProofFailure, trialFailureReason, trialFlaked, type MergeOutcome, type MergePorts } from './executor.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
-import { TrialTimeoutError } from './trial.js';
+import { TrialTimeoutError, recordedTests } from './trial.js';
 
 /** How many queued heads one batch merges (GY-2088): one trial and one push for all of them. */
 export const defaultMergeBatch = 4;
@@ -74,7 +74,7 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
       const own = e2eProofsOf(work), e2e = run.e2e?.filter(entry => own.includes(entry.proof)) ?? [];
       const proofs = Object.fromEntries([...criterionProofs(work), ...own].filter(proof => run.proofs[proof]).map(proof => [proof, run.proofs[proof]!]));
       await ports.record(work, { kind: 'intent', head, baseTip: parent, mergeSha, risk: riskOf(work).risk, at: at() });
-      await ports.record(work, { kind: 'trial', head, baseTip: parent, mergeSha: tip, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs, durationMs: run.durationMs,
+      await ports.record(work, { kind: 'trial', head, baseTip: parent, mergeSha: tip, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs, durationMs: run.durationMs,
         ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(e2e.length ? { e2e } : {}), ...(preview ? { preview } : {}), ...(flaked && index === 0 ? { flaked } : {}) });
     }
     // Retain the real batch counts before individual trials identify the head needing rework.
