@@ -593,6 +593,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
       if (error instanceof SessionStartError) log(`graphyard: ${name} (${kind}) in pane ${pane}: start failed after ${(error.waitedMs / 1000).toFixed(1)} s (${error.startCase}; bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
       throw error;
     }
+    const runtimeStartedAt = new Date().toISOString();
     log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime ${started.awaiting ? 'awaiting consent' : 'started'} after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
     let named = true;
     try { await herdrJson(['agent', 'rename', pane, name], run); }
@@ -609,7 +610,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
     launched = true;
     // The request is already the runtime's own first argument, so nothing waits to be pasted: a
     // session held on a consent dialog reads it once the dialog is answered.
-    return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
+    return { runtimeStartedAt, delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
       confinement,
       started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
   } finally { settle(launched); }

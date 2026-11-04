@@ -43,10 +43,15 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   }
   for (const [key, action] of Object.entries(actions)) {
     const item = open.find(item => item.key === action.work);
-    if (!item || (action.epoch !== null && action.epoch !== item.epoch)) continue;
+    const earlyExit = key.startsWith('early-exit:');
+    if (!item || (!earlyExit && action.epoch !== null && action.epoch !== item.epoch)) continue;
     if (key.startsWith('spec-check-') && specCheckCurrent(item)) continue;
-    if ((action.state === 'failed' || action.state === 'indeterminate') && ['dispatch', 'review', 'proof', 'attention'].includes(action.kind))
-      causes.push(cause(subject('cursor', key), `${action.work} ${action.kind}: ${action.detail}`));
+    if ((action.state === 'failed' || action.state === 'indeterminate') && ['dispatch', 'review', 'proof', 'attention'].includes(action.kind)) {
+      const entry = cause(subject('cursor', key), `${action.work} ${action.kind}: ${action.detail}`);
+      // An unchanged crash on a new lease is the same incident; its prompt still names the exact epoch.
+      if (earlyExit) entry.digest = cause(entry.key, action.detail.replace(/(?:epoch|attempt) \d+/g, 'attempt')).digest;
+      causes.push(entry);
+    }
   }
   return causes;
 }
