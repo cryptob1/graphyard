@@ -58,13 +58,14 @@ export async function createItems(context:RunContext) {
     context.signal.throwIfAborted();
     const final=component.id==='integration'||component.id==='single';
     const item=await context.plane.call('work',context.operator,{
+      reason:`Run ${context.config.id}: create ${component.id} for the ${context.config.mode} frozen-v1 certified real-root workbench rebuild, seed ${context.config.seed}.`,
       type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
       criteria:[{id:'AC-1',text:`${component.brief} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
       dependencies:component.depends.map(id=>ids.get(id)),producerProofs:final?['manual:certified-artifact']:[],policy:{checks:['test'],review:true},
     });
     ids.set(component.id,item.id);
     context.receipt.work.push({component:component.id,id:item.id,key:item.key,epoch:0,candidate:null,merge:null,attempts:0,reviews:0,repairs:0,record:item});
-    await context.plane.call(`work/${item.id}/ready`,context.operator,{});
+    await context.plane.call(`work/${item.id}/ready`,context.operator,{reason:`Run ${context.config.id}: release ${component.id} under the frozen-v1 work plan; preserve its dependencies, independent proofs and review gates.`});
   }
 }
 export async function execute(configInput:unknown,fixture?: (context:RunContext)=>Promise<void>):Promise<Receipt> {

@@ -99,7 +99,14 @@ python3-venv and the committed pinned requirements on top of that image; nested
 trials expose the environment read-only. Build, five lifecycle/comparison tests,
 focused seed 1/2/3 oracle/routing checks and documentation checks pass after sync.
 Full scratch integration and container checks await the declared candidate image;
-no full fixture or actual-agent outcome is assumed.
+no full fixture or actual-agent outcome is assumed. The first native check ran
+11 cases: eight passed, and three delivery/cleanup cases stopped at operator-agent
+work creation because the required reason was missing. Creation and release now
+supply explicit run/component/goal reasons; the identity and reason guards remain
+unchanged. The isolated benchmark master also explicitly receives work creation
+scope within `scratch/hard-math`, matching the existing master setup pattern;
+the default empty work scope cannot create items. Those three cases still require
+the native rerun.
 
 The epoch 2/3 failure at the initial scratch Git push was an inherited Landlock
 REFER restriction (`Invalid cross-device link` during quarantine object migration).

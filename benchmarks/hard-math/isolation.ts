@@ -61,6 +61,6 @@ export async function startPlane(directory:string,root:string,credentials:Creden
 }
 export async function operator(plane:Awaited<ReturnType<typeof startPlane>>,admin:string) {
   const token=randomBytes(32).toString('hex');
-  await plane.call('operator-agents',admin,{id:'benchmark-master',displayName:'Hard math supervising master',capabilities:operatorCapabilities,scope:{repositories:['scratch/hard-math']},token,reason:'Isolated benchmark coordination, no implementation or proof authority'});
+  await plane.call('operator-agents',admin,{id:'benchmark-master',displayName:'Hard math supervising master',capabilities:operatorCapabilities,scope:{repositories:['scratch/hard-math'],workItems:['*']},token,reason:'Isolated benchmark coordination, no implementation or proof authority'});
   return token;
 }
