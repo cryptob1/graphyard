@@ -1,0 +1,14 @@
+{
+  "id": "vite-private-cache",
+  "title": "Vite serves the project with read-only shared dependencies",
+  "description": "Real private-root startup reproduces EROFS with the prior project config, then serves client and entry output on cold and warm starts using writable project cache.",
+  "tags": ["browser", "isolation"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run actual Vite startup with read-only dependencies",
+    "run": "node --import tsx --test tests/vite-private-cache.test.ts",
+    "timeoutSeconds": 100
+  }]
+}
