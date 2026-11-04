@@ -13,7 +13,7 @@ import { stopRun, stopImplementation, watchBudget } from './lifecycle.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MERGE_PROTOCOL } from '../../src/protocol-version.js';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
-import { defaultChildRun } from '../../src/child-runner.js';
+import { defaultChildRun, type ChildRun } from '../../src/child-runner.js';
 import { boundedChildRun, command, git } from './process.js';
 import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
@@ -32,6 +32,7 @@ export type Plane=Awaited<ReturnType<typeof startPlane>>;
 export interface RunContext {
   config:RunConfig; receipt:Receipt; directory:string; root:string;origin:string;install:string;
   plane:Plane;admin:string;coordinator:string;producer:string;operator:string;workers:{id:string;token:string}[];
+  fixtureRuntime?:ChildRun;
   oracleFile:string; signal:AbortSignal; panes:Set<string>; checkpoint():Promise<void>; snapshot():Promise<any[]>; certify(item:any):Promise<boolean>;
 }
 async function frozenInputs() {

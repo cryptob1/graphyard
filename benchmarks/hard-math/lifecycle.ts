@@ -4,12 +4,11 @@ import { join } from 'node:path';
 import { closeHerdrPane, herdrJson } from '../../src/master.js';
 import { liveRun, listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
 import type { RunContext } from './runner.js';
-import { childRunner } from '../../src/child-runner.js';
+import { childRunner, type ChildRun } from '../../src/child-runner.js';
 import type { Work } from '../../src/model.js';
 import type { DaemonState } from '../../src/daemon/state.js';
 
-async function closePresentPane(pane:string) {
-  const run=childRunner({timeoutMs:5_000});
+async function closePresentPane(pane:string,run:ChildRun=childRunner({timeoutMs:5_000})) {
   const inventory=await herdrJson(['pane','list'],run);
   if(!Array.isArray(inventory.panes)) throw new Error('Herdr pane inventory unavailable during benchmark cleanup');
   if(inventory.panes.some((p:any)=>p.pane_id===pane)) await closeHerdrPane(pane,run);
@@ -18,7 +17,7 @@ async function closePresentPane(pane:string) {
 /** Confirm this submitted item's implementation has stopped before attesting rework. */
 export async function stopImplementation(c:RunContext,item:Work) {
   for(const s of item.sessions??[]) if(s.kind==='implementation') {
-    if(s.pane) await closePresentPane(s.pane);
+    if(s.pane) await closePresentPane(s.pane,c.fixtureRuntime);
     if(s.state==='running') await c.plane.call(`work/${item.id}/session`,c.coordinator,{
       id:s.id,kind:s.kind,principal:s.principal,runtime:s.runtime,host:s.host,subject:s.subject,state:'finished',outcome:'Independent certification rejected the submitted candidate',...(s.launch?{launch:s.launch}:{}),
     });
@@ -26,7 +25,7 @@ export async function stopImplementation(c:RunContext,item:Work) {
 }
 
 /** Only handles belonging to this isolated installation are eligible for shutdown. */
-export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:string)=>Promise<unknown>=closePresentPane) {
+export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:string)=>Promise<unknown>=(pane)=>closePresentPane(pane,c.fixtureRuntime)) {
   const reason='Bounded benchmark ended; stop run-owned sessions and release leases';
   const errors:string[]=[],closed=new Set<string>();
   const attempt=async(label:string,body:()=>Promise<unknown>)=>{try {await body();} catch(error) {errors.push(`${label}: ${error}`);}};

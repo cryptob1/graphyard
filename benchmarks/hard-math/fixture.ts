@@ -142,18 +142,21 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
       reviewers:[{name:'fixture-reviewer',agentName:'controlled-independent-reviewer',kind:'claude',concurrency:16}],run:{worktreeRoot:join(c.directory,'review-worktrees')}});
     await mkdir(join(c.root,'.graphyard'),{recursive:true});
     await atomicPrivateWrite(join(c.root,'.graphyard/master.json'),config);
-    const cursor=emptyDispatchCursor(config),directories:string[]=[];
+    const cursor=emptyDispatchCursor(config),directories:string[]=[],panes=new Set<string>();
     // Replace only the AI runtime: dispatch, session binding, launch registration and verdict ingestion are native.
     const runtime=(_command:string,args:string[])=>{
       if(args[0]==='tab' && args[1]==='create') {
         directories.push(args.find(value=>value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length));
+        panes.add(`fixture-review-${directories.length}`);
         return JSON.stringify({result:{type:'tab_created',root_pane:{pane_id:`fixture-review-${directories.length}`,tab_id:`fixture-tab-${directories.length}`},tab:{tab_id:`fixture-tab-${directories.length}`}}});
       }
       if(args[0]==='pane' && args[1]==='read') return 'Claude Code ready\n';
       if(args[0]==='pane' && args[1]==='process-info') return JSON.stringify({result:{process_info:{shell_pid:100,foreground_process_group_id:200,foreground_processes:[{argv:['claude']}]}}});
       if(args[0]==='agent' && ['get','rename'].includes(args[1])) return JSON.stringify({result:{agent:{agent:'claude',agent_status:'idle',pane_id:args[2]}}});
-      return JSON.stringify({result:args[0]==='pane' && args[1]==='list'?{panes:[]}: {}});
+      if(args[0]==='pane' && args[1]==='close') panes.delete(args[2]);
+      return JSON.stringify({result:args[0]==='pane' && args[1]==='list'?{panes:[...panes].map(pane_id=>({pane_id}))}: {}});
     };
+    c.fixtureRuntime=runtime;
     const effects={snapshot:async()=>({work:await c.snapshot(),now:new Date().toISOString()}),agents:()=>[],
       credentials:async(profiles:{name:string}[])=>Object.fromEntries(profiles.map(p=>[p.name,{available:true,reason:null}])),
       reconcileReviews:async()=>reconcileReviews(c.root,config,{run:runtime,work:await c.snapshot(),agents:[]}),reconcileProducers:async()=>({producers:[]}),launchReview:async()=>{},launchProducer:async()=>{},persist:async()=>{},

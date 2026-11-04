@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { stopRun, watchBudget } from '../benchmarks/hard-math/lifecycle.js';
@@ -37,6 +37,24 @@ test('hard math cleanup stops only run-owned master, item and headless sessions 
     await assert.rejects(stopRun(c,undefined,async()=>{throw new Error('runtime still running');}),/cleanup failed/);
     assert.ok(!writes.some(w=>w.path==='work/one/capacity'),'failed runtime stop cannot release its lease');
   } finally {endRun(name,{} as any);endRun(other,{} as any);}
+});
+
+test('hard math controlled review cleanup uses its runtime inventory and closes only owned panes',async()=>{
+  const root=await temporaryDirectory('hard-math-fixture-cleanup');
+  await mkdir(join(root,'.graphyard'));
+  await writeFile(join(root,'.graphyard/reviews.json'),JSON.stringify({reviews:[{pane:'fixture-review-1'},{pane:'fixture-review-2'}]}));
+  const live=new Set(['fixture-review-1','fixture-review-2','unrelated-pane']),closed:string[]=[];
+  const c={root,coordinator:'fixture',fixtureRuntime:(_command:string,args:string[])=>{
+    if(args[0]==='pane' && args[1]==='close') {closed.push(args[2]);live.delete(args[2]);}
+    return JSON.stringify({result:args[1]==='list'?{panes:[...live].map(pane_id=>({pane_id}))}:{}});
+  },plane:{call:async(path:string)=>path==='work'?[]:{sessions:[]}}} as any;
+  await stopRun(c);
+  assert.deepEqual(closed,['fixture-review-1','fixture-review-2']);
+  assert.deepEqual([...live],['unrelated-pane']);
+  await stopRun(c);
+  assert.equal(closed.length,2,'already closed fixture ledger handles need no second close');
+  c.fixtureRuntime=()=>{throw new Error('fixture inventory unavailable');};
+  await assert.rejects(stopRun(c),/fixture inventory unavailable/,'fixture transport errors still fail cleanup');
 });
 
 test('hard math watchdog enforces budget while coordination is busy; aborted commands kill descendants',async()=>{

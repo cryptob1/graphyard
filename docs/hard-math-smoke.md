@@ -199,3 +199,6 @@ independent approval is recorded, within the same deadline, usage and repair bou
 Normal-risk delivery uses the native post-merge review of the exact delivery merge
 and its parent; pre-merge approval binds the candidate and its reviewed base.
 Missing, stale, unrelated or wrong-policy approvals cannot certify a receipt.
+
+Controlled review fixtures use the same synthetic runtime for launch, pane inventory
+and cleanup; real runs still inspect and close their actual runtime handles.
