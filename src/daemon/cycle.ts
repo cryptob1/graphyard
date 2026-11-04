@@ -1,4 +1,5 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
+import { existsSync } from 'node:fs';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
@@ -274,6 +275,16 @@ async function closeStep(cycle: Cycle) {
       const ended = await effects.releaseRegistrySession({ key: item.key, id: session.id, kind: session.kind, head: session.head ?? null, pane: session.pane ?? null, agentName: session.agentName ?? null }, reason);
       await note(cycle, key, 'close', item.key, 'done', `Released ${session.id}'s agent-registry session (${ended ?? 'none recorded'}): ${reason}`, session.principal ?? null);
     } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
+  }
+  // A pane Graphyard launched whose runtime exited in a worktree since removed is a leftover shell: close it.
+  const launched = new Set([...snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)), ...Object.values(state.actions).map(action => action.pane)]);
+  for (const master of [state.master, ...Object.values(state.personalMasters)]) launched.delete(master.pane ?? undefined);
+  if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
+    const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
+    if (!agent.pane_id || !launched.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
+    if (!cwd.includes('/.graphyard/worktrees/') || existsSync(cwd)) continue;
+    try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
+    catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
 }
