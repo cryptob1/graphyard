@@ -28,7 +28,7 @@ async function open(page: Page) {
     }
     return route.fulfill({ json: boardApi(url.pathname.slice(1) + url.search) });
   });
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', level: 1 })).toBeVisible();
@@ -124,7 +124,7 @@ for (const width of loginWidths) test(`the sign-in page is captured in every sta
     expect(layout.helpTop, `${state}: the helper text is below the action at ${width} px`).toBeGreaterThanOrEqual(layout.buttonBottom);
     await page.screenshot({ path: `${loginOut}/${state}-${width}.png`, fullPage: true });
   };
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await expect(page.getByLabel('Access token')).toBeFocused();
   await shot('token-form');
   await page.getByLabel('Access token').fill('fixture');

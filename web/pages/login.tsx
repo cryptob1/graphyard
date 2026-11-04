@@ -23,14 +23,18 @@ export function offerToSavePassword(token: string, scope: { PasswordCredential?:
 }
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
 /** The one command that signs the human operator in without a token (GY-738, GY-2171). */
-export const SIGN_IN_COMMAND = 'graphyard login';
-/** Where a session a sign-in link opens is kept: it lasts 30 days, so it outlives the browser session a typed token keeps to (GY-2171). */
+export const SIGN_IN_COMMAND = 'graphyard open';
+/** Where a session a sign-in link opens is kept: it lasts until 90 days unused, so it outlives the browser session a typed token keeps to (GY-2171). */
 export const HUMAN_SESSION_KEY = 'graphyard-token';
-/** The token this browser holds: a typed one for this browser session, else a sign-in link's 30-day human session. */
+/** The token this browser holds: a typed one for this browser session, else a sign-in link's human session. */
 export const storedToken = () => sessionStorage.getItem(HUMAN_SESSION_KEY) ?? localStorage.getItem(HUMAN_SESSION_KEY) ?? '';
-/** The operator's line: run the command (a click copies it) on the Graphyard host and open the link it prints. */
+/** What an action the local viewer may not take says; the notice beside it offers Sign in. */
+export const SIGN_IN_NEEDED = 'Sign in to do that.';
+/** The sign-in form opens at once for `/?sign-in` and for a sign-in or claim link; otherwise the dashboard first tries the local viewer. */
+export const wantsSignIn = () => new URLSearchParams(location.search).has('sign-in') || !!signInCode(location.hash) || !!claimFromHash(location.hash);
+/** The operator's line: run the command (a click copies it) on the Graphyard host. */
 function SignInCommand() {
-  return <p className="login-help">Operator? Run <code className="login-command" title="Click to copy" onClick={() => void navigator.clipboard?.writeText(SIGN_IN_COMMAND).catch(() => {})}>{SIGN_IN_COMMAND}</code> on the Graphyard host and open the link it prints to sign in for 30 days.</p>;
+  return <p className="login-help">Operator? Run <code className="login-command" title="Click to copy" onClick={() => void navigator.clipboard?.writeText(SIGN_IN_COMMAND).catch(() => {})}>{SIGN_IN_COMMAND}</code> on the Graphyard host, or graphyard login to print a link to open elsewhere.</p>;
 }
 export const LINK_REFUSED_NOTICE = 'That sign-in link has expired or was already used. Ask for a new one.';
 
@@ -130,7 +134,7 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
 }
 
 /** The token prompt, and the verifying state while the first status read is in flight. */
-export default function LoginPage({ token, error, signOut, setError, sessionEpoch, setToken, draftToken, setDraftToken, host, onVerified }: Pick<Dashboard, 'token' | 'error' | 'signOut' | 'setError' | 'sessionEpoch'> & { setToken(token: string): void; draftToken: string; setDraftToken(value: string): void; host: string; onVerified(status: unknown, signal: AbortSignal): Promise<void> }) {
+export default function LoginPage({ token, error, signOut, setError, sessionEpoch, setToken, draftToken, setDraftToken, host, onVerified, signingIn, setSigningIn }: Pick<Dashboard, 'token' | 'error' | 'signOut' | 'setError' | 'sessionEpoch'> & { setToken(token: string): void; draftToken: string; setDraftToken(value: string): void; host: string; onVerified(status: unknown, signal: AbortSignal): Promise<void>; signingIn: boolean; setSigningIn(value: boolean): void }) {
   const [unreachable, setUnreachable] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // A sign-in link opens here: its code is taken out of the address bar at once, redeemed, and the
@@ -156,20 +160,21 @@ export default function LoginPage({ token, error, signOut, setError, sessionEpoc
       sessionEpoch.current++; setError(''); sessionStorage.setItem('graphyard-token', value); setToken(value);
     }, () => setError(CLAIM_REFUSED));
   }, []);
+  // With no token, the first read is the local viewer's: a refusal (a proxied or remote address) opens the form.
   useEffect(() => {
-    if (!token) return;
+    if (!token && signingIn) return;
     setUnreachable(false);
     const epoch = sessionEpoch.current; let active = true;
     const check = verifyToken(token, (input, init) => fetch(input, init), { setTimeout: (run, ms) => setTimeout(run, ms), clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>) }, onVerified);
     void check.result.then(outcome => {
       if (!active || epoch !== sessionEpoch.current) return;
-      if (outcome.kind === 'accepted') { offerToSavePassword(token); return; }
-      if (outcome.kind === 'rejected') { signOut(); setError(REJECTED_NOTICE); }
+      if (outcome.kind === 'accepted') { if (token) offerToSavePassword(token); return; }
+      if (outcome.kind === 'rejected') { if (!token) { setSigningIn(true); return; } signOut(); setError(REJECTED_NOTICE); }
       else setUnreachable(true);
     });
     return () => { active = false; check.cancel(); };
-  }, [token, attempt]);
-  const state: LoginState = !token ? { kind: 'form' } : unreachable ? { kind: 'unreachable', host } : { kind: 'verifying' };
+  }, [token, attempt, signingIn]);
+  const state: LoginState = !token && signingIn ? { kind: 'form' } : unreachable ? { kind: 'unreachable', host } : { kind: 'verifying' };
   const submit = () => { const value = draftToken.trim(); if (!value) { setError('Enter an access token.'); return; } sessionEpoch.current++; setError(''); sessionStorage.setItem('graphyard-token', value); setToken(value); };
   return <LoginView state={state} error={error} draftToken={draftToken} setDraftToken={setDraftToken} submit={submit} retry={() => setAttempt(n => n + 1)} useAnotherToken={signOut}/>;
 }
