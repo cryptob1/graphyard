@@ -1,4 +1,4 @@
-// Concern: the control-plane merge executor (GY-1524) — the serial queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
+// Concern: the control-plane merge executor (GY-1524) — the queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import type { Work } from '../model.js';
 import { riskOf } from '../model/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
@@ -7,7 +7,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { runTrial, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
+import { runTrial, recordedTests, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
@@ -27,20 +27,9 @@ export function countProofCases(tap: string, proof: string) {
   return { executed, failed, skipped };
 }
 
-// ---- The queue -----------------------------------------------------------------------------------
-
-/**
- * When the item's current head was handed in. The pipeline timeline's resubmission or submission
- * when the snapshot carries it; the loop's coordination view drops that timeline, so there the
- * moment this very head was first observed (`headObserved`, set when the candidate changed) stands
- * in, then the candidate's creation, then the stage entry.
- */
-export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 'headObserved'>): number {
-  const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
-  const observed = item.headObserved && item.candidate && item.headObserved.sha.toLowerCase() === item.candidate.sha.toLowerCase() ? item.headObserved.at : null;
-  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, observed, item.candidate?.createdAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
-  return 0;
-}
+// ---- The queue (model/merge-queue.ts) ------------------------------------------------------------
+import { baseFailurePrefix, gate, open } from '../model/merge-queue.js';
+export { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, mergeQueue, nextToMerge, submittedAtOf, trialRefusalHeld, type MergeQueue, type QueuedMerge } from '../model/merge-queue.js';
 
 /** Whether trial results still belong to this implementation and policy. */
 export function mergeCandidateObsolete(current: Work | undefined, selected: Work = current!): string | null {
@@ -61,73 +50,6 @@ export function mergeCandidateHold(current: Work | undefined, selected: Work = c
     ?? (!gate(current!, 'build') || !gate(current!, 'review') ? `${current!.key}: build or review gate no longer passes; obsolete merge stays queued` : null);
 }
 
-/** One queued control-plane candidate, oldest submission first. */
-export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
-export interface MergeQueue {
-  /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
-  next: Work | null;
-  /** Every candidate due a merge, oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
-  due: Work[];
-  queue: QueuedMerge[];
-  /** The item whose open intent (or unreconciled push) holds the queue until it is reconciled; null when none does. */
-  blockedBy: string | null;
-}
-const open = (state: MergeLedgerState) => state.state === 'intent' || state.state === 'pushed';
-const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)?.passed === true;
-
-const createdAtOf = (item: Pick<Work, 'createdAt'>) => Date.parse(item.createdAt) || 0;
-/** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
-export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
-/** The item the loop's base-failure step files for a failing base test (`baseFailureItem`'s title): it unblocks every held head, so it goes first too. */
-export const isBaseRepair = (item: Pick<Work, 'title'>) => /^base branch \S+ fails .+ test: /i.test(item.title ?? '');
-const mergesFirst = (item: Pick<Work, 'title'>) => isHotfix(item) || isBaseRepair(item);
-/**
- * The trial-failure refusal the item's own record holds for its exact candidate head, or null: the
- * one fact that takes a head out of the queue (`mergeQueue`'s `trial failed` drop, GY-1524 AC-3)
- * and the ground of the rework releasing the head requires. The queue and the writer's rework debt
- * read the same record, so a head the queue drops is always a head whose rework is asked for
- * (requestPendingReworks re-derives the debt from here, GY-2166: the settlement that first owed a
- * refusal's rework lives only in memory, and the restart that kept the ledger lost it).
- */
-export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedgerState | null | undefined): { reason: string } | null {
-  const head = candidate?.sha.toLowerCase();
-  return state && head && state.state === 'refused' && state.head === head
-    && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)
-    ? { reason: state.refusal.reason } : null;
-}
-/**
- * The control-plane candidates owed a merge, hotfixes and base-failure repairs first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
- * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
- * and `review` gates passed as the control plane served them: its review gate fails a sensitive delta until its
- * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
- * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
- * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent
- * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
- * so never more than one merge is in flight.
- */
-export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
-  const blocking = Object.values(ledger).find(open);
-  const owed = work.filter(item => {
-    const candidate = item.candidate;
-    if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
-    if (!gate(item, 'build')) return false;
-    // The served review gate is the control plane's verdict under the deployment's policy, never this process's
-    // own reading of graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
-    if (!gate(item, 'review')) return false;
-    const state = ledger[item.key];
-    if (trialRefusalHeld(candidate, state)) return false;
-    if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
-    // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
-    if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
-    return true;
-  // The oldest item first, by when it was filed, not by its latest submission: lead time runs from release, so a head
-  // redone after a refusal goes ahead of newer work instead of rejoining at the back.
-  }).sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
-  const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
-  return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
-}
-/** The oldest-submitted candidate due a merge (hotfixes and base-failure repairs first), or null while nothing is due or an open intent blocks the queue (AC-1). */
-export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;
 
 // ---- The ledger events the executor records --------------------------------------------------------
 
@@ -257,13 +179,6 @@ export function requiredProofFailure(work: Pick<Work, 'criteria'>, run: Pick<Mer
   }
   return null;
 }
-/**
- * GY-1834: the refusal of a head whose every failing test file fails on the base tip too. It grounds
- * no rework (it does not start `trialFailurePrefix`) and leaves the head queued, held
- * `baseFailureHoldMs`; the loop's base-failure step files the fix item from it.
- */
-export const baseFailurePrefix = 'base failure';
-export const baseFailureHoldMs = 30 * 60_000;
 /** Up to 20 of `entries` joined by `separator` within `budget` characters: whole entries only, the first cut to the budget when it alone exceeds it. */
 function boundedList(entries: readonly string[], separator: string, budget: number): string {
   const kept: string[] = [];
@@ -721,14 +636,24 @@ export interface MergePorts {
   fetch(): Promise<string>;
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
-  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984). */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void): Promise<MergeTrialRun>;
+  /**
+   * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
+   * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
+   */
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, share?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
    * Absent, nothing is previewed.
    */
   preview?(mergeSha: string, files: readonly string[], item: Pick<Work, 'key'>): Promise<PreviewVerdict | null>;
+  /**
+   * Whether the tip a trial ran on is the tip it would land on (batch.ts `mergeStack`): answered once
+   * every queue position before this one has finished. False discards the verdict, which is the
+   * stacked positions' as much as this head's, and the head is trialled again on the tip as it stands.
+   * Absent, every trial lands where it ran.
+   */
+  lands?(baseTip: string): Promise<boolean>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -790,6 +715,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
 
     const merged = await ports.merge(head, baseTip, item);
     if ('conflict' in merged) {
+      if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
       const reason = trialFailureReason({ conflict: merged.conflict })!;
       await ports.record(item, { kind: 'refused', head, reason });
       return { outcome: 'refused', reason, trial: null, conflict: merged.conflict };
@@ -807,6 +733,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
         durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
       throw error;
     }
+    if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
     // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
     const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
     const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
@@ -815,7 +742,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
       ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
       ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
     const landing = await held();

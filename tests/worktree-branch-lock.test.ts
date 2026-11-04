@@ -7,7 +7,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { pipelineTimeline } from '../src/pipeline-speed.js';

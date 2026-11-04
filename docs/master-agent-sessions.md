@@ -21,6 +21,8 @@ Outer trials inherit no host filesystem Landlock domain, which would forbid desc
 
 ### Worker sandbox
 
+Workers run the build and their criteria's tests. A required test failing only because the sandbox lacks Docker, unnested bubblewrap or a trial-image fixture does not block submission: record its command and environment error in the commit message and submit with `complete`; the merge trial runs it and decides the verdict. Assertion failures, build errors and refused worker writes still require a fix or blocker.
+
 Confined Codex uses `--sandbox danger-full-access` inside Graphyard's mount and socket boundary. A second runtime sandbox would fail because Landlock denies later mounts. Standalone probes keep native workspace policy; confined probes exercise the outer boundary. OS writable grants and credential masks still apply to every command.
 
 The outer boundary grants writable common `.git` for `packed-refs` locking/replacement, plus assigned worktree administration, objects, remote refs, graphyard branch refs and logs. Native Codex sandbox probes grant these through `--add-dir` too. Inside the mount, coordinator index/HEAD/config/hooks, other refs and shared worktree administration remain read-only. Directory locks cannot replace protected files.
@@ -97,11 +99,11 @@ Claude records session ID, runtime, account and worktree in `.graphyard/dispatch
 
 ### Verdicts and registry slots
 
-Reviews launch under the profile’s agent identity through the control plane. `master reviewer add|remove` manages profiles; no reviewer App, installation or private key is configured.
+Reviews and spec checks run headless: one confined child gets item, criteria and diff, printing JSON posted with the launch token as the profile. Malformed answers retry once, then relaunch; limit notices hold the account. Runtimes lacking one-shot forms keep panes; `master reviewer add|remove` manages profiles.
 
-`review-binding.json` (0600 in `GH_CONFIG_DIR`) binds head/base/policy, verdictToken and previousHead. No binding means no launch. `review post --event …` posts once; moved heads refuse. Workers run `review self GY-N` before complete.
+`review-binding.json` (0600, launcher-held) binds head, base, policy and verdictToken; moved heads refuse. Workers run `review self GY-N` before complete.
 
-Verdict, stage change or missing pane ends the ledger-linked registry slot. Completed reviews release on the first eligible pane miss after launch grace; other orphaned slots close after two consecutive misses, including after loop restart. See [session liveness](master-agent.md#session-liveness-is-reconciled-not-trusted).
+Verdict, stage change or missing pane ends the ledger-linked registry slot. Completed reviews release on the first eligible pane miss after launch grace; other orphans after two consecutive misses, across loop restarts. See [session liveness](master-agent.md#session-liveness-is-reconciled-not-trusted).
 
 ### One continuing master conversation
 

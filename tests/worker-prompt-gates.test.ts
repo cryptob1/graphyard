@@ -54,7 +54,7 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /guide TOPIC/, 'the block names guide TOPIC');
   // Nothing else in the request changed: the section is the one addition, sitting between the
   // pre-edit status instruction and the worktree instruction that follows it.
-  assert.ok(request.includes(`Run node ${cli} status GY-1 before editing. ${section}Work only in the current assigned worktree`), 'the section is the one addition after the pre-edit instruction');
+  assert.ok(request.includes(`Run node ${cli} status GY-1 before editing. ${section}Use the assigned worktree`), 'the section is the one addition after the pre-edit instruction');
   // Purity, as today: the request is a pure function of its inputs, and an input that adds
   // nothing adds nothing to the request.
   assert.equal(render(true), request, 'the same input renders byte-identical');
@@ -76,7 +76,7 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   const other = render(false);
   assert.equal(other, request.replace(section, ''), "another repository's request is byte-identical to the pre-GY-1797 request");
   assert.ok(!other.includes('fast gates') && !other.includes(' sync GY-1') && gatesIn(other).length === 0, "another repository's request names no gate and no sync");
-  assert.ok(other.includes('before editing. Work only in the current assigned worktree'), "another repository's request keeps the pre-edit instruction with its one space");
+  assert.ok(other.includes('before editing. Use the assigned worktree'), "another repository's request keeps the pre-edit instruction with its one space");
   assert.equal(render(), other, 'a request whose launcher said nothing of the gates renders as before');
   assert.equal(workerPrompt({ cliPath: cli, repository: 'owner/graphyard' }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1), other, 'the repository name alone adds nothing: the gates are an input the launcher reads from its checkout');
 });

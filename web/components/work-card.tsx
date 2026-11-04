@@ -5,7 +5,7 @@ import { groupOf, nextActor, timedGroups, type Group } from '../groups';
 import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
 import { currentMergeStep } from '../../src/model/merge-ledger';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
-import type { ActionlessCard } from '../../src/model/actionless';
+import { queuedSentence, type ActionlessCard, type QueuedBehind } from '../../src/model/actionless';
 import type { ReleaseView } from '../../src/model/release';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
@@ -21,13 +21,14 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
  * threshold. On a phone the same element lays out as a card. The candidate is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, release }: { item: Work; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
+export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, queue, release }: { item: Work; queue?: QueuedBehind; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
   const group = given ?? groupOf(item, now, undefined, undefined, release) ?? 'shipped';
   const status = plainStatus(item, now);
-  const held = stepHeld(item, now, null, release);
+  // A head waiting its merge-queue turn is moving, never overdue for that wait.
+  const step = stepHeld(item, now, null, release), held = queue ? { ...step, overdue: false } : step;
   const timed = timedGroups.has(group);
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
-  const actor = nextActor(item, group, now, release, all);
+  const actor = queue ? { who: 'Graphyard (automatic)', does: queuedSentence(queue) } : nextActor(item, group, now, release, all);
   // The merge writer opens no pull request, so a candidate the control plane observed itself names no PR (GY-2963).
   const pr = item.candidate && item.observation?.source !== 'control-plane' && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
   // GY-2963: a merge whose trial is advancing names where it is, never a stall.
@@ -39,6 +40,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
     : waits?.kind === 'waiting-until' ? waits.sentence
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
       : merging ? merging
+      : queue ? queuedSentence(queue)
       : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;

@@ -32,7 +32,7 @@ async function fixture(page: Page) {
 test('integration:spec-check-shown — a feature item shows its spec check: the paraphrase, the gaps and the verdict', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await fixture(page);
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true })).toBeVisible();
@@ -51,7 +51,7 @@ test('integration:spec-check-shown — a feature item shows its spec check: the 
 test('integration:spec-check-shown — a bug owes no spec check and shows no panel', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await fixture(page);
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true })).toBeVisible();

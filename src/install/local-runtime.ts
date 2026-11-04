@@ -117,13 +117,13 @@ export async function startCluster(paths: LocalPaths, port: number, binaries?: P
   };
 }
 
-/** Creates the graphyard database on a fresh cluster; an existing one is kept. */
-export async function ensureDatabase(password: string, port: number) {
+/** Creates the graphyard database on a fresh cluster, as a copy of `template` when named; an existing one is kept. */
+export async function ensureDatabase(password: string, port: number, template?: string) {
   const client = new pg.Client({ host: '127.0.0.1', port, user: LOCAL_USER, password, database: 'postgres' });
   await client.connect();
   try {
     const found = await client.query('SELECT 1 FROM pg_database WHERE datname = $1', [LOCAL_DATABASE]);
-    if (!found.rowCount) await client.query(`CREATE DATABASE ${LOCAL_DATABASE}`);
+    if (!found.rowCount) await client.query(`CREATE DATABASE ${LOCAL_DATABASE}${template ? ` TEMPLATE ${client.escapeIdentifier(template)}` : ''}`);
   } finally { await client.end(); }
 }
 
@@ -161,10 +161,10 @@ export async function readLocalEnvironment(paths: LocalPaths): Promise<Record<st
 export interface LocalRuntime { url: string; databaseUrl: string; cluster: RunningCluster; stop(): Promise<void> }
 
 /**
- * Starts the cluster, migrates, then serves. `stop` awaits the server's close (which awaits
+ * Starts the cluster, migrates, then serves. A `template` database (a warm cluster's, src/e2e/warm-postgres.ts) seeds a new database already migrated. `stop` awaits the server's close (which awaits
  * store.close()) before it stops the cluster; a failure before serving stops the cluster it started.
  */
-export async function startLocalRuntime(directory: string, options: { serve?: Serve; log?: (line: string) => void } = {}): Promise<LocalRuntime> {
+export async function startLocalRuntime(directory: string, options: { serve?: Serve; log?: (line: string) => void; template?: string } = {}): Promise<LocalRuntime> {
   const paths = localPaths(directory);
   const environment = await readLocalEnvironment(paths);
   if (!environment) throw new Error(`${paths.environment} is missing; run graphyard install --provider local --apply first`);
@@ -175,7 +175,7 @@ export async function startLocalRuntime(directory: string, options: { serve?: Se
   await initialiseCluster(paths, binaries);
   const cluster = await startCluster(paths, port, binaries, options.log);
   try {
-    await ensureDatabase(password, port);
+    await ensureDatabase(password, port, options.template);
     const databaseUrl = environment.DATABASE_URL ?? localDatabaseUrl(password, port);
     await migrate(databaseUrl);
     const served = await (options.serve ?? serveControlPlane)({ ...environment, DATABASE_URL: databaseUrl });

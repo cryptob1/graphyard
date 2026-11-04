@@ -45,7 +45,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 812 
     await expect(page.getByRole('button', { name: 'Every request and answer →' })).toBeVisible();
     expect(posted[0]).toEqual({ path: '/api/sign-in', body: { code: 'one-time-code-from-graphyard-login' } });
     expect(new URL(page.url()).hash).toBe('');
-    // GY-2171: the human session lasts 30 days, so it is kept beyond this browser session.
+    // GY-2171: the human session lasts until 90 days unused, so it is kept beyond this browser session.
     expect(await page.evaluate(() => localStorage.getItem('graphyard-token'))).toBe('browser-human');
 
     await page.getByRole('button', { name: 'Every request and answer →' }).click();
@@ -62,12 +62,29 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 812 
   });
 }
 
-test('integration:sign-in-screen-command the sign-in screen names the one command, graphyard login, that signs the operator in for 30 days', async ({ page }) => {
+test('integration:sign-in-screen-command the sign-in screen names the one command, graphyard open, that signs the operator in', async ({ page }) => {
   await page.route('**/api/**', route => route.fulfill({ status: 401, json: { error: 'Rejected' } }));
   await page.goto('/');
   const line = page.locator('.login-help', { hasText: 'Operator?' });
-  await expect(line).toHaveText('Operator? Run graphyard login on the Graphyard host and open the link it prints to sign in for 30 days.');
-  await expect(line.locator('code')).toHaveText('graphyard login');
+  await expect(line).toHaveText('Operator? Run graphyard open on the Graphyard host, or graphyard login to print a link to open elsewhere.');
+  await expect(line.locator('code')).toHaveText('graphyard open');
+});
+
+test('the local viewer sees the dashboard without a login wall and is offered Sign in for a human-only decision', async ({ page }) => {
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== 'GET') return route.fulfill({ status: 401, json: { error: 'A valid Graphyard bearer token is required' } });
+    if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'local-viewer', role: 'reader', displayName: 'Local viewer' }, humanOnly: openHumanOnly([{ work: parked as never }], Date.parse(now)), repository: 'fixture/repository', jobs: [] } });
+    if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: [parked], now } });
+    if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus([parked as never], Date.parse(now), null) });
+    return route.fulfill({ json: path.endsWith('/work') ? [parked] : [] });
+  });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Every request and answer →' })).toBeVisible();
+  await expect(page.getByLabel('Access token')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Every request and answer →' }).click();
+  await page.locator('.human-request').getByRole('button', { name: 'Sign in as the operator' }).click();
+  await expect(page.getByLabel('Access token')).toBeVisible();
 });
 
 test('a refused answer keeps everything the operator typed: the card clears only after the answer succeeds', async ({ page }) => {

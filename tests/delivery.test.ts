@@ -2,7 +2,7 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
@@ -10,6 +10,7 @@ import { Delivery, commonInterval, mergeSegments, serviceState, type Environment
 import { server } from '../src/server.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { localRequest } from './helpers/local-request.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -378,7 +379,7 @@ test('HTTP delivery routes derive authority from the credential', async () => {
     const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { ...(actor ? { Authorization: `Bearer ${actor.id}-token-${'x'.repeat(32)}` } : {}), 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
     return { status: response.status, body: await response.json() };
   };
-  assert.equal((await call('delivery', null)).status, 401);
+  assert.equal((await localRequest(url, '/api/delivery', { headers: { Host: 'graphyard.example' } })).status, 401);
   const status = await call('delivery', reader); assert.equal(status.status, 200); assert.ok(status.body.environments.some((e: EnvironmentDelivery) => e.environmentId === f.env.id)); assert.ok(status.body.releases.some((x: Release) => x.id === r.id));
   assert.equal((await call('delivery/release', worker, {})).status, 400);
   assert.equal((await call('delivery/select', worker, { environment: f.env, release: { id: r.id, revision: 1 }, expectedGeneration: 1 })).status, 403);

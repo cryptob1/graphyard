@@ -86,10 +86,10 @@ class World {
       } as unknown as Work;
     });
   }
-  ports(batch?: number): MergeWriterReads {
+  ports(batch?: number, parallel?: number): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now,  ...(batch ? { batch } : {}),
+      baseBranch: 'main', retrials: 3, now: this.now,  ...(batch ? { batch } : {}), ...(parallel ? { parallel } : {}),
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         const mergeSha = sha(`merge:${head}:${baseTip}`);
@@ -237,5 +237,34 @@ test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with
   assert.ok(world.pushes.length < count, `batches landed several heads per push: ${world.pushes.length} pushes for ${count} heads`);
   const failing = Array.from({ length: count }, (_, index) => index + 1).filter(n => failsTrial(n) || timesOut(n));
   assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'each failed or repeatedly timed-out head got exactly one rework request; no head batched beside it was refused');
+  assert.deepEqual(state.mergeWriter.reworks, [], 'no rework is still owed');
+});
+
+test('unit:soak-merge-writer-stacked — the simulated day with three queue positions trialled at once, each stacked on the one before it: every head is still delivered exactly once at its own merge commit on main, no commit is pushed twice, and each failed or repeatedly timed-out head is reworked exactly once', { timeout: 300_000 }, async () => {
+  let now = start;
+  const world = new World(() => now);
+  for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
+  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
+    closeSession: () => {}, dispatch: async () => {},
+    decisions: async () => ({ decisions: [] }), persist: async () => {},
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(undefined, 3), rework: world.rework } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  for (let cycle = 0; cycle < cycles; cycle++) {
+    now = start + cycle * cycleMs; world.cycle = cycle;
+    for (const [n, { confirmedAt }] of world.reworked) if (world.submissions.get(n)!.head === sha(`head${n}-1`) && now >= confirmedAt + 30 * minute) world.submit(n, 2, now);
+    await runCycle(config, state, effects, () => now);
+    await mergeWriterIdle(state);
+    assert.ok(world.widest <= 3, `cycle ${cycle}: at most three trials at once`);
+  }
+  assert.ok(world.widest > 1, 'positions were trialled at once');
+  const final = world.snapshot();
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every head is delivered');
+  const delivered = final.map(item => item.delivery!.mergeSha);
+  assert.equal(new Set(delivered).size, items, 'each item has its own merge commit');
+  for (const mergeSha of delivered) assert.ok(world.main.includes(mergeSha), `${mergeSha.slice(0, 12)} is on main's first-parent chain`);
+  assert.equal(new Set(world.pushes).size, world.pushes.length, 'no merge commit was pushed twice');
+  const failing = Array.from({ length: items }, (_, index) => index + 1).filter(n => failsTrial(n) || timesOut(n));
+  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'only a failing head is reworked, never one stacked on it');
   assert.deepEqual(state.mergeWriter.reworks, [], 'no rework is still owed');
 });
