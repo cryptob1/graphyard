@@ -1,3 +1,4 @@
+import { decisionWork } from '../store/decision-read.js';
 import { once, record } from '../store/mutations.js';
 import type pg from 'pg';
 import { demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
@@ -9,7 +10,6 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { authenticated } from './receipts.js';
 import type { Services } from './routes.js';
-import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 type Db = pg.PoolClient;
@@ -42,7 +42,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const actor = await authenticated(services, db, now, caller);
     return once(db, actor, key, receiptInput, async () => {
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id, ref]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
     const refused = closeRefusal(work!); demand(!refused, refused!, 409);
