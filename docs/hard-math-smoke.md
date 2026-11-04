@@ -37,6 +37,12 @@ native worker, reviewer, spec-check and producer launches (including headless
 producers). Confinement does not depend on CLI entry-point detection. Each session
 keeps its assigned credential and runtime login; the existing credential mask
 hides the other installation credentials, source installation and frozen oracle.
+`hard-math-confinement.test.ts` exercises the embedded daemon’s worker dispatch
+and reviewer dispatch tick with non-CLI arguments. Controlled CLI/HTTP/Herdr
+replies drive the real launch code; read probes execute its emitted native
+wrapper and require authority/oracle denial plus access to the assigned credential.
+These diagnostics require working bubblewrap namespaces in the native host;
+a confined implementation worker without that capability cannot certify them.
 
 ```sh
 npm run build
