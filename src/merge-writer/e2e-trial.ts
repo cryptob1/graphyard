@@ -104,6 +104,8 @@ export async function runTrialE2eCases(input: {
   log: (line: string) => void;
   /** GY-2997: the trial's confinement words the serve command runs under. */
   wrapper?: readonly string[];
+  /** Trusted outer launcher dispatches groups into private-root containers. */
+  runGroup?: typeof runTrialE2eGroup;
 }): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   const pending: string[] = [];
@@ -133,18 +135,19 @@ export async function runTrialE2eCases(input: {
     groups.set(id!, group);
   }
   const deadline = Date.now() + input.budgetMs;
-  for (const group of groups.values()) cases.push(...await runGroup(group.target, group.proofs, { ...input, budgetMs: Math.max(1_000, deadline - Date.now()) }));
+  for (const group of groups.values()) cases.push(...await (input.runGroup ?? runTrialE2eGroup)(group.target, group.proofs, { ...input, budgetMs: Math.max(1_000, deadline - Date.now()) }));
   return cases;
 }
 
 /** `proofs` run against `target` served from the head; every case comes back, failed naming why when it could not run. */
-async function runGroup(target: E2eServe | Application, proofs: readonly string[], input: Parameters<typeof runTrialE2eCases>[0]): Promise<TrialE2eCase[]> {
+export async function runTrialE2eGroup(target: E2eServe | Application, proofs: readonly string[], input: Parameters<typeof runTrialE2eCases>[0], origin?: string): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   let served: Served | null = null;
   // The cases' bearer token, handed to a serve command as GRAPHYARD_E2E_TOKEN so the head it serves can accept it.
   const token = `trial-${randomUUID()}`;
   try {
-    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
+    if (origin) served = { origin, close: async () => {} };
+    else if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
     else if (target.kind === 'static') {
       const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, groupBuildShell(input.budgetMs, input.wrapper), undefined, input.env) : null;
       if (build) throw new Error(build);

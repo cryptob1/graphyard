@@ -13,7 +13,7 @@ import { liveInstallProof, piProducerPrompt } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { RunOptions, Runner } from '../src/runner/types.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-02 `clock` is the explicit tick clock handed to runDispatchTick and its snapshot; new Date() only stamps request/observation records that no clock compares to it.
 
@@ -140,6 +140,21 @@ function herdr(calls: string[][]) {
   };
 }
 
+// Keep every environment layer the pane shell executes before the runtime, including
+// native PATH/mise settings and the private secrets-file wrapper.
+function producerPrefix(typed: ReturnType<typeof expandTypedCommand>, checkout: string) {
+  const prefix = typed.words.slice(0, typed.words.length - typed.args.length - 1);
+  const secrets = prefix.indexOf('sh');
+  assert.ok(secrets >= 0, 'private secrets wrapper exists');
+  assert.deepEqual(prefix.slice(secrets), ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', join(checkout, 'producer.env'), '--']);
+  assert.equal(prefix[0], '/usr/bin/env');
+  assert.ok(prefix.slice(1, secrets).some(word => word.startsWith('PATH=')), 'native runtime PATH is reapplied');
+  assert.ok(prefix.slice(1, secrets).includes('MISE_NO_CONFIG=1'));
+  assert.equal(typed.kind, 'codex');
+  assert.match(requestOf(typed.kind, typed.args)!, /independent Graphyard proof producer/);
+  return prefix;
+}
+
 test('integration:producer-environment a Herdr producer gets the .env secrets from its private file, never on the tab or pane command line', async () => {
   const { root, cleanup } = await installation();
   try {
@@ -149,7 +164,7 @@ test('integration:producer-environment a Herdr producer gets the .env secrets fr
     const secret = token.replaceAll("'", '');
     assert.ok(!calls.flat().some(word => word.includes(secret) || word.includes('ghp_never') || /^(HCLOUD_TOKEN|HETZNER_SPEND_CAP_USD_MONTHLY)=/.test(word)), 'no Herdr argument carries a secret');
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-    assert.deepEqual(typed.words.slice(0, 6), ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', join(launched.checkout, 'producer.env'), '--']);
+    producerPrefix(typed, launched.checkout);
     assert.equal(typed.kind, 'codex', 'the runtime is what the wrapper execs');
     assert.equal(await readFile(join(launched.checkout, 'producer.env'), 'utf8'), `HCLOUD_TOKEN='${secret}'\nHETZNER_SPEND_CAP_USD_MONTHLY='25'\n`);
     // The file is in the session directory, beside the git checkout the producer works in, so nothing
@@ -165,7 +180,7 @@ test('integration:producer-environment a launch whose proofs need no secret neit
     const item = work('GY-75', 'manual', ['manual:install-railway-live']), calls: string[][] = [];
     const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-    assert.notEqual(typed.words[0], 'sh', 'no secrets wrapper');
+    assert.ok(!typed.words.includes('set -a; . "$1"; set +a; shift 2; exec "$@"'), 'no secrets wrapper');
     assert.ok(!calls.flat().some(word => word.includes('HETZNER_SPEND_CAP_USD_MONTHLY')));
     await assert.rejects(stat(join(launched.checkout, 'producer.env')), { code: 'ENOENT' });
   } finally { await cleanup(); }
@@ -286,7 +301,7 @@ test('unit:host-install-live-receives-producer-env a manual:host-install-live se
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
     const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-    assert.deepEqual(typed.words.slice(0, 6), ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', join(launched.checkout, 'producer.env'), '--']);
+    producerPrefix(typed, launched.checkout);
     assert.equal(await readFile(join(launched.checkout, 'producer.env'), 'utf8'), `HCLOUD_TOKEN='abc123'\nHETZNER_SPEND_CAP_USD_MONTHLY='25'\n`);
     assert.equal((await stat(join(launched.checkout, 'producer.env'))).mode & 0o777, 0o600);
     assert.ok(!calls.flat().some(word => word.includes('abc123') || word.includes('ghp_never')), 'no Herdr argument carries a secret');
@@ -316,7 +331,8 @@ test('unit:live-install-ssh-key-available HETZNER_SSH_KEY in .env reaches the li
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
     const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-    const printed = execFileSync(typed.words[0], [...typed.words.slice(1, 6), process.execPath, '-e', 'process.stdout.write(process.env.HETZNER_SSH_KEY ?? "")'], { encoding: 'utf8' });
+    const prefix = producerPrefix(typed, launched.checkout);
+    const printed = execFileSync(prefix[0], [...prefix.slice(1), process.execPath, '-e', 'process.stdout.write(process.env.HETZNER_SSH_KEY ?? "")'], { encoding: 'utf8' });
     assert.equal(printed, 'operator key', 'the session environment carries the key name');
     const prompt = producerPrompt({ repository: 'owner/project', cliPath: launcher }, { ...item.autoDispatch!.producers[0] as any, key: 'GY-717', checkout: launched.checkout }, { principal: 'proof-runner' });
     assert.match(prompt, /If HETZNER_SSH_KEY is set in your environment, pass --ssh-key "\$HETZNER_SSH_KEY"/);

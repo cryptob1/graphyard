@@ -1,0 +1,14 @@
+{
+  "id": "worker-reparenting",
+  "title": "Assigned worker storage permits ordinary moves while home and sockets stay confined",
+  "description": "Run genuine ordinary worker mount and Landlock composition. Reproduce EXDEV with the previous socket policy for cache publication, hardlinks and a local Git push, then verify the fixed policy and all protected-home and host-socket regressions, including late pathname and abstract sockets and working local IPC.",
+  "tags": ["isolation", "workers"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise worker reparenting and existing confinement regressions",
+    "run": "node --import tsx --test tests/worker-filesystem-isolation.test.ts",
+    "timeoutSeconds": 180
+  }]
+}

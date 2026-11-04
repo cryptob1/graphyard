@@ -228,3 +228,45 @@ test('integration:master-stalled-delivery-wake — actionable wake resets heartb
   assert.equal(f.prompts.length, 3);
   assert.equal(f.state.master.lastWake?.heartbeat, true);
 });
+
+test('integration:master-large-transcript-wake — real recovery failure retains live incident/heartbeat delivery, deduplicates and retries', async () => {
+  const { captureConversation } = await import('../src/master/conversation.js');
+  const f = await fixture();
+  const current = { launch: 'legacy', runtime: 'claude', account: 'account', nativeId: 'native', transcript: join(f.directory, 'missing.jsonl'),
+    origins: join(f.directory, 'origins.jsonl'), record: join(f.directory, 'record.jsonl'), predecessor: null, supersededBy: null };
+  let attempts = 0;
+  f.effects.masterSession!.initialize = async () => { attempts++; await captureConversation(current); return { current, predecessor: null }; };
+  await f.cycle();
+  assert.equal(f.prompts.length, 1, 'an actual initialization I/O failure must not suppress the incident');
+  assert.match(f.state.actions['master:continuity'].detail, /ENOENT/);
+  assert.equal(f.state.master.continuity, null);
+  const recoveryAttempts = f.state.actions['master:continuity'].attempts;
+  f.restart(); await f.cycle();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.state.actions['master:continuity'].attempts, recoveryAttempts, 'the same recovery failure is standing, not recorded anew per cycle');
+  f.advance(31); await f.cycle();
+  assert.equal(f.prompts.length, 2);
+  assert.equal(f.state.master.lastWake?.heartbeat, true);
+  assert.equal(attempts, 3);
+  await writeFile(current.transcript, JSON.stringify({ type: 'user', uuid: 'person', message: { content: 'Retained person input' } }) + '\n');
+  await f.cycle();
+  assert.deepEqual(f.state.master.continuity, { current, predecessor: null });
+  assert.equal(f.state.actions['master:continuity'].state, 'done');
+  assert.equal(f.prompts.length, 2);
+});
+
+
+test('integration:master-large-transcript-wake — failed recovery of an absent master launches a factual replacement and retains provenance', async () => {
+  const f = await fixture(false);
+  f.state.master.startedAt = at;
+  f.effects.masterSession!.initialize = async () => { throw new Error('Native history is unavailable'); };
+  await f.cycle();
+  assert.equal(f.launches.length, 1);
+  assert.match(f.launches[0], /NOT been recovered.*Native history is unavailable/);
+  assert.match(f.launches[0], /Queued delivery/);
+  assert.equal(f.state.master.continuity, null);
+  assert.equal(f.state.master.recoveryFailures[0].master.startedAt, at);
+  assert.match(f.state.actions['master:continuity'].detail, /Native history is unavailable/);
+  f.restart(); await f.cycle();
+  assert.equal(f.launches.length, 1);
+});

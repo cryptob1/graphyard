@@ -4,6 +4,7 @@ import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { checkoutRelease } from '../release.js';
 import { localAdapter } from './local.js';
+import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
 export interface AdapterContext {
   provider: Provider;
@@ -76,7 +77,7 @@ export async function httpHealth(ctx: AdapterContext, url: string) {
   } catch { return false; }
 }
 
-async function tool(ctx: AdapterContext, transport: Transport, program: string, args: string[], name: string, fix: string): Promise<PreflightItem> {
+export async function tool(ctx: AdapterContext, transport: Transport, program: string, args: string[], name: string, fix: string): Promise<PreflightItem> {
   const result = await transport.exec(program, args, { allowFailure: true, timeout: 60_000 });
   return result.code === 0
     ? { name, ok: true, detail: ctx.vault.scrub(result.stdout.trim().split('\n')[0] ?? 'available') }
@@ -303,11 +304,13 @@ export const composeAdapter: ProviderAdapter = {
   },
   plan(ctx, observation) {
     return [
+      trialImagePlan(ctx),
       { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ') },
       ...composeActions(ctx, observation),
     ];
   },
   async provision(ctx) {
+    await buildTrialImage(ctx);
     await ctx.transport.exec('docker', ['build', ...imageBuildArgs(ctx.sourceRoot), '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
   },
   async setEnv(ctx, values) {

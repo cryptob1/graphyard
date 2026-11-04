@@ -89,7 +89,7 @@ class FakeHerdr {
   constructor(private options: { occupant?: (kind: string) => string | null } = {}) {}
   private start(pane: string, kind: string, args: string[], name: string | null) {
     const request = requestOf(kind, args);
-    const session = { name, kind: this.options.occupant?.(kind) ?? kind, request, role: roleOf(args), args, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${kind} ready\n` };
+    const session = { name, kind: this.options.occupant?.(kind) ?? kind, request, role: roleOf(args), args, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${({ claude: 'Claude Code', codex: 'Codex', opencode: 'Ask anything…', cursor: 'Cursor', gemini: 'Gemini' } as Record<string, string>)[kind] ?? kind} ready\n` };
     // The runtime acts on its own request at once: its first tool call, before any further input.
     if (request) { session.toolCalls.push(`first tool call on request: ${request.slice(0, 60)}`); session.screen += `❯ ${request}\n  Ran 1 shell command\n`; }
     this.sessions.set(pane, session);
@@ -106,6 +106,7 @@ class FakeHerdr {
       this.start(args[2], launch.kind, launch.args, null);
       return '';
     }
+    if (args[0] === 'pane' && args[1] === 'process-info') { const session = this.find(args[3]); return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: session ? [{ argv: [session.kind] }] : [] } }); }
     if (args[0] === 'pane' && args[1] === 'read') return this.sessions.get(args[2])?.screen ?? '';
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     if (args[0] === 'pane' && args[1] === 'close') { this.sessions.delete(args[2]); return json({}); }
@@ -179,7 +180,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
     const busy = new FakeHerdr();
     const adopted = await startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user'], 'Review #93 now', busy.run, { directory: root });
     assert.equal(adopted.delivery, 'request'); assert.equal(adopted.started.detail, 'Herdr reports the claude runtime working');
-    assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'run'], ['agent', 'get'], ['agent', 'rename']]);
+    assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'read'], ['pane', 'process-info'], ['agent', 'rename']]);
     assert.equal(busy.named('review-busy').toolCalls.length, 1);
     const stranger = new FakeHerdr({ occupant: () => 'codex' });
     const bounds = { clock: () => stranger.calls.length * 1000, wait: () => {} };

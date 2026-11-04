@@ -101,3 +101,34 @@ test('unit:merge-batch-e2e-own-item — each head in a passing batch records onl
     assert.deepEqual(record.e2e?.map(entry => entry.proof), [`e2e:case-${n}`], `GY-${n} records its own case run only`);
   }
 });
+
+test('integration:merge-requires-executed-proofs — absent, zero and failing counts refuse both writer paths for every executable family; unrelated proofs and post-deploy observations do not gate', async () => {
+  for (const family of ['unit', 'integration', 'e2e']) for (const counts of [undefined, { executed: 0, failed: 0 }, { executed: 2, failed: 1 }, { executed: 2, failed: 0 }]) {
+    const run = recording();
+    const items = [1, 2].map(queued);
+    const required = `${family}:required`;
+    items[0]!.criteria = [{ id: 'AC-1', text: 'Works', proofs: [required] }, { id: 'AC-2', text: 'Observed after deployment', proofs: ['manual:post-deploy/observed'] }];
+    items[0]!.criteria.push({ id: 'AC-3', text: 'Deferred harness', proofs: ['unit:deferred'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/harness.ts'], declaredBy: 'operator', declaredAt: new Date(start).toISOString(), policyRevision: 1 } });
+    const trial = run.ports.trial;
+    run.ports.trial = async (...args) => {
+      const verdict = await trial(...args);
+      delete verdict.proofs[required];
+      delete verdict.proofs['unit:deferred'];
+      if (counts) verdict.proofs[required] = counts;
+      verdict.proofs['unit:unrelated'] = { executed: 0, failed: 1 };
+      return verdict;
+    };
+    const results = await mergeBatch(run.ports, items);
+    const passing = counts && counts.executed > 0 && counts.failed === 0;
+    assert.equal('outcome' in results[0]! && results[0].outcome.outcome, passing ? 'merged' : 'refused');
+    assert.equal('outcome' in results[1]! && results[1].outcome.outcome, 'merged', 'only the item requiring this proof is refused');
+    if (!passing) {
+      assert.ok(!run.calls.includes('push:GY-1+GY-2'), 'batch does not push a head lacking proof');
+      const refusal = run.records.find(entry => entry.key === 'GY-1' && entry.event.kind === 'refused')!.event;
+      assert.ok(refusal.kind === 'refused' && refusal.reason.includes(required));
+      const trials = run.records.filter(entry => entry.key === 'GY-1' && entry.event.kind === 'trial');
+      assert.equal(trials.length, 2, 'both actual batch and individual trials survive');
+      for (const { event } of trials) assert.ok(event.kind === 'trial' && event.outcome === 'verdict' && JSON.stringify(event.proofs[required]) === JSON.stringify(counts));
+    }
+  }
+});

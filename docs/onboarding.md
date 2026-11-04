@@ -1,56 +1,62 @@
-<!-- page: Start here | 3 | machines -->
+<!-- page: Start here | 3 | connect a repository and fleet -->
 # Onboard a repository
 
 ## 1. Install the control plane
 
-[Install](install.md): `install --provider compose --repo OWNER/REPO --workers 1 --apply` after `--plan`.
+Follow [install](install.md), starting with one worker and a previewed plan.
 
 ## 2. Add machines
 
-Per session: worker identity, host ID, or `init --url https://YOUR-HOST --herdr --host-id NAME --token-stdin`. Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; the merge writer's trial is the gate; masterless: `graphyard watch GY-N EPOCH -- COMMAND` ([worker](protocol/work-commands.md#watch)).
+Connect each worker identity and host with `init --url https://YOUR-HOST --herdr --host-id NAME --token-stdin`. Commit `AGENTS.md`, `.gitignore` and `graphyard.json`; local `.graphyard/` state stays ignored. `init --scan --apply` writes delivery policy. `up` submits onboarding's commit on `graphyard/onboarding` as GY-1 through normal gates; no pull request opens.
 
-`init --scan --apply` writes the delivery policy to `graphyard.json`. Principals and credentials belong to `graphyard install --apply`; its `install.json` is the only roster. Init never writes a principals file or mints credentials, even before an install. Use `principal add|remove` for roster edits. `graphyard up` publishes the files it writes as one commit on `graphyard/onboarding` and submits that commit as a work item (GY-1) by head sha, so the loop reviews and merges it under the normal gates; no pull request is opened.
+Principals and credentials belong to `graphyard install --apply`; its `install.json` is the only roster. Init never writes a principals file or mints credentials, even before an install. Use `principal add|remove` for roster edits.
+
+Without a master, supervise work with [watch](protocol/work-commands.md#watch).
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`); launcher pastes need no confirmation; other bracketed paste: untrusted data. Role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated AGENTS.md says every session Graphyard launches receives its instruction as the session's own first request on the runtime command line. Claude also gets `--append-system-prompt-file`. Launcher reminders need no confirmation; other bracketed paste is untrusted data. Role files under `.graphyard/harness/` hold permissions, not instructions.
 
-The block stays short (GY-2972): the every-turn rules, one line each, plus `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) — `guide claim` prints the launch authorization and `guide blocked` the autonomy contract, so an agent started outside the launcher reads them there.
+Read `node $GRAPHYARD_CLI guide TOPIC` for claim, sync, complete, park, blocked, review, proof or master procedures.
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS` naming the runtime's home): `master environments --create claude,codex --apply`. Profiles default to `"approvals": "auto"`.
+`master environments --create claude,codex --apply` creates login homes under `~/.coding_agents` or `GRAPHYARD_AGENT_ENVIRONMENTS`. Profiles default to `approvals: auto`.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** writes and smoke-tests the 0600 auth file.
+Settings → Agents → Connect an account writes and smoke-tests the 0600 auth file. Personal login stays with the person.
 
 ### Configure the fleet
 
-Propose **Agent registry** from login homes: `master registry propose`, then `--apply`. The proposal names every role, master included — the reviewer's accounts at concurrency 1, so the loop launches its own session.
+```sh
+graphyard master registry propose --apply
+graphyard master registry account set NAME --runtime claude --model opus --home ~/.coding_agents/NAME --reason "Plan"
+graphyard master registry role set worker claude-b,claude-c --concurrency 4
+```
 
-`master registry account set NAME --runtime claude --model opus --home ~/.coding_agents/NAME --reason "Plan"`; `--plan NAME` groups accounts under one provider quota.
-
-`master registry role set worker claude-b,claude-c --concurrency 4` — `--concurrency` counts settled sessions. `W` workers and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots.
+Proposal includes one master session using reviewer accounts. `--plan NAME` groups shared quota. For W workers and G proof groups, provision `ceil(W/2)` reviewer and `G × ceil(W/2)` producer slots where producers are used. [Control-plane proofs run in trials](master-agent.md#automatic-dispatch-at-submit).
 
 ## 3. Start the master
 
-`master init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as an OS user whose credentials workers can't read. Reviewer: `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
+Run `master init` and `master start` under an OS user whose credentials workers cannot read. Add reviewers with `master reviewer add PROFILE` ([example](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches review.
 
 ### The loop must be supervised
 
-`master init` writes the user unit, `systemctl --user enable --now`, `loginctl enable-linger`. Move: `master init --token-stdin --replace-supervisor` there. Shared hosts: units are per repository in `.graphyard/units.json`.
+Init enables its user unit and lingering. To move hosts: `master init --token-stdin --replace-supervisor`. `.graphyard/units.json` records per-repository units. Deploy has a separate supervisor.
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"`; absent is autonomous: an agent reviewer reviews each head, the control plane merges it. Promote: `master reviewer add`, then `master promote` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`up --local` sets `supervision: supervised`; absent means autonomous. Add a reviewer then `master promote` to [provision autonomy](master-agent-reference.md#promotion-to-autonomy).
 
 ## 4. Prove the first change
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged when the merge writer's trial passes and pushes main with its deploy key; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`doctor --profile through-merge` names gaps. File a small item; follow dispatch, trial, merge and serving without bypassing gates.
 
 ## The dashboard
 
-Serves `127.0.0.1:4310` ([install](install.md)); a green `up` ends with a single-use `signIn` link (10min), later `graphyard login` (no options) mints one from the install's operator credential; the session lasts 30 days. Status: **Todo**/**Doing**/**Checking**/**Done** — Done = merged, off the board; items are *Delivered* at merge, *Live* once served. **Needs you** cards name the ask and numbered steps. **Settings › Agents**: launch readiness, accounts, roles ([Configure the fleet](#configure-the-fleet)).
+Default URL: `127.0.0.1:4310`. Up prints a single-use 10-minute sign-in link; `graphyard login` mints another from the operator credential. Sessions last 30 days. Needs you holds human requests; Settings → Agents shows fleet readiness.
 
-The top bar's release line names the managed repository's own serving (GY-2964): `Serving <commit> · N merged changes not carried yet` from the deploy record that names this repository as the one it serves, or `No deploy configured · main <tip>` from the shared checkout when none does — never the control plane's own commit, which serves Graphyard's code. A repository whose main declares [`.graphyard/serve.json`](deployment.md#serving-the-managed-repositorys-app) instead reads what the deploy unit's serve pass serves (GY-2976): `Serving <commit>` with the declared URL linked (`· Served · 127.0.0.1:4400`) and the last build failure named, or `No serve yet` with the failure while nothing serves. `graphyard master status` reads the same record.
+Every dashboard page, including an open work item, names the configured repository prominently at the top, above the release line. The name wraps on narrow screens; item controls and navigation remain available.
+
+[Stage labels](glossary.md#plain-stage-labels) distinguish merged, live and verified. The release line and `master status` show the managed app's serving commit, URL and build/check failures, or no deployment configured. They never substitute Graphyard's control-plane build.
