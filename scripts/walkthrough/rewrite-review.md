@@ -1,8 +1,8 @@
 # GY-3048 documentation review
 
-Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `d67724adb3e8`.
+Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `324444ef27cb`.
 
-The handwritten set went from **14,906 to 12,351 words (17.1% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
+The handwritten set went from **15,091 to 12,535 words (16.9% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
@@ -16,7 +16,7 @@ The handwritten set went from **14,906 to 12,351 words (17.1% shorter)**, includ
 | `docs/how-graphyard-works.md` | 545 | 540 |
 | `docs/install.md` | 469 | 382 |
 | `docs/master-agent-reference.md` | 668 | 561 |
-| `docs/master-agent-sessions.md` | 3278 | 2191 |
+| `docs/master-agent-sessions.md` | 3463 | 2375 |
 | `docs/master-agent.md` | 1217 | 1027 |
 | `docs/onboarding.md` | 641 | 480 |
 | `docs/operations.md` | 541 | 494 |
@@ -47,3 +47,10 @@ Preserved submitted `806913fb547e23d2c4bfcd88595b083a3a3e8767` and synced delive
 Merged exact approved header commit `8cddc260a3e637983d23b667923d210143b2c974` with its ancestry and authorship intact. Resolved only the shared onboarding prose; its `web/` and header E2E files are byte-for-byte unchanged. Regenerated indexes with `node scripts/check-docs.mjs --write`.
 
 Preparation checks pass: `npm run build`, `npm run docs:check` and `WALKTHROUGH_BROWSERS_PATH=/home/vish/.cache/ms-playwright npm test -- tests/documentation-validation.test.ts` (one passing integration test, thirteen rendered frames). Self-review finds AC-1, AC-2 and AC-3 met for the prepared head; no blocking findings. The original storyboard/media remain unchanged. No ordinary verification or completion ran. Hold this head and lease until GY-3059 is Done, then sync actual delivered main, reconcile its runtime environment/readiness documentation, refresh counts and repeat the final checks/self-review. Native ordinary verification, mandatory native completion recheck, independent exact-head review and canonical full/E2E gates remain required for submission.
+
+
+## Final delivered integration (epoch 113)
+
+GY-3059 is canonically Done. CLI and server both reported `324444ef27cbae363e7fd97baabd018d2aed1af2` before final sync. Merged that actual delivered main, preserving preparation `70ba18d4947c4be04790d4fb3e8c43ba0dc3c388`, submitted `806913fb547e23d2c4bfcd88595b083a3a3e8767` and approved header `8cddc260a3e637983d23b667923d210143b2c974`. Reconciled the sole session-guide conflict against delivered `src/master/launch.ts`, `environments.ts` and `confinement.ts`: real runtime readiness, absolute executables, wrong occupants, install PATH after shell activation, mise refusal/cleanup and the narrowly restored DNS resolver. Retained actual master recovery/fallback and proof-count gate explanations. No pending application changes were imported; header UI/E2E files remain identical to the approved commit.
+
+Final build, docs checker and focused documentation integration test pass; generated indexes were refreshed using `scripts/check-docs.mjs --write`. Counts above now compare against delivered `324444ef27cb`. Self-review: AC-1 met (roles, ownership, failed-check handoff, implemented wakes and three human decisions); AC-2 met (preserved corrected storyboard, unchanged decoded/inspected media, repeatable renderer and passing interaction coverage); AC-3 met (concise reviewed guides, current source behavior, retained operational details, links and regenerated indexes). No BLOCKING findings. Bound `e2e:create-work-item` and all independent review/canonical full/E2E requirements remain mandatory. Hold the final clean head and lease for native ordinary verification and mandatory native completion recheck; no host ordinary verification, host complete or broad host full suite ran.
