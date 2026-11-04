@@ -63,7 +63,7 @@ Rotate `GRAPHYARD_PRINCIPALS`; keep secrets outside Git. Operator agents have on
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` defaults to 250; observation concurrency defaults to 8 per token.
+`GRAPHYARD_RECONCILE_BATCH_MS` defaults to 250; observation concurrency defaults to 8 per token. Idle observation workers check only the jobs table once per second. When a job is due, they read open items for the existing priority order, then claim with `SKIP LOCKED`; settled summaries are never read for observation scheduling. Successful observations remain due every 20 seconds.
 
 ### Concurrent reconciliation
 

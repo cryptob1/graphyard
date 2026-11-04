@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
-import { accountLaunch, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
+import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
@@ -30,7 +30,9 @@ import { underTestRunner } from './runtime-environment.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { findingLocation } from './review-cap.js';
-import { writeReviewBinding } from './review-post.js';
+import { postReview, verdictStateOf, writeReviewBinding } from './review-post.js';
+import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessExec } from './headless-session.js';
+import { liveRun } from './runner/registry.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -557,7 +559,9 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
  * `review post` command needs none. A post-merge review judges the delivered merge commit against
  * its first parent, and says what becomes of its findings.
  */
-export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string }
+export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string;
+  /** A headless session's answer (headlessReviewAnswer), in place of the `review post` instructions: the launcher posts it. */
+  answer?: string }
 function reviewReadSection(cliPath: string, head: string) {
   return `Read snapshot paths: git show ${head}:PATH; surrounding code: rg, cat. node ${cliPath} --help lists commands; node ${cliPath} guide review is supported and needs no worker or coordinator credential. No graphyard show command. `;
 }
@@ -608,14 +612,47 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct. `
     + walk
     + `Then judge: is this a good idea? Does it make the app better for the person using it — discoverable where they would look, worded as they would word it, and no more than it needs? A feature that passes every test and still makes the app worse is rejected. `
-    + `Post exactly one verdict, only through Graphyard, with the body on standard input: node ${config.cliPath ?? launcherPath} review post --event EVENT <<'EOF' … EOF. `
-    + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one. `
-    + `Open the body by naming the head you judged, and name each screenshot you captured (at most 5, .png or .jpg, each under 2 MiB) on its own "Screenshot: PATH" line, the path of the file you saved: review post uploads each with your verdict, and the item shows your verdict, findings and screenshots together. `
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
+    + (plane.answer ? readOnlySession + plane.answer : productPostSection(config.cliPath ?? launcherPath) + readOnlySession
     + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
     + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
-    + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES or REJECT, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:');
+    + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES or REJECT, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:'));
+}
+const readOnlySession = 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. ';
+function productPostSection(cliPath: string) {
+  return `Post exactly one verdict, only through Graphyard, with the body on standard input: node ${cliPath} review post --event EVENT <<'EOF' … EOF. `
+    + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one. `
+    + `Open the body by naming the head you judged, and name each screenshot you captured (at most 5, .png or .jpg, each under 2 MiB) on its own "Screenshot: PATH" line, the path of the file you saved: review post uploads each with your verdict, and the item shows your verdict, findings and screenshots together. `;
+}
+/**
+ * A headless session's answer (in place of `review post`): one JSON object the launcher posts as
+ * this launch's verdict through the same route and token, each finding as a BLOCKING: line.
+ */
+export function headlessReviewAnswer(key: string, product = false) {
+  return `Answer in one JSON object, the last thing you print: {"verdict": "APPROVE" or "BLOCKING"${product ? ' or "REJECT"' : ''}, "body": "THE REVIEW BODY", "findings": ["${product ? 'SCREEN OR FLOW' : 'PATH:LINE'} — FINDING", …]}. `
+    + `APPROVE when no blocking finding stands, with findings empty; BLOCKING when one does, each in findings${product ? '; REJECT when the feature should not ship at all, the reason in the body: the master closes the item unmerged on it' : ''}. `
+    + (product ? 'Open the body by naming the head you judged, and name each screenshot you saved (at most 5, .png or .jpg, each under 2 MiB) on its own "Screenshot: PATH" line: the item shows them beside your verdict. ' : '')
+    + 'Graphyard posts that answer as your verdict under this launch, each finding on a BLOCKING: line, so run no review post. '
+    + `Judge whether this change meets what ${key} requires; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. Decide on your own: never ask a human or wait on input.`;
+}
+/** The headless answer, checked before it is posted: a BLOCKING verdict names its findings, an approval none. */
+export const headlessVerdictSchema = z.object({ verdict: z.enum(['APPROVE', 'BLOCKING', 'REJECT']), body: z.string().trim().min(1).max(60_000), findings: z.array(z.string().trim().min(1).max(2_000)).max(100).default([]) })
+  .refine(answer => answer.verdict !== 'APPROVE' || !answer.findings.length, 'an APPROVE verdict lists no findings')
+  .refine(answer => answer.verdict !== 'BLOCKING' || answer.findings.length > 0, 'a BLOCKING verdict lists at least one finding');
+/** The review event and body a headless answer posts as. */
+export function headlessVerdictPost(answer: z.infer<typeof headlessVerdictSchema>) {
+  const event = answer.verdict === 'APPROVE' ? 'APPROVE' as const : answer.verdict === 'REJECT' ? 'REJECT' as const : 'REQUEST_CHANGES' as const;
+  return { event, body: [answer.body, ...answer.findings.map(finding => `BLOCKING: ${finding.replace(/^BLOCKING:\s*/i, '')}`)].join('\n') };
+}
+/** Bound on the diff a headless request carries, so the request stays one command-line argument; the rest is read with git diff. */
+export const reviewDiffBytes = 80_000;
+/** The exact change a headless reviewer judges, head against the base its launch binds, for its request; empty when the object store cannot show it (the request still names git diff). */
+export async function reviewDiff(root: string, base: string, head: string, run: ChildRun = defaultChildRun) {
+  let diff: string;
+  try { diff = String(await run('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, head])); } catch { return ''; }
+  const bytes = Buffer.from(diff, 'utf8');
+  const shown = bytes.length > reviewDiffBytes ? `${bytes.subarray(0, reviewDiffBytes).toString('utf8')}\n… truncated: read the rest with git diff ${base} ${head}` : diff;
+  return ` The change, git diff ${base} ${head}:\n${shown}`;
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. `plane.baseTip` is the diff base the session judges — for a candidate review the head's merge base with the base branch (GY-2948), for a post-merge review the merge commit's first parent — and anchors the memory digest too: the digest's "changes since" window reaches past that base to the tip, so it names items merged between the two, which a reviewer judging against the merge base still wants in mind. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
@@ -637,13 +674,13 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + `Classify findings by node ${config.cliPath ?? launcherPath} guide review. `
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
-    + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
+    + readOnlySession
+    + (plane.answer ?? reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
     + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
     + `review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
-    + reviewAutonomySection();
+    + reviewAutonomySection());
 }
 
 /**
@@ -806,8 +843,11 @@ export async function launchReview(root: string, work: Work, profileName: string
   product?: boolean;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
+  /** How a headless review's one child runs (headless-session.ts); the host's by default, and a runtime with no one-shot form keeps its pane session. */
+  headless?: HeadlessExec | null;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
+  const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
   const postMerge = dependencies.postMerge;
@@ -951,21 +991,34 @@ export async function launchReview(root: string, work: Work, profileName: string
       // own credential is the binding its launch directory carries, and its runtime login stays.
       // GY-2995: that launch directory under the config home is kept readable, and with it the
       // deploy checkout the CLI it must run lives in.
-      const credentialMask = credentialMaskFor(config, { credentialFile: sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      // A headless session (headless-session.ts) holds no binding at all: the launcher posts its answer.
+      const runHeadless = headless && headlessKind(launch.kind) ? headless : null;
+      const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
+      let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null;
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
-        const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
-        startedTab = true;
-
+        const own = withVerificationPath(harness.environment, launch.environment);
+        const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
-        // The request is the session's own first message, on the runtime's command line (GY-93), read
-        // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) }, reservation.record.reviewInputs?.scenarioRequirements), workspace: config.herdrWorkspace, label: `${binding.key} review · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask } }));
+        const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
+        if (runHeadless) {
+          // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
+          delivery = 'request';
+          ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
+            contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+            holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
+            prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
+            answer: output => postReview({ ...headlessVerdictPost(jsonAnswer(output, headlessVerdictSchema)), cliPath: config.cliPath ?? launcherPath, environment },
+              { run: (command, args) => (dependencies.run ?? defaultChildRun)(command, args, { cwd: root }) }) }));
+        } else {
+          startedTab = true;
+          ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: request(), workspace: config.herdrWorkspace, label: `${binding.key} review · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask } }));
+        }
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -988,14 +1041,26 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}) });
+          // A headless run holds its request from its first instant: there is nothing to acknowledge or re-prompt.
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}), ...(answered ? { acknowledgedAt: reserved.acknowledgedAt ?? now().toISOString() } : {}) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
       } catch (error) {
+        if (answered) liveRun(agentName)?.run.cancel('its ledger record could not be written');
         if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
+      // The posted answer is the record's verdict, which the next reconcile settles; a run with no
+      // accepted answer settles as a session that finished without one, and the request relaunches.
+      if (answered) void answered.then(({ reviewId, event }) => reviewId === null ? undefined : updateReviewLedger(root, ledger => {
+        const entry = ledger.reviews.find(candidate => candidate.id === id);
+        if (entry?.state === 'pending' && !entry.verdict) entry.verdict = { state: verdictStateOf(event), reviewer: reviewerIdentity, reviewId, submittedAt: now().toISOString() };
+      }), failure => updateReviewLedger(root, async ledger => {
+        const entry = ledger.reviews.find(candidate => candidate.id === id);
+        if (entry?.state === 'pending' && !entry.verdict) await closeReviewSession(root, entry, { run: dependencies.run, now }, { state: 'failed', force: true,
+          resolution: `the reviewer session finished (headless ${launch.kind}: ${failure instanceof Error ? failure.message : String(failure)}) without posting a verdict on ${binding.sha.slice(0, 12)}`.slice(0, 900) });
+      })).catch(() => { /* reconciliation settles a record this could not write */ });
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
@@ -1158,6 +1223,8 @@ const paneCloseRefused = (record: Pick<ReviewRecord, 'closeFailure'>) => !!recor
  */
 async function closeReviewSession(root: string, record: ReviewRecord, dependencies: { run?: ChildRun; now: () => Date }, options: { state: ReviewRecord['state']; resolution?: string; force?: boolean }) {
   let closeFailure: string | undefined, paneGone = false;
+  // A headless run still going decides nothing further either: it is stopped, as a pane is closed.
+  if (!record.pane) liveRun(record.agentName)?.run.cancel(options.resolution ?? `the review session settled ${options.state}`);
   // A pane that is already gone is the state the close wanted (GY-137): it settles the record,
   // named on its resolution, rather than holding the request pending as a failure for good.
   try { if (record.pane) await closeHerdrPane(record.pane, dependencies.run); }
@@ -1273,7 +1340,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());
           const item = dependencies.work?.find(entry => entry.key === record.key && entry.policyRevision === record.policyRevision);
-          try { await retry(record, reviewRetryPrompt(config.repository, record, item?.criteria, config.cliPath, item?.scenarioRequirements)); }
+          // A headless run that is gone has no pane to prompt: the grace alone settles it.
+          if (record.pane) try { await retry(record, reviewRetryPrompt(config.repository, record, item?.criteria, config.cliPath, item?.scenarioRequirements)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
         else if (now.getTime() - Date.parse(record.idleSince) >= (record.acknowledgedAt ? reviewVerdictReminderMs : reviewIdleGraceMs) && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'

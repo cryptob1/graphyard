@@ -1,0 +1,14 @@
+{
+  "id": "overlapping-items-run-in-sequence",
+  "title": "Items declaring the same file run one after another",
+  "description": "Drive the loop against a real control plane: of two backlog items declaring the same file only one is released and dispatched while it is in flight, the other goes once it lands, and items on other files run beside them.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run the loop's release and dispatch over overlapping items",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/overlapping-items-run-in-sequence.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

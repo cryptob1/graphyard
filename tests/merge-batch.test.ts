@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { timedMergePorts } from '../src/daemon/trial-timings.js';
 import { emptyMergeWriterState } from '../src/daemon/merge-writer-state.js';
-import { mergeBatch } from '../src/merge-writer/batch.js';
+import { mergeBatch, mergeStack } from '../src/merge-writer/batch.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergePorts, MergeRecordEvent, MergeTrialRun } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
@@ -77,7 +77,7 @@ test('unit:merge-batch-fallback — a batch whose trial fails is trialled one he
   assert.deepEqual(failing.calls.filter(call => call.startsWith('trial:')), ['trial:GY-1+GY-2+GY-3+GY-4', 'trial:GY-1', 'trial:GY-1+GY-2', 'trial:GY-1+GY-2+GY-3', 'trial:GY-1+GY-2+GY-4'], 'the batch, then each head alone on the tip the last landed');
   const outcomes = Object.fromEntries(results.map(entry => [entry.work.key, 'outcome' in entry ? entry.outcome.outcome : 'error']));
   assert.deepEqual(outcomes, { 'GY-1': 'merged', 'GY-2': 'merged', 'GY-3': 'refused', 'GY-4': 'merged' }, 'only the failing head is refused');
-  assert.deepEqual(failing.kinds('GY-3'), ['intent', 'trial', 'refused']);
+  assert.deepEqual(failing.kinds('GY-3'), ['intent', 'intent', 'trial', 'refused']);
   const refusal = failing.records.find(entry => entry.key === 'GY-3' && entry.event.kind === 'refused')!.event;
   assert.ok(refusal.kind === 'refused' && refusal.reason.startsWith(trialFailurePrefix), 'the refusal grounds the head\'s rework');
 
@@ -146,4 +146,47 @@ test('integration:trial-step-timings — batch fallbacks retain their own covere
     [{ key: 'GY-1', head: head(1) }], [{ key: 'GY-2', head: head(2) }],
   ]);
   assert.deepEqual(writer.trials!.map(trial => trial.steps.map(step => step.step)), [[], ['push'], []]);
+});
+
+for (const batched of [false, true]) for (const predecessorFails of [false, true]) {
+  test(`stacked ${batched ? 'batch' : 'single'} conflicts wait for a ${predecessorFails ? 'failed' : 'landed'} predecessor`, async () => {
+    const run = recording({ failing: predecessorFails ? [1] : [] });
+    run.ports.retrials = 2;
+    let release!: () => void, conflictSeen!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const conflict = new Promise<void>(resolve => { conflictSeen = resolve; });
+    const merge = run.ports.merge, trial = run.ports.trial;
+    run.ports.merge = async (headSha, baseTip, item) => {
+      if (headSha === head(2) && run.contains.get(baseTip)!.includes(1)) {
+        conflictSeen();
+        return { conflict: ['src/app.ts'] };
+      }
+      return merge(headSha, baseTip, item);
+    };
+    run.ports.trial = async (...args) => {
+      if (args[2].key === 'GY-1') await pending;
+      return trial(...args);
+    };
+    const running = mergeStack(run.ports, [[queued(1)], (batched ? [2, 3] : [2]).map(queued)]);
+    await conflict;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(!run.kinds('GY-2').includes('refused'), 'no speculative refusal while the predecessor is running');
+    release();
+    const results = await running;
+    const later = results.find(entry => entry.work.key === 'GY-2')!;
+    assert.ok('outcome' in later);
+    assert.equal(later.outcome.outcome, predecessorFails ? 'merged' : 'refused');
+    assert.equal(run.kinds('GY-2').includes('refused'), !predecessorFails);
+    if (batched) assert.ok(results.some(entry => entry.work.key === 'GY-3' && 'outcome' in entry && entry.outcome.outcome === 'merged'));
+  });
+}
+
+test('a conflict with a failed head in the same batch is retried against landed heads', async () => {
+  const run = recording({ failing: [1] });
+  const merge = run.ports.merge;
+  run.ports.merge = async (headSha, baseTip, item) => headSha === head(2) && run.contains.get(baseTip)!.includes(1)
+    ? { conflict: ['src/app.ts'] } : merge(headSha, baseTip, item);
+  const results = await mergeBatch(run.ports, [1, 2, 3].map(queued));
+  assert.ok(results.some(entry => entry.work.key === 'GY-2' && 'outcome' in entry && entry.outcome.outcome === 'merged'));
+  assert.ok(!run.kinds('GY-2').includes('refused'));
 });

@@ -35,7 +35,7 @@ export function useFeatures(token: string, ready: boolean, read: Read, admin: bo
   const [state, setState] = useState<Probe>({ features: unknownFeatures, operatorAgents: [], operatorAgentsError: null });
   useEffect(() => {
     setState({ features: unknownFeatures, operatorAgents: [], operatorAgentsError: null });
-    if (!token || !ready) return;
+    if (!ready) return;
     let active = true;
     const load = () => void probeFeatures(read, admin, hasScenarios).then(next => { if (active) setState(next); });
     load(); const timer = setInterval(load, 60000);

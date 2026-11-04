@@ -49,7 +49,7 @@
     {
       "kind": "browser",
       "action": "open",
-      "path": "/"
+      "path": "/?sign-in"
     },
     {
       "kind": "browser",

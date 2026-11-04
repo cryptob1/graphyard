@@ -54,3 +54,5 @@ The profile named by `run.reviewerProfile` defaults to 4 sessions when its concu
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record `dispatch.abandoned`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
 
 Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. Exact-head control-plane approval lets the head proceed immediately to the merge trial. Settings ignore old `run.awaitReviewers` and `run.awaitReviewersMinutes`; dispatch cursors discard old `botReviewers`.
+
+The loop closes exited Graphyard panes left in removed worktrees. If bounded coordination sessions and launch actions no longer identify a leftover, it reads that worktree’s item history once that cycle to recover ownership, without loading the fleet’s history. Master panes, foreign panes and running agents stay open; an existing worktree needs no history lookup.

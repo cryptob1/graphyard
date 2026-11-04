@@ -1,0 +1,19 @@
+{
+  "id": "local-view-without-login",
+  "title": "The dashboard is readable on its own machine without signing in",
+  "description": "A real control plane reached directly and through a TCP publication with a different port and peer (the Compose NAT boundary) answers a tokenless board read addressed to its local host and port, refuses foreign Host, proxy, foreign Origin and cross-site fetch requests, and never sends a CORS header.",
+  "tags": [
+    "dashboard",
+    "authentication"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "The dashboard is readable on its own machine without signing in",
+      "run": "node --import tsx --test tests/local-view-without-login.test.ts",
+      "timeoutSeconds": 120
+    }
+  ]
+}

@@ -36,6 +36,7 @@ import { installIdFor } from '../install/types.js';
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
+  sessionHistory?: DaemonEffects['sessionHistory'];
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
@@ -70,6 +71,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
     snapshot: deps.snapshot,
+    sessionHistory: deps.sessionHistory,
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     credentials: profiles => inspectWorkerCredentials(root, profiles),

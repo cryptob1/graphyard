@@ -45,7 +45,7 @@
       "kind": "browser",
       "name": "sign in to the dashboard",
       "action": "open",
-      "path": "/"
+      "path": "/?sign-in"
     },
     {
       "kind": "browser",
