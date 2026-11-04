@@ -17,7 +17,7 @@ import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { createSchema } from '../src/model/work.js';
 import type { Work } from '../src/model.js';
 import { archiveDaemonCursor, writeDaemonState, readDaemonState } from '../src/daemon/state.js';
-import { foldMergeLedger, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
+import type { MergeLedgerEvent } from '../src/model/merge-ledger.js';
 import { mergeRecordKinds } from '../src/merge-writer/executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -29,6 +29,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // repository and a served.json fixture read through the serve record the deploy unit writes.
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't@t', GIT_COMMITTER_EMAIL: 't@t' } as NodeJS.ProcessEnv;
+import { foldServeReverts } from '../src/merge-writer/serve-revert-ledger.js';
+
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim();
 const gitEnv = (cwd: string, args: string[], extra: Record<string, string>) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...env, ...extra } }).trim();
@@ -743,12 +745,12 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   const reads = loopReads(coordinator, origin, join(coordinator, '.graphyard', 'served.json'), clock, () => outcome === 'reverted' ? passTrial : { ...passTrial, build: 'fail' }, tried, filed);
   const createWork = reads.createWork;
   delete reads.createWork;
-  const rows: MergeLedgerEvent[] = work.map(item => ({ kind: 'merge.intent', work: item.key,
-    payload: { key: item.key, head: item.mergeLedger!.mergeSha, baseTip: verified, mergeSha: item.mergeLedger!.mergeSha, risk: 'normal', at: new Date(clock.nowMs).toISOString() } }));
+  const initialLedger = Object.fromEntries(work.map(item => [item.key, structuredClone(item.mergeLedger!)]));
+  const rows: MergeLedgerEvent[] = [];
   reads.record = async (item, event) => {
     const { kind, ...payload } = event;
     rows.push({ kind: mergeRecordKinds[kind], work: item.key, payload });
-    const ledger = foldServeReverts(foldMergeLedger(rows), rows);
+    const ledger = foldServeReverts(structuredClone(initialLedger), rows);
     for (const entry of work) entry.mergeLedger = ledger[entry.key];
   };
   let state = emptyDaemonState(config);
@@ -781,5 +783,3 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   assert.equal(tipOf(origin), reverted.revertSha ?? served);
   assert.equal(work[1]!.mergeLedger!.serveReverts!.length, 1);
 });
-
-import { foldServeReverts } from '../src/merge-writer/serve-revert-ledger.js';

@@ -19,6 +19,8 @@ import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
 
+import { foldServeReverts, mergeServeRevertKind, mergeServeRevertSchema } from '../merge-writer/serve-revert-ledger.js';
+
 /**
  * GY-1524. The merge writer's ledger, written by the loop's coordinator identity through
  * `POST /api/work/:id/merge-record`: one event per step of a merge (model/merge-ledger.ts) —
@@ -240,5 +242,3 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     return answer();
   }));
 }
-
-import { foldServeReverts, mergeServeRevertKind, mergeServeRevertSchema } from '../merge-writer/serve-revert-ledger.js';

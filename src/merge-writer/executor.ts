@@ -12,6 +12,8 @@ import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
+import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
+
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
  * (cli/verify.ts `countProofCases`, which this mirrors: the CLI module is not imported into the loop).
@@ -909,5 +911,3 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
   }
   return outcomes;
 }
-
-import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
