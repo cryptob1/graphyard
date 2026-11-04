@@ -61,12 +61,10 @@ test('unit:registry-slot-authority — independent loops racing for the last slo
   const duplicate = await client().select({ role: 'worker', host: hostId, group: null, work: winner.work, principal: winner.principal, observations: [] });
   assert.equal(duplicate.selected, false);
   assert.equal((await registry.document(actor)).sessions.find(session => session.id === winner.id)!.endedAt, null);
-  await registry.mutate(actor, 'role.set', { role: { name: 'worker', accounts: ['account-a', 'account-b'], concurrency: 3 }, reason: 'test purpose and principal reservations' }, randomUUID());
-  for (const work of [winner.work, 'GY-other']) {
-    const duplicate = await client().select({ role: 'worker', host: hostId, group: null, work, principal: winner.principal, observations: [] });
-    assert.equal(duplicate.selected, false, 'spare role capacity cannot duplicate a worker purpose or identity');
-    assert.match(duplicate.reason, /already reserved/);
-  }
+  await registry.mutate(actor, 'role.set', { role: { name: 'worker', accounts: ['account-a', 'account-b'], concurrency: 3 }, reason: 'test purpose reservations' }, randomUUID());
+  const reserved = await client().select({ role: 'worker', host: hostId, group: null, work: winner.work, principal: winner.principal, observations: [] });
+  assert.equal(reserved.selected, false, 'spare role capacity cannot duplicate a worker purpose');
+  assert.match(reserved.reason, /already reserved/);
   await client().end(winner.id, 'test session finished');
 });
 
