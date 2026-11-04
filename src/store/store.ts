@@ -205,6 +205,14 @@ export class Store {
     // A delta row reads as the full row it stands for (snapshot-delta.ts).
     return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
+  /** Idle observers touch only jobs; a wake after this check is picked up on the next idle tick. */
+  async hasDueJob(): Promise<boolean> {
+    return (await this.pool.query('SELECT EXISTS (SELECT 1 FROM jobs WHERE available_at<=now() AND (locked_until IS NULL OR locked_until<now())) AS due')).rows[0].due;
+  }
+  /** Priority calculation needs open items only, never settled summaries. */
+  async observationWork(): Promise<Work[]> {
+    return (await this.pool.query("SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id WHERE i.stage <> 'done' ORDER BY i.number")).rows.map(row => row.document);
+  }
   /**
    * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the items
    * the merge writer may merge now, then items whose next action waits on an observation; the unnamed keep

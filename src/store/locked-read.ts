@@ -171,7 +171,7 @@ function overlaps(work: Work, other: Work) {
 const scopes = new WeakMap<Work, { path: string; prefix: boolean }[]>();
 function scopesOf(work: Work) {
   let known = scopes.get(work);
-  if (!known) scopes.set(work, known = (work.observation?.files ?? []).map(pathScope));
+  if (!known) scopes.set(work, known = ([...work.plannedFiles ?? [], ...work.exclusiveResources ?? [], ...work.observation?.files ?? []]).map(pathScope));
   return known;
 }
 

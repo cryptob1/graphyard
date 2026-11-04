@@ -22,7 +22,7 @@ A cycle can complete while every item remains stuck. Check item history, merge l
 
 A fresh-context reviewer restates each feature's result, proofs and gaps before dispatch. First `gaps` holds for `master requirements`; one re-check follows, then dispatch includes its report even if gaps remain. Bugs and chores skip it. Prompts come from Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model), vendored under `vendor/egm/`.
 
-Each tracked pane names its registered launch: only that launch’s liveness can trigger a retry. Closing a stale pane (including a saved action without a launch ID) cannot replace a newer reviewer’s token. A missing or blocked current pane retries; reported or expired launches still close.
+Tracked panes name their registered launch, so a stale pane, even an unbound saved action, never replaces a newer reviewer’s token. A missing or blocked current pane, or an unreported headless run, retries; reported or expired launches close.
 
 ## From intent to work items
 

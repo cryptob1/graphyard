@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { createContext } from '../src/cli/context.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';

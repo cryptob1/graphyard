@@ -45,7 +45,7 @@ async function open(page: Page, errors: string[]) {
     const url = new URL(route.request().url());
     return route.fulfill({ json: boardApi(url.pathname.slice(1) + url.search) });
   });
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', level: 1 })).toBeVisible();

@@ -6,7 +6,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';

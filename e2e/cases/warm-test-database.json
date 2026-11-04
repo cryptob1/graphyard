@@ -1,0 +1,14 @@
+{
+  "id": "warm-test-database",
+  "title": "Test and E2E databases start warm from a migrated template",
+  "description": "A disposable cluster is a copy of one template cluster per schema digest, fsync off, holding a migrated template database. Two databases cloned from it are isolated and carry exactly the schema a cold migration builds; a new schema generation rebuilds the template and removes the stale one.",
+  "tags": ["database", "speed"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Clone isolated current-schema databases from the warm template and rebuild it for a new generation",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/warm-test-database.test.ts",
+    "timeoutSeconds": 180
+  }]
+}

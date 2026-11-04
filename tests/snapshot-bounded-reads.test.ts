@@ -7,7 +7,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';

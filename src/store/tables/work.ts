@@ -11,7 +11,7 @@ export const workItems = defineTable({
 -- GY-3013: retire compatibility fields once at startup, rather than on every read and write.
 UPDATE work_items SET document = (document - ARRAY[
   'queue', 'queueSequence', 'queueEjection', 'queueHistory',
-  'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
+  'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
   'escalation', 'escalations', 'containmentQuarantine', 'parent', 'children', 'split', 'decomposition',
   'research', 'researchBrief', 'triage', 'pendingFollowUps', 'blockerProbe', 'documentation',
   'lane', 'speedTarget', 'mechanicalPlan', 'mechanicalAnswered'
@@ -19,7 +19,7 @@ UPDATE work_items SET document = (document - ARRAY[
   THEN '{"blocker":null}'::jsonb ELSE '{}'::jsonb END
 WHERE document ?| ARRAY[
   'queue', 'queueSequence', 'queueEjection', 'queueHistory',
-  'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
+  'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings',
   'escalation', 'escalations', 'containmentQuarantine', 'parent', 'children', 'split', 'decomposition',
   'research', 'researchBrief', 'triage', 'pendingFollowUps', 'blockerProbe', 'documentation',
   'lane', 'speedTarget', 'mechanicalPlan', 'mechanicalAnswered'

@@ -10,7 +10,7 @@ import type { Dashboard } from './pages/dashboard';
 import { primaryEntry, viewFor, views } from './pages';
 import TopBar from './components/top-bar';
 import { useFeatures } from './features';
-import LoginPage, { HUMAN_SESSION_KEY, REJECTED_NOTICE, storedToken } from './pages/login';
+import LoginPage, { HUMAN_SESSION_KEY, REJECTED_NOTICE, SIGN_IN_NEEDED, storedToken, wantsSignIn } from './pages/login';
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
@@ -23,6 +23,8 @@ import { idempotencyKey } from './idempotency-key';
 function App() {
   const [token, setToken] = useState(storedToken);
   const sessionEpoch = useRef(0);
+  // Viewing on this machine needs no sign-in; the form shows once an action asks for it or the local read is refused.
+  const [signingIn, setSigningIn] = useState(wantsSignIn);
   const [draftToken, setDraftToken] = useState('');
   const [work, setWork] = useState<Work[]>([]);
   const [status, setStatus] = useState<any>(null);
@@ -42,9 +44,16 @@ function App() {
   const [query, setQuery] = useState('');
   async function api(path: string, data?: unknown) {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey() }, body: data === undefined ? undefined : JSON.stringify(data) });
-    const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
+    const body = await response.json(); if (!response.ok) throw new Error(!token && response.status === 401 ? SIGN_IN_NEEDED : body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
-  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+  async function signOut() {
+    if (token.startsWith('gyh_')) {
+      try {
+        const response = await fetch('/api/sign-out', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok && response.status !== 401) throw new Error('Unable to sign out. Please retry.');
+      } catch { setError('Unable to sign out. Check your connection and retry.'); return; }
+    }
+    sessionEpoch.current++; setSigningIn(true); setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   /** The sign-in page's first read: once the status reply accepts the token, the work snapshot, then the dashboard. */
   async function firstLoad(system: any, signal: AbortSignal) {
     const epoch = sessionEpoch.current, headers = { Authorization: `Bearer ${token}` }, response = await fetch('/api/work-snapshot', { headers, signal });
@@ -57,7 +66,7 @@ function App() {
   // The sign-in page verifies the token first (web/pages/login.tsx); polling starts once it is accepted.
   const live = !!status;
   useEffect(() => {
-    if (!token || !live) return;
+    if (!live) return;
     const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
     const load = async () => {
       if (pending) return; pending = true;
@@ -72,7 +81,7 @@ function App() {
         if (active && epoch === sessionEpoch.current) { setWork(items.work); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
         if (!active || epoch !== sessionEpoch.current) return;
-        if (e.unauthorized) { signOut(); setError(e.message); }
+        if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
       } finally { pending = false; }
     };
@@ -85,10 +94,10 @@ function App() {
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
   const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, sessionEpoch, api, refresh, action, setError, signOut };
-  if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken} host={location.host} onVerified={firstLoad}/>;
+  if (!status) return <LoginPage signingIn={signingIn} setSigningIn={setSigningIn} token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken} host={location.host} onVerified={firstLoad}/>;
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
-    <main className="main">{error && <div role="alert" className="notice danger">{error}</div>}
+    <main className="main">{error && <div role="alert" className="notice danger">{error}{error === SIGN_IN_NEEDED && <> <button type="button" onClick={signOut}>Sign in</button></>}</div>}
       <TopBar {...dashboard}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
   </div>;

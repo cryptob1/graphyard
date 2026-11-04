@@ -3,7 +3,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import pg from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store, migrationDigests, recordedMigrationDigests } from '../src/store.js';
 import { migrationBackoffMs, retryLockFailures } from '../src/store/migration-locks.js';
 import { schemaVersion } from '../src/release.js';

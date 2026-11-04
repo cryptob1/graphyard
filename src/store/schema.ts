@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
+import { humanSignInSessions } from './tables/human-sign-in.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
 import { mergesTables } from './tables/merges.js';
@@ -19,7 +20,7 @@ import { planeLivenessTables } from './tables/plane-liveness.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...attributionTables,
-  ...schemaGenerationTables, ...planeLivenessTables,
+  ...schemaGenerationTables, ...planeLivenessTables, humanSignInSessions,
 ];
 
 /** Tables retired from the schema and logical backups. */

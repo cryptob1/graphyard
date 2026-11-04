@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store, save, applyWorkDelta, documentBefore, resolvedPayloadSql, routineSaveKinds, snapshotEvery, type WorkDelta } from '../src/store.js';
 import { compactLedger, ledgerCompactedKind, ledgerRetentionMs, configuredLedgerRetentionMs } from '../src/store/compaction.js';
 import { DELIVERY_EVENT_PREDICATE } from '../src/store/tables/production.js';

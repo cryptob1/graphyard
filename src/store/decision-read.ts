@@ -1,3 +1,4 @@
+import { sharedResources } from '../coordination.js';
 import type { Work } from '../model.js';
 import { followUpRequest } from '../model/observation-window.js';
 import type { Queryable } from './locked-read.js';
@@ -34,14 +35,18 @@ export async function decisionWork(db: Queryable, focus: readonly (string | null
   }
   // A submitted PR may already belong to an otherwise unrelated item.
   if (submissionPr !== undefined) await read((await db.query("SELECT id::text AS id FROM work_index WHERE peers->'submissionPr' = to_jsonb($1::int)", [submissionPr])).rows.map(row => row.id));
-  const resources = [...new Set(focused.flatMap(work => work.exclusiveResources ?? []))];
-  if (resources.length) {
-    const rows = (await db.query(`SELECT id::text AS id, key, stage, peers FROM work_index
-      WHERE peers->'resources' ?| $1::text[] AND jsonb_typeof(peers->'lease') = 'object' ORDER BY number`, [resources])).rows;
-    for (const row of rows) if (!works.has(row.id)) works.set(row.id, {
+  // Read compact in-flight peers: path scopes can overlap without exact string equality.
+  const rows = (await db.query(`SELECT id::text AS id, key, stage, peers FROM work_index
+    WHERE jsonb_typeof(peers->'lease') = 'object'
+      OR (stage <> 'done' AND jsonb_typeof(peers->'submission') = 'object') ORDER BY number`, [])).rows;
+  for (const row of rows) if (!works.has(row.id)) {
+    const peer = {
       id: row.id, key: row.key, stage: row.stage, lease: row.peers.lease, exclusiveResources: row.peers.resources,
+      submission: row.peers.submission, reworkRequested: row.peers.reworkRequested,
+      candidate: row.peers.candidate ? {} : null, observation: { files: row.peers.files ?? [] },
       criteria: [], dependencies: [], evidence: [], workspaces: [],
-    } as unknown as Work);
+    } as unknown as Work;
+    if (focused.some(work => sharedResources(work, peer).length)) works.set(row.id, peer);
   }
   return [...works.values()];
 }
