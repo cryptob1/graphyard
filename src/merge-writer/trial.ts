@@ -607,6 +607,7 @@ export interface RunTrialInput {
   onAttempt?: (attempt: number) => void;
   /** GY-2963: called at each step's start — checkout, install, build, selection, the tests, each repository check by name — so the merge writer records where the trial is. */
   onStep?: (step: string) => void;
+  onTiming?: (step: string, durationMs: number) => void;
   /** Where the trial's temporary directory may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
   /** Where the trial's short checkout may go; `trialCheckoutRoots()`, kept out of `trialExcludedRoots()`, unless a test names others, taken as named. */
@@ -792,12 +793,18 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   // GY-2963: the step the trial is in, reported to the caller at each start, and each step's
   // duration written into the trial's log, so a slow start is named by its slowest step.
-  let stepLabel = 'checkout', stepAt = startedAt;
+  let stepLabel = 'checkout', stepAt = startedAt, stepClosed = false;
+  const closeStep = () => {
+    if (!stepClosed) input.onTiming?.(stepLabel, Math.max(0, now() - stepAt));
+    stepClosed = true;
+  };
   const stepSeconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
   input.onStep?.(stepLabel);
   const enterStep = (label: string) => {
     const at = now();
     log.push(`[step] ${stepLabel} took ${stepSeconds(at - stepAt)}`);
+    closeStep();
+    stepClosed = false;
     stepLabel = label;
     stepAt = at;
     input.onStep?.(label);
@@ -900,6 +907,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
+    closeStep();
     const closed = enter();
     const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
     log.push(line);
@@ -912,7 +920,6 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const trial = async (): Promise<TrialRun> => {
     try {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
-      enterStep('install');
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
       // A repository the merge does not make a Node package installs and builds nothing. One without
       // scripts/ci-tests.mjs runs its graphyard.json preMerge (or package.json test/typecheck) checks
@@ -938,6 +945,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const scan = input.secretScan === false ? null
         : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
       if (scan) {
+        enterStep('scan');
         // The binary is cached under the managed root, so only the first trial on a host downloads it.
         const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
         if (!scanned.ok) {
@@ -955,6 +963,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
         }
       }
+      enterStep('install');
       let packageScripts: Record<string, unknown> | undefined;
       let browserSuitePassed = false;
       if (await holds('package.json')) {
@@ -990,6 +999,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
+        enterStep('tests: e2e');
         const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
           networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
@@ -1071,7 +1081,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           try {
             const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
             await writeFile(list, `${group.join('\n')}\n`);
-            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries });
+            const shardAt = now();
+            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries }).finally(() => input.onTiming?.(`tests: shard ${index + 1}`, Math.max(0, now() - shardAt)));
             const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
             // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
             const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
@@ -1106,7 +1117,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   };
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
   let settled: { verdict: TrialRun } | { error: unknown };
-  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; }
+  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; } finally { closeStep(); }
   // An attempt that reached no verdict keeps the phase it ended in and every phase's time (GY-1832).
   if ('error' in settled && typeof settled.error === 'object' && settled.error) attemptContext.set(settled.error, { phase, phases: enter() });
   // A root that was clean when chosen and is not now may have shadowed the trial's lookups: whatever it answered is no verdict.
