@@ -551,7 +551,7 @@ const ledgerKinds = async (id: string) => (await store.pool.query("SELECT kind F
 /** The coordinator's record port: the route, under the step's own key, as effects.ts posts it. */
 const record: MergePorts['record'] = async (work, event) => {
   const answer = await request(token(coordinator), `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
-  if (answer.status !== 200) throw new Error(`merge-record ${event.kind} refused (${answer.status}): ${JSON.stringify(answer.body)}`);
+  if (answer.status !== 200) throw Object.assign(new Error(`merge-record ${event.kind} refused (${answer.status}): ${JSON.stringify(answer.body)}`), { status: answer.status });
   return answer.body;
 };
 /** The real reads over the fixture checkout, with the trial stubbed to pass and every git call counted. */
@@ -1016,6 +1016,33 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
     assert.notEqual(held.stage, 'done', variant);
     assert.equal(held.delivery ?? null, null, variant);
     assert.equal(held.mergeLedger?.state, 'refused', variant);
+    if (variant === 'policy') {
+      // Canonical restart: an actual route 409 for the on-main recovery must leave
+      // its original flight held while a second, eligible head still lands.
+      const nextNumber = 30, nextBranch = join(checkout, '.graphyard', 'worktrees', `GY-${nextNumber}-1`);
+      git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${nextNumber}-1`, nextBranch, mergeSha);
+      heads[nextNumber] = await commit(nextBranch, 'src/after-recovery.ts', 'export const next = true;\n', 'unrelated queued change');
+      const next = await submittedItem(nextNumber);
+      const eventsBefore = await ledgerKinds(w.id);
+      const healthy = fixtureReads(), cycleState = emptyDaemonState(config);
+      const effects = effectsFor({ work: async () => [await document(w.id), await document(next.id)], now: () => start, mergeWriter: healthy.reads });
+      const restarted = await runCycle(config, cycleState, effects, () => start);
+      assert.ok(restarted.actions.some(action => action.work === w.key && action.state === 'failed' && /remains held/.test(action.detail)));
+      assert.equal(inFlightKey(cycleState), next.key);
+      await mergeWriterIdle(cycleState);
+      await runCycle(config, cycleState, effects, () => start);
+      assert.equal((await document(next.id)).stage, 'done');
+      assert.equal(firstParents()[0], (await document(next.id)).delivery?.mergeSha);
+      // Restart again to show the held source cannot be retrialled against itself.
+      await runCycle(config, emptyDaemonState(config), effects, () => start);
+      assert.deepEqual([healthy.trials.length, healthy.pushes.length], [1, 1]);
+      assert.equal(healthy.trials[0]!.mergeSha, (await document(next.id)).delivery?.mergeSha);
+      assert.deepEqual(await ledgerKinds(w.id), eventsBefore);
+      const stillHeld = await document(w.id);
+      assert.deepEqual(stillHeld.mergeLedger, held.mergeLedger);
+      assert.deepEqual(stillHeld.evidence, held.evidence);
+      assert.equal(stillHeld.delivery ?? null, null);
+    }
   }
 
 });
