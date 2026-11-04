@@ -1,8 +1,8 @@
 # Certified real-root benchmark
 
-Implementation status: **in progress, not certified**. GY-3051 epoch 2 has not
-completed the delivery integration tests. Do not use this head to launch a paid
-real-agent benchmark until independent review and the checks below pass.
+Implementation status: source work resumed in GY-3051 epoch 4. Build and focused
+checks are available below; ordinary private-root delivery verification remains
+required before submission. No actual-agent success is claimed.
 
 The versioned starter is `benchmarks/hard-math/seed/`. Its `CONTRACT.md` freezes
 exact JSON-lines CLI, batch HTTP and browser interfaces. The eight component
@@ -28,15 +28,23 @@ The external verifier requires SymPy 1.14.0 and mpmath 1.3.0. A supervising
 producer provisions those dependencies outside implementation worktrees and
 freezes `oracle/verify.py` plus `oracle/requirements.txt`. Workers receive the
 contract, not producer credentials or writable oracle mounts. `HARD_MATH_PYTHON`
-names that pinned Python for deterministic tests; this development machine's
-preprovisioned recovery environment is the current local fallback. A portable
-producer environment still needs that explicit setting.
+names the interpreter explicitly. The trial Dockerfile installs committed pinned
+requirements into `/opt/graphyard-hard-math-oracle` using python3-venv, removes
+write permission from the environment, and sets
+`HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python`. This is also the test
+default. There is no host HOME mount or implicit host fallback. The producer's
+oracle source is frozen separately outside the implementation repository; its
+source directory and Python environment are masked from implementation sessions.
+For host-only focused checks, explicitly select an already provisioned pinned
+interpreter. Rebuild the trial image from the final synced head before running
+ordinary private-root tests; preserve the delivered runner base/Git/ripgrep and
+installed-browser fixes when syncing.
 
 Run deterministic runner checks with:
 
 ```sh
 npm run build
-HARD_MATH_PYTHON=/path/to/pinned/bin/python npm test -- tests/hard-math-smoke.test.ts
+HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts
 ```
 
 The E2E binding is `e2e:hard-math-smoke`. It invokes the same head's tests, which
@@ -55,7 +63,10 @@ node --import tsx benchmarks/hard-math/runner.ts post-deploy /path/to/run.json
 ```
 
 `run` selects an explicit team or single mode; `compare` is a separate explicit
-invocation and refuses a missing existing cost cap or usage meter. Nothing in
+invocation. Both conditions inherit the same existing authorized aggregate
+agent-seconds cap and wall deadline. An unavailable monetary meter or dollar cap
+is null with a reason; it does not prevent this authorized comparison, and
+monetary parity, compliance and advantage remain unproven. Nothing in
 ordinary checks automatically starts paid comparison runs. Configuration records
 an existing authorized budget, eligible model names, source installation,
 profile/seed, deadline, isolated run directory, producer oracle directory and
@@ -71,24 +82,46 @@ Source capacity must be quiescent throughout a bounded real run. Copied role
 concurrency or account maxSessions is not shared capacity. The current precondition
 requires an absent source loop and no live sessions on eligible source accounts;
 source capacity facts are retained in receipts and checked again during polling.
-This check needs integration verification before real use. No new account,
+The source-capacity policy has deterministic checks; its live installation
+observations remain part of the actual-run receipt. No new account,
 purchase, credential for a person or increase in account limits is authorized.
 Unknown usage is null with a reason; cost compliance and advantage stay unproven.
 One fixed seed cannot establish repeatable superiority or parallel speedup.
 
-## Epoch 2 handoff
+## Epoch 4 verification handoff
 
-The oracle/family and routing tests pass locally. Full scratch delivery currently
-fails at the initial local Git push: migrating quarantined received objects returns
-`Invalid cross-device link`, both under /tmp and under the assigned worktree.
-Changing core.createObject did not resolve it and was removed. No gate was replaced
-with a mocked trace, no test was skipped, and no real-agent run was attempted.
+The epoch 2/3 failure at the initial scratch Git push was an inherited Landlock
+REFER restriction (`Invalid cross-device link` during quarantine object migration).
+The operator has recovered its scoped repair and will verify this head in a real
+private-root container without ancestor Landlock. The worker has no Docker
+socket; neither fact blocks source editing. The known failing push was not
+repeated as a prerequisite. Full ordinary delivery tests remain mandatory and the
+lease stays held for those checks; do not complete until they pass.
 
-Before completion, finish and verify run-owned session/lease cleanup on success
-and timeout (including the master and headless producers); improve deadline and
-aggregate usage enforcement; bind overlap to actual implementation handles;
-exercise source-capacity preconditions; and run the delivery tests in an ordinary
-permitted environment. Review the receipt validation and real orchestration as
-unfinished implementation, not shipped benchmark behavior. Then run Graphyard
-self-review, address findings, commit and submit through complete. Do not submit
-trusted evidence for GY-3051 from the implementation identity.
+Cleanup now closes run-owned master and item panes, cancels this installation's
+headless producer runs, finishes handles, releases worker leases through the
+existing epoch-bound capacity mutation, and ends registry allocations before
+stopping scratch Postgres/control plane. A failed runtime stop retains its lease
+and fails cleanup. Receipts retain cleanup errors, raw registry allocations,
+work/repair/merge records, review/producer ledgers and coordinator state. The
+watchdog checks aggregate allocation seconds independently of coordination and
+artifact latency, aborts child process groups, and starts cleanup at the deadline
+or usage bound. Monetary and token usage remain unknown unless an explicit
+producer meter supplies them. Allocation time includes master, workers, reviews,
+proofs and repairs; it is not a token or money estimate.
+
+Three-worker overlap is recomputed from implementation handle timestamps and
+requires distinct principals, items, branches and worktree paths. Registry
+selection time alone cannot establish overlap. A single comparison uses one
+implementation principal with delegation forbidden, under the same frozen
+initial repository, contracts, eligible models, independent checks and bounds.
+The independent reviewers/producers and master count in both conditions.
+
+Focused checks cover oracle rejection across seeds 1/2/3, routing, source capacity,
+run-scoped cleanup, refusal to free a running worker's lease, cancellation of child
+process groups and real implementation overlap. The scratch delivery suite also
+covers early failure and aggregate-limit cleanup with actual control-plane
+leases. Controlled fixtures remain controlled fixtures. Actual team rebuild and
+explicit fair comparison are authorized on existing accounts and run after
+ordinary verification and delivery, retaining honest success or failure receipts.
+No purchase, raised limit or invented dollar authorization is involved.

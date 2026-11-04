@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { masterRunSchema } from '../../src/master/profiles.js';
 /** Controlled executors test the runner and real Graphyard gates; never model/agent evidence. */
 import { createHash, randomBytes } from 'node:crypto';
@@ -13,7 +14,7 @@ import { oracle } from './oracle.js';
 import type { RunContext } from './runner.js';
 
 const app=`document.querySelector('#form').addEventListener('submit',async event=>{event.preventDefault();const error=document.querySelector('#error'),results=document.querySelector('#results');error.textContent='';results.textContent='';try{const request={coefficients:document.querySelector('#coefficients').value.trim().split(/\\s+/),precisionBits:Number(document.querySelector('#precisionBits').value)};const response=await fetch('/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobs:[request]})});const body=await response.json(),result=body.results?.[0];if(body.error||result.error){error.textContent=(body.error||result.error).code;return;}results.textContent=result.roots.map(root=>root.lo.n+'/'+root.lo.d+' .. '+root.hi.n+'/'+root.hi.d+' multiplicity '+root.multiplicity).join('\\n');}catch(e){error.textContent=String(e);}});\n`;
-export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boolean;incorrectArtifact?:boolean;injectRepair?:boolean}={}) {
+export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boolean;incorrectArtifact?:boolean;injectRepair?:boolean;haltAfterClaims?:boolean;waitAfterClaims?:boolean}={}) {
   const trials=join(c.directory,'trials');await mkdir(trials);
   await c.plane.call('agent-registry/apply',c.coordinator,{
     runtimes:[{name:'controlled-fixture',launch:{kind:'codex'}}],
@@ -76,6 +77,11 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
   };
   // Three claimed, registered, distinct worktrees remain open together before any submits.
   const first=await Promise.all(c.receipt.work.slice(0,3).map(claim));
+  if(options.haltAfterClaims || options.waitAfterClaims) {
+    await c.snapshot();
+    if(options.waitAfterClaims) await delay(180_000,undefined,{signal:c.signal});
+    return;
+  }
   for(let i=0;i<c.receipt.work.length;i++) {
     const work=c.receipt.work[i];let attempt=i<3?first[i]:await claim(work,i);
     let item=await submit(attempt,!(options.injectRepair && work.component==='integration'));

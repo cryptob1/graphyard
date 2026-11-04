@@ -14,15 +14,17 @@ export const benchmarkRoot=fileURLToPath(new URL('.',import.meta.url));
 export const codeRoot=resolve(benchmarkRoot,'../..');
 export interface Credential {id:string;role:'admin'|'coordinator'|'worker'|'producer';token:string;proofs?:string[];sessionKind?:'ai'}
 export const credential=(id:string,role:Credential['role'],proofs?:string[]):Credential=>({id,role,token:randomBytes(32).toString('hex'),...(proofs?{proofs}:{}),...(role==='admin'?{sessionKind:'ai' as const}:{})});
-export async function isolatedRepository(directory:string) {
+export async function isolatedRepository(directory:string,signal?:AbortSignal) {
   const root=join(directory,'repository'),origin=join(directory,'origin.git');
+  const run=async(program:string,args:string[],options:any={})=>(await command(program,args,{...options,signal})).stdout;
+  const git=async(root:string,...args:string[])=>(await run('git',['-C',root,...args])).trim();
   await cp(join(benchmarkRoot,'seed'),root,{recursive:true});
   await git(root,'init','-q','-b','main');await git(root,'config','user.name','Hard math benchmark');await git(root,'config','user.email','hard-math@example.invalid');
   // Identical initial tree/commit in both comparison conditions.
   await git(root,'add','.');
-  await command('git',['-C',root,'commit','-q','-m','Frozen exact roots workbench v1 seed'],{env:{...process.env,GIT_AUTHOR_DATE:'2000-01-01T00:00:00Z',GIT_COMMITTER_DATE:'2000-01-01T00:00:00Z'}});
+  await command('git',['-C',root,'commit','-q','-m','Frozen exact roots workbench v1 seed'],{env:{...process.env,GIT_AUTHOR_DATE:'2000-01-01T00:00:00Z',GIT_COMMITTER_DATE:'2000-01-01T00:00:00Z'},signal});
   await mkdir(origin);await git(origin,'init','--bare','-q','-b','main');await git(root,'remote','add','origin',origin);
-  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:masterRunSchema.parse({mergeWriter:{deployKeyFile:join(directory,'unused')}})},root,defaultChildRun,{base:directory,record:async()=>{}});
+  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:masterRunSchema.parse({mergeWriter:{deployKeyFile:join(directory,'unused')}})},root,run,{base:directory,record:async()=>{}});
   const startingCommit=await git(root,'rev-parse','HEAD');await writer.push(startingCommit,'0'.repeat(40));await writer.fetch();
   return {root,origin,startingCommit};
 }

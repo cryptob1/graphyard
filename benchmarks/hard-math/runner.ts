@@ -6,15 +6,18 @@ import { loadStoredMasterConfig, readCredentialFile, atomicPrivateWrite, atomicP
 import { masterConfigSchema, type MasterConfig } from '../../src/master/profiles.js';
 import { daemonEffects } from '../../src/daemon/effects-production.js';
 import { runCycle, Launcher } from '../../src/daemon/cycle.js';
-import { emptyDaemonState } from '../../src/daemon/state.js';
-import { closeHerdrPane } from '../../src/master.js';
+import { emptyDaemonState, type DaemonState } from '../../src/daemon/state.js';
+import { createdHerdrTab, isHerdrCommand, herdrSubcommand } from '../../src/master/herdr.js';
+import { stopRun, watchBudget } from './lifecycle.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { ChildRun } from '../../src/child-runner.js';
 import { MERGE_PROTOCOL } from '../../src/protocol-version.js';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../src/child-runner.js';
 import { command, git } from './process.js';
 import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
-import { configSchema, validateReceipt, overlappingWorkers, comparison, type RunConfig, type Receipt } from './receipt-schema.js';
+import { configSchema, validateReceipt, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
 import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
@@ -25,7 +28,7 @@ export type Plane=Awaited<ReturnType<typeof startPlane>>;
 export interface RunContext {
   config:RunConfig; receipt:Receipt; directory:string; root:string;origin:string;install:string;
   plane:Plane;admin:string;coordinator:string;producer:string;operator:string;workers:{id:string;token:string}[];
-  oracleFile:string; checkpoint():Promise<void>; snapshot():Promise<any[]>; certify(item:any):Promise<boolean>;
+  oracleFile:string; signal:AbortSignal; panes:Set<string>; checkpoint():Promise<void>; snapshot():Promise<any[]>; certify(item:any):Promise<boolean>;
 }
 async function frozenInputs() {
   const frozen=JSON.parse(await readFile(join(benchmarkRoot,'profiles/frozen-v1.json'),'utf8'));
@@ -51,6 +54,7 @@ export async function createItems(context:RunContext) {
   const ids=new Map<string,string>();
   const definitions=context.config.mode==='team'?components:[{id:'single',title:'Build complete certified exact roots workbench',depends:[] as string[],files:['src/','public/','tests/'],brief:components.map(c=>`${c.title}: ${workDescription(c.id)}`).join('\n')}];
   for(const component of definitions) {
+    context.signal.throwIfAborted();
     const final=component.id==='integration'||component.id==='single';
     const item=await context.plane.call('work',context.operator,{
       type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
@@ -73,11 +77,41 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
   // Never overwrite an earlier run or its failed receipt.
   await mkdir(directory,{recursive:false});
   const started=Date.now();
-  let context:RunContext|undefined,plane:Plane|undefined,master:MasterConfig|undefined,effects:ReturnType<typeof daemonEffects>|undefined;
-  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],sourceCapacity:[],wallClockLimitSeconds:config.wallClockSeconds,work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
-  const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await writeFile(join(directory,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');};
+  let context:RunContext|undefined,plane:Plane|undefined,master:MasterConfig|undefined,effects:ReturnType<typeof daemonEffects>|undefined,state:DaemonState|undefined,launcher:Launcher|undefined;
+  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],sourceCapacity:[],runtimeReceipts:[],cleanup:{complete:false,errors:[]},wallClockLimitSeconds:config.wallClockSeconds,work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costReason:'Monetary usage unavailable on these accounts; equal agent-second and wall limits do not establish monetary parity.',costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
+  const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await atomicPrivateWrite(join(directory,'receipt.json'),receipt);};
   await checkpoint();await writeFile(join(directory,'config.json'),JSON.stringify(config,null,2)+'\n',{mode:0o600});
-  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(new Error('Wall-clock deadline reached')),config.wallClockSeconds*1000);
+  const abort=new AbortController(),deadline=started+config.wallClockSeconds*1000;
+  const limit=(reason:string)=>{if(!abort.signal.aborted) abort.abort(new Error(reason));};
+  const interrupted=()=>limit('Benchmark interrupted by process signal');
+  process.once('SIGTERM',interrupted);process.once('SIGINT',interrupted);
+  const timer=setTimeout(()=>limit('Wall-clock deadline reached'),config.wallClockSeconds*1000);
+  const enforce=()=>{
+    abort.signal.throwIfAborted();
+    if(Date.now()>=deadline) limit('Wall-clock deadline reached');
+    const seconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
+    receipt.agentSeconds=seconds;
+    if(seconds>=config.budget.maxAgentSeconds || config.budget.maxCost!==null && receipt.cost!==null && receipt.cost>=config.budget.maxCost || config.budget.maxTokens!==null && receipt.usage.reduce((n,u)=>n+(u.inputTokens??0)+(u.outputTokens??0),0)>=config.budget.maxTokens) limit('Configured aggregate usage limit reached');
+    abort.signal.throwIfAborted();
+  };
+  const panes=new Set<string>();
+  const capture=(program:string,args:string[],stdout:string)=>{
+    const sub=herdrSubcommand(args);
+    if(isHerdrCommand(program) && sub[0]==='tab' && sub[1]==='create') {
+      try {const parsed=JSON.parse(stdout),created=createdHerdrTab(parsed.result??parsed);panes.add(created.pane);receipt.runtimeReceipts.push({file:'created-pane',record:created});} catch {/* failure before a handle was returned */}
+    }
+  };
+  const boundedRun:ChildRun=async(program,args,options={})=>{
+    enforce();
+    const words=[...(options.wrapper??[]),program,...args];
+    try {const result=await command(words[0],words.slice(1),{cwd:options.cwd,env:options.env,timeoutMs:Math.min(options.timeoutMs??90_000,Math.max(1,deadline-Date.now())),signal:abort.signal});capture(program,args,result.stdout);return result.stdout;}
+    catch(error:any) {if(error.stdout) capture(program,args,error.stdout);throw error;}
+  };
+  let pendingTick:Promise<unknown>|undefined;
+  let watchdog:Promise<void>|undefined,stopping=false,emergencyStop:Promise<void>|undefined;
+  abort.signal.addEventListener('abort',()=>{
+    if(context && !stopping) emergencyStop=stopRun(context,state).catch(error=>{receipt.failures.push({at:new Date().toISOString(),component:'deadline-cleanup',head:null,reason:String(error)});});
+  },{once:true});
   let source:MasterConfig|undefined;
   try {
     if(!fixture) {source=await loadStoredMasterConfig(config.sourceRoot);await realPrerequisites(source,graphyardCommit);
@@ -85,7 +119,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
     }
     await mkdir(install,{recursive:false,mode:0o700});await chmod(install,0o700);
-    const repository=await isolatedRepository(directory);receipt.startingCommit=repository.startingCommit;
+    enforce();const repository=await isolatedRepository(directory,abort.signal);receipt.startingCommit=repository.startingCommit;
     const admin=credential('benchmark-admin','admin'),coordinator=credential('benchmark-coordinator','coordinator'),producer=credential('benchmark-oracle','producer',['manual:certified-artifact','unit:workbench-contract']);
     const workers=Array.from({length:config.mode==='team'?3:1},(_,i)=>credential(`benchmark-worker-${i+1}`,'worker'));
     const producers=(source?.producers??[]).map((_,i)=>credential(`benchmark-proof-${i}`,'producer',['unit:*','integration:*']));
@@ -96,41 +130,56 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     await mkdir(oracleDirectory,{recursive:false,mode:0o700});
     await cp(oracleSource,join(oracleDirectory,'verify.py'));await chmod(join(oracleDirectory,'verify.py'),0o400);
     await writeFile(join(oracleDirectory,'freeze.json'),JSON.stringify({oracleDigest:receipt.oracleDigest,python:config.oraclePython,sympy:'1.14.0',mpmath:'1.3.0'}),{mode:0o400});
-    const baseline=await oracle(config.oraclePython,[{request:generate(config.seed)[2],output:{roots:[]}}],join(oracleDirectory,'verify.py'));
+    const baseline=await oracle(config.oraclePython,[{request:generate(config.seed)[2],output:{roots:[]}}],join(oracleDirectory,'verify.py'),abort.signal);
+    enforce();
     if(baseline[0]?.pass!==false) throw new Error('Oracle accepted known-bad empty root baseline');
     receipt.failures.push({at:new Date().toISOString(),component:'starter-baseline',head:receipt.startingCommit,reason:baseline[0].reason});
-    plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
+    enforce();plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
-    const snapshot=async()=>{
-      if(source) {
+    let reading:Promise<any[]>|undefined;
+    const snapshot=(checkSource=false)=>reading??=(async()=>{
+      if(source && checkSource && !stopping) {
         const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
         try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
       }
       const items=await plane!.call('work',coordinator.token);
+      let gateFailure:string|undefined;
       for(const w of receipt.work) {
         const record=items.find((i:any)=>i.id===w.id);if(!record) throw new Error(`Missing authoritative item ${w.key}`);
         Object.assign(w,{epoch:record.epoch,candidate:record.candidate?.sha??null,merge:record.delivery?.mergeSha??null,attempts:record.pipeline.attempts.length,reviews:record.observation?.reviews?.length??0,repairs:record.pipeline.reworkRounds,record});
-        if(w.repairs>2 || w.attempts>3) throw new Error(`Repair bound exceeded for ${w.key}`);
-        if(record.blocker || record.humanRequest&&!record.humanRequest.answer) throw new Error(`${w.key}: unrecoverable gate failure: ${record.blocker??record.humanRequest.needed}`);
+        if(w.repairs>2 || w.attempts>3) gateFailure=`Repair bound exceeded for ${w.key}`;
+        if(record.blocker || record.humanRequest&&!record.humanRequest.answer) gateFailure=`${w.key}: unrecoverable gate failure: ${record.blocker??record.humanRequest.needed}`;
       }
       const registry=await plane!.call('agent-registry/document',coordinator.token);
-      receipt.sessions=registry.sessions.map((s:any)=>({id:s.id,role:s.role,work:s.work,principal:s.principal,runtime:s.runtime,account:s.account,model:s.model,reason:s.reason,startedAt:s.selectedAt,endedAt:s.endedAt}));
+      const sessions=new Map(receipt.sessions.map(s=>[s.id,s]));
+      for(const s of registry.sessions) {
+        const item=items.find((w:any)=>w.key===s.work);
+        const handles=(item?.sessions??[]).filter((h:any)=>h.kind==='implementation' && h.principal===s.principal && Date.parse(h.startedAt)>=Date.parse(s.selectedAt));
+        // A later allocation must never borrow an earlier attempt's implementation handle.
+        const next=registry.sessions.filter((n:any)=>n.role===s.role && n.work===s.work && n.principal===s.principal && Date.parse(n.selectedAt)>Date.parse(s.selectedAt)).sort((a:any,b:any)=>Date.parse(a.selectedAt)-Date.parse(b.selectedAt))[0];
+        const handle=handles.find((h:any)=>!next || Date.parse(h.startedAt)<Date.parse(next.selectedAt));
+        const workspace=item?.workspaces?.find((w:any)=>w.epoch===handle?.epoch);
+        sessions.set(s.id,{id:s.id,role:s.role,work:s.work,principal:s.principal,runtime:s.runtime,account:s.account,model:s.model,reason:s.reason,startedAt:s.selectedAt,endedAt:s.endedAt,record:s,
+          implementation:handle && workspace?{id:handle.id,epoch:handle.epoch,branch:workspace.branch,path:workspace.path,pane:handle.pane,agentName:handle.agentName,startedAt:handle.startedAt,endedAt:handle.endedAt}:null});
+      }
+      receipt.sessions=[...sessions.values()];
       receipt.agentSeconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
       receipt.overlaps=overlappingWorkers(receipt.sessions);
-      receipt.comparativeSelection=new Set(receipt.sessions.filter(s=>s.role==='worker').map(s=>s.model)).size>1?'exercised':'untested';
+      receipt.comparativeSelection=new Set(receipt.sessions.filter(s=>s.role==='worker').map(s=>s.model)).size>1 && new Set(receipt.sessions.filter(s=>s.role==='worker').map(s=>s.runtime)).size>1?'exercised':'untested';
       receipt.usage=receipt.sessions.map(s=>({role:s.role,session:s.id,inputTokens:null,outputTokens:null,cost:null,reason:'Runtime usage unavailable; subscription allocation is not measured token cost.'}));
       if(config.usageCommand) {
         const measured=JSON.parse((await command(config.usageCommand[0],config.usageCommand.slice(1),{input:JSON.stringify({sessions:receipt.sessions,runDirectory:directory}),timeoutMs:10_000})).stdout);
-        receipt.usage=measured;
+        const entries=(measured as unknown[]).map(value=>usageSchema.parse(value));
+        receipt.usage=receipt.usage.map(unknown=>entries.find(u=>u.session===unknown.session && u.role===unknown.role)??unknown);
       }
       receipt.usageComplete=receipt.sessions.length>0 && receipt.sessions.every(s=>receipt.usage.some(u=>u.session===s.id && u.role===s.role && u.inputTokens!==null && u.outputTokens!==null && u.cost!==null));
       receipt.cost=receipt.usageComplete?receipt.usage.reduce((sum,u)=>sum+u.cost!,0):null;
+      receipt.costReason=receipt.usageComplete?null:'Runtime monetary usage unavailable; monetary parity and cost compliance are unproven.';
       receipt.costBudgetProven=receipt.usageComplete && config.budget.maxCost!==null && receipt.cost!<=config.budget.maxCost;
       await checkpoint();
-      if(abort.signal.aborted) throw new Error('Wall-clock deadline reached');
-      if(receipt.agentSeconds>=config.budget.maxAgentSeconds || config.budget.maxCost!==null && receipt.cost!==null && receipt.cost>=config.budget.maxCost || config.budget.maxTokens!==null && receipt.usageComplete && receipt.usage.reduce((n,u)=>n+u.inputTokens!+u.outputTokens!,0)>=config.budget.maxTokens) throw new Error('Configured aggregate usage limit reached');
+      if(!stopping) {if(gateFailure) throw new Error(gateFailure);enforce();}
       return items;
-    };
+    })().finally(()=>{reading=undefined;});
     const certify=async(item:any)=>{
       const head=item.candidate?.sha;if(!head) return false;
       const target=join(directory,`certify-${head}`),scratch=join(directory,`scratch-${head}`);
@@ -141,22 +190,25 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       await plane!.call(`work/${item.id}/evidence`,producer.token,{proof:'manual:certified-artifact',sha:head,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:passed?'pass':'fail',executed:generate(config.seed).length,skipped:0,exercise:{behaviour:'Empty-root starter solver, independently rejected before implementation',result:'fail',executed:1}});
       await checkpoint();return passed;
     };
-    context={config,receipt,directory,...repository,install,plane,admin:admin.token,coordinator:coordinator.token,producer:producer.token,operator:operatorToken,workers,oracleFile:join(oracleDirectory,'verify.py'),checkpoint,snapshot,certify};
-    await createItems(context);
+    context={config,receipt,directory,...repository,install,plane,admin:admin.token,coordinator:coordinator.token,producer:producer.token,operator:operatorToken,workers,oracleFile:join(oracleDirectory,'verify.py'),signal:abort.signal,panes,checkpoint,snapshot,certify};
+    enforce();await createItems(context);
+    watchdog=watchBudget(abort.signal,async()=>{enforce();await snapshot();}).catch(error=>{limit(String(error));});
     if(fixture) await fixture(context);
     else {
       master=await configureMaster(context,source!,producers);
       applyHerdrConfig(master);
-      const state=emptyDaemonState(master),launcher=new Launcher(3);
-      effects=daemonEffects(repository.root,master,{snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>plane!.call(path,coordinator.token,data)});
+      state=emptyDaemonState(master);launcher=new Launcher(3);
+      effects=daemonEffects(repository.root,master,{snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>{enforce();return plane!.call(path,coordinator.token,data);},run:boundedRun,fetcher:(input,init)=>fetch(input,{...init,signal:AbortSignal.any([abort.signal,...(init?.signal?[init.signal]:[])])})});
+      const dispatchTick=effects.dispatchTick!;
+      effects.dispatchTick=snapshot=>{enforce();return pendingTick=dispatchTick(snapshot);};
       const checked=new Set<string>();
       while(true) {
-        const items=await snapshot();
+        const items=await snapshot(true);
         const final=items.find((i:any)=>i.id===receipt.work.at(-1)!.id);
         if(final.candidate && !checked.has(final.candidate.sha) && final.stage!=='done') {checked.add(final.candidate.sha);await certify(final);}
         if(receipt.work.every(w=>w.merge)) break;
-        await runCycle(master,state,effects,Date.now,launcher);
-        await Promise.race([new Promise(accept=>setTimeout(accept,1000)),new Promise((_,reject)=>abort.signal.addEventListener('abort',()=>reject(new Error('Deadline reached')),{once:true}))]);
+        enforce();await runCycle(master,state,effects,Date.now,launcher);enforce();
+        await delay(1000,undefined,{signal:abort.signal});
       }
       await launcher.idle();
     }
@@ -168,18 +220,32 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     const delivered=join(directory,'delivered');
     await git(repository.root,'worktree','add','--detach','-q',delivered,tip);
     receipt.artifact=await verifyArtifact({root:delivered,sha:tip,seed:config.seed,python:config.oraclePython,oracleSource:context.oracleFile,oracleDigest:receipt.oracleDigest,scratch:join(directory,'artifact-scratch'),hidden:[install,repository.root,config.oracleDirectory,join(config.sourceRoot,'.graphyard')],signal:abort.signal});
-    receipt.outcome='PASS';receipt.reason=fixture?'Controlled executor fixture passed isolated delivery and certification; this is not a real-agent rebuild.':'Independently verified CLI/API/UI built from the pushed final merge.';
-    receipt.endedAt=new Date().toISOString();validateReceipt(receipt);
+    enforce();receipt.outcome='PASS';receipt.reason=fixture?'Controlled executor fixture passed isolated delivery and certification; this is not a real-agent rebuild.':'Independently verified CLI/API/UI built from the pushed final merge.';
+    receipt.endedAt=new Date().toISOString();
   } catch(error) {
     receipt.outcome='FAIL';receipt.reason=error instanceof Error?error.message:String(error);receipt.failures.push({at:new Date().toISOString(),component:'runner',head:receipt.artifact?.sha??null,reason:receipt.reason});
   } finally {
-    clearTimeout(timer);abort.abort();
-    // Stop only this run's recorded sessions; no shared Herdr sweep or account modification.
-    if(context && !fixture) {
-      const items=await context.plane.call('work',context.coordinator).catch(()=>[]);
-      for(const item of items) for(const s of item.sessions??[]) if(s.state==='running' && s.pane) await closeHerdrPane(s.pane).catch(()=>{});
+    clearTimeout(timer);process.removeListener('SIGTERM',interrupted);process.removeListener('SIGINT',interrupted);stopping=true;abort.abort();await watchdog;await emergencyStop;
+    // Refuse new launches, drain already started launches, then close their actual handles.
+    await launcher?.idle();await pendingTick?.catch(error=>{receipt.failures.push({at:new Date().toISOString(),component:'dispatch-shutdown',head:null,reason:String(error)});});
+    if(context) {
+      try {await stopRun(context,state);receipt.cleanup.complete=true;}
+      catch(error) {receipt.cleanup.errors.push(String(error));receipt.outcome='FAIL';receipt.reason=String(error);}
+      try {await context.snapshot();}
+      catch(error) {receipt.failures.push({at:new Date().toISOString(),component:'final-snapshot',head:null,reason:String(error)});receipt.outcome='FAIL';receipt.reason=String(error);}
+      for(const file of ['reviews.json','producers.json']) {
+        try {receipt.runtimeReceipts.push({file,record:JSON.parse(await readFile(join(context.root,'.graphyard',file),'utf8'))});} catch(error:any) {if(error.code!=='ENOENT') receipt.runtimeReceipts.push({file,error:String(error)});}
+      }
+      if(master) {
+        const {readEnvironmentLog}=await import('../../src/master/environments.js');
+        receipt.runtimeReceipts.push({file:'environment-log',record:await readEnvironmentLog(master)});
+      }
+      if(state) receipt.runtimeReceipts.push({file:'daemon-state',record:state});
     }
     await plane?.stop();receipt.endedAt=new Date().toISOString();await checkpoint();
+    if(receipt.outcome==='PASS') {
+      try {validateReceipt(receipt);} catch(error) {receipt.outcome='FAIL';receipt.reason=String(error);await checkpoint();}
+    }
   }
   return validateReceipt(receipt);
 }
@@ -193,7 +259,7 @@ async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:st
   const master=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:source.cliPath,repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:source.hostId,masterAgentName:`hm-${prefix}-master`,herdrInstance:source.herdrInstance,herdrWorkspace:source.herdrWorkspace,
     workers:c.workers.map((w,i)=>({name:`hm-worker-${i}`,principal:w.id,agentName:`hm-${prefix}-w${i}`,mode:'launch',kind:source.workers.find(w=>w.mode==='launch')?.kind,credentialFile:join(c.install,`${w.id}.token`),accounts:source.workers.find(w=>w.mode==='launch')?.accounts,agentArgs:[],approvals:'auto',environment:{}})),
     reviewers:source.reviewers.map((r,i)=>({...r,agentName:`hm-${prefix}-r${i}`})),producers:source.producers.map((p,i)=>({...p,principal:producers[i].id,credentialFile:join(c.install,`${producers[i].id}.token`),agentName:`hm-${prefix}-p${i}`})),
-    environments:source.environments,operatorAgent:{id:'benchmark-master',credentialFile:join(c.install,'operator.token')},confinement:{maskPaths:[c.install,c.config.oracleDirectory,c.config.sourceRoot,...(source.confinement?.maskPaths??[])]},
+    environments:source.environments,operatorAgent:{id:'benchmark-master',credentialFile:join(c.install,'operator.token')},confinement:{maskPaths:[c.install,c.config.oracleDirectory,dirname(dirname(resolve(c.config.oraclePython))),c.config.sourceRoot,...(source.confinement?.maskPaths??[])]},
     run:{...source.run,intervalSeconds:5,worktreeRoot:join(c.directory,'worktrees'),launchConcurrency:c.config.mode==='team'?3:1,mergeWriter:{deployKeyFile:join(c.install,'unused-local-remote-key'),retrials:0}},
   });
   await mkdir(join(c.root,'.graphyard'),{recursive:true});await mkdir(join(c.directory,'worktrees'),{recursive:true});
@@ -204,7 +270,6 @@ async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:st
 
 export async function compareRuns(configInput:unknown) {
   const config=configSchema.parse(configInput);
-  if(config.budget.maxCost===null || !config.usageCommand) throw new Error('Comparison refuses unavailable existing aggregate cost cap or usage meter; no permission to spend is invented');
   const team=await execute({...config,mode:'team',id:`${config.id}-team`,runDirectory:`${config.runDirectory}-team`,credentialDirectory:`${config.credentialDirectory}-team`,oracleDirectory:`${config.oracleDirectory}-team`});
   const single=await execute({...config,mode:'single',id:`${config.id}-single`,runDirectory:`${config.runDirectory}-single`,credentialDirectory:`${config.credentialDirectory}-single`,oracleDirectory:`${config.oracleDirectory}-single`});
   const result=comparison(team,single);await writeFile(`${config.runDirectory}-comparison.json`,JSON.stringify(result,null,2)+'\n');return result;

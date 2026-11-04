@@ -13,7 +13,7 @@ import { emptyRegistry, applyRegistryMutation } from '../src/model/registry.js';
 import { chooseSession } from '../src/model/registry-sessions.js';
 
 // CI/producer installs these pinned dependencies outside implementation worktrees.
-const python=process.env.HARD_MATH_PYTHON??'/home/vish/graphyard-recovery-20261031/hard-math-oracle-venv/bin/python';
+const python=process.env.HARD_MATH_PYTHON??'/opt/graphyard-hard-math-oracle/bin/python';
 test('integration:hard-math-smoke — frozen generator covers all families and independent exact oracle rejects incomplete, overlapping, wide, unreduced, endpoint and multiplicity errors',async()=>{
   const frozen=JSON.parse(await readFile('benchmarks/hard-math/profiles/frozen-v1.json','utf8'));
   assert.equal(await oracleDigest(),frozen.oracleDigest);
@@ -42,11 +42,11 @@ test('integration:hard-math-smoke — routing retains eligible models, capabilit
   assert.equal(selected.account?.name,'expensive');assert.ok(selected.skipped.some(s=>s.account==='affordable'));
 });
 
-async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={}) {
+async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000) {
   const testRoot=join(process.cwd(),'.graphyard','hard-math-fixtures');
   await mkdir(testRoot,{recursive:true});
   const parent=await temporaryDirectory(`hard-math-${label}`,testRoot);
-  return execute({id:`fixture-${label}`,mode:'team',profileVersion:'v1',seed:1,wallClockSeconds:180,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds:1000,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
+  return execute({id:`fixture-${label}`,mode:'team',profileVersion:'v1',seed:1,wallClockSeconds:180,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
 }
 
 test('integration:hard-math-smoke — real scratch Postgres/control plane and Git deliver eight reviewed fixture components, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:180_000},async()=>{
@@ -65,4 +65,17 @@ test('integration:hard-math-smoke — real scratch Postgres/control plane and Gi
 test('integration:hard-math-smoke — missing pushed delivery and incorrect artifacts cannot produce PASS', {timeout:180_000},async()=>{
   const missing=await runFixture('missing',{missingDelivery:true});assert.equal(missing.outcome,'FAIL');assert.match(missing.reason,/Missing delivery/);
   const incorrect=await runFixture('incorrect',{incorrectArtifact:true});assert.equal(incorrect.outcome,'FAIL');assert.equal(incorrect.artifact,null);
+});
+
+
+test('integration:hard-math-smoke — failed and usage-limited runs release actual scratch leases and sessions', {timeout:180_000},async()=>{
+  for(const [label,options,budget] of [
+    ['early-stop',{haltAfterClaims:true},1000],['usage-stop',{waitAfterClaims:true},3],
+  ] as const) {
+    const receipt=await runFixture(label,options,budget);
+    assert.equal(receipt.outcome,'FAIL');assert.equal(receipt.cleanup.complete,true,receipt.reason);
+    assert.ok(receipt.work.every(w=>!(w.record as any).lease));
+    assert.ok(receipt.sessions.length>=3);assert.ok(receipt.sessions.every(s=>s.endedAt));
+    if(label==='usage-stop') assert.match(receipt.reason,/usage limit|abort/i);
+  }
 });
