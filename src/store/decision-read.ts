@@ -6,7 +6,7 @@ import type { Queryable } from './locked-read.js';
  * A single-item decision's inputs. Read documents only for the focus, prerequisites, follow-up
  * parent and bootstrap proof issuers/provers. Resource conflicts need only the index's lease and
  * resource names. The index trigger keeps these selectors atomic with every document write.
- * Call inside the decision's transaction, after taking its fleet and item locks.
+ * Call inside the decision's transaction; the caller retains its locks and revision checks.
  */
 export async function decisionWork(db: Queryable, focus: readonly (string | null | undefined)[], submissionPr?: number): Promise<Work[]> {
   const works = new Map<string, Work>();

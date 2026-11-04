@@ -67,7 +67,12 @@ test('unit:decision-reads-peers — a cold claim, submission and evaluation on 2
     assert.equal(claimed.lease?.owner, worker.id); assertReads();
     await store.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{workspaces}', $2::jsonb) WHERE id=$1`, [focus.id,
       JSON.stringify([{ epoch: claimed.epoch, host: 'host', path: '/work/peer-test', branch: 'graphyard/peer-test', owner: worker.id }])]);
-    await engine.execute(worker, 'submit', focus.id, { epoch: claimed.epoch, pr: 3035 }, randomUUID()); assertReads();
+    const submitted = await engine.execute(worker, 'submit', focus.id, { epoch: claimed.epoch, pr: 3035 }, randomUUID()); assertReads();
+    await engine.observe(focus.id, submitted.revision, {
+      candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 3035, branch: 'graphyard/peer-test', author: worker.id },
+      checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
+      files: [], scopeFiles: [], at, prState: 'open', draft: false,
+    }); assertReads();
     await store.transaction(async (db, now) => {
       const peers = await decisionWork(db, [focus.id]);
       engine.evaluate(peers.find(work => work.id === focus.id)!, peers, now);

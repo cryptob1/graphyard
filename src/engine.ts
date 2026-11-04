@@ -2144,6 +2144,6 @@ export class Engine {
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;
-    });
+    }, { itemLock: id });
   }
 }
