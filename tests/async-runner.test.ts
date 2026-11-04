@@ -94,9 +94,9 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   // The five modules the item names, and the helpers those modules reach at runtime for
   // Herdr, gh, git and systemctl. None may hold a synchronous child call, a blocking sleep, or
   // its own import of node:child_process: the runner is the only way out of the process.
-  // The first three are re-export barrels over their modules under src/master/, src/daemon/ and src/cli/master/ (GY-177).
+  // Include the owning modules under src/master/, src/daemon/ and src/cli/master/.
   const split = async (directory: string) => (await readdir(join(repository, directory))).filter(name => name.endsWith('.ts')).sort().map(name => `${directory}/${name}`);
-  const loop = ['src/master.ts', ...await split('src/master'), 'src/master-daemon.ts', ...await split('src/daemon'), 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
+  const loop = ['src/master.ts', ...await split('src/master'), ...await split('src/daemon'), 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
   const reached = ['src/harness.ts', 'src/install/worktree-root.ts', 'src/cli/master.ts', ...await split('src/cli/master'), 'src/cli/master-status.ts'];
   // The single allow-listed CLI-startup path: `cliCommit` reads the CLI checkout's own commit for
   // the version-skew guard once, when a `master` command starts, before the loop runs a cycle.
