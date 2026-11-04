@@ -30,3 +30,5 @@ The control plane is every install's only merge writer: nothing sets another, an
 ## Measures
 
 None is recorded: Graphyard keeps no throughput, lead-time or latency reading (GY-2876).
+
+Before the leased push, single and batch writers require every declared `unit:`/`integration:`/`e2e:` proof to have `executed > 0` and `failed = 0` in the real trial. A successful command alone supplies no proof count. Missing, unexecuted or failing proofs retain their actual trial records and refuse the head with the proof name for ordinary rework; a failed batch falls back to individual trials. Other items’ proofs and declared post-deploy observations add no premerge requirement.

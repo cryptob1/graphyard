@@ -98,7 +98,7 @@ function fakePorts(options: { pushes?: ('pushed' | 'rejected')[]; holds?: (sha: 
   let fetches = 0, trials = 0, pushed = 0;
   const pushes = options.pushes ?? ['pushed'];
   const fails = (mergeSha: string) => typeof options.failTrial === 'function' ? options.failTrial(mergeSha) : !!options.failTrial;
-  const trialRun = (mergeSha: string): MergeTrialRun => ({ build: 'pass', tests: fails(mergeSha) ? { passed: 1, failed: ['tests/item.test.ts'], files: 2 } : { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts', 'tests/other.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: fails(mergeSha) ? 1 : 0 } } });
+  const trialRun = (mergeSha: string): MergeTrialRun => ({ build: 'pass', tests: fails(mergeSha) ? { passed: 1, failed: ['tests/item.test.ts'], files: 2 } : { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts', 'tests/other.test.ts'], proofs: { 'integration:item-holds': { executed: 1, failed: 0 }, 'unit:item-works': { executed: 1, failed: fails(mergeSha) ? 1 : 0 } } });
   const ports: MergePorts = {
     baseBranch: 'main', retrials: 3, now: () => start,
     fetch: async () => { calls.push('fetch'); const tips = options.tips ?? [tip]; return tips[Math.min(fetches++, tips.length - 1)]!; },
@@ -558,7 +558,7 @@ const record: MergePorts['record'] = async (work, event) => {
 function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: Parameters<typeof runMergeTrial>[0]) => Promise<MergeTrialRun> } = {}) {
   const pushes: { args: string[]; env?: NodeJS.ProcessEnv }[] = [], trials: Parameters<typeof runMergeTrial>[0][] = [];
   const run: ChildRun = (command, args, runOptions) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: runOptions?.env }); return defaultChildRun(command, args, runOptions); };
-  const trial = options.trial ?? (async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] }; trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) }; });
+  const trial = options.trial ?? (async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] }; trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) }; });
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
   const reads = mergeWriterReads(fixtureConfig, checkout, run, { base: worktreeBase, record: options.record ?? record,  trial });
   return { reads, pushes, trials };
@@ -598,7 +598,7 @@ test('integration:control-plane-merge-end-to-end — a worker commit under a lea
   assert.equal(trials.length, 1);
   assert.deepEqual([trials[0]!.mergeSha, trials[0]!.changedFiles, trials[0]!.proofs, trials[0]!.proofFiles], [mergeSha, ['src/app.ts'], ['unit:app-works'], ['tests/app.test.ts']], 'the trial runs on the exact merge commit with the file carrying the item\'s proof');
   const trialRow = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.trial'", [w.id])).rows[0].payload;
-  assert.deepEqual(trialRow.proofs, { 'unit:app-works': { executed: 1, failed: 0 } });
+  assert.deepEqual(trialRow.proofs, { 'unit:app-works': { executed: 1, failed: 0 }, 'e2e:fixture': { executed: 1, failed: 0 } });
   // Delivered, the item is out of the queue; the gates passed through the ledger.
   assert.equal(nextToMerge([done], snapshotLedger([done]), start), null);
   assert.equal(state.mergeWriter.lastMergeAt, iso(start));
