@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 type Event = { seq: number; kind: string; actor: string; created_at: string };
 export default function History({ events }: { events: Event[] }) {

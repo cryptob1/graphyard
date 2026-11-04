@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { deriveAccountPlan, detectPlanKind } from '../src/provider-usage.js';
+import { deriveAccountPlan } from '../src/provider-usage.js';
 import { checkAgentEnvironment } from '../src/master/environments.js';
 import { observeAccount } from '../src/fleet.js';
 import {
@@ -14,8 +14,6 @@ import {
   applyRegistryMutation,
   foldObservation,
   accountSchema,
-  type AgentRegistry,
-  type FleetAccount,
 } from '../src/model/registry.js';
 
 const HOST = 'test-host';
@@ -212,7 +210,6 @@ test('unit:gy-1158-finding-3 — accountSchema rejects null plan but accepts omi
   const parsed = accountSchema.parse(accountWithoutPlan);
   assert.equal(parsed.plan, undefined);
 });
-
 
 test('unit:gy-1158-finding-2 — an OpenCode account whose key file is Anthropic\'s is never probed against Z.AI nor marked logged out', async () => {
   const home = await temporaryDirectory('opencode-anthropic-key');

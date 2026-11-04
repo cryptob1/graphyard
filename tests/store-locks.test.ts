@@ -1,7 +1,6 @@
 import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';

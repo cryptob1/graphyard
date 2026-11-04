@@ -124,14 +124,6 @@ export function starvedJobText(job: NonNullable<ControlPlaneStatus['starvedJobs'
   return `${job.key}'s observation job has finished ${job.unobserved} times in a row without saving an observation; ${path}`;
 }
 /**
- * The fleet as `master status` reports it, straight from the control plane's agent registry:
- * each account with its runtime, model, role eligibility, live sessions, quota and reset time, and
- * the reason it is ineligible when it is; each role with the account its next action would run
- * on. Everything that stops a role from launching is attention the master resolves itself, in
- * the registry: no file on this host decides it.
- */
-const masterRoleUnnamed = (text: string) => /^role master is not configured\b/.test(text);
-/**
  * The production lag an operator reads first: what production serves, and the failing deployment
  * reason when the provider reported one. There is no branch-ahead computation: comparisons are
  * gone, so the summary says what the watch cannot tell when it says nothing.

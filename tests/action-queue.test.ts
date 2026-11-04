@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
-import { actionClaimMs, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
+import { actionClaimMs, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, settleAction } from '../src/model/actions.js';
 import { actionAccount, actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
@@ -17,10 +17,8 @@ import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } fr
 import { dispatchEffects, launchedSessionHandle, runDispatchTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
-import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
@@ -50,7 +48,7 @@ const executorA: Principal = { id: 'executor-a', role: 'coordinator' };
 const executorB: Principal = { id: 'executor-b', role: 'coordinator' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:inverted-loop'] };
 const PROOF = 'integration:inverted-loop';
-const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
+const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
@@ -71,14 +69,8 @@ before(async () => {
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
 const reload = async (item: Work | string) => (await store.list()).find(entry => entry.id === (typeof item === 'string' ? item : item.id))!;
-const events = async (item: Work, kind: string) => (await store.events(item.id)).filter(event => event.kind === kind).reverse();
-const rows = (item: Work) => item.actionQueue?.actions ?? [];
 /** The computed action's inputs, untyped at the call site so one assertion cannot narrow the next. */
 const inputs = (item: Work): any => item.nextAction!.inputs;
-const groupBy = <T>(entries: T[], key: (entry: T) => string) => entries.reduce<Record<string, T[]>>((groups, entry) => { (groups[key(entry)] ??= []).push(entry); return groups; }, {});
-const row = (item: Work) => rows(item)[0];
-/** A lease that lapsed: the document as it stands between the expiry and the reconciliation that clears it. */
-const expireLease = (item: Work) => store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)) WHERE id=$1", [item.id, new Date(Date.now() - 60_000).toISOString()]);
 
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
@@ -812,8 +804,6 @@ test('integration:typed-next-action — the gate evaluator and the action comput
   assert.match(own!.refusal!, /owes an end-to-end proof/);
   assert.match(own!.needsHuman!.resolve!, /graphyard master requirements GY-2/);
 });
-
-
 
 test('unit:board-api — unused reads return 404 and still require authentication', async () => {
   for (const path of [

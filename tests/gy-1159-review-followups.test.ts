@@ -51,7 +51,7 @@ test('manual:review-followups-triaged GY-1159.5: OpenCode accounts configured fo
   };
 
   fetchCalls = [];
-  const healthVar = await checkAgentEnvironment(nonZaiEnvVar as any, { fetch: mockFetch });
+  await checkAgentEnvironment(nonZaiEnvVar as any, { fetch: mockFetch });
   assert.equal(fetchCalls.length, 0, 'mockFetch to api.z.ai must NEVER be called when keyVariable is non-Z.AI');
 
   // Case C: Z.AI environment with zai.key

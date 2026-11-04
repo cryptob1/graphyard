@@ -53,7 +53,7 @@ test('unit:loop-files-no-items — a cycle with a flaked rerun and saturated doc
     refusal: { kind: 'merge', reason: 'trial failed: tests/flaky.test.ts fails on its first run and passes on its rerun' },
     flakes: [{ head: sha('flakehead'), mergeSha: sha('flicker'), files: ['tests/flaky.test.ts'], tests: ['tests/flaky.test.ts › unit:flaky'], at: iso(-2 * minute) }], events: 1 } as Work['mergeLedger'];
 
-  const posted: string[] = [], escalations: string[] = [];
+  const escalations: string[] = [];
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: iso(0), jobs: [] }),

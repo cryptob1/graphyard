@@ -186,33 +186,3 @@ test('unit:reinstall-fresh-database — up re-issues the coordinator and operato
   assert.ok(recovered.some(event => event.kind === 'note' && /still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(recovered));
 });
 
-/**
- * A self-contained host install: its loop runs on the host under its user unit, never on this machine.
- * The host below is simulated: an in-memory file system behind the install's Transport, with the
- * loop unit running and holding its cursor in memory, writing it again as systemd stops it.
- */
-const fakeHost = (checkout: string, unit: string, cursor: string) => {
-  // master init and master autonomy ran here, in the host's checkout: the master's identities and their credential files are on the host only.
-  const config = { credentialFile: cursor.replace(/\.daemon\.json$/, '.token'), operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: `${checkout}/.graphyard/operator-agent.token` } };
-  const files = new Map<string, string>([[`${checkout}/.graphyard/master.json`, JSON.stringify(config)], [config.credentialFile, `${MASTER}\n`]]);
-  const commands: string[] = [];
-  let loop: { cycle: number } | null = null;
-  const start = () => { const text = files.get(cursor); loop = { cycle: text ? JSON.parse(text).cycle : 0 }; files.set(cursor, JSON.stringify({ cycle: loop.cycle })); };
-  const stop = () => { if (loop) files.set(cursor, JSON.stringify({ cycle: loop.cycle })); loop = null; };
-  const transport = {
-    description: 'fake host',
-    putFile: async () => {},
-    exec: async (program: string, args: string[]) => {
-      // asUser runs `runuser -u graphyard -- sh -c SCRIPT CWD PROGRAM ARGS...`.
-      const [command, ...rest] = program === 'runuser' ? args.slice(args.indexOf('-c') + 3) : [program, ...args];
-      commands.push([command, ...rest].join(' '));
-      if (command === 'cat') { const text = files.get(rest[0]); return text === undefined ? { stdout: '', stderr: `cat: ${rest[0]}: No such file or directory`, code: 1 } : { stdout: text, stderr: '', code: 0 }; }
-      if (command === 'systemctl' && rest[1] === 'stop' && rest[2] === unit) { stop(); return { stdout: '', stderr: '', code: 0 }; }
-      if (command === 'systemctl' && rest[1] === 'start' && rest[2] === unit) { start(); return { stdout: '', stderr: '', code: 0 }; }
-      if (command === 'mv') { const [from, to] = rest.filter(arg => !arg.startsWith('-')); files.set(to, files.get(from)!); files.delete(from); return { stdout: '', stderr: '', code: 0 }; }
-      return { stdout: '', stderr: `unexpected ${command}`, code: 127 };
-    },
-  };
-  return { files, commands, transport, start, config, get loop() { return loop; }, set cycle(value: number) { loop!.cycle = value; } };
-};
-

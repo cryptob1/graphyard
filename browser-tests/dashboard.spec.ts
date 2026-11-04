@@ -42,7 +42,6 @@ async function sidebarEntry(page: Page, entry: string) {
   if (page.viewportSize()!.width <= 650 && await menu.getAttribute('aria-expanded') !== 'true') await menu.click();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: entry, exact: true }).click();
 }
-const openWork = (page: Page) => sidebarEntry(page, 'Work');
 async function openPage(page: Page, section: 'Shipped' | 'Settings', tab: string) {
   await sidebarEntry(page, section);
   await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
@@ -356,7 +355,6 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   await expect(page.getByLabel('Access token')).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
 });
-
 
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
   await trigger.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
