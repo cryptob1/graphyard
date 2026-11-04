@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { runWorkerVerification } from '../src/merge-writer/worker-verification.js';
@@ -55,9 +55,13 @@ test('integration:worker-verification-placement — confined verify/complete cro
     import('../src/daemon/effects-production.js'), import('../src/master/confinement.js'), import('../src/child-runner.js'), import('node:crypto'),
   ]);
   const root = await temporaryDirectory('verification-http', process.cwd());
-  const repository = await temporaryDirectory('repository', root);
+  const coordinator = await temporaryDirectory('coordinator', root);
+  const repository = await temporaryDirectory('worker', root);
+  const coordinatorGit = (...args: string[]) => execFileSync('git', args, { cwd: coordinator, encoding: 'utf8' }).trim();
+  coordinatorGit('init', '-q', '-b', 'main'); coordinatorGit('config', 'user.name', 'Fixture'); coordinatorGit('config', 'user.email', 'fixture@example.invalid');
+  coordinatorGit('commit', '--allow-empty', '-qm', 'base');
+  coordinatorGit('worktree', 'add', '-qb', 'graphyard/verification', repository);
   const git = (...args: string[]) => execFileSync('git', args, { cwd: repository, encoding: 'utf8' }).trim();
-  git('init', '-q', '-b', 'graphyard/verification'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
   await writeFile(join(repository, '.gitignore'), '.graphyard/\nnode_modules/\n');
   await writeFile(join(repository, 'package.json'), '{"type":"module"}');
   await mkdir(join(repository, 'tests'));
@@ -75,7 +79,8 @@ test('integration:placed-http', () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3075;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('verification-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('verification');
-  t.after(() => database.stop());
+  let pump: NodeJS.Timeout | undefined;
+  t.after(() => { clearInterval(pump); return database.stop(); });
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/verification`);
   await store.init(); t.after(() => store.close());
   const engine = new Engine(store, 600, 'owner/project'); engine.gitRunner = null;
@@ -98,9 +103,8 @@ test('integration:placed-http', () => {
   };
   await assert.rejects(api('worker-verifications/take', { host: 'test' }, 'worker-test-token'), /Only the host coordinator/);
   await assert.rejects(api('worker-verifications/finish', { id: randomUUID(), error: 'forged' }, 'worker-test-token'), /Only the host coordinator/);
-  const effects = daemonEffects(repository, { hostId: 'test' } as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: api });
-  const pump = setInterval(() => { void effects.snapshot().catch(() => {}); }, 50);
-  t.after(() => clearInterval(pump));
+  const effects = daemonEffects(coordinator, { hostId: 'test' } as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: api });
+  pump = setInterval(() => { void effects.snapshot().catch(() => {}); }, 50);
   const previous = process.env.GRAPHYARD_REPOSITORY_ROOT;
   process.env.GRAPHYARD_REPOSITORY_ROOT = '/server-private/repo-does-not-exist-on-host';
   t.after(() => { if (previous === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = previous; });
@@ -122,12 +126,15 @@ try {
   console.log(JSON.stringify(result));
 } catch (error) { console.log(JSON.stringify({ error: error.message })); }
 `);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: repository, sessionDirectory: repository, secretsBus: null });
+  // Match a real launch: the host owns the coordinator checkout; the worker can
+  // write its separate assigned worktree, including the returned local record.
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: coordinator, sessionDirectory: repository, secretsBus: null });
   const invoke = async (mode: string) => JSON.parse(await defaultChildRun(process.execPath, ['--import', import.meta.resolve('tsx'), script, mode], { cwd: repository, wrapper, timeoutMs: 120_000 }));
   const passing = await invoke('verify');
   assert.equal(passing.record?.head, git('rev-parse', 'HEAD'), JSON.stringify(passing));
   assert.equal(passing.record.ran[0].result, 'pass');
   assert.equal(passing.record.ran[0].executed, 1);
+  assert.deepEqual(JSON.parse(await readFile(join(repository, '.graphyard', 'verify', `${work.key}.json`), 'utf8')), passing.record);
   await writeFile(join(repository, 'tests/placed.test.ts'), source(true)); git('add', '.'); git('commit', '-qm', 'failing');
   const failing = await invoke('complete');
   assert.match(failing.error, /complete refused: required proofs failed/);
