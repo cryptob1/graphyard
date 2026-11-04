@@ -5,7 +5,7 @@ Except `/healthz`, requests need `Authorization: Bearer TOKEN`. Mutations need `
 
 ## Create and change work
 
-`POST /api/work` takes title/criteria, optionally dependencies, exclusiveResources and producerProofs ([example](../../examples/work.json)). Review uses a recorded reviewer-session verdict; retired `codex` and `agent` policy providers are refused. The UI offers no provider selector. Mutations use `POST /api/work/KEY/COMMAND`:
+`POST /api/work` takes title/criteria, optionally dependencies, plannedFiles, exclusiveResources and producerProofs ([example](../../examples/work.json)). Review uses a recorded reviewer-session verdict; retired `codex` and `agent` policy providers are refused. The UI offers no provider selector. Mutations use `POST /api/work/KEY/COMMAND`:
 
 | Command | Required data/rule |
 | --- | --- |

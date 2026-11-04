@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';

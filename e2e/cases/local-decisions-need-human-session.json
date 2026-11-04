@@ -1,0 +1,19 @@
+{
+  "id": "local-decisions-need-human-session",
+  "title": "Actions and human-only decisions on a local dashboard still need a signed-in human",
+  "description": "Against a real control plane, the tokenless local viewer is refused every write and human-only answer, agent credentials stay refused and get no session, and a session opened from a one-time link answers.",
+  "tags": [
+    "dashboard",
+    "authentication"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Actions and human-only decisions on a local dashboard still need a signed-in human",
+      "run": "node --import tsx --test tests/local-decisions-need-human-session.test.ts",
+      "timeoutSeconds": 120
+    }
+  ]
+}

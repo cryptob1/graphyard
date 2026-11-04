@@ -26,7 +26,7 @@ async function fixture(page: Page, role = 'admin') {
     if (path.endsWith('/board')) return serveBoard(page, route);
     return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
-  await page.goto('/'); return state;
+  await page.goto('/?sign-in'); return state;
 }
 // Opening a work item goes through the card's own selection control, a sibling of
 // the candidate links rather than a button wrapped around them.
@@ -170,7 +170,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), null) });
       return route.fulfill({ json: [] });
     });
-    await page.goto('/'); await login(page);
+    await page.goto('/?sign-in'); await login(page);
     // Every fixture item is handed in and waiting for review, so each is a Moving row with its
     // clock; the per-stage percentile strip went with the stage row (GY-161).
     await expect(page.locator('[data-group-section="moving"] .work-row')).toHaveCount(5);
@@ -207,7 +207,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), status) });
       return route.fulfill({ json: [] });
     });
-    await page.goto('/'); await login(page);
+    await page.goto('/?sign-in'); await login(page);
     // The release line: the served commit, its health, and the merged change it does not carry yet.
     const release = page.locator('[data-release-line="serving"]');
     await expect(release).toHaveAttribute('data-healthy', 'true');
@@ -272,7 +272,7 @@ test('every moving row carries how long it has held its status, in red past thir
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), null) });
     return route.fulfill({ json: [] });
   });
-  await page.goto('/'); await login(page);
+  await page.goto('/?sign-in'); await login(page);
   const age = (key: string) => row(page, key).locator('.status-age');
   const colour = (key: string) => age(key).evaluate(element => getComputedStyle(element).color);
   const red = (value: string) => { const [r, g, b] = value.match(/\d+/g)!.map(Number); return r > g + 40 && r > b + 40; };

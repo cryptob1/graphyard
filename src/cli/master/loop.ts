@@ -39,13 +39,14 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
     const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId) });
-    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation });
+    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
     const stopping = new AbortController();
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root }))
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root,
+      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator.actor.id } }))
       .finally(() => stopping.abort());
     // GY-409: the loop turns a connect made in Settings › Agents into a registered account on this host, one pass at a time.
     let connecting = false;

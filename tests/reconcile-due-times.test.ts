@@ -2,7 +2,7 @@ import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine, configuredReconcileFullMs } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';

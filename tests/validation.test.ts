@@ -1,7 +1,7 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation, type ValidationRequest, type ValidationCandidate } from '../src/validation.js';
@@ -13,6 +13,7 @@ import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { localRequest } from './helpers/local-request.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -255,7 +256,7 @@ test('HTTP validation endpoints enforce authenticated roles', async () => {
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   try {
     const url = `http://127.0.0.1:${(http.address() as any).port}/api/validation`;
-    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await localRequest(url, '/api/validation', { headers: { Host: 'graphyard.example' } })).status, 401);
     assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${'w'.repeat(32)}` } })).status, 200);
     // Every command the packaged runner and collector call must be routed. An unmatched
     // path answers 404, which the collector cannot distinguish from a missing request,
@@ -567,7 +568,7 @@ test('artifact HTTP routes require authentication and return private attachments
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   try {
     const origin = `http://127.0.0.1:${(http.address() as any).port}`, url = `${origin}/api/validation/artifacts/${f.r.id}/${artifact.id}`;
-    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await localRequest(url, new URL(url).pathname, { headers: { Host: 'graphyard.example' } })).status, 401);
     const headers = { Authorization: `Bearer ${'1'.repeat(32)}` };
     const response = await fetch(url, { headers });
     assert.equal(response.status, 200); assert.match(response.headers.get('content-disposition')!, /^attachment/); assert.equal(response.headers.get('cache-control'), 'no-store');

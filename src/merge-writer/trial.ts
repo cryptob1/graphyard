@@ -24,6 +24,8 @@ export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: 
 
 export const trialAuthor = 'graphyard-merge-writer';
 export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
+/** A trial's test outcome as the merge record accepts it (src/server/merge-record.ts): at most 100 failed files of at most 300 characters, so a mass failure is still recorded instead of refused. */
+export const recordedTests = (tests: { passed: number; failed: string[]; files: number }) => ({ ...tests, failed: tests.failed.slice(0, 100).map(file => file.slice(0, 300)) });
 const fullSha = /^[0-9a-f]{40}$/;
 
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.

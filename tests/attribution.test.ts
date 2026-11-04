@@ -2,7 +2,7 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation, type ValidationCandidate, type ValidationRequest } from '../src/validation.js';
@@ -12,6 +12,7 @@ import { currentEvidence, type Observation, type Principal } from '../src/model.
 import { server } from '../src/server.js';
 import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { localRequest } from './helpers/local-request.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -470,6 +471,6 @@ test('integration:attribution-security-regressions', async () => {
   await assert.rejects(store.pool.query("UPDATE attribution_records SET kind='rescheduled' WHERE kind='reanchor-blocked'"), /append-only/);
   await assert.rejects(store.pool.query('DELETE FROM attribution_reanchors'), /append-only/);
   assert.equal((await api('/api/analytics/attribution?window=7', tokens.implementer)).status, 404);
-  assert.equal((await fetch(`${url}/api/analytics/attribution?window=7`)).status, 401);
+  assert.equal((await localRequest(url, '/api/analytics/attribution?window=7', { headers: { Host: 'graphyard.example' } })).status, 401);
   await cleanup(f);
 });
