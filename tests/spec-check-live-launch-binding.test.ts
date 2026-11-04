@@ -72,12 +72,17 @@ test('integration:spec-check-live-launch-binding — stale panes cannot replace 
     };
     const state = emptyDaemonState(master);
     const closed: string[] = [];
+    const screens = new Map<string, string>();
+    const inspected: string[] = [];
     const effects: DaemonEffects = {
       agents: () => [...host.agents] as HerdrAgent[], credentials: async () => ({}),
       snapshot: async () => ({ work: [await read()], now: new Date().toISOString() }),
       dispatch: async () => { throw new Error('No worker is configured'); },
       closeSession: pane => { closed.push(pane); host.run('herdr', ['pane', 'close', pane]); },
-      sessionScreen: () => '',
+      sessionScreen: session => {
+        inspected.push(session.pane!);
+        return screens.get(session.pane!) ?? '';
+      },
       launchSpecCheck: work => launch(work),
       persist: async () => {},
     };
@@ -98,10 +103,14 @@ test('integration:spec-check-live-launch-binding — stale panes cannot replace 
     state.actions['spec-check:legacy'] = { ...Object.values(state.actions).find(action => action.pane === prior.pane)!, specCheckLaunch: undefined, pane: 'legacy-absent' };
     const restored = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
     Object.assign(state, restored);
+    inspected.length = 0;
     await cycle();
     // On base this cycle records current as ended, replaces its token, and report(current) fails "valid bearer token".
     const standing = (await read()).specCheckLaunch?.id;
     const endedRecord = state.actions[specCheckEndedKey(await read())];
+    // Repeated snapshots cannot turn an untracked current launch into an ended one.
+    await cycle(); await cycle();
+    assert.ok(!inspected.includes(prior.pane!), 'stale actions never supply current liveness');
     await assert.rejects(report(prior), /valid Graphyard bearer token/, 'superseded credentials stay refused');
     // Track the independently launched current pane using exactly its returned registration.
     state.actions['spec-check:independent'] = { ...state.actions['spec-check:legacy'], pane: current.pane!, specCheckLaunch: current.launch };
@@ -128,20 +137,30 @@ test('integration:spec-check-live-launch-binding — stale panes cannot replace 
     assert.equal(launches.length, 4);
     await assert.rejects(report(ended), /valid Graphyard bearer token/);
     const retry = launches[3];
+    screens.set(retry.pane!, 'BLOCKED: the spec checker cannot read the named file');
+    await cycle();
+    assert.ok(closed.includes(retry.pane!), 'a genuinely blocked current pane closes');
+    assert.match(state.actions[`spec-check-ended:${item.id}:${retry.launch}`].detail, /BLOCKED: the spec checker cannot read/);
+    assert.equal(launches.length, 5, 'blocked current launch retries exactly once');
+    await assert.rejects(report(retry), /valid Graphyard bearer token/);
+    const afterBlocked = launches[4];
+    await cycle();
+    assert.equal(launches.length, 5, 'the ended record does not end its live successor');
     // Expiry uses the real registration path, without editing authoritative launch state.
     const expired = await launch(await read(), new Date(Date.now() - 3_600_001).toISOString());
     state.actions['spec-check:expired'] = { ...state.actions['spec-check:independent'], work: item.key, pane: expired.pane!, specCheckLaunch: expired.launch };
     await cycle();
     assert.ok(closed.includes(expired.pane!), 'expired current pane closes');
-    assert.equal(launches.length, 6, 'expired launch retries');
+    assert.equal(launches.length, 7, 'expired launch retries');
     await assert.rejects(report(expired), /valid Graphyard bearer token/);
     await assert.rejects(report(retry), /valid Graphyard bearer token/);
-    const final = launches[5];
+    await assert.rejects(report(afterBlocked), /valid Graphyard bearer token/);
+    const final = launches[6];
     assert.match(await report(final), /Spec check recorded/, 'the bound current independent reviewer can post its report');
     await assert.rejects(report(final), /valid Graphyard bearer token/, 'one verdict per launch');
     await cycle();
     assert.ok(closed.includes(final.pane!), 'reported current pane closes');
-    assert.equal(launches.length, 6, 'reported check does not relaunch');
+    assert.equal(launches.length, 7, 'reported check does not relaunch');
     assert.equal((await read()).specCheck?.verdict, 'gaps');
     assert.equal((await read()).candidate, null, 'no approval or merge gate is fabricated');
   } finally {

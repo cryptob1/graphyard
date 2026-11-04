@@ -231,3 +231,26 @@ test('unit:spec-check-before-dispatch — a person\'s item keeps its running che
   post(item, 'ready');
   assert.equal((await drive(item, null, [], 1, ['alice'])).closed.length, 1, 'once the report lands, the pane closes once');
 });
+
+test('unit:spec-check-before-dispatch — stale and unbound saved panes cannot end a newer live registration', async () => {
+  const item = feature('GY-24');
+  await drive(item, null);
+  const state = states.get(item.key)!;
+  const prior = Object.values(state.actions).find(action => action.pane)!;
+  panes.delete(prior.pane!);
+  const current = { ...item.specCheckLaunch!, id: 'independently-registered-launch', tokenHash: 'a'.repeat(64) };
+  item.specCheckLaunch = current;
+  panes.add('independent-pane');
+  state.actions['spec-check:legacy'] = { ...prior, pane: 'legacy-absent', specCheckLaunch: undefined };
+  const result = await drive(item, null, [], 3);
+  assert.deepEqual(result.checks, [], 'no replacement registration across repeated snapshots');
+  assert.deepEqual(result.launched, [], 'the pending check still holds worker dispatch');
+  assert.deepEqual(result.closed.sort(), [prior.pane!, 'legacy-absent'].sort(), 'only stale panes close');
+  assert.deepEqual(item.specCheckLaunch, current, 'current launch and credential binding are retained');
+  assert.ok(!state.actions[`spec-check-ended:${item.id}:${current.id}`]);
+  assert.ok(panes.has('independent-pane'), 'independently launched session remains live');
+  state.actions['spec-check:independent'] = { ...prior, pane: 'independent-pane', specCheckLaunch: current.id };
+  assert.deepEqual((await drive(item, null)).closed, [], 'tracking its actual registration keeps it open');
+  post(item, 'ready');
+  assert.deepEqual((await drive(item, null)).closed, ['independent-pane'], 'its report closes its own pane');
+});
