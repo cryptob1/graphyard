@@ -1,0 +1,37 @@
+{
+  "id": "board-queue-not-blocked",
+  "title": "The board shows heads waiting in the merge queue as moving, with their place and the merge ahead",
+  "description": "The command step seeds one submitted head whose merge trial is in flight and two healthy heads queued behind it; the board counts the queued heads as moving with their queue position and the in-flight item ahead, not Blocked or overdue, and the Work page names their place in the queue.",
+  "tags": ["api", "board", "dashboard"],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "seed a merge in flight and two heads queued behind it",
+      "run": "node scripts/e2e-seed-merge-queue.mjs",
+      "timeoutSeconds": 60
+    },
+    {
+      "kind": "http",
+      "name": "the queued heads are moving with their queue position",
+      "method": "GET",
+      "path": "/api/board",
+      "status": 200,
+      "expect": [
+        { "path": "groups.moving", "includes": { "key": "GY-QUEUED-1", "group": "moving", "overdue": false, "queue": { "position": 1, "ahead": "GY-QFLIGHT", "step": "tests" } } },
+        { "path": "groups.moving", "includes": { "key": "GY-QUEUED-2", "group": "moving", "overdue": false, "queue": { "position": 2, "ahead": "GY-QFLIGHT" } } }
+      ]
+    },
+    { "kind": "browser", "name": "sign in to the dashboard", "action": "open", "path": "/" },
+    { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
+    { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
+    {
+      "kind": "browser",
+      "name": "the Work page names the queued head's place behind the merge in flight",
+      "action": "expectText",
+      "text": "behind GY-QFLIGHT (tests)",
+      "exact": false
+    }
+  ]
+}
