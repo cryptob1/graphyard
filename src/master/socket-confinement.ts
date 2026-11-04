@@ -16,12 +16,16 @@ try:
     if checked(libc.syscall(444, 0, 0, 1)) < 9:
         raise RuntimeError('Linux Landlock ABI 9 or newer is required')
     resolve_unix = 1 << 16
-    rules = Ruleset(resolve_unix, 0, 1)
+    # REFER is denied even when omitted from handled_access_fs. Handle it here
+    # so this socket domain does not veto moves inside the writable mounts.
+    refer = 1 << 13
+    rules = Ruleset(resolve_unix | refer, 0, 1)
     rules_fd = checked(libc.syscall(444, ctypes.byref(rules), ctypes.sizeof(rules), 0))
-    for path in json.loads(sys.argv[1]):
+    writable, keyring_sockets = json.loads(sys.argv[1])
+    for path, access in [(path, resolve_unix | refer) for path in writable] + [(path, resolve_unix) for path in keyring_sockets]:
         fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
         try:
-            rule = ctypes.create_string_buffer(struct.pack('=Qi', resolve_unix, fd))
+            rule = ctypes.create_string_buffer(struct.pack('=Qi', access, fd))
             checked(libc.syscall(445, rules_fd, 1, ctypes.byref(rule), 0))
         finally:
             os.close(fd)
@@ -38,5 +42,5 @@ os.execvp(command[0], command)
 
 export function socketConfinementWords(writable: readonly string[], keyringSockets: readonly string[] = []): string[] {
   return ['/usr/bin/python3', '-I', '-S', '-c', restrictSockets,
-    JSON.stringify([...new Set(['/tmp', '/var/tmp', ...writable, ...keyringSockets])]), '--'];
+    JSON.stringify([[...new Set(['/tmp', '/var/tmp', ...writable])], [...new Set(keyringSockets)]]), '--'];
 }
