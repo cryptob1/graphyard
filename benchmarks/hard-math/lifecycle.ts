@@ -5,7 +5,7 @@ import { closeHerdrPane, herdrJson } from '../../src/master.js';
 import { liveRun, listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
 import type { RunContext } from './runner.js';
 import { childRunner } from '../../src/child-runner.js';
-import { wholeDocument } from '../../src/model/work-summary.js';
+import type { Work } from '../../src/model.js';
 import type { DaemonState } from '../../src/daemon/state.js';
 
 async function closePresentPane(pane:string) {
@@ -37,7 +37,7 @@ export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:strin
   }
   const items=await c.plane.call('work',c.coordinator);
   for(const listed of items) {
-    const item=await wholeDocument(listed,path=>c.plane.call(path,c.coordinator));
+    const item:Work=await c.plane.call(`work/${encodeURIComponent(listed.id)}`,c.coordinator);
     let workerStopped=errors.length===0;
     for(const s of item.sessions??[]) {
       // Finished handles can still have a live pane after submission or proof delivery.

@@ -107,8 +107,8 @@ unchanged. The isolated benchmark master also explicitly receives work creation
 scope within `scratch/hard-math`, matching the existing master setup pattern;
 the default empty work scope cannot create items. Those three cases still require
 the native rerun. That rerun advanced to snapshots and exposed missing pipeline
-handling for newly created work. Receipt snapshots now hydrate tracked settled
-summaries with `wholeDocument`, use zero attempt/repair counts only for known
+handling for newly created work. Receipt snapshots now read every tracked `/work/ID` document explicitly,
+use zero attempt/repair counts only for known
 unclaimed epoch-zero documents, and reject missing claimed timelines. Final claim
 and worktree requirements remain enforced. Local failure receipts retain the
 original runner stack, including errors surfaced by the watchdog.
@@ -201,3 +201,14 @@ changed, and no sensitive files were manufactured. Focused receipt tests reject
 missing/wrong-head review, missing/failed/stale/dependent certification, missing
 required mechanical proofs and zero trial proof counts; these synthetic validation inputs are not run receipts or
 actual-agent success evidence. Full native delivery/repair still needs its rerun.
+
+
+The native `64c2a756d` run passed twelve of fourteen cases; the two remaining
+failures occurred after the first delivery because fleet-index projections can
+omit `summary: true`. The runner now fetches every tracked work ID explicitly
+(up to eight full reads per snapshot), without inferring projection shape or
+synthesizing history. Cleanup also reads each listed item by ID before closing
+its handles and lease. Regression fixtures cover both marked and markerless
+settled projections; missing full claim history still fails. All existing
+claim/worktree/review/certification/trial-proof receipt requirements remain in
+force. The full native delivery/repair result remains pending its next rerun.

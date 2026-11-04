@@ -21,7 +21,9 @@ test('hard math cleanup stops only run-owned master, item and headless sessions 
   registerRun({name:other,role:'producer',work:'GY-2',subject:'proof',run:run('/elsewhere',other)});
   const c={root,coordinator:'coordinator',plane:{call:async(path:string,_token:string,body?:any)=>{
     if(body) {writes.push({path,body});return {};}
-    if(path==='work') return [{id:'one',key:'GY-1',lease:{owner:'worker',epoch:4},sessions:[{id:'worker:4',kind:'implementation',principal:'worker',epoch:4,runtime:'codex',host:'host',subject:'work',pane:'worker-pane',state:'running'}]}];
+    const item={id:'one',key:'GY-1',lease:{owner:'worker',epoch:4},sessions:[{id:'worker:4',kind:'implementation',principal:'worker',epoch:4,runtime:'codex',host:'host',subject:'work',pane:'worker-pane',state:'running'}]};
+    if(path==='work') return [{id:'one',key:'GY-1',stage:'done'}];
+    if(path==='work/one') return item;
     return {sessions:[{id:'master-slot',endedAt:null},{id:'producer-slot',endedAt:null}]};
   }}} as any;
   try {
@@ -80,7 +82,7 @@ test('hard math comparison accepts equal existing time caps with unavailable mon
   assert.throws(()=>comparison(team,{...single,seed:2}),/differs/);
 });
 
-test('hard math snapshots distinguish unclaimed work from missing claim history and hydrate settled summaries',async()=>{
+test('hard math snapshots read authoritative tracked documents for marked and markerless settled projections',async()=>{
   const {trackedDocuments,lifecycleCounts,failureStack}=await import('../benchmarks/hard-math/snapshot.js');
   const {beginAttempt}=await import('../src/pipeline-speed.js');
   const fresh={id:'item',key:'GY-1',epoch:0,lease:null,lastAssignment:null,candidate:null,submission:null,delivery:null,observation:null} as any;
@@ -95,7 +97,13 @@ test('hard math snapshots distinguish unclaimed work from missing claim history 
   assert.deepEqual(reads,['work/item']);assert.equal(hydrated[0],delivered);
   assert.deepEqual(lifecycleCounts(hydrated[0]),{attempts:1,repairs:0,reviews:0});
   assert.throws(()=>lifecycleCounts({...delivered,pipeline:{...delivered.pipeline,attempts:[]}}),/Incomplete authoritative claim timeline/);
-  assert.equal((await trackedDocuments([fresh],[fresh],async()=>{throw new Error('unexpected read');}))[0],fresh);
+  const markerless=[{id:'item',key:'GY-1',stage:'done',epoch:1,delivery:delivered.delivery}] as any;
+  reads.length=0;
+  const settled=await trackedDocuments(markerless,[fresh],async path=>{reads.push(path);return delivered;});
+  assert.deepEqual(reads,['work/item']);assert.equal(settled[0],delivered);
+  assert.deepEqual(lifecycleCounts(settled[0]),{attempts:1,repairs:0,reviews:0});
+  assert.equal(markerless[0].pipeline,undefined,'the fleet projection is not patched with synthesized history');
+  assert.equal((await trackedDocuments([fresh],[fresh],async path=>{assert.equal(path,'work/item');return fresh;}))[0],fresh);
   await assert.rejects(trackedDocuments([], [fresh],async()=>delivered),/Missing authoritative item/);
   const error=new TypeError('located runner failure');
   assert.match(failureStack(error)!,/TypeError: located runner failure/);

@@ -1,11 +1,10 @@
-import { wholeDocument } from '../../src/model/work-summary.js';
 import type { Work } from '../../src/model.js';
 
-/** Receipt histories require whole tracked documents, including settled deliveries. */
+/** Fleet projections can omit their summary marker; always read each tracked document by ID. */
 export async function trackedDocuments(items:Work[],tracked:{id:string;key:string}[],read:(path:string)=>Promise<any>) {
-  const ids=new Set(tracked.map(w=>w.id));
   for(const w of tracked) if(!items.some(item=>item.id===w.id)) throw new Error(`Missing authoritative item ${w.key}`);
-  return Promise.all(items.map(item=>ids.has(item.id)?wholeDocument(item,read):item));
+  const documents=new Map(await Promise.all(tracked.map(async w=>[w.id,await read(`work/${encodeURIComponent(w.id)}`) as Work] as const)));
+  return items.map(item=>documents.get(item.id)??item);
 }
 
 export function lifecycleCounts(record:Work) {
