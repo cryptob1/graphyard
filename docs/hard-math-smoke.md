@@ -286,3 +286,15 @@ structured stdout alongside stderr so CLI JSON errors remain diagnosable.
 The generator, contract and oracle are unchanged. Native CLI/API/UI certification
 and the complete eight-merge fixture still require passing reruns; controlled
 lookup tests do not demonstrate actual-agent success.
+
+The native `5354e6e5` full run finished in 322 seconds with eighteen of nineteen
+tests passing. All eight controlled merges, injected fault/repair and external
+CLI/API/browser certification succeeded, but receipt validation rejected a zero
+authoritative `unit:workbench-contract` trial count. The seed's `npm test` now
+explicitly selects TAP instead of Node's default spec reporter. A focused test
+runs that exact seed command and requires the canonical merge-writer counter to
+observe one executed, zero failed and zero skipped contract cases. This changes
+test reporting in the common initial repository only; frozen mathematical inputs
+and receipt requirements remain unchanged. The writer's acceptance of the
+zero-count trial is tracked as a separate production guard repair. Full native
+verification still needs a passing rerun; no actual-agent success is claimed.

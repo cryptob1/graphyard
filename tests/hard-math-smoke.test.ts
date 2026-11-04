@@ -16,9 +16,19 @@ import { validateReceipt, comparison } from '../benchmarks/hard-math/receipt-sch
 import { routeAccounts } from '../benchmarks/hard-math/routing.js';
 import { emptyRegistry, applyRegistryMutation } from '../src/model/registry.js';
 import { chooseSession } from '../src/model/registry-sessions.js';
+import { countProofCases } from '../src/merge-writer/executor.js';
 
 // CI/producer installs these pinned dependencies outside implementation worktrees.
 const python=process.env.HARD_MATH_PYTHON??'/opt/graphyard-hard-math-oracle/bin/python';
+test('integration:hard-math-smoke — seed npm test emits a positive canonical TAP proof count',async()=>{
+  const root=await temporaryDirectory('hard-math-seed-tap',process.cwd());
+  await cp(join(benchmarkRoot,'seed'),root,{recursive:true});
+  const pkg=JSON.parse(await readFile(join(root,'package.json'),'utf8'));
+  assert.match(pkg.scripts.test,/--test-reporter=tap(?:\s|$)/);
+  const result=await command('npm',['test'],{cwd:root,env:trialEnvironment(),includeStdout:true});
+  assert.match(result.stdout,/TAP version 13/);
+  assert.deepEqual(countProofCases(result.stdout,'unit:workbench-contract'),{executed:1,failed:0,skipped:0});
+});
 test('integration:hard-math-smoke — frozen generator covers all families and independent exact oracle rejects incomplete, overlapping, wide, unreduced, endpoint and multiplicity errors',async()=>{
   const frozen=JSON.parse(await readFile('benchmarks/hard-math/profiles/frozen-v1.json','utf8'));
   assert.equal(await oracleDigest(),frozen.oracleDigest);
