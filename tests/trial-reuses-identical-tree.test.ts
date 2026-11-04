@@ -15,7 +15,7 @@ const verdict = (failed: string[], proofs: string[]): MergeTrialRun => ({ build:
 
 test('integration:trial-reuses-identical-tree — the merge writer reuses its own pass on the same tree and proofs, never a failure', async () => {
   const base = await temporaryDirectory('trial-reuse');
-  const trees: Record<string, string> = { [sha('a1')]: sha('ae'), [sha('a2')]: sha('ae'), [sha('b1')]: sha('be'), [sha('c1')]: sha('ce'), [sha('c2')]: sha('ce') };
+  const trees: Record<string, string> = { [sha('a1')]: sha('ae'), [sha('a2')]: sha('ae'), [sha('a3')]: sha('ae'), [sha('a4')]: sha('ae'), [sha('b1')]: sha('be'), [sha('c1')]: sha('ce'), [sha('c2')]: sha('ce') };
   const run = async (_command: string, args: readonly string[]) => args[2] === 'rev-parse' ? `${trees[args[3].replace('^{tree}', '')]}\n` : '';
   const ran: string[] = [];
   let fail = false;
@@ -26,7 +26,7 @@ test('integration:trial-reuses-identical-tree — the merge writer reuses its ow
 
   const first = await reads().trial(sha('a1'), [], work('GY-1', proofs), sha('f1'));
   assert.equal(first.reused, undefined);
-  // A re-queue on a moved base that merges to the same tree: no second trial.
+  // A re-queue with the same base and tree: no second trial.
   const second = await reads().trial(sha('a2'), [], work('GY-1', proofs), sha('f1'));
   assert.deepEqual(ran, [sha('a1')], 'the identical tree was not trialled again');
   assert.deepEqual(second.reused, { mergeSha: sha('a1'), key: 'GY-1' });
