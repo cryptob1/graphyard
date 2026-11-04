@@ -30,13 +30,13 @@ const lanes = ['low', 'medium', 'high', null, undefined];
 const sensitivePaths: Record<string, string> = {
   'persistence layer': 'src/store/work-store.ts', 'server auth, principals, API assembler, bootstrap or routes': 'src/server/auth.ts', 'operator agent': 'src/operator-agent.ts',
   installation: 'src/install/index.ts', deployment: 'deploy/compose.yml', Dockerfile: 'Dockerfile', 'compose file': 'compose.yaml',
-  'CI configuration': '.github/workflows/ci.yml', dependencies: 'package.json', 'merge path': 'src/main-guard.ts', 'merge writer': 'src/merge-writer/index.ts', migrations: 'migrations/0042_items.sql',
+  'CI configuration': '.github/workflows/ci.yml', dependencies: 'package.json', 'merge path': 'src/regression-guard.ts', 'merge writer': 'src/merge-writer/index.ts',
 };
 const normalFiles = ['src/master/dispatch.ts', 'src/model/worker-preference.ts', 'tests/worker-preference-risk.test.ts', 'docs/delegation.md'];
 /** Directory scopes that cover a sensitive surface while matching no rule literally. */
-const sensitiveScopes = ['src/', 'src/*', 'src/**', 'src/server/', 'src/server/**', 'src/merge-writer/', '.github/', '.github/workflows/', 'migrations/', 'deploy/'];
+const sensitiveScopes = ['src/', 'src/*', 'src/**', 'src/server/', 'src/server/**', 'src/merge-writer/', '.github/', '.github/workflows/', 'src/store/', 'deploy/'];
 /** Directory scopes with no sensitive file beneath them. */
-const normalScopes = ['docs/', 'docs/**', 'tests/', 'tests/helpers/*', 'src/model/', 'src/master/**', 'src/server/jobs/', 'web/', 'browser-tests/'];
+const normalScopes = ['migrations/', 'docs/', 'docs/**', 'tests/', 'tests/helpers/*', 'src/model/', 'src/master/**', 'src/server/jobs/', 'web/', 'browser-tests/'];
 /** An item whose `lane` is never read: the preference judges the change, not the lane. */
 const laneBlind = <T extends object>(work: T) => new Proxy(work, { get(target, property, receiver) { if (property === 'lane') throw new Error('workerPreference read the lane'); return Reflect.get(target, property, receiver); } });
 

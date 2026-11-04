@@ -33,7 +33,6 @@ const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id:
 const source = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), 'utf8');
 // src/master.ts re-exports the modules under src/master/ (GY-177); its source is theirs.
 const masterSource = () => readdirSync(fileURLToPath(new URL('../src/master', import.meta.url))).filter(name => name.endsWith('.ts')).sort().map(name => source(`master/${name}`)).join('\n');
-const supervisedUser = String(process.getuid?.() ?? '');
 /** A new install names its loop for its repository (GY-1441); a unit placed by hand under the legacy name is an older install's. */
 const loopUnit = perInstallUnits('owner/project').master;
 /** The deploy unit installed beside the loop's (GY-2877). */
@@ -423,7 +422,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
     assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory);') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory);') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes, given the directory and nothing the caller built');
     assert.match(supervisor_ts, /^export function testSuiteHomeGuard\(unitDirectory: string\) \{$/m, 'the guard takes no env or argv override');
-    assert.match(supervisor_ts, /^export const underTestRunner = \(\) =>/m, 'the runner mark is read from the real process only');
+    assert.match(source('runtime-environment.ts'), /^export const underTestRunner = \(\) =>/m, 'the runner mark is read from the real process only');
     assert.ok(installer.indexOf('assertCoordinatorCheckout(input.root') < installer.indexOf('await readFile('), 'and the WorkingDirectory is judged before the existing unit is read');
     assert.equal((await readdir(join(home, '.config/systemd/user'))).filter(name => name.endsWith('.tmp')).length, 0, 'no temporary unit file is left behind');
   } finally {

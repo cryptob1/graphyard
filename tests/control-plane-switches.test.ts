@@ -9,7 +9,6 @@ import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 

@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { dropRetiredQueueFields, dropRetiredScopeFields, type Work } from '../model.js';
+import { type Work } from '../model.js';
 import { assertSavable } from './locked-read.js';
 import { StaleWrite } from './item-lock.js';
 
@@ -10,7 +10,6 @@ import { StaleWrite } from './item-lock.js';
  */
 export async function saveDocument(db: pg.PoolClient, work: Work, now: Date): Promise<string> {
   assertSavable(work);
-  dropRetiredQueueFields(work); dropRetiredScopeFields(work);
   const read = work.revision;
   work.revision++;
   work.updatedAt = now.toISOString();
@@ -27,7 +26,6 @@ export async function saveDocument(db: pg.PoolClient, work: Work, now: Date): Pr
  */
 export async function rewriteDocument(db: pg.PoolClient, work: Work) {
   assertSavable(work);
-  dropRetiredQueueFields(work); dropRetiredScopeFields(work);
   await guardedWrite(db, work.id, JSON.stringify(work), work.revision);
 }
 

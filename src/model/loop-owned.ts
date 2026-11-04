@@ -1,4 +1,4 @@
-import { servingReleaseProof, loopObservationProofs, type Principal, type Work } from './work.js';
+import { servingReleaseProof, type Principal, type Work } from './work.js';
 import { namedPaths } from './documentation-glob.js';
 
 /**
@@ -28,14 +28,6 @@ export const loopOwned = (work: Pick<Work, 'criteria'>) => {
 export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria'>) => loopOwned(work)
   ? `${work.key} is loop-owned: no criterion names a file to change and every proof it owes is a master-role session's observation of the master checkout, so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
   : null;
-
-/**
- * GY-1768: the words a worker's blocked report uses when its cause is only that a worker cannot take the reading the item owes — the proof's authority is not a worker's, the step needs a
- * master-role session or a browser sign-in, or a credential no worker holds. Exactly such a report is moot on an item held for the loop: the item is off the dispatch board and its own
- * next action names who records the reading. Any other cause on the same item is actionable — an unrelated failure, or a fault a named remedy could answer (a configuration missing and
- * owed its restore) — so its blocker stands for whoever can act on it, however the item is shaped.
- */
-const workerCannotServe = /\bnot a worker(?:'s)?(?=\s*(?:[(,;:]|\.(?:\s|$)|$|to\b|reading\b|observation\b|proof\b|authority\b))|\bcannot\b[^.\n]{0,80}\bby a worker\b|\bworker token holds no master role\b|\bfrom a worker session\b|\bobtainable from this sandbox\b|\bneeds? a master(?:-role)?\b|\bmaster-role session\b|\ba worker does not hold\b|\bbrowser sign-in\b|\boperator-supplied\b/i;
 
 /**
  * GY-2605: an item whose own record reserves its release to the owner (GY-1857): an `Owner hold:` title,

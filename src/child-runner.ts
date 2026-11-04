@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { performance } from 'node:perf_hooks';
 
 /**
  * The one way the loop, the dispatcher and the merge broker run Herdr, gh, git and systemctl.

@@ -5,7 +5,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { endedRuntimeStates, type RuntimeStates } from './model/sessions.js';
-import { temporaryDirectories, underTestRunner } from './supervisor.js';
+import { temporaryDirectories, underTestRunner } from './runtime-environment.js';
 
 export type ApprovalMode = 'auto' | 'prompt';
 /**

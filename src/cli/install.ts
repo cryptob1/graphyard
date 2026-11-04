@@ -1,12 +1,11 @@
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
-import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
+import { type DeliveryMode } from '../model/delivery-policy.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installIdFor, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
-import { delegationLimitAssignments } from '../install/limits.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
@@ -17,24 +16,6 @@ export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
   if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
 }
 
-/**
- * The capacity variables that accompany the principals `init --apply` registers: derived from
- * the roster in .graphyard/principals.json, and — when the operator credential reaches the
- * server — compared with what the deployment runs with, so a re-run after the roster grew
- * reports the deployed value that no longer covers it beside the value to set.
- */
-export async function capacityForPrincipals(principalsFile: string, status: () => Promise<any>) {
-  const registry = JSON.parse(await readFile(principalsFile, 'utf8'));
-  let deployed: Record<string, string | null> | null = null, error: string | null = null;
-  try {
-    const live = await status();
-    deployed = live?.delegationLimits?.deployed ?? null;
-    if (!deployed) error = 'the server reports no delegationLimits; deploy main first, then rerun init --scan --apply to compare';
-  } catch (failure: any) { error = `the server could not be read (${failure.message})`; }
-  const limits = delegationLimitAssignments(registry.principals, deployed);
-  return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
-    next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
-}
 /**
  * `graphyard principal add|remove` (GY-1879): one entry of this host's installation roster. The
  * install.json record is the roster; `add` judges the entry as the planner judges its own
@@ -140,7 +121,6 @@ export const installCommands = defineCommands([
         // flag the session builds from the checkout this command's own code was loaded from.
         ...(values['source-root'] ? { sourceRoot: resolve(values['source-root']) } : {}),
       }, values.apply ? 'apply' : 'plan');
-      if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
       return context.print(await applyInstall(session, plan));
@@ -150,7 +130,7 @@ export const installCommands = defineCommands([
     name: 'init',
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
-      '       [--delivery local|release-candidate|per-pr] [--candidate-cron CRON|off]',
+      '       [--delivery local] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
       '                                after graphyard install, --apply reuses the install\'s identities and writes no principals file',
@@ -160,7 +140,7 @@ export const installCommands = defineCommands([
       const root = context.repositoryRoot();
       const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
         delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
-      if (values.delivery !== undefined && !(deliveryModes as readonly string[]).includes(values.delivery)) throw new Error(`Use --delivery ${deliveryModes.join(' or ')}`);
+      if (values.delivery !== undefined && values.delivery !== 'local') throw new Error('Use --delivery local');
       if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
       const cron = values['candidate-cron'];
       const choices = { ...(values.delivery ? { mode: values.delivery as DeliveryMode } : {}), ...(cron !== undefined ? { candidateSchedule: cron === 'off' ? null : cron } : {}) };
@@ -186,9 +166,7 @@ export const installCommands = defineCommands([
             const result = await applyProposal(root, stored.proposal, { url, installed });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
-          const result = await applyProposal(root, stored.proposal, { url, writeCredentials: true });
-          if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
-          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
+          return print({ proposal: stored.file, ...await applyProposal(root, stored.proposal, { url }) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);
@@ -197,7 +175,7 @@ export const installCommands = defineCommands([
           applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
           drift: setupDrift(applied, fresh),
           appliedNothingElse: true,
-          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or opt out with --delivery per-pr), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or edit the proposed checks), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
       }
       let workerToken = await context.individualToken();
       if (values['token-stdin']) {

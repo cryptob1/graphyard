@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runUp, type UpDependencies, type UpEvent, type UpRequest } from '../src/up.js';
+import { type UpDependencies, type UpEvent, type UpRequest } from '../src/up.js';
 import { loadMasterConfig, setupAgentEnvironments, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

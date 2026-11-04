@@ -1,6 +1,7 @@
+import { temporaryDirectories, underTestRunner } from './runtime-environment.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
@@ -12,6 +13,7 @@ import { herdrCall } from './master/herdr.js';
 import { knownGoodCli, knownGoodState } from './master/known-good.js';
 import { installDirectory } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
+export { temporaryDirectories, underTestRunner } from './runtime-environment.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -694,12 +696,6 @@ export class LoopSupervisorRefusal extends Error {
 const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
 const within = (path: string, parent: string) => path === parent || path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
 /**
- * The directories every host treats as temporary, by name. A unit whose WorkingDirectory is under
- * one outlives the directory: on 2026-09-22 a unit written with a reviewer's `/var/tmp` checkout as
- * its WorkingDirectory crash-looped 233 times in 40 minutes after that checkout was deleted.
- */
-export const temporaryDirectories = () => [...new Set([tmpdir(), '/tmp', '/var/tmp'].map(canonical))];
-/**
  * Host preflight (GY-1457): the loop unit refuses a coordinator checkout under a temporary
  * directory (assertCoordinatorCheckout), so setup says so before it starts, naming the directory
  * and a durable place to clone the repository instead.
@@ -712,14 +708,6 @@ export function durableCheckoutPreflight(root: string, temporary: string[] = tem
     fix: `Clone the repository on durable storage, such as ${join(home, 'code', basename(checkout))}, and run setup from there` };
 }
 
-/**
- * Whether this process is the test suite. Node's test runner marks every process it runs a test
- * file in (`NODE_TEST_CONTEXT` in the children `--test` spawns, `--test` itself on the runner), and
- * `npm test` marks everything it starts with its lifecycle event. The marks are read from the real
- * process only: a `LoopSupervisorHost.env` says where a unit goes, never whether this is a test, so
- * no argument a test passes — or forgets — can switch the guard below off.
- */
-export const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
 /**
  * The one guard the test suite shares. Under the test runner the loop's unit directory must be
  * rooted in the system temporary directory, so a test that reaches `setupMaster` or

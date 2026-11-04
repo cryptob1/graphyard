@@ -1,6 +1,8 @@
 <!-- page: Understand or contribute | 1 | change code and validate -->
 # Development and dogfooding
 
+Typechecking enforces `noUnusedLocals` across source, web, and tests. Remove unused imports and bindings; retain setup calls and other side effects when discarding a result.
+
 ## Where a new feature goes
 
 | Concern | Source |
@@ -14,6 +16,8 @@
 | Protocol guides | `docs/protocol/` |
 
 Claim work and use its assigned worktree before editing ([AGENTS.md](../AGENTS.md)).
+
+Keep runtime helpers below launch and coordination modules: environment-file parsing in `src/env-file.ts`, test-host detection in `src/runtime-environment.ts`, private file I/O in `src/private-file.ts`, loop-code readings in `src/loop-code.ts`, and review wording in `src/review-prompt.ts`. Daemon schemas live beside state, separate from cycle execution. `tests/import-cycles.test.ts` counts static imports, re-exports and literal dynamic imports, excluding type-only edges; no runtime component may exceed three modules.
 
 ## Validate a change
 
@@ -70,3 +74,8 @@ Use the release's checkout, one release at a time. Each run creates/removes a sc
 Edit handwritten guides and their `<!-- page: Section | order | summary -->` metadata. `npm run docs:check -- --write` generates `docs/README.md` and `docs/protocol.md`; `npm run docs:check` validates relative links and anchors. The [generated-file policy](coordination.md#generated-files) keeps sync from hand-merging indexes.
 
 Diagram specs live in `scripts/render-docs-diagrams.mjs`. The opening video has a separate HTML source and renderer under `scripts/walkthrough/`; [rendering instructions](walkthrough.md) cover both committed media assets.
+
+Mutation bookkeeping lives in `src/store/mutations.ts`: call `once(db, actor, key, input, fn)` inside the existing transaction and locks. It fingerprints input, replays the recorded result and refuses changed input with HTTP 409. `record` appends history. Use `appendEvidence(work, evidence, db)` from `src/model/append-evidence.ts` to append evidence and its scenario run together. External I/O stays outside the transaction; receipt preflight reads never replace the transactional check.
+
+Schema generation 13 retires job holds and their status fields, the unused work-index owner, epoch and next-action columns, and the legacy merger pin and production observation tables. Startup migrates existing databases and rebuilds the work index; fresh databases omit those fields. Repeating the migration skips column removal when the index projection is unchanged, so live writers do not block startup. Job scheduling still uses wake generations, due times and lease tokens.
+

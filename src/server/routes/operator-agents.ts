@@ -1,6 +1,6 @@
 import { demand } from '../../model.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
-import { defineRoutes, parseJson, type Services } from '../routes.js';
+import { defineRoutes, parseJson } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle. */

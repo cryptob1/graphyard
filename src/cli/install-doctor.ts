@@ -50,11 +50,10 @@ export async function runDoctor(context: CliContext) {
     : readiness.next;
   return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, role: live?.actor?.role, release: live?.release ?? null, failure,
     setup,
-    heldJobs: live?.heldJobs ?? 0,
     mainGuard: live?.mainGuard ?? null,
     build: live?.build ?? null,
     delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
-    production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
+    production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadError: production.aheadError ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
     repositoryPolicy: doctorRepositoryPolicy(root),
     // GY-2958: whether the merge trial has a test check for this checkout (ci-tests, preMerge / npm test, or none).
     trialTests: trialTestGateStatus(root),

@@ -28,7 +28,7 @@ function dashboard(work: Work[], overrides: Partial<Dashboard> = {}): Dashboard 
   return {
     token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-    operatorAgents: [], operatorAgentsError: null, features: {} as any, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    operatorAgents: [], operatorAgentsError: null, features: {} as any, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   } as Dashboard;
@@ -147,7 +147,7 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
   const above = html.slice(0, technical), inside = html.slice(technical);
   assert.doesNotMatch(inside.slice(0, inside.indexOf('>') + 1), /\sopen/, 'collapsed');
   // Everything technical is inside it, and none of it is above it.
-  const technicalParts = ['<h3>Gate decisions</h3>', '<h3>Sessions (1)</h3>', 'herdr pane attach w1V:p32M --workspace w1V', '<h3>Code review</h3>', 'Provider: Formal GitHub approval',
+  const technicalParts = ['<h3>Gate decisions</h3>', '<h3>Sessions (1)</h3>', 'herdr pane attach w1V:p32M --workspace w1V', '<h3>Code review</h3>', 'Independent reviewer session',
     '<h3>Next action</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master decisions GY-171', 'graphyard-cursor-1'];
   for (const part of technicalParts) {
     assert.ok(inside.includes(part), `inside Technical details: ${part}`);

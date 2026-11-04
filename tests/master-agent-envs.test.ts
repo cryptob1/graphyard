@@ -1,21 +1,17 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
-import { sessionSlotsGrant } from '../src/master/harness.js';
+import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
-import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
-import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 
@@ -26,7 +22,6 @@ import { readySpecCheck } from './helpers/spec-check.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const installed = async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } });
 const hour = 3_600_000, future = (ms = hour) => new Date(Date.now() + ms).toISOString();
 
 // A private directory of agent environments for the whole file, so nothing reads the machine's own.

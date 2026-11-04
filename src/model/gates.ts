@@ -1,10 +1,9 @@
 import type { Gate, Stage, Work } from './work.js';
 import type { MergeLedgerState } from './merge-ledger.js';
 import { leadHoldRefusal } from './delegation.js';
-import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
+import { exactApproval } from './review.js';
 import { carriedApproval } from './carry.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
-import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 import { filingRefusal } from './user-facing.js';
@@ -84,17 +83,10 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   family('build');
   const reviews = current ? obs!.reviews : [];
   const changesRequested = reviews.some(r => r.state === 'CHANGES_REQUESTED');
-  const agentReview = current ? obs!.agentReview : undefined;
-  const provider = reviewProviderOf(work.policy);
-  const selectedProfile = reviewerProfileFor(work);
   // An approval binds the exact commit: the one the provider approved (see exactApproval), or the
   // one Graphyard carried it to across its own authored base refresh (see carry.ts). Nothing else counts.
   const reviewPassed = !!exactApproval(work) || !!carriedApproval(work);
-  const reviewRefusal = provider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required'
-    : provider === 'agent' ? !selectedProfile
-      ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
-      : agentReview?.reason ?? `Verified approval from reviewer profile ${selectedProfile.name} is required for the current commit`
-    : work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
+  const reviewRefusal = work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   // The one merge rule (GY-1525): a head the merge writer observed is judged by the class of its
   // merge delta (model/risk-class.ts). A sensitive delta needs the exact-head approval before it
   // merges; any other passes here and owes one post-merge review (model/post-merge-review.ts), which
