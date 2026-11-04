@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
 import { trialConfinement, trialEnvironment } from '../../src/merge-writer/trial.js';
 import { freePort } from '../../src/cli/test-isolation.js';
@@ -14,7 +14,7 @@ export async function verifyArtifact(input:{root:string;sha:string;seed:number;p
   input.signal?.throwIfAborted();
   const signal=(ms:number)=>AbortSignal.any([AbortSignal.timeout(ms),...(input.signal?[input.signal]:[])]);
   await mkdir(input.scratch,{recursive:true});
-  const wrapper=trialConfinement(input.hidden,[input.root,input.scratch]);
+  const wrapper=trialConfinement([...input.hidden,dirname(dirname(resolve(input.python)))],[input.root,input.scratch]);
   const env={...trialEnvironment(process.env),HOME:input.scratch,TMPDIR:input.scratch};
   const run=(args:string[],stdin='')=>command(wrapper[0],[...wrapper.slice(1),process.execPath,...args],{cwd:input.root,input:stdin,env,signal:input.signal});
   await command(wrapper[0],[...wrapper.slice(1),'npm','run','build'],{cwd:input.root,env,signal:input.signal});

@@ -1,3 +1,4 @@
+<!-- page: Understand or contribute | 2 | frozen exact-root benchmark and run receipts. -->
 # Certified real-root benchmark
 
 Implementation status: source work resumed in GY-3051 epoch 4. Build and focused
@@ -32,7 +33,7 @@ names the interpreter explicitly. The trial Dockerfile installs committed pinned
 requirements into `/opt/graphyard-hard-math-oracle` using python3-venv, removes
 write permission from the environment, and sets
 `HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python`. This is also the test
-default. There is no host HOME mount or implicit host fallback. The producer's
+default. Nested private-root trials bind that environment read-only. There is no host HOME mount or implicit host fallback. The producer's
 oracle source is frozen separately outside the implementation repository; its
 source directory and Python environment are masked from implementation sessions.
 For host-only focused checks, explicitly select an already provisioned pinned

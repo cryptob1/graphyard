@@ -102,6 +102,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
     return ['bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--tmpfs', '/', '--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc',
       '--ro-bind', '/opt/graphyard-browsers', '/opt/graphyard-browsers',
+      ...(existsSync('/opt/graphyard-hard-math-oracle') ? ['--ro-bind', '/opt/graphyard-hard-math-oracle', '/opt/graphyard-hard-math-oracle'] : []),
       '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
       '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
       '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/var/tmp', '--tmpfs', '/run',

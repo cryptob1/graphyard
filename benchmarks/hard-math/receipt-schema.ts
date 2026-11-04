@@ -6,7 +6,7 @@ export type RunConfig=z.infer<typeof configSchema>;
 export const usageSchema=z.object({role:z.string(),session:z.string(),inputTokens:z.number().nonnegative().nullable(),outputTokens:z.number().nonnegative().nullable(),cost:z.number().nonnegative().nullable(),reason:z.string().nullable()});
 export const receiptSchema=z.object({
   version:z.literal(1),id:z.string(),kind:z.enum(['controlled-fixture','real-agent']),mode:z.enum(['team','single']),configDigest:hash,
-  graphyardCommit:sha,profileVersion:z.literal('v1'),profileDigest:hash,generatorDigest:hash,contractDigest:hash,seed:z.number(),startingCommit:sha,oracleDigest:hash,
+  graphyardCommit:sha,graphyardVersion:z.string().min(1),profileVersion:z.literal('v1'),profileDigest:hash,generatorDigest:hash,contractDigest:hash,seed:z.number(),startingCommit:sha,oracleDigest:hash,
   startedAt:z.string().datetime(),endedAt:z.string().datetime().nullable(),outcome:z.enum(['RUNNING','PASS','FAIL']),reason:z.string(),
   budget:budgetSchema,eligibleModels:z.array(z.string()),accountLimits:z.array(z.unknown()),sourceCapacity:z.array(z.unknown()),runtimeReceipts:z.array(z.unknown()),cleanup:z.object({complete:z.boolean(),errors:z.array(z.string())}),wallClockLimitSeconds:z.number().positive(),
   work:z.array(z.object({component:z.string(),id:z.string(),key:z.string(),epoch:z.number(),candidate:sha.nullable(),merge:sha.nullable(),attempts:z.number(),reviews:z.number(),repairs:z.number(),record:z.unknown()})),

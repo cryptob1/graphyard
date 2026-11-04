@@ -36,13 +36,13 @@ export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:strin
   }
   const items=await c.plane.call('work',c.coordinator);
   for(const item of items) {
-    let workerStopped=true;
+    let workerStopped=errors.length===0;
     for(const s of item.sessions??[]) {
       // Finished handles can still have a live pane after submission or proof delivery.
       let stopped=true;
       if(s.pane) await attempt(`pane ${s.pane}`,async()=>{try {await pane(s.pane);} catch(error) {stopped=false;if(s.kind==='implementation') workerStopped=false;throw error;}});
       if(s.state==='running' && stopped) await attempt(`handle ${s.id}`,()=>c.plane.call(`work/${item.id}/session`,c.coordinator,{
-        id:s.id,kind:s.kind,principal:s.principal,...(s.epoch?{epoch:s.epoch}:{}),runtime:s.runtime,host:s.host,subject:s.subject,state:'finished',outcome:reason,...(s.launch?{launch:s.launch}:{}),
+        id:s.id,kind:s.kind,principal:s.principal,runtime:s.runtime,host:s.host,subject:s.subject,state:'finished',outcome:reason,...(s.launch?{launch:s.launch}:{}),
       }));
     }
     if(item.lease && workerStopped) await attempt(`lease ${item.key}`,()=>c.plane.call(`work/${item.id}/capacity`,c.coordinator,{

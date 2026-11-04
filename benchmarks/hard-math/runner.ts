@@ -19,6 +19,7 @@ import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
 import { configSchema, validateReceipt, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
+import { listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
 import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
@@ -69,6 +70,7 @@ export async function createItems(context:RunContext) {
 export async function execute(configInput:unknown,fixture?: (context:RunContext)=>Promise<void>):Promise<Receipt> {
   const config=configSchema.parse(configInput),directory=resolve(config.runDirectory),install=resolve(config.credentialDirectory);
   const frozen=await frozenInputs(),graphyardCommit=await git(codeRoot,'rev-parse','HEAD');
+  const graphyardVersion=JSON.parse(await readFile(join(codeRoot,'package.json'),'utf8')).version;
   if(!fixture) {
     const base=join(homedir(),'.config/graphyard');
     if(relative(base,install).startsWith('..') || install===base) throw new Error('Real installation credentials belong under ~/.config/graphyard/<install>/');
@@ -78,7 +80,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
   await mkdir(directory,{recursive:false});
   const started=Date.now();
   let context:RunContext|undefined,plane:Plane|undefined,master:MasterConfig|undefined,effects:ReturnType<typeof daemonEffects>|undefined,state:DaemonState|undefined,launcher:Launcher|undefined;
-  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],sourceCapacity:[],runtimeReceipts:[],cleanup:{complete:false,errors:[]},wallClockLimitSeconds:config.wallClockSeconds,work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costReason:'Monetary usage unavailable on these accounts; equal agent-second and wall limits do not establish monetary parity.',costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
+  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,graphyardVersion,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],sourceCapacity:[],runtimeReceipts:[],cleanup:{complete:false,errors:[]},wallClockLimitSeconds:config.wallClockSeconds,work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costReason:'Monetary usage unavailable on these accounts; equal agent-second and wall limits do not establish monetary parity.',costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
   const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await atomicPrivateWrite(join(directory,'receipt.json'),receipt);};
   await checkpoint();await writeFile(join(directory,'config.json'),JSON.stringify(config,null,2)+'\n',{mode:0o600});
   const abort=new AbortController(),deadline=started+config.wallClockSeconds*1000;
@@ -137,11 +139,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     enforce();plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
     let reading:Promise<any[]>|undefined;
-    const snapshot=(checkSource=false)=>reading??=(async()=>{
-      if(source && checkSource && !stopping) {
-        const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
-        try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
-      }
+    const readSnapshot=()=>reading??=(async()=>{
       const items=await plane!.call('work',coordinator.token);
       let gateFailure:string|undefined;
       for(const w of receipt.work) {
@@ -180,6 +178,13 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       if(!stopping) {if(gateFailure) throw new Error(gateFailure);enforce();}
       return items;
     })().finally(()=>{reading=undefined;});
+    const snapshot=async(checkSource=false)=>{
+      if(source && checkSource && !stopping) {
+        const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
+        try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
+      }
+      return readSnapshot();
+    };
     const certify=async(item:any)=>{
       const head=item.candidate?.sha;if(!head) return false;
       const target=join(directory,`certify-${head}`),scratch=join(directory,`scratch-${head}`);
@@ -240,9 +245,11 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
         const {readEnvironmentLog}=await import('../../src/master/environments.js');
         receipt.runtimeReceipts.push({file:'environment-log',record:await readEnvironmentLog(master)});
       }
+      for(const run of listRunDirectories(runsDirectory(context.root))) receipt.runtimeReceipts.push({file:'headless-run',...run});
       if(state) receipt.runtimeReceipts.push({file:'daemon-state',record:state});
     }
-    await plane?.stop();receipt.endedAt=new Date().toISOString();await checkpoint();
+    try {await plane?.stop();} catch(error) {receipt.cleanup.errors.push(String(error));receipt.cleanup.complete=false;receipt.outcome='FAIL';receipt.reason=`Control plane cleanup failed: ${error}`;}
+    receipt.endedAt=new Date().toISOString();await checkpoint();
     if(receipt.outcome==='PASS') {
       try {validateReceipt(receipt);} catch(error) {receipt.outcome='FAIL';receipt.reason=String(error);await checkpoint();}
     }

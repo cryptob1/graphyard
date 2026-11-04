@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { trialContainerWords } from '../src/merge-writer/trial-container.js';
+import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
+import { command } from '../benchmarks/hard-math/process.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { generate, profile } from '../benchmarks/hard-math/generator.js';
 import { oracle, oracleDigest } from '../benchmarks/hard-math/oracle.js';
@@ -78,4 +81,22 @@ test('integration:hard-math-smoke — failed and usage-limited runs release actu
     assert.ok(receipt.sessions.length>=3);assert.ok(receipt.sessions.every(s=>s.endedAt));
     if(label==='usage-stop') assert.match(receipt.reason,/usage limit|abort/i);
   }
+});
+
+
+test('integration:hard-math-smoke — private-root trials expose the immutable pinned producer Python environment',async()=>{
+  const allocation=await temporaryDirectory('hard-math-oracle-container',process.cwd());
+  const [program,...wrapper]=trialContainerWords([allocation]);
+  const result=await command(program,[...wrapper,'/opt/graphyard-hard-math-oracle/bin/python','-I','-c',`
+import sympy, mpmath
+assert sympy.__version__ == '1.14.0'
+assert mpmath.__version__ == '1.3.0'
+try:
+    open('/opt/graphyard-hard-math-oracle/producer-write-probe', 'w')
+    raise AssertionError('producer oracle environment is writable')
+except (PermissionError, OSError):
+    pass
+print('pinned immutable oracle')
+`],{cwd:allocation,env:{...trialEnvironment(),...trialHomeVariables(allocation),PATH:'/usr/local/bin:/usr/bin:/bin'}});
+  assert.match(result.stdout,/pinned immutable oracle/);
 });
