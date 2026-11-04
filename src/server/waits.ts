@@ -17,7 +17,7 @@ import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
-import { lockedWork } from '../store/locked-read.js';
+import { decisionWork } from '../store/decision-read.js';
 
 /**
  * The two waits that must stall nothing but the item that has them (GY-89): a session whose
@@ -29,7 +29,7 @@ import { lockedWork } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 const findWork = async (db: Db, id: string): Promise<{ work: Work | undefined; all: Work[] }> => {
-  const all = await lockedWork(db, [id]);
+  const all = await decisionWork(db, [id]);
   return { work: all.find(item => item.id === id || item.key === id), all };
 };
 /** Re-evaluate, append the evaluation's dispatch transitions, save with history. */

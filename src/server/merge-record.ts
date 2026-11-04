@@ -12,7 +12,7 @@ import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
 import { save, eventWorkSql } from '../store.js';
 import { evaluateLandability } from '../model-boundary/landability.js';
 import { exactApproval } from '../model/review.js';
-import { lockedWork } from '../store/locked-read.js';
+import { decisionWork } from '../store/decision-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
@@ -156,7 +156,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     return result.stdout;
   }, `refs/remotes/origin/${base}`, data.mergeSha);
   return engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });
     if (data.kind === 'intent') {

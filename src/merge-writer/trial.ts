@@ -1071,7 +1071,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           try {
             const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
             await writeFile(list, `${group.join('\n')}\n`);
-            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`], { entries });
+            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries });
             const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
             // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
             const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);

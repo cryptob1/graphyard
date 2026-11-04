@@ -1,3 +1,4 @@
+import { decisionWork } from './store/decision-read.js';
 import { recordRenewalFault } from './store/renewal-fault.js';
 import { appendEvidence } from './model-boundary/append-evidence.js';
 import { once, readReceipt, record } from './store/mutations.js';
@@ -567,7 +568,7 @@ export class Engine {
     if (!id) return null;
     if (await readReceipt(this.store.leasePool, actor, key)) return null;
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
-    const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
+    const work: Work | undefined = (await this.store.leasePool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
     // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
     // its replacement commit is read from the shared object store, never from the pull request.
@@ -778,7 +779,7 @@ export class Engine {
     // already has a receipt (a replay or a mismatched reuse), leaves the item and its history untouched.
     if (command === 'claim' && (actor.role === 'worker' || actor.role === 'admin')) await this.store.transaction(async (db, now) => {
       if (await readReceipt(db, actor, key)) return;
-      const all = await lockedWork(db, [id]);
+      const all = await decisionWork(db, [id]);
       const work = all.find(w => w.id === id || w.key === id);
       if (!work || work.stage === 'done' || work.observationWindow) return;
       await adoptFollowUpWindow(db, work);
@@ -798,7 +799,11 @@ export class Engine {
         actor = await this.operatorAuthorizer(db, now, caller);
       }
       return once<Work>(db, actor, key, receiptInput, async () => {
-      const all = await lockedWork(db, [id]);
+      // Creation/requirement changes validate the dependency graph; workspace registration checks
+      // every reservation. Those are board decisions. Lifecycle decisions read only their peers.
+      const all = ['create', 'requirements', 'workspace'].includes(command)
+        ? await lockedWork(db, [id])
+        : await decisionWork(db, [id], command === 'submit' ? data.pr : undefined);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       if (command === 'create') {
@@ -2037,7 +2042,7 @@ export class Engine {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
-      const all = await lockedWork(db, [id]);
+      const all = await decisionWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameObservationInputs)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
@@ -2065,6 +2070,6 @@ export class Engine {
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;
-    });
+    }, { itemLock: id });
   }
 }

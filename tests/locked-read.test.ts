@@ -86,10 +86,10 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   const probe = 'const wholeSql = `SELECT w.document FROM work_items w JOIN work_index i ON i.id = w.id`;\n'
     + 'await this.store.leasePool.query(`SELECT document FROM work_items w JOIN work_index i ON i.id = w.id ORDER BY w.number`);\nawait db.query(wholeSql, []);';
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
-  // Each former call site reads through lockedWork, naming the item it acts on.
+  // Single-item commands use the peer read; graph-wide edits retain the bounded fleet read.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
-  // Three callers remain after GY-3015 removed bindReviewRequest and failoverReviewRequest.
-  assert.equal((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length, 3, 'the remaining engine commands read through the bounded read, naming their item');
+  assert.equal((engineSource.match(/decisionWork\(db, \[id\]/g) ?? []).length, 3, 'single-item commands name their focus in the peer read');
+  assert.equal((engineSource.match(/lockedWork\(db, \[id\]\)/g) ?? []).length, 1, 'only graph and workspace edits retain the fleet read');
   assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
   assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
@@ -106,7 +106,7 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   timeTransactions();
   const { reads } = await held('scope', () => engine.execute(operator, 'ready', focus.id, {}, randomUUID()));
   const seen = new Set(reads.flatMap(entry => entry.keys));
-  assert.deepEqual([...seen].sort(), [focus.key, dependency.key, sharing.key].sort(), 'the command read whole only its item, the open item sharing its resource and its dependency');
+  assert.deepEqual([...seen].sort(), [focus.key, dependency.key].sort(), 'the command reads only its item and dependency; resource peers need no document');
   const board = await lockedWork(store.pool, [focus.id]);
   const standIn = (key: string) => isStandIn(board.find(item => item.key === key)!);
   assert.deepEqual([focus.key, dependency.key, sharing.key].map(standIn), [false, false, false], 'the item, the resource sharer and its dependency are documents');

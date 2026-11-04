@@ -231,6 +231,41 @@ async function ownRepositoryTrial(keep: readonly string[]) {
   return { root, base: join(scratch, 'root'), mergeSha, dropped: dropped.length };
 }
 
+test('integration:trial-hung-test-fails-fast — a hung file fails by name while a slow finishing file passes', async () => {
+  const trial = await ownRepositoryTrial([]);
+  gitIn(trial.root, 'checkout', '-q', '-f', '--detach', trial.mergeSha);
+  for (const name of ['run-tests.ts', 'bounded-tests.mjs']) copyFileSync(fileURLToPath(new URL(`./helpers/${name}`, import.meta.url)), join(trial.root, 'tests/helpers', name));
+  const hung = 'tests/hung.test.ts', slow = 'tests/slow.test.ts';
+  writeFileSync(join(trial.root, hung), "import { test } from 'node:test'; test('hung', async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n");
+  writeFileSync(join(trial.root, slow), "import { test } from 'node:test'; test('slow', async () => { await new Promise(resolve => setTimeout(resolve, 500)); });\n");
+  gitIn(trial.root, 'add', hung, slow, 'tests/helpers');
+  gitIn(trial.root, 'commit', '-q', '-m', 'hung and slow fixtures');
+  let testRuns = 0;
+  const result = await runTrial({
+    ...trial, mergeSha: gitIn(trial.root, 'rev-parse', 'HEAD'), changedFiles: [hung, slow],
+    timeoutMs: 120_000, retries: 0, groupSize: 2, cores: 2,
+    run: async (command, args, options) => {
+      if (args.includes('tests/helpers/run-tests.ts')) {
+        testRuns++;
+        assert.ok(args.includes('--file-timeout=300000'), 'production bounds each file at five minutes');
+        // Exercise the real runner, reporter and trial verdict with a shortened clock.
+        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=3000' : arg);
+      }
+      // This regression exercises test processes, not the separately tested container boundary.
+      // All executed code belongs to this repository or the two fixtures above.
+      return defaultChildRun(command, args, { ...options, wrapper: undefined });
+    },
+  });
+  assert.equal(testRuns, 1, result.logTail);
+  assert.equal(result.build, 'pass');
+  assert.deepEqual(result.tests, { passed: 1, failed: [hung], files: 2 });
+  assert.equal(result.runnerExit, 1);
+  assert.match(result.logTail, /hung\.test\.ts/);
+  assert.match(result.logTail, /timed out/);
+  assert.ok(result.phases!.tests < 15_000, `file bound, not overall deadline: ${result.phases!.tests}ms`);
+  assert.deepEqual(result.retried ?? [], [], 'a named failure is a verdict, not a no-verdict retry');
+});
+
 test('unit:trial-credential-free-runner-exits-zero — this repository\'s own two-file fast selection, built and run by the real runner in a credential-free scratch checkout through runTrial\'s environment (GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND and every GRAPHYARD_*/HERDR_* variable removed, GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null), records no failed file and a runner exit code of 0 (GY-1549)', async () => {
   const keep = ['tests/stable-json.test.ts', 'tests/vite-config-loader.test.ts'];
   const trial = await ownRepositoryTrial(keep);
