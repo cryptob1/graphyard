@@ -2,6 +2,7 @@ import { enforceUsage } from './enforcement.js';
 import { z } from 'zod';
 import { currentEvidence } from '../../src/model/evidence.js';
 import { evidenceProves } from '../../src/model/mechanical-proofs.js';
+import { exactApproval } from '../../src/model/review.js';
 import type { Work } from '../../src/model.js';
 const sha=z.string().regex(/^[0-9a-f]{40}$/), hash=z.string().regex(/^[0-9a-f]{64}$/);
 export const budgetSchema=z.object({authorization:z.string().trim().min(1),maxAgentSeconds:z.number().positive(),maxTokens:z.number().positive().nullable(),maxCost:z.number().positive().nullable(),currency:z.literal('USD'),priceSource:z.object({url:z.string().url().nullable(),date:z.string().nullable(),reason:z.string().nullable()})});
@@ -32,6 +33,24 @@ export function overlappingWorkers(sessions:Receipt['sessions']) {
   }
   return result;
 }
+/** Native reviews bind either the pre-merge candidate or the delivered merge, never an arbitrary head. */
+export function independentlyApproved(work:Work):boolean {
+  const candidate=work.candidate, binding=work.reviewVerdicts;
+  if(!candidate || !binding || binding.sha!==candidate.sha || binding.baseSha!==candidate.baseSha || binding.policyRevision!==work.policyRevision) return false;
+  const postMerge=work.postMergeReview!=null;
+  const launch=work.reviewLaunch, verdict=launch?.verdict;
+  const head=postMerge?work.delivery?.mergeSha:candidate.sha;
+  const base=postMerge?work.mergeLedger?.baseTip:work.observation?.mergeBase??candidate.baseSha;
+  if(postMerge && (work.postMergeReview!=='reviewed' || !launch?.postMerge || launch.product || launch.refused || launch.head!==head || launch.baseTip!==base || verdict?.sha!==head || verdict.baseSha!==base || verdict.state!=='APPROVED')) return false;
+  if(!postMerge && !exactApproval(work)) return false;
+  return !!work.observation?.reviews.some(review=>review.sha===head && review.baseSha===base && review.state==='APPROVED'
+    && review.source==='control-plane' && review.reviewer!==candidate.author && !(work.implementers??[]).includes(review.reviewer)
+    && !work.formalReviewBaseline?.reviewIds.includes(review.id!) && !work.observation?.dismissedReviewIds?.includes(review.id!)
+    && (!postMerge || review.id===verdict!.reviewId && review.reviewer===launch!.reviewer && review.reviewer!==launch!.requester));
+}
+
+export const reviewedDeliveries=(work:Receipt['work'])=>work.length>0 && work.every(w=>!!w.merge && independentlyApproved(w.record as Work));
+
 export function validateReceipt(value:unknown):Receipt {
   const r=receiptSchema.parse(value);
   if(JSON.stringify(r.overlaps)!==JSON.stringify(overlappingWorkers(r.sessions))) throw new Error('Overlap receipt differs from implementation handles');
@@ -46,7 +65,7 @@ export function validateReceipt(value:unknown):Receipt {
       const record=w.record as any;
       if(!w.candidate || !w.merge || record?.stage!=='done' || record.delivery?.mergeSha!==w.merge || record.mergeLedger?.state!=='reconciled' || record.candidate?.sha!==w.candidate) throw new Error(`Missing authoritative delivery: ${w.key}`);
       if(!record.pipeline?.attempts?.some((a:any)=>a.epoch===w.epoch) || !record.workspaces?.some((a:any)=>a.epoch===w.epoch)) throw new Error(`Missing claim/worktree: ${w.key}`);
-      if(!record.observation?.reviews?.some((a:any)=>a.sha===w.candidate && a.state==='APPROVED')) throw new Error(`Missing independent approval: ${w.key}`);
+      if(!independentlyApproved(record)) throw new Error(`Missing independent approval: ${w.key}`);
       if(r.kind==='real-agent' && !r.sessions.some(s=>s.work===w.key && s.implementation?.epoch===w.epoch && (s.implementation.pane || s.implementation.agentName))) throw new Error(`Missing actual implementation handle: ${w.key}`);
       const trial=record.mergeLedger.trial;
       const required=record.criteria.flatMap((ac:any)=>ac.proofs.filter((proof:string)=>/^(unit|integration|e2e):/.test(proof)));

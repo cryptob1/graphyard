@@ -193,3 +193,9 @@ criteria, frozen mathematics or the delivery harness:
 
 These changes request fresh independent judgement; they do not supply a review
 verdict or waive technical, product, full-suite, bound E2E or actual-run obligations.
+
+The runner keeps coordinating after the last component merges until every required
+independent approval is recorded, within the same deadline, usage and repair bounds.
+Normal-risk delivery uses the native post-merge review of the exact delivery merge
+and its parent; pre-merge approval binds the candidate and its reviewed base.
+Missing, stale, unrelated or wrong-policy approvals cannot certify a receipt.

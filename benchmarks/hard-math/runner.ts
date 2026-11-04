@@ -17,7 +17,7 @@ import { defaultChildRun } from '../../src/child-runner.js';
 import { boundedChildRun, command, git } from './process.js';
 import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
-import { configSchema, validateReceipt, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
+import { configSchema, validateReceipt, reviewedDeliveries, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
 import { listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
 import { trackedDocuments, lifecycleCounts, failureStack, receiptSession } from './snapshot.js';
@@ -210,7 +210,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       const checked=new Map<string,boolean>();
       while(true) {
         const items=await snapshot(true);
-        if(receipt.work.every(w=>w.merge)) break;
+        if(reviewedDeliveries(receipt.work)) break;
         enforce();await runCertifiedCycle({config:master,state,effects,items,finalId:receipt.work.at(-1)!.id,checked,certify,launcher,
           repair:async item=>{
             await launcher!.idle();

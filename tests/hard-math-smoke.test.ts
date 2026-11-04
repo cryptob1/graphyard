@@ -67,8 +67,8 @@ async function runFixture(label:string,options:Parameters<typeof fixtureExecutor
   return execute({id:`fixture-${label}`,mode,profileVersion:'v1',seed:1,wallClockSeconds,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
 }
 
-test('integration:hard-math-smoke — real scratch Postgres/control plane and Git deliver eight reviewed fixture components, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
-  const receipt=await runFixture('repair',{injectRepair:true});
+test('integration:hard-math-smoke — real scratch Postgres/control plane and Git merge eight normal-risk components before native review dispatch/completion, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
+  const receipt=await runFixture('repair',{injectRepair:true,nativePostMerge:true});
   assert.equal(receipt.outcome,'PASS',`${receipt.reason}\n${JSON.stringify(receipt.failures,null,2)}`);assert.equal(receipt.kind,'controlled-fixture');
   assert.ok(receipt.overlaps.length);assert.equal(receipt.work.at(-1)?.repairs,1);
   assert.ok(receipt.failures.some(f=>f.component==='integration'));assert.equal(receipt.cost,null);assert.equal(receipt.costBudgetProven,false);
@@ -78,6 +78,18 @@ test('integration:hard-math-smoke — real scratch Postgres/control plane and Gi
     (r:any)=>{delete r.work[0].record.pipeline;},(r:any)=>{r.work[0].record.workspaces=[];},(r:any)=>{r.artifact.sha='f'.repeat(40);},
     (r:any)=>{r.overlaps=[];},(r:any)=>{r.cost=0;},
   ]) {const bad=structuredClone(receipt);edit(bad);assert.throws(()=>validateReceipt(bad));}
+  for(const edit of [
+    (r:any)=>{r.reviewLaunch.verdict.sha=r.candidate.sha;},
+    (r:any)=>{r.reviewLaunch.baseTip='f'.repeat(40);},
+    (r:any)=>{r.reviewVerdicts.policyRevision++;},
+    (r:any)=>{r.observation.reviews[0].sha='f'.repeat(40);},
+    (r:any)=>{r.observation.reviews[0].state='CHANGES_REQUESTED';},
+    (r:any)=>{r.observation.reviews[0].reviewer=r.candidate.author;},
+    (r:any)=>{r.postMergeReview='owed';},
+  ]) {
+    const bad=structuredClone(receipt),distinct=bad.work.find(w=>w.candidate!==w.merge)!;
+    edit(distinct.record);assert.throws(()=>validateReceipt(bad),/Missing independent approval/);
+  }
   const unreviewed=structuredClone(receipt);(unreviewed.work[0].record as any).observation.reviews=[];
   assert.throws(()=>validateReceipt(unreviewed),/Missing independent approval/,'benchmark receipt rejects a missing review regardless of the production queue policy');
   const uncertified=structuredClone(receipt);(uncertified.work.at(-1)!.record as any).evidence=[];

@@ -1,5 +1,10 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { runWorkerPull } from '../../src/auto-dispatch.js';
+import { emptyDispatchCursor, runDispatchTick, runWorkerPull } from '../../src/auto-dispatch.js';
+import { masterConfigSchema } from '../../src/master.js';
+import { atomicPrivateWrite, atomicPrivateText } from '../../src/master/config.js';
+import { launchReview, reconcileReviews } from '../../src/reviewer.js';
+import { readReviewBinding } from '../../src/review-post.js';
+import { reviewedDeliveries } from './receipt-schema.js';
 import { masterRunSchema } from '../../src/master/profiles.js';
 /** Controlled executors test the runner and real Graphyard gates; never model/agent evidence. */
 import { createHash, randomBytes } from 'node:crypto';
@@ -26,7 +31,7 @@ export async function writeControlledArtifact(root:string,python:string,oracleFi
   await writeFile(join(root,'public/app.mjs'),app);
 }
 const certificationFailure=(c:RunContext)=>JSON.stringify(c.receipt.failures.filter(f=>f.component==='integration').at(-1),null,2);
-export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boolean;incorrectArtifact?:boolean;injectRepair?:boolean;haltAfterClaims?:boolean;waitAfterClaims?:boolean}={}) {
+export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boolean;incorrectArtifact?:boolean;injectRepair?:boolean;haltAfterClaims?:boolean;waitAfterClaims?:boolean;nativePostMerge?:boolean}={}) {
   const trials=join(c.directory,'trials');await mkdir(trials);
   await c.plane.call('agent-registry/apply',c.coordinator,{
     runtimes:[{name:'controlled-fixture',launch:{kind:'codex'}}],
@@ -85,6 +90,7 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     await command(process.execPath,['--test','tests/contract.test.mjs'],{cwd:directory});
     await command(process.execPath,['--input-type=module','-e',"import {parseRequest} from './src/contract.mjs';import assert from 'node:assert/strict';assert.throws(()=>parseRequest({coefficients:['0'],precisionBits:64}),{code:'ZERO_POLYNOMIAL'});"],{cwd:directory});
     await c.plane.call(`work/${item.id}/evidence`,c.producer,{proof:'unit:workbench-contract',sha:item.candidate.sha,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:'pass',executed:1,skipped:0,exercise:{behaviour:'Contract fixture without zero polynomial rejection',result:'fail',executed:1}});
+    if(options.nativePostMerge) return c.plane.call(`work/${item.id}`,c.coordinator);
     const reviewToken=randomBytes(32).toString('hex');
     await c.plane.call(`work/${item.id}/review-launch`,c.coordinator,{reviewer:'controlled-independent-reviewer',head:item.candidate.sha,baseTip:item.observation.mergeBase??item.candidate.baseSha,tokenHash:createHash('sha256').update(reviewToken).digest('hex'),expiresAt:new Date(Date.now()+120_000).toISOString()});
     await c.plane.call(`work/${item.id}/review-verdict`,reviewToken,{event:'APPROVE',body:'Controlled fixture review; not a real coding-agent review.',sha:item.candidate.sha,token:reviewToken});
@@ -119,5 +125,55 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     const merged=await mergeOne(writer,item);
     assert.equal(merged.outcome,'merged',JSON.stringify(merged));
     await c.snapshot();
+  }
+  if(options.nativePostMerge) {
+    assert.ok(c.receipt.work.every(w=>w.merge));
+    assert.equal(reviewedDeliveries(c.receipt.work),false,'final merge must not end coordination before review dispatch');
+    assert.ok(c.receipt.work.some(w=>w.candidate!==w.merge),'concurrent branches exercise distinct candidate and merge SHAs');
+    for(const work of c.receipt.work) {
+      const item=work.record as any;
+      assert.equal(item.mergeLedger.risk,'normal');
+      assert.equal(item.postMergeReview,'owed');
+      assert.deepEqual(item.observation.reviews,[],'no pre-approved fixture shortcut');
+    }
+    const credentialFile=join(c.install,'fixture-review-coordinator.token');
+    await atomicPrivateText(credentialFile,c.coordinator);
+    const config=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:join(c.config.sourceRoot,'bin/graphyard.mjs'),repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:'scratch',masterAgentName:'fixture-master',herdrWorkspace:'fixture-review',workers:[],
+      reviewers:[{name:'fixture-reviewer',agentName:'controlled-independent-reviewer',kind:'claude',concurrency:16}],run:{worktreeRoot:join(c.directory,'review-worktrees')}});
+    await mkdir(join(c.root,'.graphyard'),{recursive:true});
+    await atomicPrivateWrite(join(c.root,'.graphyard/master.json'),config);
+    const cursor=emptyDispatchCursor(config),directories:string[]=[];
+    // Replace only the AI runtime: dispatch, session binding, launch registration and verdict ingestion are native.
+    const runtime=(_command:string,args:string[])=>{
+      if(args[0]==='tab' && args[1]==='create') {
+        directories.push(args.find(value=>value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length));
+        return JSON.stringify({result:{type:'tab_created',root_pane:{pane_id:`fixture-review-${directories.length}`,tab_id:`fixture-tab-${directories.length}`},tab:{tab_id:`fixture-tab-${directories.length}`}}});
+      }
+      if(args[0]==='pane' && args[1]==='read') return 'Claude Code ready\n';
+      if(args[0]==='pane' && args[1]==='process-info') return JSON.stringify({result:{process_info:{shell_pid:100,foreground_process_group_id:200,foreground_processes:[{argv:['claude']}]}}});
+      if(args[0]==='agent' && ['get','rename'].includes(args[1])) return JSON.stringify({result:{agent:{agent:'claude',agent_status:'idle',pane_id:args[2]}}});
+      return JSON.stringify({result:args[0]==='pane' && args[1]==='list'?{panes:[]}: {}});
+    };
+    const effects={snapshot:async()=>({work:await c.snapshot(),now:new Date().toISOString()}),agents:()=>[],
+      credentials:async(profiles:{name:string}[])=>Object.fromEntries(profiles.map(p=>[p.name,{available:true,reason:null}])),
+      reconcileReviews:async()=>reconcileReviews(c.root,config,{run:runtime,work:await c.snapshot(),agents:[]}),reconcileProducers:async()=>({producers:[]}),launchReview:async()=>{},launchProducer:async()=>{},persist:async()=>{},
+      launchPostMergeReview:(item:any,request:any,profile:any,_agents:any,at:string)=>launchReview(c.root,item,profile.name,[],at,{run:runtime,requestId:request.id,postMerge:{mergeSha:request.sha,baseTip:request.baseSha}}),
+    };
+    const tick=await runDispatchTick(config,cursor,effects);
+    assert.deepEqual(tick.refused,[],JSON.stringify(tick.refused));
+    assert.equal(tick.launched.length,c.receipt.work.length,JSON.stringify(tick));
+    await c.snapshot();
+    assert.equal(reviewedDeliveries(c.receipt.work),false,'a pending launched review is not approval');
+    for(const directory of directories) {
+      const binding=await readReviewBinding(directory);
+      const work=c.receipt.work.find(w=>w.key===binding.key)!;
+      assert.equal(binding.sha,work.merge);
+      assert.equal(binding.baseTip,(work.record as any).mergeLedger.baseTip);
+      await c.plane.call(`work/${work.id}/review-verdict`,binding.verdictToken!,{event:'APPROVE',body:'Controlled native post-merge regression; no real coding-agent review.',sha:binding.sha,token:binding.verdictToken});
+    }
+    await c.snapshot();
+    assert.equal(reviewedDeliveries(c.receipt.work),true,'only completed exact merge approvals permit loop termination');
+    const settled=await runDispatchTick(config,cursor,effects);
+    assert.equal(settled.launched.length,0,'settled reviews do not relaunch');
   }
 }

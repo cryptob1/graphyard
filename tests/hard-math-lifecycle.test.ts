@@ -9,7 +9,7 @@ import { registerRun, writeRunOwner, runsDirectory, endRun } from '../src/runner
 import { sourceCapacity } from '../benchmarks/hard-math/capacity.js';
 import { receiptSession } from '../benchmarks/hard-math/snapshot.js';
 import { emptyRegistry } from '../src/model/registry.js';
-import { overlappingWorkers, comparison, receiptSchema, validateReceipt } from '../benchmarks/hard-math/receipt-schema.js';
+import { overlappingWorkers, comparison, receiptSchema, validateReceipt, reviewedDeliveries } from '../benchmarks/hard-math/receipt-schema.js';
 
 test('hard math cleanup stops only run-owned master, item and headless sessions and releases leases',async()=>{
   const root=await temporaryDirectory('hard-math-cleanup'),directory=join(runsDirectory(root),'proof');
@@ -194,12 +194,32 @@ test('hard math receipt independently requires approval, certification and posit
   const receipt=syntheticReceipt('single'),head='c'.repeat(40),merge='d'.repeat(40),base='b'.repeat(40);
   receipt.kind='controlled-fixture';receipt.outcome='PASS';
   receipt.sessions=[{id:'synthetic-session',role:'worker',work:'GY-1',principal:'worker',runtime:'synthetic',account:'synthetic',model:'synthetic',reason:'Synthetic receipt validation only',startedAt:receipt.startedAt,endedAt:receipt.endedAt,record:{},implementation:null}];
-  const record={criteria:[{proofs:['unit:workbench-contract','e2e:workbench']}],key:'GY-1',stage:'done',lease:null,policyRevision:1,candidate:{sha:head,baseSha:base},delivery:{mergeSha:merge},pipeline:{attempts:[{epoch:1}]},workspaces:[{epoch:1,owner:'worker'}],
-    observation:{reviews:[{sha:head,state:'APPROVED',reviewer:'independent'}]},mergeLedger:{state:'reconciled',trial:{build:'pass',proofs:{'unit:workbench-contract':{executed:1,failed:0},'e2e:workbench':{executed:2,failed:0}}}},
+  const record={policy:{review:true,checks:['test']},criteria:[{proofs:['unit:workbench-contract','e2e:workbench']}],key:'GY-1',stage:'done',lease:null,policyRevision:1,candidate:{sha:head,baseSha:base,author:'worker'},reviewVerdicts:{sha:head,baseSha:base,policyRevision:1,verdicts:[]},delivery:{mergeSha:merge},pipeline:{attempts:[{epoch:1}]},workspaces:[{epoch:1,owner:'worker'}],
+    observation:{candidate:{sha:head,baseSha:base},reviews:[{id:1,sha:head,baseSha:base,source:'control-plane',state:'APPROVED',reviewer:'independent'}]},mergeLedger:{state:'reconciled',trial:{build:'pass',proofs:{'unit:workbench-contract':{executed:1,failed:0},'e2e:workbench':{executed:2,failed:0}}}},
     evidence:[{proof:'manual:certified-artifact',sha:head,baseSha:base,policyRevision:1,producer:'independent-producer',trusted:true,result:'pass',executed:8,skipped:0}]};
   receipt.work=[{component:'single',id:'synthetic-item',key:'GY-1',epoch:1,candidate:head,merge,attempts:1,reviews:1,repairs:0,record}];
   receipt.artifact={sha:merge,cli:true,api:true,ui:true,cases:8,oracleDigest:receipt.oracleDigest};
   assert.doesNotThrow(()=>validateReceipt(receipt));
+  assert.equal(reviewedDeliveries(receipt.work),true);
+  for(const edit of [
+    (r:any)=>{r.reviewVerdicts.policyRevision++;},(r:any)=>{r.reviewVerdicts.baseSha=merge;},
+    (r:any)=>{r.observation.reviews[0].baseSha=merge;},(r:any)=>{r.observation.reviews[0].reviewer='worker';},
+    (r:any)=>{r.formalReviewBaseline={reviewIds:[1]};},(r:any)=>{r.observation.dismissedReviewIds=[1];},
+  ]) {const bad=structuredClone(receipt);edit(bad.work[0].record);assert.equal(reviewedDeliveries(bad.work),false);assert.throws(()=>validateReceipt(bad),/Missing independent approval/);}
+  const post=structuredClone(receipt),postRecord=post.work[0].record as any;
+  postRecord.postMergeReview='owed';postRecord.observation.reviews=[];postRecord.mergeLedger.baseTip=base;
+  assert.equal(reviewedDeliveries(post.work),false,'all merges without reviews must keep coordinating');
+  postRecord.reviewLaunch={postMerge:true,head:merge,baseTip:base,reviewer:'independent',requester:'coordinator',verdict:null};
+  assert.equal(reviewedDeliveries(post.work),false,'pending native launch must keep coordinating');
+  postRecord.postMergeReview='reviewed';
+  postRecord.reviewLaunch.verdict={sha:merge,baseSha:base,reviewId:2,state:'APPROVED'};
+  postRecord.observation.reviews=[{id:2,sha:merge,baseSha:base,source:'control-plane',state:'APPROVED',reviewer:'independent'}];
+  assert.equal(reviewedDeliveries(post.work),true);assert.doesNotThrow(()=>validateReceipt(post));
+  for(const edit of [
+    (r:any)=>{r.reviewLaunch.verdict.sha=head;},(r:any)=>{r.reviewLaunch.baseTip=head;},
+    (r:any)=>{r.reviewVerdicts.policyRevision++;},(r:any)=>{r.observation.reviews[0].sha=head;},
+    (r:any)=>{r.reviewLaunch.verdict.state='CHANGES_REQUESTED';},(r:any)=>{r.reviewLaunch.postMerge=false;},
+  ]) {const bad=structuredClone(post);edit(bad.work[0].record);assert.equal(reviewedDeliveries(bad.work),false);assert.throws(()=>validateReceipt(bad),/Missing independent approval/);}
   const missingReview=structuredClone(receipt);(missingReview.work[0].record as any).observation.reviews=[];
   assert.throws(()=>validateReceipt(missingReview),/Missing independent approval/);
   const otherHeadReview=structuredClone(receipt);(otherHeadReview.work[0].record as any).observation.reviews[0].sha=base;
