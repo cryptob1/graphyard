@@ -15,6 +15,22 @@ function assertHostPidOneAlive() {
   try { process.kill(1, 0); } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'EPERM'); }
 }
 const memory = async () => ({ totalBytes: 64 * 2 ** 30, availableBytes: 40 * 2 ** 30 });
+// Each fixture launcher owns a detached process group. Signal it from this parent
+// namespace, where SIGKILL can terminate the nested namespace's PID 1. Waiting for
+// close also waits for the trial wrapper's container cleanup and inherited pipes.
+function ownedGroupStop(child: ReturnType<typeof spawn>) {
+  let closed = false, stopped: Promise<void> | undefined;
+  child.once('close', () => { closed = true; });
+  return () => stopped ??= (async () => {
+    if (closed) return;
+    assert.ok(child.pid && child.pid > 1, 'only the owned detached group may be signalled');
+    const finished = once(child, 'close', { signal: AbortSignal.timeout(10_000) });
+    try { process.kill(-child.pid, 'SIGKILL'); }
+    catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH'); }
+    await finished;
+  })();
+}
+
 async function waitFor(file: string, child: ReturnType<typeof spawn>, output: () => string) {
   const deadline = Date.now() + 30_000;
   while (!existsSync(file)) {
@@ -40,7 +56,8 @@ test('integration:verification-owner-identity — host release, live safety and 
     await declareTrialFiles(${JSON.stringify(directory)}, 'interrupted', 46);
     writeFileSync(${JSON.stringify(ready)}, 'ready');
     setInterval(() => {}, 1000);
-  `], { stdio: ['ignore', 'ignore', 'pipe'] });
+  `], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const stop = ownedGroupStop(child);
   let output = ''; child.stderr!.on('data', chunk => output += chunk);
   try {
     await waitFor(ready, child, () => output);
@@ -49,34 +66,35 @@ test('integration:verification-owner-identity — host release, live safety and 
     const ownerFile = join(directory, 'slot-1000', 'owner.json');
     await writeFile(ownerFile, JSON.stringify({ ...JSON.parse(readFileSync(ownerFile, 'utf8')), pid: process.pid }));
     assert.equal(await trialAffordableFiles(memory, directory), baseline! - 46, 'same numeric PID is still another owner');
-    const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
+    await stop();
     assert.equal(await trialAffordableFiles(memory, directory), baseline, 'first plan reclaims before subtracting declarations');
     assert.equal(heldSlots(directory).length, 0);
     const release = await declareTrialFiles(directory, 'ordinary', 3);
     assert.equal(heldSlots(directory)[0].owner?.files, 3);
     await release();
     assert.equal(heldSlots(directory).length, 0);
-  } finally { child.kill('SIGKILL'); }
+  } finally { await stop(); }
 });
 
 test('integration:verification-owner-identity — private container PID collision preserves live owner then recovers first host plan', { timeout: 60_000 }, async () => {
   const directory = await temporaryDirectory('verification-private', root);
-  const ready = join(directory, 'ready'), interrupt = join(directory, 'interrupt');
+  const ready = join(directory, 'ready');
   const baseline = await trialAffordableFiles(memory, directory);
   const wrapper = trialContainerWords([directory]);
   // PID 1 in the nested private root collides with the caller's live PID 1.
   // This uses the ordinary trial container, including its real nested namespace support.
   const script = `
     import { acquireVerificationSlot, declareSlotFiles } from '/graphyard-harness/src/master/verification-slots.ts';
-    import { existsSync, writeFileSync } from 'node:fs';
+    import { writeFileSync } from 'node:fs';
     const held = await acquireVerificationSlot({ directory: ${JSON.stringify(directory)}, slots: 1, label: 'private suite' });
     declareSlotFiles(held, 46);
     writeFileSync(${JSON.stringify(ready)}, String(process.pid));
-    setInterval(() => { if (existsSync(${JSON.stringify(interrupt)})) process.kill(process.pid, 'SIGKILL'); }, 20);
+    setInterval(() => {}, 1000);
   `;
-  const child = spawn(wrapper[0], [...wrapper.slice(1), 'bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1', '--ro-bind', '/', '/',
+  const child = spawn(wrapper[0], [...wrapper.slice(1), 'bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--as-pid-1', '--ro-bind', '/', '/',
     '--proc', '/proc', '--dev', '/dev', '--bind', directory, directory, '--', 'node', '--import', '/graphyard-harness/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', script],
-    { cwd: directory, env: { ...trialEnvironment(), HOME: directory, TMPDIR: directory, PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['ignore', 'ignore', 'pipe'] });
+    { detached: true, cwd: directory, env: { ...trialEnvironment(), HOME: directory, TMPDIR: directory, PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['ignore', 'ignore', 'pipe'] });
+  const stop = ownedGroupStop(child);
   let output = ''; child.stderr!.on('data', chunk => output += chunk);
   try {
     await waitFor(ready, child, () => output);
@@ -84,13 +102,12 @@ test('integration:verification-owner-identity — private container PID collisio
     assertHostPidOneAlive();
     assert.equal(await trialAffordableFiles(memory, directory), baseline! - 46);
     assert.equal(heldSlots(directory).length, 1, 'foreign live owner is retained');
-    const exited = once(child, 'exit');
-    await writeFile(interrupt, 'kill'); await exited;
+    await stop();
     assertHostPidOneAlive();
     assert.equal(await trialAffordableFiles(memory, directory), baseline);
     assert.deepEqual(trialShardBreadth(24, 24, await trialAffordableFiles(memory, directory)), trialShardBreadth(24, 24, baseline));
     const held = await acquireVerificationSlot({ directory, slots: 1, label: 'host successor' });
     assert.equal(held.slot, 0); held.release();
     assert.equal(heldSlots(directory).length, 0);
-  } finally { child.kill('SIGKILL'); }
+  } finally { await stop(); }
 });
