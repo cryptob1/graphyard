@@ -1,26 +1,19 @@
-<!-- page: Start here | 0 | install -->
+<!-- page: Start here | 0 | plan and install -->
 # Install Graphyard
 
-> install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
-
-Ask only: **Which provider**; **Provider login**; **Approval of the printed plan**. Graphyard registers no GitHub App; the merge writer pushes with the install deploy key.
+Install for `OWNER/REPO` with the merge writer's deploy key as the only GitHub access. No App, Actions gate or branch protection is needed.
 
 ## Hard rules
 
-- **Never print, echo, `cat`, log, paste, or commit a credential.**
-- **One principal per role** (`--workers N`); never share worker credentials.
-- **Workers never receive an admin, coordinator, or producer credential.**
-- **Proof producers get explicit grants only** (`--producer-proof NAME`).
-- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): plan's `installDirectory`, `init --apply`'s `workers/` (`0700`/`0600`).
+Never print or commit credentials. Store them outside repositories under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): directories 0700, secrets 0600. Use separate principals for concurrent sessions (`--workers N`). Workers receive no admin, coordinator or producer credentials; producers get only named `--producer-proof` grants.
 
 ## Preconditions
 
-Node 24, an `OWNER/REPO` checkout, `GRAPHYARD_CLI` exported, `gh` scope `repo` as a repository admin (it registers the deploy key); worker hosts pass the [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
+Node 24, an OWNER/REPO checkout, exported `GRAPHYARD_CLI`, and repository-admin `gh` login with `repo` scope for deploy-key registration. Worker hosts need [bubblewrap](setup-from-zero.md#1-machine-prerequisites).
 
 ### Providers
 
-- `compose`: `curl -fsSL https://get.docker.com | sh`.
-- `local` (`graphyard up --local`): embedded Postgres; Docker runs private-root merge trials, while the control plane runs directly on the host.
+`compose` needs Docker and Compose. `local` runs the control plane on the host with embedded Postgres; Docker runs its private-root merge trials. `up --local` also chooses [supervised mode](onboarding.md#supervised-mode-up---local).
 
 ## Step 1: plan and approve
 
@@ -28,7 +21,7 @@ Node 24, an `OWNER/REPO` checkout, `GRAPHYARD_CLI` exported, `gh` scope `repo` a
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-**Verify** `secretsRedacted` and `preflight[].ok` (else run each `fix`; `HUMAN:` ones are the human's); the human approves the plan. The deploy key is the only GitHub step. `compose` mounts the checkout at `/repo`.
+Check `secretsRedacted` and `preflight[].ok`; run each reported fix. Agents apply existing authorization without routine human approval. Only goals and priorities, money and accounts, and credentials for people need human decisions.
 
 ## Step 2: apply
 
@@ -36,42 +29,36 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; registers the deploy key; reruns idempotent. **Verify** `/healthz`.
+Reruns are idempotent. Verify `/healthz`; use `install --logs` for failures. Compose mounts the checkout at `/repo`.
 
 ## Step 3: deploy key
 
-`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless listed. The merge writer trial-merges each submitted head and pushes the base with it alone; the loop re-registers a missing key each setup run. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
+Apply creates `INSTALL/deploy-key` (ed25519, 0600) and registers it read-write with `gh repo deploy-key add` unless listed. Setup restores missing registration. Verify `gh repo deploy-key list -R OWNER/REPO`. Only the merge writer uses it.
 
 ## Step 4: summary
 
-**Verify** `health`, `deployKey`, `profiles.master.configured`, `status.role` `admin`.
+Check `health`, `deployKey`, `profiles.master.configured` and the setup operator's `status.role` (admin). The running master uses its agent identity.
 
 ## Step 5: first item
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge writer trials and pushes it.
+Follow [onboarding](onboarding.md#4-prove-the-first-change) through a gated merge and serving.
 
 ## Roster
 
-`principal add ID --role ROLE [--grant …] [--proof …]` writes only `GRAPHYARD_PRINCIPALS`.
+`principal add ID --role ROLE [--grant …] [--proof …]` updates `GRAPHYARD_PRINCIPALS`.
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys Graphyard's `origin/main` or `VERSION` (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
+`graphyard upgrade [--to VERSION] [--plan]` needs a clean checkout, `DATABASE_URL` and `GRAPHYARD_URL`. It backs up, deploys Graphyard's origin/main or VERSION, restarts the loop and checks health. `install --source-root DIR` selects source. Older schemas refuse; migrated failures require roll-forward.
 
 ## Failure handling
 
-| Symptom | Action
-| --- | ---
-| `Preflight is incomplete` | run its `fix`
-| `did not become healthy` | `install --logs`
-| `gh repo deploy-key` fails | `gh auth login --scopes repo` as a repository admin
-| `Another install --apply` … `holds the lock` | let it finish, apply again
-| `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
+Run preflight's fix, read install logs, check deploy-key login/scope, or wait for another apply's lock. Config must stay outside worktrees.
 
 ## Agent execution contract
 
-Run steps 1–5; never weaken gates.
+Preserve gates. Use CLI blockers for genuine failures; park only human decisions.
 
 ## Manual fallback (unsupported platforms)
 
-[Deployment](deployment.md#manual-fallback). Done when the plan listed the deploy key, apply registered it,.
+Use [deployment](deployment.md#manual-fallback).

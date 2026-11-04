@@ -1,34 +1,36 @@
-<!-- page: Operate Graphyard | 10 | criteria -->
+<!-- page: Operate Graphyard | 10 | write criteria and advance work -->
 # Coordination
 
 ## Write observable criteria
 
-Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: master attestation unless in `producerProofs`; `e2e:`: [runner](validation.md), and required on every item — chores, bugs and features owe a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` (a new case or an existing one), which the merge trial runs against the served head; no description opts out. Any trusted pass proves it whatever it executed. `master create` plans; `master requirements` rewrites, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
+Use `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. Unit/integration proofs name exact-head runnable checks. Every item, including chores, also needs an `e2e:NAME` proof bound to a new or existing [repository case](validation.md#every-item-carries-an-e2e-proof); no description opts out. Control-plane acceptance requires trial cases executed with none failing. Sensitive changes also need required manual attestations; producer evidence cannot replace trial counts.
 
-Sample several cases: a criterion whose proof pins one seed or one fixture can pass on a head tuned to that case, so create and `master requirements` flag it (`AC-1 checks one case; … name at least three, or say why one is enough`) and the reviewer inspects code and test coverage for other inputs, requesting changes when they do not establish the required generality. Paths under `e2e/cases/` bind proofs and are not sample inputs. Reviewers assess every criterion and post APPROVE or REQUEST_CHANGES without running builds, tests or servers; exact-head tests and E2E execution remain the automated merge trial gate, with no human step. Example: Open City's campaign completed 20/20 missions on seed 42 and 7–11/20 on the others, and its one-hour soak was clean on 42 and jammed on seed 1.
+Post-ship outcomes use `manual:post-deploy/NAME` or per-clause observations, not pre-merge requirements. `master requirements` invalidates old evidence/review/authorization. Never weaken requirements to pass implementation.
+
+Single-fixture proofs warn: cover three cases or explain why one suffices. Reviewers inspect code and coverage for other inputs; `e2e/cases/` paths bind proofs rather than sample inputs. They assess every criterion and post APPROVE or REQUEST_CHANGES without running builds, tests or servers. Exact-head execution belongs to the automated merge trial, with no human step.
 
 ## Dispatch optimistically
 
-Dispatch never locks paths: `sync` and the merge writer's trial integrate overlaps (`master status`: `overlap.concurrent` on observed files, `merge-tree` failures); only `exclusiveResources` hold dispatch. A session gets the `verification/AREA.md` maps whose `Paths:` cover a path its item's criteria or description name.
-
-A failed dispatch is retried next cycle, never blocked.
+Only exclusiveResources lock dispatch. Sync and merge trials integrate path overlaps; status reports conflicts. Sessions receive matching verification maps. Failed dispatch retries next cycle.
 
 ## Review gate: verdicts, not threads
 
-Exact-head approval lands; remote threads and reviews are never read or resolved. Code-review launch and retry briefs carry the launch snapshot’s criterion IDs, exact proof names, E2E case IDs/paths and available scenario revision, environment and hash. Retries retain those inputs; reviewers read case files with `git show HEAD:PATH` and procedures with `graphyard guide review`, without worker/coordinator credentials. A guessed path or command failure calls for `rg --files` or CLI `--help` and a corrected read, including on retries; only an input unavailable through authorized equivalent reads or a genuine permission, identity, binding or runtime failure warrants a blocker. Briefs keep discovery and recovery inline, with finding classification in `guide review`. Reviewers remain read-only and post one verdict. Pre-merge review judges implementation and bound E2E coverage before the merge trial: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. A `BLOCKING:` finding reworks the item once per submission, uncapped. A sensitive delta needs exact-head approval; a normal one merges, and its post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
+Graphyard reads exact-head verdicts, not remote review threads. Pre-merge review judges implementation and bound E2E coverage: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
+
+Review launch and retry briefs retain the launch snapshot’s criterion IDs, proof names, E2E case IDs/paths and available scenario revision, environment and hash. Reviewers read cases with `git show HEAD:PATH` and procedures with `graphyard guide review`, without worker/coordinator credentials. For a guessed path or command failure, use `rg --files` or CLI `--help` and correct the read, including on retries. Only unavailable inputs after authorized equivalent reads, or real permission, identity, binding or runtime failures, warrant blockers. Briefs include discovery and recovery; `guide review` classifies findings. Reviewers stay read-only and post one verdict.
 
 Reviewer and spec-check launch bearers authenticate from committed launch records, including delivered items, so unexpired unused tokens survive server restarts. Recovery grants only the launch's reader identity; verdicts retain their token, head, requirements revision and independence checks. Recording, refusing, replacing or clearing a launch revokes its token; expiry needs no process-local cleanup. Session reconciliation can release an unusable session without supplying an approval.
 
-`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Nits stay advisory: they never hold approval or trigger a bot round.
+Use `Nit: PATH:LINE — FINDING`, ending with `(mechanical: …)` or `(substantive: …)`; findings about behavior, criteria or scope are substantive. Nits stay advisory: they never hold approval or trigger a bot round. Graphyard keeps them in project memory for later workers. Put required fixes on `BLOCKING:` lines; see `guide review`. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
 
 ## Scope is a plan, not a lock
 
-`plannedFiles` is accepted and ignored; nothing requests, widens, splits or refuses a file. `graphyard sync GY-N` merges `origin/BASE`, regenerates generated files, reports only merge conflicts;
+`plannedFiles` is accepted but ignored; no file-widening permission is needed. `graphyard sync GY-N` merges shared `origin/BASE` and regenerates generated files; only merge conflicts hold it.
 
-Workers build, run `graphyard verify GY-N` (own proofs; CI: all), submit on pass, naming out-of-scope sandbox failures. `leftToCi` (exit 0, `passing`): all passed, abnormal end; failed/skipped/unexecuted block.
+Workers run `graphyard verify GY-N` for their proofs; CI owns the full suite. A failed, skipped or unexecuted own proof blocks submission. `leftToCi` with exit 0 and `passing` means the selected tests passed before an abnormal runner end. Name unrelated sandbox failures in the commit message.
 
 ### Generated files
 
-`GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses; `sync` regenerates.
+`GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` marks generated paths. Deletion refuses; sync regenerates them. Edit source metadata or the generator, not the index.
 
-`graphyard diagnose GY-N` names holds. Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).
+`graphyard diagnose GY-N` names holds. Installation faults raise setup attention: fix a 4xx deployment endpoint URL, a credential's 401, or a refused reviewer launch at its source.

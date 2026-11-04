@@ -61,7 +61,7 @@ export function specCheckPrompt(config: { repository: string; cliPath?: string; 
 }
 
 /** What a launch hands the loop back, recorded beside the launch action. */
-export interface SpecCheckLaunchResult { work: string; profile: string; agentName: string; reviewer: string; pane: string | null; checkout: string | null; tokenExpiresAt: string }
+export interface SpecCheckLaunchResult { launch: string; work: string; profile: string; agentName: string; reviewer: string; pane: string | null; checkout: string | null; tokenExpiresAt: string }
 
 /**
  * `launchSpecCheck` — the loop's one fresh-context reviewer session for a released feature item's
@@ -111,7 +111,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     try {
       // The control plane registers the launch before the session starts: the reviewer, the token
       // hash, the expiry. A launch it refuses starts nothing and writes no credential.
-      await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: profile.agentName, tokenHash, expiresAt, policyRevision: work.policyRevision });
+      const registered = await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: profile.agentName, tokenHash, expiresAt, policyRevision: work.policyRevision });
       await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
       await writeSpecCheckBinding(sessionDirectory, { repository: config.repository, key: work.key, workId: work.id, policyRevision: work.policyRevision, reviewer: profile.agentName, url: config.url, token });
       const writable = await sessionWritable(root, config, checkout.directory);
@@ -128,7 +128,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
         specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), run,
         { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
-      return { work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
+      return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.
       if (pane) await closeHerdrPane(pane, run).catch(() => {});
