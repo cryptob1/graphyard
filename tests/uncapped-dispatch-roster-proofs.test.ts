@@ -8,6 +8,7 @@ import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import { authorizedForProof, unauthorizedProofs, type Principal, type Work } from '../src/model.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 import { apiRoutes } from '../src/server/index.js';
+import { signInDatabase } from './helpers/sign-in-database.js';
 import { HumanSignIn } from '../src/server/auth.js';
 import { migration, retiredTables, tables } from '../src/store/schema.js';
 
@@ -64,9 +65,13 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   assert.equal(authorizedForProof(admin, 'manual:works'), false);
   assert.equal(authorizedForProof(attester, 'manual:works'), true);
   // A human sign-in session keeps its roster entry's patterns, and gains none it lacks.
-  const signIn = new HumanSignIn(), session = (issuer: Principal) => signIn.authenticate(signIn.redeem(signIn.issue({ ...issuer, sessionKind: 'human' }, true).code).token)!;
-  assert.equal(authorizedForProof(session(attester), 'manual:works'), true);
-  assert.equal(authorizedForProof(session(admin), 'manual:works'), false);
+  const database = await signInDatabase(3078);
+  try {
+    const signIn = new HumanSignIn(database.store);
+    const session = async (issuer: Principal) => (await signIn.authenticate((await signIn.redeem(signIn.issue({ ...issuer, sessionKind: 'human' }, true).code)).token))!;
+    assert.equal(authorizedForProof(await session(attester), 'manual:works'), true);
+    assert.equal(authorizedForProof(await session(admin), 'manual:works'), false);
+  } finally { await database.close(); }
   assert.deepEqual(unauthorizedProofs([admin], ['manual:works']), ['manual:works']);
   assert.deepEqual(unauthorizedProofs([bare], ['unit:works']), ['unit:works']);
   assert.deepEqual(unauthorizedProofs([bare, seeded], ['unit:works']), []);

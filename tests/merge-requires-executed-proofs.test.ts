@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -85,6 +85,9 @@ test('integration:merge-requires-executed-proofs — single and batch writers re
       // directly there, with the same real output and the trusted harness resolved locally.
       const fixtureRun: ChildRun = async (command, args, options) => {
         if (command === 'git' && args.includes('push')) pushes++;
+        // This tiny E2E child must exit after its server stops, without waiting out the
+        // 20-second shutdown grace timer on every one of the single and batch trials.
+        if (args.includes('/graphyard-harness/node_modules/tsx/dist/loader.mjs')) options = { ...options, timeoutMs: 15_000 };
         if (!existsSync('/etc/graphyard-trial') && options?.wrapper?.length) {
           if (args.includes('/graphyard-harness/node_modules/tsx/dist/loader.mjs')) {
             const script = args.at(-1)!;

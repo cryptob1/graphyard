@@ -35,6 +35,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const rowsOf = (entries: BoardItem[]) => entries.filter(match).flatMap(entry => byId.has(entry.id) ? [byId.get(entry.id)!] : []);
   const byGroup = Object.fromEntries(groups.map(group => [group, board ? rowsOf(board.groups[group]) : []])) as Record<OpenGroup, Work[]>;
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
+  const queues = new Map(board ? board.groups.moving.flatMap(entry => entry.queue ? [[entry.id, entry.queue] as const] : []) : []);
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const recent = shippedThisWeek(work, now, release);
@@ -49,7 +50,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
   const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
-  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} release={release}/>;
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>

@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { main, refusedBeforeReady } from '../src/server/main.js';
 import { Delivery } from '../src/delivery.js';

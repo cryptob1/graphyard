@@ -13,16 +13,20 @@ export const trialTimeoutMinutes = 20;
 export const defaultMergeWriterRetrials = 3;
 /** The most re-trials an install may ask for: every one is a full build and test run on a fresh merge commit. */
 export const maxMergeWriterRetrials = 10;
+/** How many queue positions the writer trials at once, each stacked on the merge commit of the one before it, and the most an install may ask for. */
+export const defaultMergeWriterParallel = 3, maxMergeWriterParallel = 6;
 /** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
 export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
- * its re-trial bound. Unset, the key is the install's default and the bound `defaultMergeWriterRetrials`.
+ * its re-trial bound and its stacked trials. Unset, the key is the install's default, the bound
+ * `defaultMergeWriterRetrials` and the stack `defaultMergeWriterParallel`.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
   retrials: z.number().int().min(0).max(maxMergeWriterRetrials).optional(),
+  parallel: z.number().int().min(1).max(maxMergeWriterParallel).optional(),
 }).strict();
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 
@@ -33,6 +37,7 @@ const expandHome = (path: string, home: string) => path === '~' ? home : path.st
 export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string) => ({
   deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home ?? homedir()),
   retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
+  parallel: run.mergeWriter?.parallel ?? defaultMergeWriterParallel,
 });
 
 // ---- The retired candidate cut (GY-1526, removed by GY-1983) ----------------------------------------

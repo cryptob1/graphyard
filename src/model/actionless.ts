@@ -1,6 +1,7 @@
 import { observationWindowHold, type Work } from './work.js';
 import { mergeWriterRefusal } from './gates.js';
-import { currentMergeStep } from './merge-ledger.js';
+import { currentMergeStep, type MergeLedgerState } from './merge-ledger.js';
+import { mergeQueue } from './merge-queue.js';
 import { plainReason } from './plain-status.js';
 
 /**
@@ -37,6 +38,7 @@ export interface ActionlessCard {
  * items nothing is moving, which are the ones the page names.
  */
 export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
+  const queued = mergeQueuePositions(work, now);
   // `null` is the control plane having computed an action and found none; `undefined` is an item
   // it has not computed one for at all — an unevaluated snapshot, never a stalled item — and the
   // difference is the whole signal, so nothing here treats the two as the same absence.
@@ -57,7 +59,8 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
         : live && failing!.name === 'build' ? item.lease!.owner
           : window ? `its observation window, which closes at ${window.notBefore}`
           : deferredRefusal(refusal) ? refusal.match(/^Dependency (\S+)|: (\S+) is ahead$|^Waiting for (\S+)/)?.slice(1).find(Boolean) ?? 'another item'
-            : step?.fresh && mergeWriterRefusal(failing!.name, refusal) ? `the merge writer's trial (${step.step})` : null;
+            : step?.fresh && mergeWriterRefusal(failing!.name, refusal) ? `the merge writer's trial (${step.step})`
+            : queued.has(item.id) && mergeWriterRefusal(failing!.name, refusal) ? queuedSentence(queued.get(item.id)!) : null;
       const missing = refusal === undefined ? failing ? `Its ${failing.name} step reports a problem without saying what it is`
           : 'Nothing has been checked about it yet'
           : step && !step.fresh && mergeWriterRefusal(failing!.name, refusal)
@@ -70,3 +73,23 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
 
 /** The items nothing is moving: no action, no other item to wait for, nobody building them. */
 export const stalledCards = (work: Work[], now: number) => actionlessCards(work, now).filter(card => !card.movedBy);
+
+/** A head waiting its turn in the merge writer's serial queue behind a trial: its 1-based place among the waiting heads, and the flight ahead. */
+export interface QueuedBehind { position: number; of: number; ahead: string; step: string }
+/**
+ * The heads the merge writer's queue holds behind the merge in flight (`mergeQueue` over the
+ * items' folded ledgers), by item id. A stalled flight keeps its waiting heads queued; the
+ * flight itself reports the stall.
+ */
+export function mergeQueuePositions(work: Work[], now: number): Map<string, QueuedBehind> {
+  const ledger: Record<string, MergeLedgerState> = Object.fromEntries(work.flatMap(item => item.mergeLedger ? [[item.key, item.mergeLedger]] : []));
+  const queue = mergeQueue(work, ledger, now);
+  const flight = queue.blockedBy ? work.find(item => item.key === queue.blockedBy) : undefined;
+  const step = flight && currentMergeStep(flight, now);
+  if (!flight || !step) return new Map();
+  const flying = new Set(work.filter(item => currentMergeStep(item, now)).map(item => item.id));
+  const waiting = queue.queue.filter(entry => !flying.has(entry.id));
+  return new Map(waiting.map((entry, index) => [entry.id, { position: index + 1, of: waiting.length, ahead: flight.key, step: step.step }]));
+}
+/** The plain sentence for a queued head. */
+export const queuedSentence = (queued: QueuedBehind) => `In the merge queue: ${queued.position} of ${queued.of}, behind ${queued.ahead} (${queued.step})`;

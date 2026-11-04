@@ -102,7 +102,13 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The checkout whose deploy record names the serving commit; absent, the loop never restarts itself. */
   root?: string;
   restartLoop?: () => Promise<unknown>;
-  delay?: (ms: number, signal: AbortSignal) => Promise<void>; }) {
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * The control plane's event ledger, newest first. Polled during the wait: an event another actor
+   * wrote (a submission, a verdict, an unblock, a release) ends the wait, so the next stage starts
+   * at once; a burst is one wake, and the interval stays the upper bound.
+   */
+  events?: { read: () => Promise<{ seq: string | number; actor: string }[]>; self: string; pollMs?: number }; }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const host = options.process ?? process;
@@ -130,6 +136,26 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
     host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
     const cycles: { cycle: number; actions: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
+    const pause = (ms: number) => options.delay ? options.delay(ms, waking.signal) : delay(ms, undefined, { signal: waking.signal });
+    let seen: number | null = null;
+    // True when another actor wrote an event since the last read; the first read only sets the mark.
+    const fresh = async () => {
+      try {
+        const rows = await options.events!.read(), newest = Math.max(0, ...rows.map(row => Number(row.seq)));
+        const woke = seen !== null && rows.some(row => Number(row.seq) > seen! && row.actor !== options.events!.self);
+        seen = Math.max(seen ?? 0, newest);
+        return woke;
+      } catch { return false; }
+    };
+    const sleep = async (ms: number) => {
+      if (!options.events) return pause(ms);
+      const end = Date.now() + ms;
+      if (seen === null) await fresh();
+      while (!stopping && Date.now() < end) {
+        await pause(Math.min(end - Date.now(), options.events.pollMs ?? 2_000));
+        if (!stopping && await fresh()) return;
+      }
+    };
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
     try {
       while (!stopping) {
@@ -161,7 +187,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           catch (error) { log(`[graphyard-master] the restart could not be asked: ${message(error)}`); }
         }
         if (options.once || stopping) break;
-        try { await (options.delay ? options.delay(wait, waking.signal) : delay(wait, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
+        try { await sleep(wait); } catch { /* woken to stop */ }
       }
     } finally {
       if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);

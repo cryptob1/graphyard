@@ -2,7 +2,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import pg from 'pg';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

@@ -55,7 +55,7 @@ async function open(page: Page) {
     if (url.pathname.endsWith('/work-snapshot')) return route.fulfill({ json: { work: [], now: new Date(now).toISOString(), jobs: [] } });
     return route.fulfill({ json: [] });
   });
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   const menu = page.getByRole('button', { name: 'Menu' });

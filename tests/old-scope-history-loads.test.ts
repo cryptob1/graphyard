@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -65,7 +65,8 @@ test('unit:retired-fields-migrated — startup removes retired document fields a
   await store.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
   await store.init();
   const migrated = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
-  for (const field of ['queue', 'queueSequence', 'queueHistory', 'queueEjection', 'plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings', 'lane', 'escalation']) assert.ok(!(field in migrated), `${field} is migrated away`);
+  for (const field of ['queue', 'queueSequence', 'queueHistory', 'queueEjection', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings', 'lane', 'escalation']) assert.ok(!(field in migrated), `${field} is migrated away`);
+  assert.deepEqual(migrated.plannedFiles, ['src/a.ts']);
   assert.equal(migrated.blocker, null);
   assert.equal(migrated.stage, work.stage, 'migration keeps the stored stage');
   await store.init();
@@ -80,11 +81,12 @@ test('unit:retired-fields-migrated — startup removes retired document fields a
   // Evaluation after migration retains the same stage and names no scope.
   const evaluated = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   assert.equal(evaluated.stage, work.stage, 'the migrated item evaluates as before');
-  for (const field of ['plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings']) assert.ok(!(field in evaluated), `${field} is dropped`);
+  for (const field of ['scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings']) assert.ok(!(field in evaluated), `${field} is dropped`);
   assert.equal(evaluated.blocker, null);
   assert.doesNotMatch(JSON.stringify(evaluated.gates), /scope/i);
   const row = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
-  assert.ok(!('scopeRequest' in row) && !('plannedFiles' in row) && row.blocker === null, 'the saved document carries none of it');
+  assert.ok(!('scopeRequest' in row) && row.blocker === null, 'the saved document carries no retired scope state');
+  assert.deepEqual(row.plannedFiles, ['src/a.ts']);
   const claimed = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   assert.equal(claimed.lease?.owner, worker.id, 'the item dispatches again');
 });

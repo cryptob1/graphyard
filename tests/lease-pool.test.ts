@@ -6,7 +6,7 @@ import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine, RenewalFault, renewalFaultEvent } from '../src/engine.js';

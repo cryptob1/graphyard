@@ -73,15 +73,15 @@ const evidenceArtifact = z.object({
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
   availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
-// GY-1992: plannedFiles and scope widening are retired. An intent or a held decision recorded before then may still name them; they are ignored.
+// Retired scope-permission fields remain accepted for old intents.
 const retiredField = z.unknown().transform(() => undefined).optional();
 // GY-2968: one failing case a rerun set aside — where the run located it and the timing it gave.
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
-  create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
+  create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() })
     .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
+  requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
@@ -437,7 +437,7 @@ function faceReach({ move, before, after, between = [] }: FaceMoveSides, all: Wo
   const proofs = new Set(sides.flatMap(work => work.evidence ?? []).map(evidence => evidence.proof));
   const paths = new Set<string>();
   for (const work of sides) {
-    for (const path of work.observation?.files ?? []) paths.add(path);
+    for (const path of [...work.observation?.files ?? [], ...work.plannedFiles ?? [], ...work.exclusiveResources ?? []]) paths.add(path);
     for (const criterion of work.criteria ?? []) for (const path of criterion.bootstrap?.contractPaths ?? []) paths.add(path);
   }
   for (const work of all) {
@@ -450,7 +450,7 @@ function faceReach({ move, before, after, between = [] }: FaceMoveSides, all: Wo
 }
 /** The paths other items' evaluations read an item on (GY-1777): the files its candidate was observed to change, and the ones its landing check compared. */
 function readerPaths(work: Work): string[] {
-  return [...work.observation?.files ?? [], ...(work.observation?.scopeFiles ?? []).map(file => file.path), ...(work.observation?.landing?.files ?? []).map(file => file.path)];
+  return [...work.plannedFiles ?? [], ...work.exclusiveResources ?? [], ...work.observation?.files ?? [], ...(work.observation?.scopeFiles ?? []).map(file => file.path), ...(work.observation?.landing?.files ?? []).map(file => file.path)];
 }
 /** Whether `entry`'s evaluation reads the moved face `reach` describes (GY-1777). */
 function readsFace(entry: ReconcileEntry, reach: FaceReach) {
@@ -1261,6 +1261,7 @@ export class Engine {
     work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
     if (data.owner !== undefined) { this.assertHumanOwner(data.owner); work.owner = data.owner; }
     work.criteria = revised;
+    if (data.plannedFiles !== undefined) work.plannedFiles = data.plannedFiles;
     work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
     work.scenarioRequirements = pins; work.policyRevision++;
     this.refuseRenewedDeferral(work, all);

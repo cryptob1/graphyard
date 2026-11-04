@@ -7,13 +7,14 @@ import type { Engine } from '../engine.js';
  * false when no job was due or the observation failed. A candidate GitHub observed before the control
  * plane became the only merge writer (a pull request head) is observed the same way, from the shared
  * object store, which turns it into a submitted head the merge writer queues. The claimed item is read again after the claim, never judged from
- * the pre-claim snapshot: a submission between `fleet()` and `takeJob` creates the candidate and
+ * the pre-claim snapshot: a submission between `observationWork()` and `takeJob` creates the candidate and
  * wakes the very job claimed, and a stale snapshot would discard it. A job for an item with nothing
  * submitted yet is deferred a minute (`deferJob` keeps a wake that lands meanwhile); one for a
  * finished or missing item is dropped.
  */
 export async function processControlPlaneJob(engine: Engine): Promise<boolean> {
-  const all = await engine.store.fleet();
+  if (!await engine.store.hasDueJob()) return false;
+  const all = await engine.store.observationWork();
   const plan = observationClaim(all, Date.now(), false);
   const job = await engine.store.takeJob(plan.order, plan.headCount);
   if (!job) return false;

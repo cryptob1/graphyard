@@ -1,0 +1,16 @@
+{
+  "id": "pending-review-no-wake",
+  "title": "A live pending reviewer is a wait, never a master wake",
+  "description": "A review launch refused because a reviewer session is already pending on the head waits while that session lives in Herdr, and wakes the master once it is gone.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "pending reviewer wait and wake proofs",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/pending-review-no-wake.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

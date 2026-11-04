@@ -72,7 +72,12 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
   // SIGTERM the group so the serve command can stop what it started and remove its files; wait for
   // descendants (not the shell alone) to finish that cleanup before SIGKILL past the grace.
   const close = async () => {
-    try { process.kill(-child.pid!, 'SIGTERM'); await Promise.race([descendantsGone, new Promise(accept => setTimeout(accept, closeGraceMs))]); } catch { /* already gone */ }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      process.kill(-child.pid!, 'SIGTERM');
+      await Promise.race([descendantsGone, new Promise(accept => { timer = setTimeout(accept, closeGraceMs); })]);
+    } catch { /* already gone */ }
+    finally { clearTimeout(timer); }
     try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
   };
   for (;;) {

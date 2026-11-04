@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { AgentRegistry } from '../src/agent-registry.js';

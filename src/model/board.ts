@@ -7,7 +7,7 @@ import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
 import { noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
-import { stalledCards } from './actionless.js';
+import { mergeQueuePositions, queuedSentence, stalledCards, type QueuedBehind } from './actionless.js';
 import { resourceConflicts } from './coordination.js';
 
 /**
@@ -219,6 +219,8 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
+  /** A head waiting its turn in the merge writer's queue: its place and the flight ahead of it. It is moving, never overdue for that wait. */
+  queue?: QueuedBehind;
   /** The standing blocker: `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: { summary: string; until?: string };
 }
 export interface Board {
@@ -235,8 +237,10 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
   const { byGroup, open } = classify(work, now, humanRows, release);
   const stalls = new Map(stalledCards(work.filter(item => item.stage !== 'done' && !isClosed(item)), now).map(card => [card.item.id, card]));
   const rows = new Map((humanRows ?? []).map(row => [row.id, row]));
+  const queued = mergeQueuePositions(work, now);
   const item = (entry: Work, group: OpenGroup): BoardItem => {
-    const { who, does } = nextActor(entry, group, now, release, work);
+    const queue = group === 'moving' ? queued.get(entry.id) : undefined;
+    const { who, does } = queue ? { who: 'Graphyard (automatic)', does: queuedSentence(queue) } : nextActor(entry, group, now, release, work);
     const actor = actorRole(entry, group, who);
     const timed = timedGroups.has(group);
     const since = group === 'needs-you' ? entry.humanRequest?.at ?? rows.get(entry.id)?.request.at ?? statusSince(entry, now)
@@ -245,7 +249,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const wait = entry.blocker ? blockerSummary(entry.blocker, now, entry, 'UTC') : null, blocker = wait && { summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && !queue && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(queue ? { queue } : {}), ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,

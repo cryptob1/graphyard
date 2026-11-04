@@ -1109,6 +1109,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             wakeSettlement(item, answered.answered.at);
             wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
           }
+          // A live reviewer session already answering this head is a wait, never a counted refusal; one gone from Herdr still refuses.
+          else if (answered && inventory().some(agent => agent.name === answered.agentName)) { delete cursor.failures[review.id]; wait('review', item, review, `reviewer session ${answered.agentName} is already pending on ${review.sha.slice(0, 12)}; ${launchWaitWording.settles}`); }
           // An unknown reviewer profile is a configuration wait (GY-1850): the launch boundary spaces its own attempts and master status names the fix, so nothing is counted and the request resumes once the profiles change.
           else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           // GY-2995: a launch whose sandbox cannot reach its own CLI is configuration attention, never a counted failure.

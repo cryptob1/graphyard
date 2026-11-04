@@ -1,0 +1,15 @@
+{
+  "id": "worker-request-trial-only-tests",
+  "title": "Workers submit tests that require the merge-trial environment",
+  "description": "Dispatches a worker through the real launcher with a fake runtime and checks its delivered request permits trial-only test failures while retaining blockers for genuine implementation failures.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "worker trial-environment submission request",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:worker-request-trial-only-tests tests/launch-prompt-delivery.test.ts",
+      "timeoutSeconds": 60
+    }
+  ]
+}

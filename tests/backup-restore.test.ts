@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';

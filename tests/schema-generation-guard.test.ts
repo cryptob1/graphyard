@@ -1,7 +1,7 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { schemaGenerations, schemaVersion } from '../src/store/schema-lineage.js';
 import { currentSchemaCode, runStartupMigration, schemaGenerationDigest, type SchemaCode } from '../src/store/migration-locks.js';

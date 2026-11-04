@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fork, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import type { Work } from '../src/model.js';
 import type { AgentRegistry, FleetSession } from '../src/model/registry.js';
