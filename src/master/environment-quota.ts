@@ -1,7 +1,7 @@
 // Concern: one agent environment's provider login and quota — the per-provider probes that read them, and one shared plan's cached reading.
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { getCachedPlanUsage, parseZaiUsage, setCachedPlanUsage, type ProviderUsageResult } from '../provider-usage.js';
+import { getCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
 import type { AccountUsage, EnvironmentProbe, ProbedEnvironment } from './environments.js';
 import type { AgentEnvironment } from './profiles.js';
 
@@ -77,7 +77,6 @@ export async function codexAccount(environment: AgentEnvironment, probe: Environ
     resetsAt: typeof window.resets_at === 'number' ? new Date(window.resets_at * 1000).toISOString() : null }));
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
-
 
 export async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }> {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));

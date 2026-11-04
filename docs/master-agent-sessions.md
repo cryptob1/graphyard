@@ -85,7 +85,7 @@ Only Continue without trusting (`hooks-continue-untrusted`) and telemetry declin
 
 Reviewers/producers acknowledge after 30 seconds active. Quiet sessions get one reminder at `run.acknowledgementSeconds` (90); resultless starts retry `retry.neverStarted` times (3), then another profile.
 
-Idle workers get one reminder after `run.inactivityMinutes` (10); another idle window ends as stalled and releases the lease. Stopped sessions with recognized limits end immediately and hold the account. Runtime prompts receive one reject key (external-directory Reject, destructive-command No). Still blocked after a window ends stalled with the prompt recorded; a new prompt gets a fresh answer.
+Session `observedAt` records liveness sightings; routine observations leave activity `updatedAt` unchanged. Session updates and changed worktree readings advance activity, including progress found in the current cycle. Working sessions and unavailable runtime inventories are not closed for inactivity. Idle workers get one reminder after `run.inactivityMinutes` (10); another idle window ends as stalled and releases the lease. Stopped sessions with recognized limits end immediately and hold the account. Runtime prompts receive one reject key (external-directory Reject, destructive-command No). Still blocked after a window ends stalled with the prompt recorded; a new prompt gets a fresh answer.
 
 ### Resume and attempt bounds
 

@@ -30,7 +30,7 @@ export const glossary = {
   'operator automation': 'Limited agent identities that can create and release work on the operator’s behalf.',
   'delivery slice': 'An area of the codebase with its own coordinating lead.',
   'exclusive resource': 'Something only one work item may use at a time, such as a shared test account. It is held only while someone is working on the item.',
-  'review provider': 'Who does the code review: a person approving on GitHub, or a reviewing agent.',
+  'review provider': 'An independent reviewer session records its verdict on the submitted code.',
   dependency: 'Another work item that has to ship before this one can start moving.',
   stage: 'Where an item is, in plain words: Not started, Building, Testing, In review, Merging, Merged, not live yet, Live, Live and verified, Live and failing, or Done.',
   'required check': 'A GitHub check that must pass before anything merges.',

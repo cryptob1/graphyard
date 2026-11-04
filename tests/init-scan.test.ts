@@ -159,15 +159,13 @@ test('init --scan writes only an ignored proposal and covers every required area
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('applying a reviewed proposal registers principals and grants with no GitHub App, and is idempotent with drift reporting', async () => {
+test('applying a reviewed proposal writes onboarding files without a roster and is idempotent with drift reporting', async () => {
   const root = await fixtureRepo(nodeRailway);
   try {
     const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
     await saveProposal(root, proposal);
-    let tokens = 0;
     const dependencies = {
       url: 'https://graphyard.example',
-      token: () => `secret-${++tokens}-`.padEnd(40, 't'),
       now: () => new Date('2030-01-01T00:00:00Z'),
     };
     const first = await applyProposal(root, proposal, dependencies);
@@ -175,15 +173,8 @@ test('applying a reviewed proposal registers principals and grants with no GitHu
     assert.ok(first.applied.some(entry => /AGENTS.md/.test(entry)));
     assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard coordination/);
     const principalsFile = join(root, '.graphyard/principals.json');
-    assert.equal((await stat(principalsFile)).mode & 0o777, 0o600);
-    const registry = JSON.parse(await readFile(principalsFile, 'utf8'));
-    const byId = Object.fromEntries(registry.principals.map((entry: any) => [entry.id, entry]));
-    assert.equal(byId.operator.role, 'admin');
-    assert.equal(byId.master.role, 'coordinator');
-    assert.equal(byId['worker-1'].role, 'worker');
-    assert.equal(byId.evidence.role, 'producer');
-    assert.deepEqual(byId.evidence.proofs, ['integration:test', 'unit:typecheck']);
-    for (const entry of registry.principals) assert.ok(entry.token.length >= 32);
+    await assert.rejects(stat(principalsFile), { code: 'ENOENT' });
+    assert.equal(first.principalsFile, null);
     const profile = JSON.parse(await readFile(join(root, '.graphyard/profiles/codex-primary.json'), 'utf8'));
     assert.equal(workerProfileSchema.parse(profile).principal, 'worker-1');
     assert.equal(JSON.parse(await readFile(join(root, '.graphyard/profiles/reviewer.json'), 'utf8')).provider, 'github');
@@ -195,8 +186,7 @@ test('applying a reviewed proposal registers principals and grants with no GitHu
     const second = await applyProposal(root, proposal, dependencies);
     assert.equal(second.applied.length, 0);
     assert.ok(second.unchanged.includes('AGENTS.md coordination section'));
-    assert.ok(second.unchanged.includes('principal and grant registry'));
-    assert.deepEqual(JSON.parse(await readFile(principalsFile, 'utf8')), registry);
+    await assert.rejects(stat(principalsFile), { code: 'ENOENT' });
 
     const tampered = { ...profile, agentArgs: ['--operator-tuned'] };
     await writeFile(join(root, '.graphyard/profiles/codex-primary.json'), JSON.stringify(tampered, null, 2), { mode: 0o600 });
@@ -209,38 +199,6 @@ test('applying a reviewed proposal registers principals and grants with no GitHu
     assert.deepEqual(repositoryScanDifference(rescan, proposal), ['The repository scan no longer matches the stored proposal']);
     assert.equal(setupDrift(applied, rescan).length, 1);
     assert.deepEqual(repositoryScanDifference(await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex', 'claude'] }), rescan), []);
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test('apply registers only the worker principals the reviewed proposal declares', async () => {
-  const root = await fixtureRepo(nodeRailway);
-  try {
-    // No agent runtime on the machine means no reviewed worker profile, so apply
-    // must not mint an unreviewed worker credential of its own.
-    const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: [] });
-    assert.deepEqual(proposal.profiles.workers, []);
-    await saveProposal(root, proposal);
-    let tokens = 0;
-    const result = await applyProposal(root, proposal, { url: 'https://graphyard.example',
-      token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
-    const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
-    assert.deepEqual(registry.principals.map((entry: any) => entry.id), ['operator', 'master', 'evidence']);
-    assert.deepEqual(registry.principals.filter((entry: any) => entry.role === 'worker'), []);
-    assert.deepEqual(result.workerPrincipals, []);
-    assert.match(result.next, /no agent runtime was detected/);
-    assert.deepEqual((await loadAppliedSetup(root))!.artifacts.profiles, ['reviewer']);
-
-    // Declaring a runtime later adds exactly that principal and keeps existing secrets.
-    const withRuntime = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
-    await saveProposal(root, withRuntime);
-    const second = await applyProposal(root, withRuntime, { url: 'https://graphyard.example',
-      token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
-    assert.deepEqual(second.workerPrincipals, ['worker-1']);
-    const grown = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
-    assert.deepEqual(grown.principals.map((entry: any) => entry.id), ['operator', 'master', 'worker-1', 'evidence']);
-    for (const id of ['operator', 'master', 'evidence'])
-      assert.equal(grown.principals.find((entry: any) => entry.id === id).token,
-        registry.principals.find((entry: any) => entry.id === id).token);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -410,13 +368,9 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ appId: 99, slug: 'graphyard-owner-repo', repository: 'owner/repo', privateKey: 'test-only', webhookSecret: 'test-only', installationId: 7 }), { mode: 0o600 });
     const applied = JSON.parse(await runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env));
     assert.equal(applied.githubApp, null);
-    assert.match(applied.next, /Install the principals array as GRAPHYARD_PRINCIPALS/);
+    assert.match(applied.next, /Run graphyard install --apply/);
     assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard coordination/);
-    const appliedProposal = JSON.parse(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'));
-    const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
-    // operator, master, the evidence producer, and one worker per reviewed profile (GY-2010: no CI producer).
-    assert.equal(registry.principals.length, 3 + new Set(appliedProposal.profiles.workers.map((worker: any) => worker.principal)).size);
-    for (const principal of registry.principals) assert.doesNotMatch(principal.token, /test-only/);
+    await assert.rejects(stat(join(root, '.graphyard/principals.json')), { code: 'ENOENT' });
 
     await addFile(root, 'compose.yaml', 'services:\n  db:\n    image: postgres:16\n');
     const afterChange = JSON.parse(await runCli(root, ['init', '--scan'], env));

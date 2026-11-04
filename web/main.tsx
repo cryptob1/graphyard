@@ -81,11 +81,10 @@ function App() {
   }, [token, live]);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   useEffect(() => { let active = true; const epoch = sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (active && epoch === sessionEpoch.current) setEvents(rows); }).catch(e => { if (active && epoch === sessionEpoch.current) setError(e.message); }); return () => { active = false; }; }, [selected, work]);
-  const codexAvailable = status?.reviewProviders?.includes('codex') === true;
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
-  const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, sessionEpoch, api, refresh, action, setError, signOut };
+  const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken} host={location.host} onVerified={firstLoad}/>;
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>

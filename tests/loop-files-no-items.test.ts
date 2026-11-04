@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { emptyMergeWriterState, type MergeWriterState } from '../src/daemon/cycle-merge-writer.js';
-import { daemonStatePath, readDaemonState } from '../src/daemon/state.js';
+import { daemonStatePath, readDaemonState, writeDaemonState } from '../src/daemon/state.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -53,7 +53,7 @@ test('unit:loop-files-no-items — a cycle with a flaked rerun and saturated doc
     refusal: { kind: 'merge', reason: 'trial failed: tests/flaky.test.ts fails on its first run and passes on its rerun' },
     flakes: [{ head: sha('flakehead'), mergeSha: sha('flicker'), files: ['tests/flaky.test.ts'], tests: ['tests/flaky.test.ts › unit:flaky'], at: iso(-2 * minute) }], events: 1 } as Work['mergeLedger'];
 
-  const posted: string[] = [], escalations: string[] = [];
+  const escalations: string[] = [];
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: iso(0), jobs: [] }),
@@ -112,7 +112,7 @@ test('unit:loop-files-no-items — the loop exposes no filing effect at all', as
   }
 });
 
-test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagnoses, advisory entries or base-failure item keys loads, and the retired keys drop on read', async t => {
+test('unit:diagnostician-removed-cursor-loads — a cursor preserves passive diagnoses and base-failure keys while dropping the advisory ledger', async t => {
   const root = await temporaryDirectory('diagnostician-cursor');
   execFileSync('git', ['init', '-q'], { cwd: root });
   const directory = await temporaryDirectory('diagnostician-cursor-credentials');
@@ -134,13 +134,17 @@ test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagno
   };
   await writeFile(file, JSON.stringify(carried));
   const loaded = await readDaemonState(root, master);
-  // Everything the loop still reads survived; the retired keys did not.
-  assert.equal((loaded as unknown as Record<string, unknown>).diagnoses, undefined, 'the diagnoses record is dropped on read');
+  // Retired records remain passive cursor data; only the advisory ledger has its own cleanup.
+  assert.deepEqual((loaded as unknown as Record<string, unknown>).diagnoses, carried.diagnoses, 'the diagnoses record survives read');
+  assert.deepEqual((loaded as unknown as Record<string, unknown>).baseFailures, carried.baseFailures, 'the base-failure keys survive read');
   assert.equal((loaded.mergeWriter as unknown as Record<string, unknown>).advisory, undefined, 'the advisory run ledger drops on read (GY-3002)');
-  // And it round-trips: the next read loads the written-back cursor without the retired keys.
-  await writeFile(file, JSON.stringify({ ...loaded }));
+  // The real writer and next read preserve those records without reviving the advisory ledger.
+  await writeDaemonState(master, loaded);
   const again = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(again.diagnoses, undefined);
+  assert.deepEqual(again.diagnoses, carried.diagnoses);
+  assert.deepEqual(again.baseFailures, carried.baseFailures);
+  assert.equal(again.mergeWriter.advisory, undefined);
+  assert.deepEqual(await readDaemonState(root, master), loaded);
 });
 
 function tip40() { return sha('basetip'); }

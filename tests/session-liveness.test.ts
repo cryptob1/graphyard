@@ -14,7 +14,6 @@ import {
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
 import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
-import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -286,8 +285,8 @@ test('integration:slot-released-on-death — the launcher\'s busy check counts r
 
   // One reviewer profile, concurrency 1. A session it launched is recorded on another item, whose
   // own candidate asks for nothing, and is still reported by the runtime: the one slot is taken.
-  const other = await submitted({ ...reviewOnly, policy: { checks: ['test'], review: true, reviewProvider: 'codex' } });
-  await engine.observe(other.id, (await reload(other)).revision, observation(await reload(other)));
+  const other = await submitted(reviewOnly);
+  await engine.observe(other.id, (await reload(other)).revision, observation(await reload(other), { reviews: [{ reviewer: 'independent', sha: head, state: 'APPROVED' }] }));
   assert.equal((await reload(other)).autoDispatch?.review ?? null, null, 'nothing is requested for the item the busy session sits on');
   const busy = launchedSessionHandle('review', { ...review, id: 'review-elsewhere' }, `${other.key}: review elsewhere`, 'host-1', { pane: 'pane-90', agentName: 'review-claude' }, 'claude', 'wF');
   await engine.execute(coordinator, 'session', other.id, busy, randomUUID());

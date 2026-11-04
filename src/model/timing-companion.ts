@@ -1,6 +1,5 @@
 // The timing baseline a change to test files may write (GY-1023).
 import { testFile } from './documentation-glob.js';
-import type { ScopeFile } from './work.js';
 
 /**
  * The per-file test durations CI balances its shards by (scripts/ci-tests.mjs). A change that adds a

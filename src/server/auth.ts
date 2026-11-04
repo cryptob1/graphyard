@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Refusal, demand, operatorScopeIncludes, type Principal } from '../model.js';
+import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
 import { readImports } from '../validation-import.js';
 import type { Engine } from '../engine.js';
@@ -7,7 +7,6 @@ import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
 import { AgentRegistry } from '../agent-registry.js';
-import { ProductionDelivery } from '../production-delivery.js';
 import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
@@ -213,9 +212,8 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
-  const productionDelivery = new ProductionDelivery(engine.store);
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is the roster's: each principal may prove exactly the --proof patterns its entry carries.
   engine.principals = credentials.map(({ token, ...actor }) => actor);
-  return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }

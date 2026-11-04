@@ -51,7 +51,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 
 /** The item the fixture session runs, claimed so its lease is live across the whole fixture clock. */
 const item = async (key: string, title: string) => {
-  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-session-after-reprompt-is-ended', 'e2e:fixture'] }] }) as Work;
+  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-stall-handling', 'e2e:fixture'] }] }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
   const claimed = await ok(workerA, 'POST', `work/${filed.id}/claim`, {}) as Work;
   return { filed: claimed, session: { id: `worker-a:1`, kind: 'implementation' as const, principal: workerA.id, epoch: claimed.epoch, runtime: 'pi', host: 'loop-host', pane: `pane-${key.toLowerCase()}`, agentName: `agent-${key.toLowerCase()}`, subject: `${key}: ${title}`, state: 'running' as const } };
@@ -74,9 +74,9 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:idle-session-after-reprompt-is-ended — the close step ends a session idle past the window after its re-prompt (stalled, lease released, item dispatchable), re-prompts one that has had no re-prompt, and leaves a session inside the window alone', async () => {
+test('unit:idle-stall-handling — the close step ends a session idle past the window after its re-prompt (stalled, lease released, item dispatchable), re-prompts one that has had no re-prompt, and leaves a session inside the window alone', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-  const now = Date.now(), window = 10 * 60_000, clock = now + 30 * 60_000, iso = (at: number) => new Date(at).toISOString();
+  const now = Date.now(), clock = now + 30 * 60_000, iso = (at: number) => new Date(at).toISOString();
   const stalled = await item('GY-31', 'Stalled after its re-prompt');
   const limited = await item('GY-32', 'Stalled on the provider limit notice');
   const inside = await item('GY-33', 'Idle inside the window');

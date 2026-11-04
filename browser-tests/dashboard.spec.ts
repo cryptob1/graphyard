@@ -24,7 +24,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith('/board')) return serveBoard(page, route);
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/'); return state;
 }
@@ -42,7 +42,6 @@ async function sidebarEntry(page: Page, entry: string) {
   if (page.viewportSize()!.width <= 650 && await menu.getAttribute('aria-expanded') !== 'true') await menu.click();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: entry, exact: true }).click();
 }
-const openWork = (page: Page) => sidebarEntry(page, 'Work');
 async function openPage(page: Page, section: 'Shipped' | 'Settings', tab: string) {
   await sidebarEntry(page, section);
   await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
@@ -357,7 +356,6 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
 });
 
-
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
   await trigger.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('button', { name: /Close/ })).toBeFocused();
@@ -443,7 +441,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   const pending = new Promise<void>(resolve => { requested = resolve; });
   let created = false;
   await page.route('**/api/work*', async route => {
-    if (route.request().method() === 'POST') { expect(route.request().postDataJSON().policy.reviewProvider).toBe('codex'); created = true; return route.fulfill({ json: work }); }
+    if (route.request().method() === 'POST') { expect(route.request().postDataJSON().policy).toEqual({ review: true, checks: ['test', 'typecheck'] }); created = true; return route.fulfill({ json: work }); }
     if (!created) return route.fallback();
     requested(); await held; return route.fulfill({ json: {work:[work],now:'2026-01-01T00:00:00Z'} });
   });
@@ -451,7 +449,6 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   await page.getByLabel('Title', { exact: true }).fill('Delayed creation');
   await page.getByLabel('Acceptance criterion').fill('No data crosses sessions');
   await page.getByLabel('Required proof').fill('manual:session');
-  await page.getByLabel('Code review provider').selectOption('codex');
   await page.getByRole('button', { name: 'Create work item', exact: true }).click();
   await pending;
   await page.getByRole('button', { name: 'Sign out' }).click();
@@ -505,14 +502,15 @@ test('history groups observation noise and bounds expanded rows without losing o
   await expect(history.locator('.timeline > div')).toHaveCount(20);
 });
 
- test('unavailable review providers disable selection and explain the missing connection', async ({page}) => {
+ test('retired review providers are absent from item editing and creation', async ({page}) => {
   await fixture(page);
   await page.route('**/api/status',route=>route.fulfill({json:{actor:{id:'fixture',role:'admin'},github:true,reviewProviders:['github'],repository:'fixture/repository',jobs:[]}}));
   await login(page);await cardSelect(page).click();await editMenu(page);
-  await expect(page.getByRole('button',{name:'Use Codex cloud review'})).toBeDisabled();
-  await expect(page.getByText(/Codex review is unavailable/)).toBeVisible();
+  await expect(page.getByRole('button',{name:/Use .* review/})).toHaveCount(0);
+  await expect(page.getByText(/Codex review is unavailable/)).toHaveCount(0);
   await page.getByRole('button',{name:'← Back'}).click();await page.getByRole('button',{name:'New work item'}).click();
-  expect(await page.locator('option[value="codex"]').evaluate((e:HTMLOptionElement)=>e.disabled)).toBe(true);
+  await expect(page.getByLabel('Code review provider')).toHaveCount(0);
+  await expect(page.locator('option[value="codex"], option[value="agent"]')).toHaveCount(0);
  });
 
  test('lease activity uses the work snapshot time despite a later status response', async ({page}) => {

@@ -30,7 +30,9 @@ There is no remote-side token variable: the merge writer uses the [deploy key](i
 
 ### Production deployment observation
 
-`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise `delivery.deployment-incident`. `run.deploymentReuseMinutes` (15) permits reused observations. Self-upgrades [deploy](delivery.md) the tip before loop reload. The launcher resolves the install's published CLI artifact before loading dependencies; every `up` removes stale `.graphyard/held-cli.json`, even when the loop is current.
+The watch reads Railway directly when its service, environment and API token are configured. Without a Railway token it reports the running build identity and makes no deployment API request; there is no GitHub deployment fallback.
+
+Provider-reported deployment failures raise `delivery.deployment-incident`; unequal serving and merge commits remain pending. The serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher resolves the install's published CLI artifact before loading dependencies (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
 
 ### Serving the managed repository's app
 
@@ -48,11 +50,13 @@ Status/dashboard read that record; doctor reports unreachable declared apps. Wit
 
 ### Deployment incident
 
-If `/healthz` reports an old commit, read `install --logs`, diagnose the failure and use the [fallback](#manual-fallback) if needed. Environment name comes from `production.environment`, then `GRAPHYARD_PRODUCTION_ENVIRONMENT`, then `production`. `/api/github/*` is not served.
+The retired `POST /api/production-environment` route returns 404. Configure the production environment through `GRAPHYARD_PRODUCTION_ENVIRONMENT`; historical `production.environment` ledger entries do not select the environment reported by `/api/status` or accepted by `/api/delivery/observe-sha`. Both use the process configuration, defaulting to `production`. Historical candidate promotions no longer supply expected releases in `/api/delivery`; that view uses persisted release-backed selections.
+
+`/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The production watch observes serving from its provider's deployment list (Railway's API, `RAILWAY_API_TOKEN` or `RAILWAY_TOKEN`) or the build identity; containment is equality alone, so a merge is deployed only when production serves its exact commit. What production serves is read from the deploy record and the watch only — `/api/status` names the production environment from `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`, and reads no ledger value. `/api/github/*` is not served.
 
 ## Backup, upgrade, rollback
 
-Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`.
+Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`. Older backups still verify after tables are retired; restore skips those tables and reports their names in `tablesRetired`, matching the migration's removal.
 
 [Upgrade](install.md#upgrading-an-existing-installation) installs dependencies in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees. The existing `install --plan`/apply flow builds and restarts the exact source. Only after `/healthz?strict` passes does an atomic symlink rename publish `deploy/build/.graphyard/cli-published`. Launchers resolve it before loading tsx; the watched checkout and legacy `deploy/build` retain their code and dependencies.
 
@@ -65,3 +69,9 @@ Set the variables, register a read-write deploy key, then run `doctor`. For Comp
 `master setup --apply` sets derivable variables and appends `.graphyard/setup-audit.jsonl`. Agents run host-doable steps; park refuses those asks. Personal sign-in, enrolment and browser profiles remain human.
 
 No main guard, revert approver or reviewer App remains. Old `GRAPHYARD_REVERT_APPROVER_*` and `GRAPHYARD_REVIEWER_APPS` variables are unread. Reviews use control-plane launch tokens.
+
+Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
+escalation, research and lane fields, and clears standing `Scope request refused` blockers.
+The migration preserves stages and event history; evaluations and status reads no longer strip fields.
+Daemon cursors still load retired keys and preserve unknown fields across reads and writes for
+forward compatibility, while validating active fields.

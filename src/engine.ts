@@ -1,20 +1,22 @@
+import { recordRenewalFault } from './store/renewal-fault.js';
+import { appendEvidence } from './model/append-evidence.js';
+import { once, readReceipt, record } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, save, rewriteDocument, lockItem, wakeJob, eventWorkSql } from './store.js';
+import { Store, save, wakeJob, eventWorkSql } from './store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, reconcileRowLockSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, proofExerciseSchema, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, resourcesSchema, demand, evaluate, proofSchema, type Criterion, type Evidence, type Lease, type Principal, type Work, type Observation, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
-import { implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { onto } from './model/base-refresh.js';
+import { implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { buildIdentity } from './protocol-version.js';
@@ -23,7 +25,6 @@ import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { actionAccount, sameAction } from './model/next-action.js';
 import type { ActionAccount } from './model/action-account.js';
-import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
@@ -551,7 +552,7 @@ export class Engine {
    */
   private async observeSubmittedHead(actor: Principal, id: string | null, data: { epoch: number; head: string }, key: string): Promise<Observation | null> {
     if (!id) return null;
-    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    if (await readReceipt(this.store.leasePool, actor, key)) return null;
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
@@ -685,14 +686,7 @@ export class Engine {
     const payload = JSON.stringify({ owner: actor.id, epoch, at: at.toISOString(), error: reason });
     const until = at.getTime() + this.leaseSeconds * 1000;
     // Only a live lease of this owner and epoch earns a grace; the refusal says what it earned.
-    const write = async () => (await this.store.pool.query(`WITH live AS (
-        SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
-          ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
-        FROM work_items WHERE id = ${workIdByRef('$1')} AND document->'lease'->>'owner'=$2
-          AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
-      recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
-      SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
-    [id, actor.id, renewalFaultEvent, payload, Number.isSafeInteger(epoch) ? epoch : -1, at.toISOString(), new Date(until).toISOString()])).rows[0] as { grace_until: Date; now: Date } | undefined;
+    const write = () => recordRenewalFault(this.store.pool, id, actor, epoch, at, until, renewalFaultEvent, payload);
     let recorded: { grace_until: Date; now: Date } | undefined, unrecorded: string | null = null;
     try { recorded = await write(); } catch (failure) {
       unrecorded = (failure as Error).message;
@@ -745,19 +739,14 @@ export class Engine {
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data: any = commands[command].parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
+    const receiptInput = { command, id, data };
     // Provider I/O stays outside the coordination transaction.
     // A renewal changes one item's lease and reads nothing else of the fleet (GY-1124): it takes that
     // item's lock alone, so renewals of different items never wait for each other or for a fleet
     // command. It neither evaluates the item nor records a dispatch: both are left to the next
     // reconciliation pass, which sees the row move, so a gate change that waited on this renewal
     // lands one reconcile tick after it rather than in the renewal's own response.
-    if (command === 'heartbeat' && actor.role !== 'operator-agent') return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-        return receipt.result as Work;
-      }
+    if (command === 'heartbeat' && actor.role !== 'operator-agent') return this.store.transaction(async (db, now) => once<Work>(db, actor, key, receiptInput, async () => {
       const work: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
       demandWork(work);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
@@ -767,16 +756,15 @@ export class Engine {
       this.renewLease(work, actor, data.epoch, now);
       await save(db, work, actor.id, command, now, data);
       // A renewal's replay needs only the lease, not a whole document per renewal.
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
       return work;
-    }, { lane: 'lease', fleetLock: false, itemLock: id });
+    }, { store: compactHeartbeatReceipt }), { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? (data.head !== undefined ? await this.observeSubmittedHead(actor, id, data, key) : null) : null;
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
     // already has a receipt (a replay or a mismatched reuse), leaves the item and its history untouched.
     if (command === 'claim' && (actor.role === 'worker' || actor.role === 'admin')) await this.store.transaction(async (db, now) => {
-      if ((await db.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows.length) return;
+      if (await readReceipt(db, actor, key)) return;
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id || w.key === id);
       if (!work || work.stage === 'done' || work.observationWindow) return;
@@ -796,12 +784,7 @@ export class Engine {
         demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
         actor = await this.operatorAuthorizer(db, now, caller);
       }
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
-        if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
-        return receipt.result as Work;
-      }
+      return once<Work>(db, actor, key, receiptInput, async () => {
       const all = await lockedWork(db, [id]);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
@@ -882,8 +865,7 @@ export class Engine {
         // Reassignment discards whatever assignment still stood: its end is recorded here, the
         // last moment it is visible, and the item is claimable again.
         preserveAssignment(work);
-        if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
-          JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'rework', at: now.toISOString() } })]);
+        if (work.lease) await record(db, work, 'graphyard', 'lease.expired', { details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'rework', at: now.toISOString() } });
         recordRework(work, now);
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
@@ -897,8 +879,7 @@ export class Engine {
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         // A replacement claim over a lapsed lease records how that assignment ended, exactly as reconciliation would have.
         if (work.lease) {
-          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
-            JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, at: now.toISOString() } })]);
+          await record(db, work, 'graphyard', 'lease.expired', { details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, at: now.toISOString() } });
           endLapsedAttempt(work, work.lease, now);
           work.lease = null;
         }
@@ -937,7 +918,7 @@ export class Engine {
         const open = data.failure ? timeline.attempts.find(entry => entry.epoch === data.epoch && entry.endedAt === null) : undefined;
         const untouched = open && work.lease && Date.parse(work.lease.expiresAt) === Date.parse(open.claimedAt) + this.leaseSeconds * 1000
           && work.submission?.epoch !== data.epoch ? open : undefined;
-        if (data.failure) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.failed', JSON.stringify({ details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } })]);
+        if (data.failure) await record(db, work, actor.id, 'workspace.failed', { details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } });
         // GY-1286: a rework workspace refused because the PR branch moved past the observed head can
         // only be built once that head is observed, so the release wakes the observation, prioritized.
         if (data.failure?.message.startsWith(submittedBranchMoved) && work.submission) await wakeJob(db, work.id, true);
@@ -1090,7 +1071,7 @@ export class Engine {
         work.workspaces.push({ ...workspace, owner: actor.id });
         // The preserved-attempt record (GY-860): what the released holder of this branch carried —
         // its refs and uncommitted diff — is kept on the item's ledger, never discarded silently.
-        if (data.preserved) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.preserved', JSON.stringify({ details: { epoch: data.epoch, branch: data.branch, ...data.preserved } })]);
+        if (data.preserved) await record(db, work, actor.id, 'workspace.preserved', { details: { epoch: data.epoch, branch: data.branch, ...data.preserved } });
       }
       if (command === 'submit') {
         const workspace = work.workspaces.find(w => w.epoch === data.epoch);
@@ -1119,9 +1100,9 @@ export class Engine {
         // GY-2968: what complete's automatic rerun set aside when it accepted this head — the
         // failing cases outside the item's proofs that passed on their immediate retry, and those
         // the base fails too. A fact on the item's history, judged by nobody.
-        if (data.flaked?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.flaked', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.flaked, at: now.toISOString() } })]);
-        if (data.baseFailures?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.base-failure', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.baseFailures, at: now.toISOString() } })]);
-        if (data.rerunUnjudged) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.rerun-unjudged', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, note: data.rerunUnjudged.note, output: data.rerunUnjudged.output, at: now.toISOString() } })]);
+        if (data.flaked?.length) await record(db, work, actor.id, 'complete.flaked', { details: { epoch: data.epoch, head: data.head ?? null, cases: data.flaked, at: now.toISOString() } });
+        if (data.baseFailures?.length) await record(db, work, actor.id, 'complete.base-failure', { details: { epoch: data.epoch, head: data.head ?? null, cases: data.baseFailures, at: now.toISOString() } });
+        if (data.rerunUnjudged) await record(db, work, actor.id, 'complete.rerun-unjudged', { details: { epoch: data.epoch, head: data.head ?? null, note: data.rerunUnjudged.note, output: data.rerunUnjudged.output, at: now.toISOString() } });
         if (data.head !== undefined) {
           // The control plane's reading is the candidate's observation from this instant (GY-1523): the
           // minimal save `observe` makes for a provider reading, with nothing of GitHub's to carry.
@@ -1154,7 +1135,7 @@ export class Engine {
         } else demand(data.sha === data.baseSha, 'A reading of an item that follows no delivery is bound to the serving release alone: sha and baseSha name it', 409);
         demand(!work.observationWindow || Date.parse(work.observationWindow.notBefore) <= now.getTime(), `${work.key}'s reading can first exist at ${work.observationWindow?.notBefore}; one taken before then is not recorded`, 409);
         const evidence: Evidence = { id: randomUUID(), proof: data.proof, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, producer: actor.id, trusted: true, result: data.result, executed: 1, skipped: 0, at: now.toISOString(), reading: { detail: data.detail } };
-        work.evidence.push(evidence);
+        await appendEvidence(work, evidence, db);
       }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
@@ -1180,11 +1161,9 @@ export class Engine {
         // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
         const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
         const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(unexercised ? { unexercised } : {}) };
-        if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
-          JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
-        work.evidence.push(evidence);
+        if (unexercised) await record(db, work, actor.id, 'evidence.exercise.refused', { details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } });
+        await appendEvidence(work, evidence, db);
         // GY-162: a trusted e2e: record is also a run of its test case, appended to the case's history.
-        await recordScenarioRun(db, work, evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
       }
       if (command === 'revoke') {
@@ -1214,8 +1193,11 @@ export class Engine {
         : data);
       if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       // A renewal's replay needs only the lease, not a whole document per renewal.
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
       return work;
+      }, {
+        store: work => command === 'heartbeat' ? compactHeartbeatReceipt(work) : work,
+        replay: async work => { if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, work, this.repository); },
+      });
     // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
     // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.
     }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
@@ -1274,7 +1256,7 @@ export class Engine {
     if (work.lease) endLapsedAttempt(work, work.lease, now);
     recordIntervention(work, 'requirements');
     work.lease = null;
-    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    work.observation = null; work.mergeAuthorization = null;
     // A submitted implementation must be explicitly reconsidered for changed intent.
     if (work.submission) work.reworkRequested = true;
 
@@ -1304,7 +1286,7 @@ export class Engine {
     // reaches a different offer first is refused for reusing the key with different input, and
     // replays the assignment the winner made rather than claiming beside it.
     const derived = `pull/${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
-    const replay = async () => (await this.store.pool.query('SELECT result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, derived])).rows[0]?.result as Work | undefined;
+    const replay = async () => (await readReceipt(this.store.pool, actor, derived))?.result as Work | undefined;
     const prior = await replay();
     if (prior) return { assigned: prior, offered: 1, refused: [] as { key: string; reason: string }[], replayed: true };
     // Open items whole, settled deliveries as the work index's summary (GY-1376): no settled item has a dispatch to offer.
@@ -1386,70 +1368,10 @@ export class Engine {
   }
   /** The item's durable observation job as the queue holds it, or null when it has none. */
   async observationJob(id: string): Promise<ObservationJobState | null> {
-    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error, held_until, held_reason FROM jobs WHERE work_id=$1', [id])).rows[0];
+    const row = (await this.store.pool.query('SELECT available_at, locked_until, attempts, error FROM jobs WHERE work_id=$1', [id])).rows[0];
     if (!row) return null;
     const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
-    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
-  }
-  async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
-      const provider = reviewProviderOf(work.policy);
-      demand((request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
-        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
-      if (provider === 'agent') {
-        const selected = reviewerProfileFor(work);
-        demand(!!selected && selected.name === request.profile && selected.reviewerApp === request.reviewerApp && !!request.marker,
-          'Review request does not name the currently selected reviewer profile');
-      }
-      work.reviewRequest = request;
-      if (work.observation) work.observation.agentReview = provider === 'agent'
-        ? { provider: 'agent', sha: request.sha, approved: false, profile: request.profile, reviewerApp: request.reviewerApp, reason: `Waiting for reviewer profile ${request.profile} to post a verdict through its registered App` }
-        : { provider: 'codex', sha: request.sha, approved: false, reason: 'Waiting for dispatched Codex review' };
-      this.evaluate(work, all, now); await this.recordDispatch(db, work, now); await save(db, work, 'github', 'review.requested', now); return work;
-    });
-  }
-  /**
-  }
-  /**
-   * Record provider exhaustion for the dispatched reviewer profile and release the request so
-   * the next configured profile is selected. Failing over never approves anything: when no
-   * profile remains, the review gate stays closed with the exhaustion recorded in history.
-   */
-  async failoverReviewRequest(id: string, expectedRevision: number, input: { exhaustion: 'usage-limit' | 'timeout'; reason: string }, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
-      const request = work.reviewRequest;
-      demand(work.policy.review && reviewProviderOf(work.policy) === 'agent' && request?.provider === 'agent'
-        && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision,
-      'Review failover requires a current agent review request');
-      const dispatched = reviewerProfileFor(work);
-      demand(dispatched && dispatched.name === request!.profile && dispatched.reviewerApp === request!.reviewerApp, 'Review failover must name the currently dispatched reviewer profile');
-      const exhausted = new Set([...exhaustedReviewerProfiles(work), dispatched!.name]);
-      const next = (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
-      const failover: ReviewFailover = { profile: dispatched!.name, reviewerApp: dispatched!.reviewerApp, runtime: dispatched!.runtime,
-        exhaustion: input.exhaustion, reason: input.reason.slice(0, 500), at: now.toISOString(), sha: request!.sha, baseSha: request!.baseSha,
-        policyRevision: request!.policyRevision, requestCommentId: request!.commentId, nextProfile: next?.name ?? null };
-      // The complete sequence stays in the append-only ledger; the document keeps recent entries.
-      work.reviewFailovers = [...(work.reviewFailovers ?? []), failover].slice(-100);
-      work.reviewRequest = null;
-      if (work.observation) work.observation.agentReview = { provider: 'agent', sha: failover.sha, approved: false,
-        profile: next?.name, reviewerApp: next?.reviewerApp,
-        reason: next ? `Reviewer profile ${failover.profile} is exhausted (${failover.exhaustion}); Graphyard failed over to ${next.name}`
-          : `Every configured reviewer profile is exhausted for this candidate; the last was ${failover.profile} (${failover.exhaustion})` };
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'github', 'review.failover', now, failover);
-      return work;
-    });
+    return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null };
   }
   /**
    * Evaluate one item and return the earliest instant at which its outcome could change with no
@@ -1462,15 +1384,9 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    // Graphyard keeps no merge queue (GY-1236) and no planned-file scope (GY-1992): a document stored
-    // before then drops their fields, and a scope refusal it carried, before any gate reads them.
-    dropRetiredQueueFields(work); dropRetiredScopeFields(work);
     const result = evaluate(work, all, now);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
-    // GitHub merges on every passing gate (GY-1235): no merge authorization is recorded, and one a
-    // record carried from before is cleared.
-    if (work.mergeAuthorization) work.mergeAuthorization = null;
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
     this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
@@ -1497,10 +1413,10 @@ export class Engine {
   private async recordDispatch(db: { query: (text: string, values: unknown[]) => Promise<unknown> }, work: Work, now: Date) {
     const transitions = this.dispatchTransitions.get(work) ?? [];
     this.dispatchTransitions.delete(work);
-    for (const transition of transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.request, at: now.toISOString() } })]);
+    for (const transition of transitions) await record(db, work, 'graphyard', transition.event, { details: { ...transition.request, at: now.toISOString() } });
     const conflicts = this.conflictTransitions.get(work) ?? [];
     this.conflictTransitions.delete(work);
-    for (const transition of conflicts) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.event, JSON.stringify({ details: { ...transition.conflict, at: now.toISOString() } })]);
+    for (const transition of conflicts) await record(db, work, 'graphyard', transition.event, { details: { ...transition.conflict, at: now.toISOString() } });
   }
   /**
    * How long one reconciliation batch may hold its items' row locks before it yields (GY-274).
@@ -1727,8 +1643,7 @@ export class Engine {
       let served: string | null | undefined;
       if (at.getTime() > previous.getTime()) {
         if (at.getTime() - previous.getTime() > planeStallMs)
-          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
-            ['graphyard', 'plane.stall', JSON.stringify({ details: { from: previous.toISOString(), to: at.toISOString() } })]);
+          await record(db, null, 'graphyard', 'plane.stall', { details: { from: previous.toISOString(), to: at.toISOString() } });
         // GY-2177: the first tick that moves also records what this process serves, against what the
         // tick named before it: a change is a deploy, recorded once with the window it names — from
         // the replaced release's last tick, when its renewals started landing nowhere, to this
@@ -1741,8 +1656,7 @@ export class Engine {
           served = buildIdentity().commit;
           const last = await db.query(`SELECT payload->>'commit' AS commit FROM events WHERE kind = 'plane.deploy' ORDER BY created_at DESC LIMIT 1`);
           if (served && last.rows[0]?.commit !== served)
-            await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
-              ['graphyard', 'plane.deploy', JSON.stringify({ details: { commit: served, from: previous.toISOString(), to: at.toISOString() } })]);
+            await record(db, null, 'graphyard', 'plane.deploy', { details: { commit: served, from: previous.toISOString(), to: at.toISOString() } });
         }
         await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
       }
@@ -2079,7 +1993,7 @@ export class Engine {
     this.reconcileWrites.delete(work);
     if ('delivered' in write) { await save(db, work, 'graphyard', 'delivery.settled', now); return; }
     const { ledger } = write;
-    for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+    for (const entry of ledger) await record(db, work, 'graphyard', entry.kind, { details: { ...entry.details, at: now.toISOString() } });
     await this.recordDispatch(db, work, now);
     await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
     if (work.submission) await wakeJob(db, work.id);
@@ -2132,8 +2046,7 @@ export class Engine {
       if (refreshed && carrying) {
         const replaced = carrying.approval as CarriedApproval;
         carrying.approval = refreshed;
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.carry-refreshed',
-          JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
+        await record(db, work, 'graphyard', 'review.carry-refreshed', { details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } });
       }
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);

@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -189,7 +188,7 @@ test('unit:session-liveness-model — a missed report keeps the last sighting, a
   assert.deepEqual([miss.missedReports, miss.closed, miss.observedAt], [1, null, ago(10 * 60_000)]);
   recordSession(unobserved, reportedHandle(miss), 'executor-a', now);
   const written = unobserved.sessions![0];
-  assert.equal(written.updatedAt, now.toISOString(), 'the record was written now');
+  assert.equal(written.updatedAt, ago(10 * 60_000), 'a liveness report does not advance activity');
   assert.deepEqual(sessionView(written, now), { observed: 'working', seenAt: ago(10 * 60_000), live: true, unseenMs: null }, 'yet it is seen when its launcher last saw it');
   assert.equal(sessionView(written, new Date(now.getTime() + 6 * 60_000)).live, false, 'and goes unseen once that sighting is stale, not 15 minutes after the miss');
 

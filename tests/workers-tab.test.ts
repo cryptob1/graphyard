@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import type { SessionHandle } from '../src/model/sessions.js';
-import { localAttachCommand, remoteAttachCommand, sessionRoleKind, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
+import { localAttachCommand, remoteAttachCommand, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';
@@ -79,7 +79,7 @@ const noop = () => {};
 const dashboard = (work: Work[]): Dashboard => ({
   token: 'fixture', work, status: { actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, repository: 'owner/project' }, error: '', connected: true, lastUpdated: '12:00:00', view: 'workers', setView: noop,
   filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-  operatorAgents: [], operatorAgentsError: null, features: { releases: null, validation: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+  operatorAgents: [], operatorAgentsError: null, features: { releases: null, validation: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
   sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop,
 });
 const render = (work: Work[]) => renderToStaticMarkup(createElement(WorkersPage, dashboard(work)));

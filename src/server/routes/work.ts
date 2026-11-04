@@ -1,3 +1,4 @@
+import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
 import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
@@ -7,7 +8,7 @@ import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanP
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict, recordSpecCheck, recordSpecCheckLaunch } from '../review-verdict.js';
-import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
+import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
@@ -169,10 +170,8 @@ async function recordItemPreview(services: Services, actor: Principal, id: strin
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records an item\'s preview', 403);
   const { preview, site } = previewRecordBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = mergeRecordFingerprint(id, { kind: 'preview', preview, ...(site ? { site } : {}) });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
+  const receiptInput = mergeRecordInput(id, { kind: 'preview', preview, ...(site ? { site } : {}) });
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     const work = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const refusal = applyPreviewRecord(work!, preview); demand(!refusal, refusal!, 409);
     await save(db, work!, actor.id, `preview.${preview.state}`, now, { preview: { id: preview.id, sha: preview.sha, state: preview.state, endReason: preview.endReason } });
@@ -184,9 +183,8 @@ async function recordItemPreview(services: Services, actor: Principal, id: strin
         [preview.id, work!.id, site.map(file => file.path), site.map(file => file.mediaType), site.map(file => Buffer.from(file.content, 'base64'))]);
     }
     const result = { recorded: true, key: work!.key, kind: 'preview', preview: work!.preview };
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
-  });
+  }));
 }
 /** The largest merge-record body the coordinator sends: a running preview's site, base64-encoded, and its record. */
 const previewRecordBodyLimit = Math.ceil(previewSiteByteLimit / 3) * 4 + previewSiteFileLimit * 1024 + 64 * 1024;

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { awaitRuntimeStart, emptySourceStarts, sessionHarnessPlan, SessionStartError, startAgentSession, workerHarnessPlan } from '../src/master.js';
 import { bashRuleMatches, claudeRuleProblem, harnessDecision, masterHarnessPlan } from '../src/harness.js';
 import { detectConsentPrompt, settingsWarning } from '../src/consent-prompt.js';

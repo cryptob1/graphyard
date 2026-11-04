@@ -1,3 +1,4 @@
+export { shellQuote } from '../shell-quote.js';
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
@@ -15,10 +16,11 @@ import { loopObservation, loopObservationProofs, observationWindowHold, servingR
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
-import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
+import { loadMasterConfig, readWorkerCredential } from './config.js';
+import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { simplicityParagraph } from '../reviewer.js';
+import { simplicityParagraph } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
@@ -573,7 +575,6 @@ function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>)
   return kept + answered + superseded;
 }
 
-export const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId };
   delete env.GRAPHYARD_TOKEN; delete env.GRAPHYARD_MASTER_TOKEN; delete env.GRAPHYARD_REQUEST_ID;

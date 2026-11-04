@@ -6,7 +6,7 @@ import { basename, join, resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { loopStopTimeoutSeconds, loopUnitDirectory, loopUnitOf, type LoopSupervisorHost } from '../supervisor.js';
 import type { MasterConfig } from './profiles.js';
-import { atomicPrivateText } from './config.js';
+import { atomicPrivateText } from '../private-file.js';
 import { defaultChildRun } from '../child-runner.js';
 import { knownGoodCli, knownGoodState } from './known-good.js';
 import { installDirectory } from '../install/secrets.js';

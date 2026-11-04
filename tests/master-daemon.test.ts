@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -150,7 +150,7 @@ test('restarting the loop resumes the cursor without dispatching twice', async (
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)] });
     const ready = work();
-    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } as any });
+    const review = submitted({ id: 'work-2', key: 'GY-43', policy: { checks: ['test'], review: true } });
     const calls: string[] = [];
     let snapshotWork: Work[] = [ready, review];
     const shared = effects({
@@ -318,7 +318,7 @@ test('the cursor stays bounded without discarding an unresolved action, and stat
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
   for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, epoch: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
   state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, epoch: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
-  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0 });
+  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), open: 1, actions: 0 });
   pruneDaemonState(state);
   assert.equal(Object.keys(state.actions).length, retainedActions + 1);
   assert.ok(state.actions.stuck, 'an unresolved action is never pruned away');
@@ -533,7 +533,7 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     } as unknown as Work;
   };
 
-  test('unit:daemon-single-merge-trial — a cycle with submitted heads starts exactly one trial (the merge writer\'s), a cursor carrying old shadow verdicts loads without them, and master status has no shadowGate', async () => {
+  test('unit:daemon-single-merge-trial — a cycle with submitted heads starts exactly one trial (the merge writer\'s), a cursor preserves old shadow verdicts as passive data, and master status has no shadowGate', async () => {
 
     const directory = await temporaryDirectory('no-shadow-trial');
     const config = configFor(join(directory, 'coordinator.token'));
@@ -561,11 +561,11 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     assert.deepEqual(trials, [sha(`merge:${sha('head1')}`)], 'one trial, the merge writer\'s, of the oldest head');
     assert.ok(!('shadowGate' in daemonSummary(state, start, 60_000, config.hostId)), 'the loop summary has no shadowGate');
 
-    // A cursor an older loop wrote, its shadow verdicts included, loads; the verdicts are dropped.
+    // A cursor an older loop wrote preserves its shadow verdicts as passive unknown data.
     const legacy = { ...emptyDaemonState(config), shadow: [{ key: 'GY-1', id: 'w1', head: sha('head1'), baseTip: tip, mergeSha: null, risk: 'normal', build: 'pass', tests: { passed: 0, failed: [], files: 0 }, conflict: [], durationMs: 1, at: iso(start), outcome: 'pending' }] };
     await writeFile(daemonStatePath(config), JSON.stringify(legacy));
     const loaded = await readDaemonState(root, config);
-    assert.ok(!('shadow' in loaded), 'the old verdicts are not carried');
+    assert.deepEqual((loaded as unknown as typeof legacy).shadow, legacy.shadow, 'the old verdicts are preserved as passive data');
     assert.equal(loaded.repository, 'owner/project');
   });
 

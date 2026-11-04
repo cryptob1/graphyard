@@ -23,7 +23,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // own credential. Without the setting it launches in Herdr as today.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const extension = fileURLToPath(new URL('../integrations/pi/index.ts', import.meta.url));
 const tsx = import.meta.resolve('tsx');
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), producerToken = 'producer-token-'.padEnd(40, 'x');
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;

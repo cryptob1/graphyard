@@ -2,13 +2,14 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
@@ -18,6 +19,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type Dispat
 import { neededRework, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { hostMemoryVariable } from '../src/master/host-memory.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -166,6 +168,7 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
 }
 
 test('unit:one-reviewer-per-request — the cycle step and the dispatcher launching for the same request in one tick start one session with one record, recorded before its runtime starts', async () => {
+  await sessionProviderContract();
   const master = await reviewerMaster();
   try {
     // GY-1111: the dispatcher losing used to read as "both stood down" — its refusal is settled as its
@@ -233,6 +236,9 @@ const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:
 const proven = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: 'unit:x', sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/a.ts'] }, randomUUID());
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
+  // verify runs this file directly, without the suite runner's host isolation.
+  process.env[hostMemoryVariable] = 'unreadable';
+  process.env.GRAPHYARD_DATA_HOME = await temporaryDirectory('gy124-data');
   const port = Number(process.env.GRAPHYARD_ONE_REVIEWER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy124-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
@@ -240,6 +246,41 @@ before(async () => {
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+
+/** Create rejects retired providers; the default accepts the actual session verdict route. */
+async function sessionProviderContract() {
+  const input = { type: 'chore', title: 'Session review only', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x', 'e2e:fixture'] }] };
+  for (const reviewProvider of ['codex', 'agent'])
+    await assert.rejects(engine.execute(operator, 'create', null, { ...input, policy: { reviewProvider } }, randomUUID()), /github/);
+  let item = await engine.execute(operator, 'create', null, input, randomUUID());
+  assert.equal(item.policy.reviewProvider, undefined, 'the omitted provider uses session review');
+  item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
+  item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
+  item = await engine.execute(implementer, 'submit', item.id, { epoch: 1, pr: 121 }, randomUUID());
+  const candidate = { sha: H, baseSha: B, pr: 121, branch: item.workspaces[0].branch, author: implementer.id };
+  item = await engine.observe(item.id, item.revision, { ...observation(candidate), candidate, source: 'control-plane', files: ['src/store/pools.ts'] });
+  assert.equal(item.gates.find(gate => gate.name === 'review')!.passed, false);
+  const coordinator = { id: 'session-launcher', role: 'coordinator' as const, token: 'launcher-credential-'.padEnd(40, 'x') };
+  const http = server(engine, [coordinator]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}/api/work/${item.id}`;
+  const post = async (path: string, token: string, body: unknown) => {
+    const response = await fetch(`${url}/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  };
+  try {
+    const token = randomBytes(32).toString('hex');
+    await post('review-launch', coordinator.token, { reviewer: 'independent-session', head: H, baseTip: B, tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    await post('review-verdict', token, { event: 'APPROVE', body: 'The submitted change satisfies its criteria.', sha: H, token });
+    const recorded = await store.workItem(item.id);
+    assert.equal(recorded!.gates.find(gate => gate.name === 'review')!.passed, true);
+    assert.equal(recorded!.observation!.reviews[0].source, 'control-plane');
+  } finally {
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    engine.principals = [operator, implementer, producer];
+  }
+}
 
 test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUESTED on one head for one request is a conflict: both recorded, attention raised, neither acted on, and a fresh review resolves it', async () => {
   let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Two verdicts on one head', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x', 'e2e:fixture'] }] }, randomUUID());

@@ -9,8 +9,8 @@ import { createDecipheriv, createHash, createPrivateKey, createPublicKey, diffie
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { connectDefaultRoles, connectProvider, fleetRequest, redactKey, relaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
 import { type EnvironmentKind, type MasterConfig } from './profiles.js';
-import { atomicPrivateText } from './config.js';
-import { failureText } from './worktrees.js';
+import { atomicPrivateText } from '../private-file.js';
+import { failureText } from '../disk-space.js';
 import { agentEnvironmentRoot, createAgentEnvironment, discoverAgentEnvironments } from './environments.js';
 
 // Connect an account from the UI (GY-409).

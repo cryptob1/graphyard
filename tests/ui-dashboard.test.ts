@@ -1,30 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
+import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
-import { checkStates, prSteps, stateIds, stateLabel, stepHeld, stepIds, stepSince } from '../src/model/pr-steps.js';
-import { noRelease, releaseView } from '../src/model/release.js';
-import ShippedPage from '../web/pages/shipped.js';
+import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
+import { prSteps, stateIds } from '../src/model/pr-steps.js';
+import { noRelease } from '../src/model/release.js';
 import { jargon } from '../src/model/plain-status.js';
-import { formatAge, formatDuration } from '../src/model/duration.js';
-import { primaryEntry, sections, views, visibleViews } from '../web/pages/index.js';
-import { endedItemIdleMs, workersView } from '../web/workers-view.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
-import Sidebar from '../web/components/sidebar.js';
-import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
-import { CandidateSha } from '../web/candidate.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -43,7 +36,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin'): Dashboar
     token: 'fixture', work, status: boardStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
-    codexAvailable: false, sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
+    sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
   // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
@@ -209,8 +202,7 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   assert.match(left, /Waiting for someone else to approve the latest code/);
   // Review status is the review gate's verdict, whichever provider gave it.
   const reviewRow = (item: Work) => /<dt>Review<\/dt><dd>([^<]+)<\/dd>/.exec(markup(createElement(WorkDetails, { ...dashboard({ work: board().map(entry => entry.key === item.key ? item : entry) }), item })))?.[1];
-  const codex = { ...find('GY-16'), policy: { ...find('GY-16').policy, reviewProvider: 'codex' }, observation: { ...find('GY-16').observation!, reviews: [] } } as Work;
-  assert.equal(reviewRow(codex), 'Approved', 'a Codex approval, recorded outside GitHub reviews, reads as approved');
+  assert.equal(reviewRow(find('GY-16')), 'Approved');
   assert.equal(reviewRow(find('GY-22')), 'Waiting for approval');
   const changes = { ...find('GY-21'), gates: find('GY-21').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
   assert.equal(reviewRow(changes), 'Changes requested', 'an approval beside an open change request is not reported as approved');
@@ -234,7 +226,6 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
   const work = board();
   const withReasons = (item: Work, reasons: Record<string, string[]>) => ({ ...item, gates: item.gates.map(gate => reasons[gate.name] ? { ...gate, passed: reasons[gate.name].length === 0, reasons: reasons[gate.name] } : gate) }) as Work;
   const handedIn = find('GY-22', work);
-  const ci = (name: string) => `Required CI check ${name} has not passed on the current candidate`;
   const trial = (item: Work) => `merge writer has not trialled ${item.candidate!.sha.slice(0, 12)} on ${item.candidate!.baseSha.slice(0, 12)}`;
   const refusedTrial = (item: Work) => ({ ...item, mergeLedger: { ...(item.mergeLedger ?? {}), state: 'refused', head: item.candidate!.sha } }) as unknown as Work;
   // Checking folds validate, test, review, proof and merge (GY-1979), so every gate case below is
@@ -375,6 +366,3 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
 });
 
 // GY-168: the follow-ups from the browser review of GY-161's merge.
-
-/** Hex runs long enough to be a commit SHA (at least one letter, so a numeric id is not one; a UUID's segments are not one either). */
-const longHex = (text: string) => [...text.replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, 'uuid').matchAll(/\b[0-9a-f]{9,}\b/gi)].map(match => match[0]).filter(hex => /[a-f]/i.test(hex));

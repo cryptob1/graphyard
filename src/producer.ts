@@ -1,3 +1,4 @@
+import { parseEnvValue } from './env-file.js';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -5,7 +6,8 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, credentialMaskFor, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, runtimeLoginHomes, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab, credentialMaskFor, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, runtimeLoginHomes, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
+import { atomicPrivateWrite, privateFile } from './private-file.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -23,6 +25,7 @@ import { liveInstallGuidance, liveInstallProof, liveInstallRequiredEnv, liveInst
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readProjectMemory } from './project-memory.js';
+export { parseEnvValue } from './env-file.js';
 
 /**
  * The local secrets a live-install proof producer may receive from the repo-root .env
@@ -45,50 +48,6 @@ export function missingProducerEnv(proofs: readonly string[], env: Record<string
  * other proof gets none of them, so a malformed .env line never refuses a launch that needs no secret.
  */
 export const needsProducerEnv = (proofs: readonly string[]) => proofs.some(liveInstallProof);
-
-/**
- * One .env value as a shell would read it: a value in a matching pair of quotes is the text
- * between them, with anything after the closing quote only a `# comment`; an unquoted value ends
- * at a whitespace-led `#`. Inside double quotes a backslash escapes `"`, `\`, `$` and `` ` ``
- * (GY-1071), so `"a\"b"` is `a"b`. In an unquoted value a backslash escapes the following
- * character as in sh (GY-1071 finding 26), so `a\ b` is `a b` and `a\\b` is `a\b`. A value whose
- * quotes do not pair or with a trailing unescaped backslash is refused, never altered.
- */
-export function parseEnvValue(raw: string): string | null {
-  const text = raw.trim(), quote = text[0];
-  if (quote === "'") {
-    const close = text.indexOf(quote, 1);
-    if (close < 0 || !/^(\s+#.*)?$/.test(text.slice(close + 1).trimEnd())) return null;
-    return text.slice(1, close);
-  }
-  if (quote === '"') {
-    // Inside double quotes a backslash escapes ", \, $ and ` as in sh, and is kept before anything else.
-    let value = '', close = -1;
-    for (let at = 1; at < text.length; at++) {
-      const char = text[at];
-      if (char === '\\' && at + 1 < text.length && '"\\$`'.includes(text[at + 1])) value += text[++at];
-      else if (char === '"') { close = at; break; } else value += char;
-    }
-    if (close < 0 || !/^(\s+#.*)?$/.test(text.slice(close + 1).trimEnd())) return null;
-    return value;
-  }
-  let value = '';
-  for (let at = 0; at < text.length; at++) {
-    const char = text[at];
-    if (char === '\\') {
-      if (at + 1 >= text.length) return null;
-      value += text[++at];
-    } else if (char === '"' || char === "'") {
-      return null;
-    } else if (/\s/.test(char)) {
-      if (/^\s+#/.test(text.slice(at))) break;
-      value += char;
-    } else {
-      value += char;
-    }
-  }
-  return value.trimEnd();
-}
 
 /** Read the producer-approved environment variables from the repo-root .env file. */
 export async function readProducerEnvironment(root: string): Promise<Record<string, string>> {
