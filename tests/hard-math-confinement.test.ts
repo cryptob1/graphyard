@@ -118,13 +118,31 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
   });
   const typed: string[] = [];
   let reviewDirectory = '';
+  let readinessPolls = 0;
   const run = (command: string, args: string[]) => {
     if (command !== 'herdr') return execFileSync(command, args, { encoding: 'utf8' });
     if (args[0] === 'tab' && args[1] === 'create') {
       reviewDirectory = args.find(word => word.startsWith('GH_CONFIG_DIR='))?.slice('GH_CONFIG_DIR='.length) ?? reviewDirectory;
       return JSON.stringify({ result: { root_pane: { pane_id: 'fixture-pane', tab_id: 'fixture-tab' } } });
     }
-    if (args[0] === 'pane' && args[1] === 'run') typed.push(args[3]);
+    if (args[0] === 'pane' && args[1] === 'run') {
+      typed.push(args[3]);
+      readinessPolls = 0;
+      return '';
+    }
+    // A supervised worker starts watch -> bwrap -> pi. Report the transport's
+    // observed foreground, not the first program parsed from that nested argv.
+    // Keep one wrapper poll so production readiness must wait for the runtime.
+    if (args[0] === 'agent' && args[1] === 'get') {
+      readinessPolls++;
+      return JSON.stringify({ result: { agent: { agent: readinessPolls === 1 ? 'bwrap' : 'pi', agent_status: 'idle', pane_id: args[2] } } });
+    }
+    if (args[0] === 'pane' && args[1] === 'read') return readinessPolls <= 1 ? 'Starting runtime\n' : 'pi ready\n';
+    if (args[0] === 'pane' && args[1] === 'process-info') return JSON.stringify({ result: { process_info: {
+      shell_pid: 100, foreground_process_group_id: 200,
+      foreground_processes: [{ argv: [readinessPolls <= 1 ? 'bwrap' : 'pi'] }],
+    } } });
+    if (args[0] === 'agent' && args[1] === 'rename') return JSON.stringify({ result: { agent: { agent: 'pi', agent_status: 'idle', name: args[3] } } });
     if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ result: { agents: [] } });
     return startedAtOnce(args) ?? JSON.stringify({ result: {} });
   };
@@ -135,6 +153,7 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
   try {
     await t.test('worker dispatch', async () => {
       await effects.dispatch(item, config.workers[0], [], await snapshot());
+      assert.ok(readinessPolls >= 2, 'worker readiness must wait for pi after the wrapper');
       probe(typed.at(-1)!, worker, [producer, config.credentialFile, oracleFile, sourceCredential]);
     });
     await t.test('review dispatch tick', async () => {
@@ -145,6 +164,7 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
       Object.assign(review.autoDispatch!.review!, { sha: head, baseSha: head });
       const tick = await effects.dispatchTick!({ work: [review], now: new Date().toISOString() }) as import('../src/auto-dispatch.js').DispatchTick;
       assert.equal(tick.launched.length, 1, JSON.stringify(tick));
+      assert.ok(readinessPolls >= 2, 'review readiness must wait for pi after the wrapper');
       const binding = join(reviewDirectory, 'review-binding.json');
       assert.ok(JSON.parse(await readFile(binding, 'utf8')).verdictToken);
       assert.equal((await readReviewLedger(root)).reviews[0].state, 'pending');

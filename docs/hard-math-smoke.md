@@ -39,7 +39,8 @@ keeps its assigned credential and runtime login; the existing credential mask
 hides the other installation credentials, source installation and frozen oracle.
 `hard-math-confinement.test.ts` exercises the embedded daemon’s worker dispatch
 and reviewer dispatch tick with non-CLI arguments. Controlled CLI/HTTP/Herdr
-replies drive the real launch code; read probes execute its emitted native
+replies drive the real launch code, including polling from wrapper startup to
+runtime readiness; read probes execute its emitted native
 wrapper and require authority/oracle denial plus access to the assigned credential.
 These diagnostics require working bubblewrap namespaces in the native host;
 a confined implementation worker without that capability cannot certify them.
@@ -50,7 +51,8 @@ npm run docs:check
 HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts tests/hard-math-confinement.test.ts
 ```
 
-The bound case `e2e:hard-math-smoke` runs the same head's smoke file. It starts real
+The bound case `e2e:hard-math-smoke` runs the same head's smoke and confinement
+files, so failed native read-boundary diagnostics fail ordinary proof. It starts real
 scratch Postgres, a control plane and a local Git remote, then uses controlled
 executors to exercise claims, independent review/proof records, pushed merges,
 injected failure/repair, cleanup and external CLI/API/browser certification.
