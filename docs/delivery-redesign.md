@@ -15,11 +15,7 @@ Up to four oldest heads share a trial and push; failed batches retry individuall
 
 ## The merger
 
-Only the writer receives the deploy key. Candidates come from the shared object store, base repairs and `Hotfix:` first. `/api/work/:id/merge-record` refuses pushed/reconciled commits that differ from the open intent. A `refused` record names the submitted head or the open intent superseded by resubmission.
-
-Ordinary reconciliation checks ancestry. Restart can also recover an orphan/unpushed refusal when first-parent main contains its original merge. The latest actual passing trial must retain the original head, base, policy, review and required proof bindings. Later main progress may advance the observed candidate base; recovery judges the preserved original flight, with unchanged current head, requirements and accepted approval, without retargeting proof.
-
-Recovery appends pushed/reconciled records without rerunning the trial, changing counts or pushing again. Other refusals stay held. A confirmed rejection preserves the original intent and trial, reports why, and excludes that head from fresh merges while unrelated candidates advance. Unknown replies remain errors.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` name no remote-side setup beyond the merge writer's deploy key. Candidates: object store, `Hotfix:`/base-repair first, then oldest item. `POST /api/work/:id/merge-record` records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409. A `refused` names the submitted head, or the open intent its resubmission superseded. Ordinary reconciliation retains its ancestry check. Restart also recovers an orphan/unpushed refusal when first-parent main holds its original merge: the latest actual passing trial must retain the original head, base, policy, review and required proof bindings. Later unrelated main progress may advance the observed candidate base: recovery judges the preserved original flight, with unchanged current head, requirements and accepted approval, without retargeting proof. Recovery appends pushed/reconciled records without rerunning the trial, changing counts or pushing again; other refusals remain held. A confirmed recovery rejection keeps the original intent and trial held and reports its reason; the cycle excludes that head from fresh merges while advancing unrelated candidates. Unknown replies remain errors.
 
 ## Rollout
 
