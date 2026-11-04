@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { buildPlan, coreEnv, materializeInstall, prepareInstall, type InstallSession } from '../src/install/index.js';
+import { buildPlan, coreEnv, installRequestFromArgs, materializeInstall, prepareInstall, type InstallSession } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
 import type { LocalRuntime } from '../src/install/local-runtime.js';
 import { REDACTED } from '../src/install/types.js';
@@ -86,6 +86,22 @@ async function snapshot(directory: string, skip: (path: string) => boolean = () 
   }
   return out;
 }
+
+test('unit:install-local-provider — remaining install flags produce a local plan without creating an installation', async () => {
+  const port = await freePort();
+  const { fixture, deps } = await localFixture(foreground(), port);
+  try {
+    const { request } = installRequestFromArgs(['--repo', 'owner/project', '--provider', 'local', '--plan', '--port', String(port), '--review-policy', 'agent']);
+    const session = await prepareInstall(fixture.root, request, deps, 'plan');
+    const plan = await buildPlan(session);
+    assert.equal(plan.provider, 'local');
+    assert.equal(session.reviewPolicy, 'agent');
+    const core = plan.actions.find(action => action.id === 'provider.env.core')!;
+    assert.equal(core.values!.find(value => value.name === 'PORT')?.value, String(port));
+    assert.ok(plan.actions.some(action => action.id === 'provider.provision.database'));
+    assert.deepEqual(await readdir(fixture.configHome), [], 'a plan creates nothing');
+  } finally { await fixture.cleanup(); }
+});
 
 test('unit:local-provider-plan — install --provider local --plan lists embedded Postgres and the Docker trial image, plans the cluster and the unit, and creates nothing', async () => {
   const { localUnit, runtimeCommand } = await local();

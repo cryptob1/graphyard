@@ -42,9 +42,12 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('github-setup is gone: the CLI registers no GitHub App command, and its help names none (GY-2010)', async () => {
+test('unit:cli — retired commands are absent from help; github-setup is gone: the CLI registers no GitHub App command, and its help names none (GY-2010)', async () => {
   const { stdout } = await exec(process.execPath, [launcher, '--help']);
   assert.doesNotMatch(stdout, /github-setup|update-permissions/, 'no App registration or permission migration command is offered');
+  assert.doesNotMatch(stdout, /master merge|master principals|scenario file\.json|--delivery local\|/, 'retired commands and delivery choices are absent');
+  assert.match(stdout, /scenarios\s+List/);
+  assert.match(stdout, /e2e sync/);
 });
 
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
@@ -686,7 +689,7 @@ test('master run executes the durable loop as a supervised process and master st
     await exec('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     await mkdir(join(root, '.graphyard'));
-    await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 5, deploymentShaField: 'commit' } }), { mode: 0o600 });
+    await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, workers: [], run: { intervalSeconds: 5, deploymentShaField: 'commit' } }), { mode: 0o600 });
     const env = { ...process.env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined };
 
     const first = JSON.parse((await exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env })).stdout);
@@ -707,10 +710,10 @@ test('master run executes the durable loop as a supervised process and master st
 
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '2'], { cwd: root, env }), /whole seconds between 5 and 900/);
     // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop, naming
-    // both commits. master merge runs no merge since GY-1235, so it only answers that the control plane merges.
+    // both commits.
     skewed = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), new RegExp(`server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \\(server merge protocol ${MERGE_PROTOCOL - 1}, CLI merge protocol ${MERGE_PROTOCOL}`));
-    assert.match((await exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env })).stdout, /The control plane merges/);
+    await assert.rejects(exec(process.execPath, [launcher, 'master', 'merge'], { cwd: root, env }), /There is no master merge/);
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
