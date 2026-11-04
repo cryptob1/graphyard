@@ -57,8 +57,8 @@ before(async () => {
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
-async function call(path: string, actor: Principal, data?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
+async function call(path: string, actor: Principal, data?: unknown, key = randomUUID()) {
+  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: data === undefined ? undefined : JSON.stringify(data) });
   return { status: response.status, body: await response.json() as any };
 }
 const imported = async (data: unknown, actor = producer) => { const result = await call('validation/import', actor, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
@@ -284,7 +284,43 @@ test('unit:validation-import-route — retired runner and attestor routes return
   for (const path of ['validation', 'validation/capacity', 'validation/definitions', 'validation/attempt/retired', 'validation/candidate/retired', 'validation/artifacts/retired/retired', 'validation/reuse', 'validation/replays', 'validation/analytics']) {
     assert.equal((await call(path, operator)).status, 404, path);
   }
-  for (const command of ['define', 'build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry', 'artifacts', 'artifacts/migrate', 'reuse', 'replay']) {
+  for (const command of ['build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry', 'artifacts', 'artifacts/migrate', 'reuse', 'replay']) {
     assert.equal((await call(`validation/${command}`, operator, {})).status, 404, command);
+  }
+});
+
+
+test('unit:validation-import-route — admins create and revise deployment definitions over HTTP after runner retirement', async () => {
+  const environment = { kind: 'environment', id: 'delivery-target', expectedRevision: 0, repository: 'owner/project', url: 'https://delivery.example', instance: 'production', immutable: false, services: ['api'], resources: ['production'] };
+  for (const actor of [worker, reader, producer, ungrantedProducer]) {
+    assert.equal((await call('validation/define', actor, environment)).status, 403, actor.id);
+  }
+  const key = randomUUID();
+  const created = await call('validation/define', operator, environment, key);
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.revision, 1);
+  assert.equal(created.body.createdBy, operator.id);
+  assert.deepEqual(await call('validation/define', operator, environment, key), created, 'retry replays the same definition');
+  assert.equal((await call('validation/define', operator, environment)).status, 409, 'stale revision is refused');
+  for (const role of ['builder', 'observer', 'promoter', 'rollback']) {
+    const registration = { kind: 'registration', id: `delivery-${role}`, expectedRevision: 0, principalId: ungrantedProducer.id, role, environment: { id: environment.id, revision: 1 }, adapterVersion: 'v1', proofs: [], enabled: true,
+      ...(role === 'builder' ? {} : { services: ['api'] }), ...(role === 'rollback' ? { rollback: { fencing: 'provider', automatic: false } } : {}) };
+    const registered = await call('validation/define', operator, registration);
+    assert.equal(registered.status, 200, JSON.stringify(registered.body));
+    assert.equal(registered.body.revision, 1);
+    const revoked = await call('validation/define', operator, { ...registration, expectedRevision: 1, enabled: false });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    assert.equal(revoked.body.revision, 2);
+    assert.equal(revoked.body.enabled, false);
+  }
+  const revised = await call('validation/define', operator, { ...environment, expectedRevision: 1, url: 'https://replacement.example' });
+  assert.equal(revised.status, 200, JSON.stringify(revised.body));
+  assert.equal(revised.body.revision, 2);
+  const history = await store.pool.query("SELECT actor, payload FROM events WHERE kind='validation.defined' ORDER BY seq");
+  assert.equal(history.rows.length, 10, 'creation, revisions and revocations append history; refused requests and retries do not');
+  assert.ok(history.rows.every(row => row.actor === operator.id));
+  assert.deepEqual(history.rows.at(-1).payload.definition, revised.body);
+  for (const kind of ['runner', 'suite', 'attestor']) {
+    assert.equal((await call('validation/define', operator, { ...environment, kind })).status, 400, kind);
   }
 });
