@@ -43,10 +43,6 @@
       },
       {
         "rule": "compose file",
-        "glob": "compose.yml"
-      },
-      {
-        "rule": "compose file",
         "glob": "compose.yaml"
       },
       {
@@ -63,15 +59,7 @@
       },
       {
         "rule": "merge path",
-        "glob": "src/merge-queue.ts"
-      },
-      {
-        "rule": "merge path",
         "glob": "src/merger-mode.ts"
-      },
-      {
-        "rule": "merge path",
-        "glob": "src/main-guard.ts"
       },
       {
         "rule": "merge path",
@@ -80,10 +68,6 @@
       {
         "rule": "merge writer",
         "glob": "src/merge-writer/"
-      },
-      {
-        "rule": "migrations",
-        "glob": "migrations/"
       }
     ]
   },

@@ -98,12 +98,11 @@ export function installRequestFromArgs(args: string[]) {
     provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
     domain: { type: 'string' }, workers: { type: 'string' }, image: { type: 'string' },
     'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
-    'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
-    'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
+    'server-name': { type: 'string' },
     'source-root': { type: 'string' },
-    'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
-    target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
-    'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'profiles-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
+    port: { type: 'string' },
+    local: { type: 'boolean' },
+    'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' },
     'observe-only': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
@@ -118,7 +117,7 @@ export function installRequestFromArgs(args: string[]) {
   }
   if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
   const reviewPolicy = values['review-policy'];
-  if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
+  if (reviewPolicy && reviewPolicy !== 'agent') throw new Error('Use --review-policy agent');
   // A count that silently became NaN would install a control plane with no worker principal
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
@@ -129,13 +128,8 @@ export function installRequestFromArgs(args: string[]) {
     ...(values.port ? { port: count('port', values.port) } : {}),
     ...(values.image ? { image: values.image } : {}),
     ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
-    ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
-    ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
-    ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
-    ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
-    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
-    ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
-    ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}),
+    ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'agent' } : {}),
+    ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
     ...(values['observe-only'] ? { observeOnly: true, herdr: 'skip' as const } : {}) };
   return { values, request };
 }
@@ -160,14 +154,13 @@ export function redeployArguments(record: InstallRecord, image: string, sourceRo
   const mode = !workers && !record.herdrInstance ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof]), ...(record.herdrInstance ? ['--herdr-instance'] : [])];
   return ['--repo', record.repository, '--provider', record.provider,
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
-    ...(record.deployment?.port ? ['--port', String(record.deployment.port)] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image,
+    ...(record.deployment?.port ? ['--port', String(record.deployment.port)] : []), '--review-policy', 'agent', ...mode, '--image', image,
     ...(sourceRoot ? ['--source-root', shellWord(sourceRoot)] : []), '--apply'];
 }
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
-  return [...['workers', 'producer-proof', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
-    ...(values.target || provider === 'host' ? ['--target'] : []),
+  return [...['workers', 'producer-proof', 'herdr-rebind', 'herdr-instance'].filter(given).map(name => `--${name}`),
     // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
     ...(provider === 'local' ? ['--provider local'] : [])];
 }
@@ -186,7 +179,7 @@ export interface InstallSession {
   /** True once every principal credential exists on disk, so fingerprints are real. */
   materialized: boolean;
   deps: Required<Pick<InstallDependencies, 'fetch' | 'now' | 'wait' | 'log'>> & InstallDependencies;
-  reviewPolicy: 'github' | 'agent'; requiredChecks: string[]; reviewCount: number;
+  reviewPolicy: 'agent';
   /**
    * The managed repository's generated-file manifest, derived once at preparation: the
    * assignment the installer sets beside GRAPHYARD_PRINCIPALS (null when the repository declares
@@ -316,7 +309,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
     const text = await readFile(resolve(root, repositoryConfigFile), 'utf8').catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
     repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
   } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
-  const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
+  const reviewPolicy = 'agent' as const;
   // A new install, or a retry of one whose record names the control-plane merger, proposes the local mode;
   // a committed policy is its own choice and ignores this.
   const merger = installMerger(record, !!rawInputs.observeOnly);
@@ -351,16 +344,11 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   };
   const materialized = tokens.size === principals.length && !!context.databasePassword;
   const adapter = dependencies.adapter ?? adapterFor(provider);
-  // Only a reviewed, committed split reaches branch protection; until `init --scan --apply` records
-  // one, protection keeps the checks discovery proposes. An explicit --required-check always wins.
-  const requiredChecks = inputs.requiredChecks?.length ? inputs.requiredChecks
-    : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
     mode, materialized, generatedFiles, repositoryPolicy,
     delivery: { ...delivery, merger },
-    reviewPolicy, requiredChecks,
-    reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
+    reviewPolicy,
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
   };
 }
@@ -896,7 +884,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const url = await adapter.url(context);
   log(`Service URL: ${url}`);
   const health = await waitForHealth(session, url);
-  if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect: graphyard install --provider ${context.provider} --repo ${session.inputs.repository} --logs`);
+  if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect the ${context.provider} provider logs.`);
 
   let record = session.record ?? emptyRecord(session, url);
   record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, herdrInstance: session.inputs.herdr && session.inputs.herdr !== 'skip' ? session.inputs.herdr === 'instance' : record.herdrInstance, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
@@ -915,7 +903,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const profiles = observeOnly ? observedProfiles() : await registerProfiles(session, url);
   record = installRecordSchema.parse({
     ...record,
-    deployment: { sshHost: null, sshUser: 'root', local: false, port: context.provider === 'compose' ? context.port : null, image: session.inputs.image ?? null },
+    deployment: { local: false, port: context.provider === 'compose' ? context.port : null, image: session.inputs.image ?? null },
     profiles: [
       ...(profiles.master.configured ? [{ name: 'master', principal: principalOfRole(session.principals, 'coordinator').id, kind: profiles.master.kind ?? 'unknown', role: 'master' as const }] : []),
       ...profiles.workers.map(worker => ({ name: worker.name, principal: worker.principal, kind: worker.kind, role: 'worker' as const })),
@@ -946,7 +934,7 @@ const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'
 
 /**
  * The exact command that resumes this install: every input it was given, rerun with --apply, so the
- * rerun targets the same server, SSH identity and spend consent (GY-1413). `installRequestFromArgs`
+ * rerun targets the same server and installation choices (GY-1413). `installRequestFromArgs`
  * parses it back to the same request; the record below makes a new input a compile error until it is
  * serialized here.
  */
@@ -961,8 +949,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     baseBranch: inputs.baseBranch !== 'main' ? value('base-branch', inputs.baseBranch) : [],
     domain: value('domain', inputs.domain), workers: value('workers', inputs.workers), port: value('port', inputs.port),
     producerProofs: values('producer-proof', inputs.producerProofs),
-    reviewPolicy: value('review-policy', inputs.reviewPolicy), reviewCount: value('review-count', inputs.reviewCount),
-    requiredChecks: values('required-check', inputs.requiredChecks),
+    reviewPolicy: value('review-policy', inputs.reviewPolicy),
     image: value('image', inputs.image), serverName: value('server-name', inputs.serverName),
     herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
   };

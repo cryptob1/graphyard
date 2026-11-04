@@ -28,14 +28,14 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   assert.deepEqual(plan.steps.map(step => step.id), order);
   assert.match(plan.steps[0].command, /git -C "\/opt\/graphyard" checkout --detach b{40}/);
   assert.match(plan.steps[1].command, /^npm ci/);
-  assert.match(plan.steps[3].command, /install --repo acme\/app --provider compose --base-branch main --server-name graphyard --review-policy github --workers 1 --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --source-root \/opt\/graphyard --plan && .*install --repo acme\/app .* --source-root \/opt\/graphyard --apply$/, 'the install preview runs before the apply, both building from the checkout the upgrade checked out (GY-2168)');
+  assert.match(plan.steps[3].command, /install --repo acme\/app --provider compose --base-branch main --server-name graphyard --review-policy agent --workers 1 --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --source-root \/opt\/graphyard --plan && .*install --repo acme\/app .* --source-root \/opt\/graphyard --apply$/, 'the install preview runs before the apply, both building from the checkout the upgrade checked out (GY-2168)');
   assert.match(plan.steps[4].command, /master restart$/);
   assert.match(plan.steps[5].command, /init --scan --url https:\/\/gy\.example && .*init --scan --apply --url https:\/\/gy\.example$/, 'the scan refreshes the stored proposal before it is applied');
   assert.equal(plan.rollback, 'graphyard upgrade --to 2026.10.16');
   assert.match(renderPlan(plan), /^upgrade 2026\.10\.16 -> 2026\.10\.17/);
   assert.match(upgradePlan(inputs({ current: { version: 'unreleased aaaaaaaaaaaa', revision: 'a'.repeat(40), released: false } })).rollback, /checkout --detach a{40}/, 'an unreleased previous rolls back by commit');
-  assert.deepEqual(redeployArguments({ ...record, deployment: { sshHost: null, sshUser: 'root', local: false, port: 4317, image: null } }, 'img').slice(0, 4), ['--repo', 'acme/app', '--provider', 'compose']);
-  assert.ok(redeployArguments({ ...record, deployment: { sshHost: null, sshUser: 'root', local: false, port: 4317, image: null } }, 'img').join(' ').includes('--port 4317'), 'the recorded port is kept');
+  assert.deepEqual(redeployArguments({ ...record, deployment: { local: false, port: 4317, image: null } }, 'img').slice(0, 4), ['--repo', 'acme/app', '--provider', 'compose']);
+  assert.ok(redeployArguments({ ...record, deployment: { local: false, port: 4317, image: null } }, 'img').join(' ').includes('--port 4317'), 'the recorded port is kept');
   // The redeploy is a full apply, so it replans exactly the recorded roster and mode: extra workers and the CI producer's grants stay
   // authorized, a principal added by graphyard principal add is reconciled in by install itself, and nothing reverts to defaults.
   const fleet = redeployArguments({ ...record, reviewPolicy: 'agent', noGithubApp: true, principals: [...record.principals, principal('worker-2', 'worker'), principal('worker-3', 'worker'),
