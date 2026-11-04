@@ -11,6 +11,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { harnessDecision } from '../src/harness.js';
+import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { blockerCommands, branchRestoration, sessionHarnessPlan, unrunnableRemedies, workerHarnessPlan } from '../src/master.js';
 import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -75,7 +76,7 @@ test('unit:worker-may-force-with-lease-its-own-branch — the worker restores it
   assert.equal(decision(`${cli} restore-branch GY-9 4`, session), 'allow');
   for (const command of [`git push --force origin ${branch}`, 'git push --force-with-lease origin graphyard/gy-7-1', 'git push origin :graphyard/gy-7-1']) assert.equal(decision(command, session), 'deny', command);
   // The restoration the rework reason carries is permitted command by command, with no human shell.
-  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, pr: 31, reviewedHead: 'f'.repeat(40) });
+  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, reviewedHead: 'f'.repeat(40) });
   assert.deepEqual(steps.map(step => decision(step)), steps.map(() => 'allow'), steps.join('\n'));
   assert.ok(steps.includes(`${cli} restore-branch GY-9 4`));
   assert.ok(!steps.some(step => /^git push/.test(step)), 'no raw push in the restoration');
@@ -130,7 +131,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
     return { candidate: { sha: head, baseSha: base, pr, branch: itemBranch, author: worker.id }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
       files: scopeFiles.map(file => file.path), scopeFiles, baseTip: base, at: new Date().toISOString() } satisfies Observation;
   };
-  engine.submissionObserver = observeOrigin;
+  // complete's head is read from the origin's own object store, which restore-branch just pushed it to.
+  engine.gitRunner = gitRunnerFor(origin); engine.baseBranch = 'main';
   // The provider observation the control plane's sync job records for the submitted head.
   const observed = async () => { const latest = (await store.list()).find(item => item.id === work.id)!; return engine.observe(latest.id, latest.revision, await observeOrigin()); };
 
@@ -194,7 +196,7 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
 
   // The restoration, exactly as the rework carries it: every step permitted by the worker's own
   // harness, run non-interactively in its worktree against the live control plane.
-  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, pr, reviewedHead: reviewed });
+  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, reviewedHead: reviewed });
   const outputs: string[] = [];
   for (const step of steps) {
     assert.equal(harnessDecision(harness, step).decision, 'allow', `${step} is permitted to the worker session`);
@@ -211,7 +213,6 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   work = (await store.list()).find(item => item.id === work.id)!;
   assert.equal(work.submission?.epoch, 2);
   assert.equal(work.lease, null, 'complete ended the lease');
-  work = await observed();
   const head = git(seed, 'ls-remote', origin, `refs/heads/${itemBranch}`).split('\t')[0];
   assert.equal(work.candidate?.sha, head);
   assert.equal(work.candidate?.baseSha, base);

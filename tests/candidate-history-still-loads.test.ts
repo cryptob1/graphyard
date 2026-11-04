@@ -38,7 +38,7 @@ test('unit:candidate-history-still-loads — a cursor carrying the removed candi
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/candidate_history_test`); await store.init();
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard-coordinator', 'release.candidate.promotion',
     JSON.stringify({ candidate: '20261017T235000Z', promotion: { environment: 'production', releaseId: 'release-1', sourceSha: sha, artifact: `sha256:${'c'.repeat(64)}`, at: '2026-10-17T23:58:00.000Z', by: 'graphyard-coordinator' } })]);
-  const engine = new Engine(store, 120, 'owner/history'); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, 'owner/history');
   http = server(engine, [credential]);
   await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
   const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/delivery`, { headers: { Authorization: `Bearer ${credential.token}` } });

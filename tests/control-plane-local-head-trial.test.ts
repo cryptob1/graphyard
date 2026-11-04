@@ -74,7 +74,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('control-plane-local-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('local_head_trial');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/local_head_trial`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null
+  engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
@@ -118,12 +118,12 @@ test('integration:control-plane-local-head-trial — a head present only in the 
   const trial = async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => {
     const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] };
     trials.push(input);
-    return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) };
+    return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
   const records: { kind: string }[] = [];
   const reads = mergeWriterReads(fixtureConfig, checkout, writerRun, {
-    base: worktreeBase, merger: async () => 'control-plane', trial,
+    base: worktreeBase,  trial,
     record: async (_work, event) => { records.push({ kind: event.kind }); return {}; },
   });
 

@@ -61,7 +61,7 @@ const run: ChildRun = async (command, args, options) => {
 
 async function merge(repo: Awaited<ReturnType<typeof repository>>, type: Work['type'], proofs = [proof]) {
   const events: MergeRecordEvent[] = [];
-  const reads = mergeWriterReads(config, repo.root, run, { base: await temporaryDirectory('bug-proof-trials', tmpdir()), record: async () => {}, merger: async () => 'control-plane', environment: { PATH: process.env.PATH! } });
+  const reads = mergeWriterReads(config, repo.root, run, { base: await temporaryDirectory('bug-proof-trials', tmpdir()), record: async () => {},  environment: { PATH: process.env.PATH! } });
   const ports: MergePorts = { baseBranch: 'main', retrials: 0, now: () => Date.parse('2030-01-01T00:00:00Z'), fetch: async () => repo.base, merge: reads.merge, trial: reads.trial,
     push: async () => 'pushed', holds: async () => false, record: async (_work, event) => { events.push(event); } };
   const work = { id: 'w-2984', key: 'GY-2984', type, title: 'fix', candidate: { sha: repo.head, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-2984-1', author: 'worker' },

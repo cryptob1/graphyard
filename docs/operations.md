@@ -1,14 +1,13 @@
-<!-- page: Operate Graphyard | 8 | checklist, incidents. -->
+<!-- page: Operate Graphyard | 8 | diagnose and recover -->
 # Operations and recovery
 
 ## Daily checklist
 
-- `/healthz` at expected `commit` (another release refuses: `graphyard upgrade`); `/api/status`: no job errors.
-- `master status`: serving commit at main's tip, `loop.state` `running`; recent `graphyard db backup`.
+Check `/healthz` for the expected commit, `/api/status` for job errors and `master status` for item holds, serving commit and main. Keep a recent `db backup`. Running cycles alone do not show delivery.
 
 ## Incident decision tree
 
-- **Item not moving**: fix the refusal's cause. Never weaken requirements. Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework). A failed producer-runnable manual proof returns to worker.
+Run `diagnose GY-N`; fix the named cause with requirements intact. Use lease recovery for expired workers and rework for failed implementations or producer-runnable manual proofs. The master handles routine recovery.
 
 ## Recovery recipes
 
@@ -18,74 +17,72 @@ graphyard unblock GY-N "reason"
 systemctl --user restart graphyard-master-OWNER-NAME
 ```
 
-Never attest a stop you have not confirmed.
+Confirm the worker stopped before attesting it. Use the recorded unit name; legacy units omit the repository suffix.
 
 ## Safety facts that never change
 
-- Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
-- Only the merge writer moves main, on passing gates: no bypass, no lifecycle-state endpoint.
-- History is append-only; rows past retention get compacted.
+Workers hold no admin/coordinator/producer credentials. AI cannot hold admin. Only the merge writer moves main through gates. Mutations append history transactionally; retention compacts old rows. No endpoint sets lifecycle state.
 
 ## Deeper references
 
-[The coordination loop](#master-coordination-loop), [bootstrap mode](#bootstrap-mode-for-a-self-proving-change).
+[Loop](#master-coordination-loop), [lost worker](#lost-worker-before-submission), [delivery](delivery.md), [deployment recovery](deployment.md#backup-upgrade-rollback).
 
 ## Resources and disk
 
-The loop removes an assignment worktree (`git worktree remove`, never forced) once its attempt ends; a settled session removes its checkout, the merge writer its trial checkout. ENOSPC/EDQUOT names the path.
+Ended assignments use `git worktree remove` without force. Sessions and trials remove their own checkouts. ENOSPC/EDQUOT names the storage to free or expand.
 
 ## Master coordination loop
 
-Snapshot, close, dispatch, merge writer, persist ([loop](master-agent.md#the-loop)); a step that throws is one log line and runs again next cycle. A failed deploy is `serving.failedDeploy` in `master status`.
+See the [five steps and wake limits](master-agent.md#the-loop). Systemd detects incomplete cycles; the AI master diagnoses delivery failures. The separate deploy supervisor reports `serving.failedDeploy`.
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`, not another lease period); the attempt ends and the item is claimable again; higher-epoch claim keeps worktree.
+A lease lasts 120 seconds after heartbeat; control-plane stall uses the 30-second `stallRenewalWindowMs`. Lapse ends the attempt. A higher-epoch claim receives preserved work; the old worker stops immediately.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` closes that head's required checks.
+`revoke GY-N revoke.json` withdraws the candidate's records.
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](#recovery-recipes) `--previous-worker-stopped`; next resubmits.
+Stop the worker, then use [rework](#recovery-recipes). The successor submits a new head.
 
 ## Proof authority
 
-A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer|coordinator|admin --proof PATTERN`); admins included, nothing is granted at runtime.
+Roster `--proof` patterns determine authority, including for admins. `principal add ID --role producer|coordinator|admin --proof PATTERN` records grants. Implementers never provide their own trusted acceptance evidence.
 
 ## Credentials
 
-Operator agents hold only listed capabilities.
+Rotate `GRAPHYARD_PRINCIPALS`; keep secrets outside Git. Operator agents have only listed capabilities.
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; rescans report drift, never repair.
+`init --scan` writes `.graphyard/setup-proposal.json`. Rescans report drift without repairing it.
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8) pace per token. Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables).
+`GRAPHYARD_RECONCILE_BATCH_MS` defaults to 250; observation concurrency defaults to 8 per token.
 
 ### Concurrent reconciliation
 
-Reconcile evaluates changed and due rows, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) running full.
+Changed/due rows reconcile incrementally. Full runs use max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), three times duration).
 
 ## Observation
 
-Graphyard observes no remote thread, check run or commit status; no request budget, webhook or observation cadence; every candidate is observed from the shared checkout.
+Candidates come from the shared checkout, not remote checks, threads or webhooks. Serving comes from configured deployment/app records.
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders self-prove one change.
+Explicit `policy:bootstrap` holders may self-prove one change; ordinary workers receive no such credential.
 
 ## Control-plane resources
 
-`/healthz` fails writes refused or the database at `GRAPHYARD_DATABASE_MAX_BYTES`; grow it.
+`/healthz` fails on refused writes or `GRAPHYARD_DATABASE_MAX_BYTES`; repair storage.
 
 ## Database crash
 
-The server outlives a dropped Postgres connection (one log line; the next request reconnects) and waits for a database still starting or recovering. On a compose install, a loop that cannot reach the control plane for 2 minutes runs `docker compose up -d` in the install's compose directory, at most once per 5 minutes, and `master status` shows `controlPlane`: unreachable since when, the server's last exit and the disk space free for Docker's data. Free the disk if that is the cause.
+Dropped connections reconnect on the next request. After two minutes unreachable, a Compose loop runs `docker compose up -d`, at most every five minutes. Status → `controlPlane` reports outage, server exit and Docker free space.
 
 ## Withdrawal and credentials
 
-Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. Only its reconciled ledger record marks an item Done; an observation alone does not record delivery. A delivered item with a failed smoke proof stays Done.
+The [merge writer](delivery-redesign.md#merge-writer) pushes main itself. Only its reconciled ledger record marks an item Done; an observation alone does not record delivery. Failed smoke proofs leave delivered items Done with failure visible.

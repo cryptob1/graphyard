@@ -9,12 +9,14 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
-import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
+import type { TrialE2eCase } from './e2e-trial.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
-import { bwrapOnPath, credentialMaskWords } from '../master/confinement.js';
+import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
+import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
+import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -114,7 +116,7 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
  * temporary-directory overrides (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from
  * environment.d). runTrial sets its own in their place (`trialTemporaryRoot`).
  */
-export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
+export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'TMPDIR', 'TMP', 'TEMP'] as const;
 /**
  * Whether a variable name is credential-bearing and must not reach the trial child (GY-1548): the
  * named helpers above, plus any name carrying a token, secret, password, private key, API key,
@@ -126,20 +128,22 @@ export const credentialTrialVariable = (name: string) =>
   || /(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)/i.test(name);
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
+  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR|LC)_/.test(name) && name !== 'LANG' && !credentialTrialVariable(name)));
   // Use the running Node installation before host version-manager shims: the trial's empty
   // home intentionally cannot supply the host's mise trust/configuration to those shims.
-  return { ...kept, PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // The private image supplies C.UTF-8, not the service manager's host locales.
+  // Normalize every inherited category before builds, tests and E2E start.
+  return { ...kept, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
 /**
- * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
- * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
- * coordinator credential through HOME or XDG. Only the host's npm cache and Playwright browsers are
- * still found where the host keeps them, along with mise's toolchain directories.
+ * GY-2997: the trial child's home and caches belong to its allocation. The
+ * installed Chromium lives in the read-only image, while its profiles use scratch. Preserve
+ * explicit host mise resolution for launcher tooling; candidate commands use the
+ * private container's toolchain without mounting the host home.
  */
-export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const shared: Record<string, string> = host.HOME ? { npm_config_cache: host.npm_config_cache ?? join(host.HOME, '.npm'), PLAYWRIGHT_BROWSERS_PATH: host.PLAYWRIGHT_BROWSERS_PATH ?? join(host.HOME, '.cache', 'ms-playwright') } : {};
+export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env, installedBrowsers = existsSync('/etc/graphyard-trial')): Record<string, string> {
+  const shared: Record<string, string> = {};
   for (const [kind, base, fallback] of [
     ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
     ['DATA', 'XDG_DATA_HOME', '.local/share'], ['STATE', 'XDG_STATE_HOME', '.local/state'],
@@ -149,24 +153,30 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
     if (host[name] !== undefined) shared[name] = host[name];
     else if (directory) shared[name] = join(directory, 'mise');
   }
-  return { ...shared, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: installedBrowsers ? '/opt/graphyard-browsers' : join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
   [...new Set([configHome(environment.GRAPHYARD_CONFIG_HOME), deployKeyFile, environment.XDG_RUNTIME_DIR, uid === undefined ? undefined : `/run/user/${uid}`].filter((path): path is string => !!path && isAbsolute(path)))];
 /**
- * GY-2997: the bubblewrap words a trial child runs under: the host as it is, with each hidden path's
- * directory replaced by an empty tmpfs (`credentialMaskWords`), and the trial's own directories that
- * lie under a mask bound back on top so the child still reaches its checkout. The child sees only
+ * The bubblewrap words every trial child runs under: a read-only host, private devices and
+ * scratch, host launch sockets hidden, credential masks, then only the trial's allocated
+ * directories bound writable. The child sees only
  * its own processes and dies with the runner, so a killed trial leaves nothing behind.
  */
-export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap'): string[] {
+export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap', readable: readonly string[] = [], environment: NodeJS.ProcessEnv = process.env): string[] {
   const masks = credentialMaskWords({ configHome: '', extraPaths: hidden, own: [], cli: [] }, []);
-  const masked = masks.filter((_, index) => masks[index - 1] === '--tmpfs');
-  const inside = (path: string, directory: string) => { const from = relative(directory, path); return from !== '' && !from.startsWith('..') && !isAbsolute(from); };
-  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))].filter(path => masked.some(directory => inside(path, directory)));
+  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))];
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
-  return [bwrap, '--die-with-parent', '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', ...binds.flatMap(path => ['--bind', path, path]), '--'];
+  const scratch = binds.at(-1);
+  if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
+  // Keep the short allocated temporary path in the child: nested trials and cleanup
+  // must refer to their own allocation, including through the namespace aliases.
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment, binds),
+    ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
+    ...binds.flatMap(path => ['--bind', path, path]),
+    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--',
+    ...socketConfinementWords(binds)];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
@@ -629,12 +639,34 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
   return outputs.map(output => {
     if (output.length <= share) return output;
     const line = output.slice(0, output.indexOf('\n') + 1), command = line.length < share / 2 ? line : '';
-    const summary = failingSummary(output), exit = summary ? /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1] : undefined;
+    const summary = failingSummary(output), exit = /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1];
     const end = exit ? `\n${exit}` : '', room = Math.max(0, share - command.length - cut.length - end.length);
     if (summary && summary.length <= room) return `${command}${cut}${summary}${end}`;
-    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
-    const kept = (summary ?? output).slice(-room), whole = kept.slice(kept.indexOf('\n') + 1), entry = summary ? whole.search(/^test at /m) : -1;
-    return `${command}${cut}${entry > 0 ? whole.slice(entry) : whole}${end}`;
+    // Keep each test's name and first assertion/child error, before its long stack.
+    // Taking the end of the summary loses exactly the asset-startup diagnosis we need.
+    if (summary) {
+      const entries = summary.replace(ansiEscape, '').split(/(?=^test at )/m).filter(entry => /^test at /m.test(entry));
+      const perEntry = Math.floor((room - Math.max(0, entries.length - 1)) / Math.max(1, entries.length));
+      return `${command}${cut}${entries.map(entry => {
+        // node's spec reporter prints ChildProcessError's entire invocation before its
+        // stderr, then repeats the arguments in inspected properties after the stack.
+        // Read the stderr property independently so inline scripts cannot consume the share.
+        const childAt = entry.search(/\n  (?:ChildProcessError|Error \[ChildProcessError\]):/);
+        const stderr = /^    stderr: (?!'',?$)([\s\S]*?)(?=^    \w+:|^  }\s*$)/m.exec(entry)?.[1];
+        const useful = childAt >= 0 && stderr
+          ? `${entry.slice(0, childAt)}\n  ChildProcessError stderr: ${stderr.trim()}`
+          : entry;
+        return useful.slice(0, Math.max(0, perEntry)).trimEnd();
+      }).join('\n')}${end}`;
+    }
+    const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
+    if (errorAt >= 0) {
+      const first = output.slice(errorAt, errorAt + Math.floor(room / 2));
+      const last = output.slice(-Math.max(0, room - first.length - 1));
+      return `${command}${cut}${first}\n${last}`;
+    }
+    const kept = output.slice(-room), whole = kept.slice(kept.indexOf('\n') + 1);
+    return `${command}${cut}${whole}${end}`;
   }).join('\n').slice(-length);
 }
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -774,7 +806,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
-  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let env: Record<string, string>, wrapper: string[];
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -786,22 +819,21 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
+    // HOME stays beside the short tempdir: nested tests derive socket paths from it.
+    home = await mkdtemp(join(root, 'gy-h')); await writeTempOwner(home);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
+    assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
+    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
   }
   catch (error) {
-    for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
+    for (const made of [temporary, home, place]) if (made) await clear(made).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
-  // Keep HOME beside the trial's short scratch paths: session-directory homes make
-  // nested fixtures and Herdr's Unix sockets exceed their path bounds.
-  const home = join(temporary!, 'home');
-  await mkdir(home);
-  const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-  const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-  const wrapper = input.hidden?.length ? trialConfinement(input.hidden, [input.root, checkout.directory, place, temporary]) : undefined;
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];
@@ -866,7 +898,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
-    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
+    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
     const closed = enter();
     const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
@@ -944,13 +976,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
-        // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
+        // GY-2092: dashboard changes run the Playwright suite with the image's pinned Chromium.
+        // The image is read-only; profiles and caches belong to this allocation.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           enterStep('tests: test:browser');
-          const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
-          if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
           if (hostEnded(browser)) throw runnerFailure('tests', browser);
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
@@ -960,9 +990,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
-        const ran = await runTrialE2eCases({
+        const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-          scratch: temporary ?? checkout.directory, budgetMs: remaining(), holds, log: line => log.push(line),
+          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
+          scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
         });
         // Bounded so the trial record the merge writer posts stays within its schema.
         e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
@@ -1083,7 +1114,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
   const failures: { directory: string; cause: unknown }[] = [];
-  for (const directory of [temporary, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
+  for (const directory of [temporary, home!, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
   await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(cause => { failures.push({ directory: checkout.directory, cause }); });
   const failure = failures[0];
   if (failure) {

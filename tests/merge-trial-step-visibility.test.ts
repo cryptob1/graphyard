@@ -86,7 +86,7 @@ function harness(): StepHarness {
       made.report = step => onStep?.(step);
       await new Promise<void>(resolve => { made.finish = () => settle?.(); settle = resolve; });
       if (made.trialError) throw made.trialError;
-      return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: {} };
+      return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
     push: async () => 'pushed', holds: async () => false,
     record: async (target, event) => {
@@ -99,7 +99,7 @@ function harness(): StepHarness {
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const effects = { mergeWriter: reads, persist: async () => {} };
   made.advance = ms => { clock += ms; };
   made.step = async () => { clock += 1000; await mergeWriterStep({ state: made.state, effects, now: () => clock, snapshot: { work }, performed: [] } as unknown as Cycle); };
@@ -218,7 +218,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
         root: repo.root, base: managedBase, mergeSha, changedFiles: files, timeoutMs: 120_000, key: picked.key, run,
         environment: { PATH: process.env.PATH! }, temporaryRoots: [temporary], checkoutRoots: [trials], retries: 0, ...(onStep ? { onStep } : {}),
       });
-      return { ...verdict, files: [...files], proofs: {} };
+      return { ...verdict, files: [...files], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
     push: async () => 'pushed', holds: candidate => firstParentHolds(repo.git, 'refs/heads/main', candidate),
     record: async (target, event) => {
@@ -232,7 +232,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const cycle = { state, effects: { mergeWriter: reads, persist: async () => {} }, now: () => Date.now(), snapshot: { work }, performed: [] } as unknown as Cycle;
   await mergeWriterStep(cycle);
   await mergeWriterIdle(state);

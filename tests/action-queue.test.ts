@@ -240,13 +240,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(merging.wait?.kind, 'session'); assert.equal(merging.wait?.on, 'merge-writer');
   assert.match(merging.wait!.detail, new RegExp(`queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)}`));
 
-  // The API exposes both the per-item action and the whole queue.
-  const response = await fetch(`${url}/api/actions`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } });
-  const body = await response.json();
-  assert.equal(response.status, 200);
-  assert.deepEqual(body.kinds, [...nextActionKinds]);
-  assert.deepEqual(body.mechanical, [...mechanicalActionKinds]);
-  assert.equal(body.nextActions.some((entry: any) => entry.key === item.key), false, 'a candidate GitHub merges names no action');
+  // The work snapshot carries each item's computed action.
   const snapshot = await (await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } })).json();
   assert.ok((snapshot.work as Work[]).every(entry => 'nextAction' in entry), 'every item carries its computed action');
 
@@ -819,3 +813,16 @@ test('integration:typed-next-action — the gate evaluator and the action comput
   assert.match(own!.needsHuman!.resolve!, /graphyard master requirements GY-2/);
 });
 
+
+
+test('unit:board-api — unused reads return 404 and still require authentication', async () => {
+  for (const path of [
+    '/api/events/stats', '/api/actions', '/api/analytics/attribution',
+    '/api/analytics/attribution/drilldown', '/api/attribution/manifest/example/1',
+    '/api/attribution/work/00000000-0000-4000-8000-000000000001',
+    '/api/validation/import/seal-authority', '/api/agent-registry/connect/hosts',
+  ]) {
+    assert.equal((await fetch(`${url}${path}`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } })).status, 404, path);
+    assert.equal((await fetch(`${url}${path}`)).status, 401, path);
+  }
+});

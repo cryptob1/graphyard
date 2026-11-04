@@ -46,7 +46,7 @@ export async function registerLocalProfiles(request: ProfileRequest): Promise<Pr
   }
 
   if (request.reviewers.length) {
-    // Reviewer profiles carry no credential: they name a reviewer App and its runtime.
+    // Reviewer profiles carry no credential: the control plane binds each launched review.
     await writeFile(resolve(request.installDirectory, 'reviewer-profiles.json'), `${JSON.stringify(request.reviewers, null, 2)}\n`, { mode: 0o600 });
   }
   return registration;

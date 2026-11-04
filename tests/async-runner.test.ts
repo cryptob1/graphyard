@@ -74,7 +74,7 @@ async function slowHerdr(directory: string, startDelayMs: number) {
       const deadline = Date.now() + ${startDelayMs};
       const wait = () => { if (existsSync(${JSON.stringify(release)}) || Date.now() >= deadline) answer({ result: { ran: true } }); else setTimeout(wait, 25); };
       wait();
-    } else if (args[0] === 'pane' && args[1] === 'read') process.stdout.write('claude ready\\n');
+    } else if (args[0] === 'pane' && args[1] === 'read') process.stdout.write('Claude Code ready\\n');
     else if (args[0] === 'agent' && args[1] === 'get') answer({ result: { agent: { agent: 'claude', agent_status: 'idle', pane_id: args[2] } } });
     else if (args[0] === 'agent' && args[1] === 'rename') answer({ result: { agent: { agent: 'claude', agent_status: 'idle', name: args[3] } } });
     else if (args[0] === 'agent' && args[1] === 'list') answer({ result: { agents: [{ name: 'someone-else', pane_id: 'pane-9', agent_status: 'working' }] } });

@@ -419,7 +419,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const start = expandTypedCommand(masterCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.equal(start.kind, 'codex'); assert.deepEqual(start.args.slice(0, 4), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
     assert.ok(start.args.includes('sandbox_workspace_write.network_access=true') && start.args.includes(join(credentialDirectory, 'masters')));
-    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'run', 'get', 'read', 'rename'], 'typed, seen ready with no consent prompt on screen (GY-130), named; nothing pasted'); assert.match(start.args.at(-1)!, /dedicated Graphyard master agent/);
+    assert.deepEqual(masterCalls.map(args => args[1]), ['create', 'run', 'get', 'read', 'process-info', 'rename'], 'typed, seen ready with no consent prompt on screen and foreground inspected (GY-130), named; nothing pasted'); assert.match(start.args.at(-1)!, /dedicated Graphyard master agent/);
 
     // The master harness covers everything the master owns, and still no merge path or credential
     // read: master.json is read, never edited — its owned settings change through `master config` —
@@ -449,7 +449,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.deepEqual(tuned.changed, ['intervalSeconds', 'deploymentUrl', 'quotaCeilingPercent', 'accounts:review-oc']);
     assert.equal(after.run.intervalSeconds, 25); assert.equal(after.run.quotaCeilingPercent, 90);
     assert.equal(after.run.deploymentUrl, 'https://graphyard.example/api/health');
-    assert.equal(after.autoMerge, false, 'an autoMerge flip never rides the owned fields');
+    assert.equal('autoMerge' in after, false, 'the retired setting is dropped');
     assert.equal(after.credentialFile, before.credentialFile, 'credential paths never move through the owned fields');
     assert.deepEqual(after.reviewers.find(profile => profile.name === 'review-oc')!.accounts, ['opencode-a']);
     await assert.rejects(saveMasterSettings(root, { intervalSeconds: null }), /can only be set, never cleared/);

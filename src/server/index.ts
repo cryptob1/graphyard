@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
 import { artifactCapacityFromEnv } from '../artifacts.js';
-import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule } from './routes.js';
+import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule } from './routes.js';
 import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, operatorAgentRouteGuard, operatorVisible, type ArtifactOptions, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
@@ -14,9 +14,7 @@ import { delegationRoutes } from './routes/delegation.js';
 import { validationRoutes } from './routes/validation.js';
 import { deliveryRoutes } from './routes/delivery.js';
 import { scenarioRoutes } from './routes/scenarios.js';
-import { attributionRoutes } from './routes/attribution.js';
 import { statusRoutes } from './routes/status.js';
-import { mergeSettingsRoutes } from './routes/merge-settings.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
@@ -27,15 +25,14 @@ export { assembleServices } from './auth.js';
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes];
 /**
- * Every authenticated `/api/` route, in matching order. A resource adds its module here or in
- * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their
- * callers themselves.
+ * Every authenticated `/api/` route, in matching order. A resource adds its module here;
+ * modules ahead of the operator-agent guard authorize their callers themselves.
  */
-export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
+export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, attributionRoutes, scenarioRoutes, actionRoutes, statusRoutes, mergeSettingsRoutes, workRoutes,
-]);
+  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes,
+];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
   const chunks: Buffer[] = []; let size = 0;

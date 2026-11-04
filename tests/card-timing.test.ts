@@ -1,3 +1,4 @@
+import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -229,9 +230,9 @@ test('integration:status-duration-tracks-real-progress — a retry loop, a heart
   const climbing: number[] = [];
   for (let round = 0; round < 3; round++) {
     await store.pool.query("UPDATE work_items SET document=(document #- '{actionQueue,actions,0,retryAt}') WHERE id=$1", [item.id]);
-    const claimed = await engine.claimNextAction(executor, { host: 'card-timing-host' }, id());
+    const claimed = await claimFixture(store, executor, { host: 'card-timing-host' });
     assert.equal(claimed.action?.kind, 'dispatch', `round ${round} offers the dispatch again`);
-    const settled = await engine.settleClaimedAction(executor, claimed.action!.id, { result: 'failed', reason: 'no worker runtime answered' }, id());
+    const settled = await settleFixture(store, executor, claimed.action!.id, { result: 'failed', reason: 'no worker runtime answered' });
     assert.equal(settled.action.result, 'failed');
     assert.equal(settled.action.attempts, round + 1, 'the same action, retried');
     item = (await store.list()).find(row => row.id === item.id)!;

@@ -1,11 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server as controlPlane } from '../src/server.js';
@@ -35,45 +37,11 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // stored with PR observations still loads; progression is the merge writer's trial and push.
 
 const root = new URL('../', import.meta.url);
-const gone = [
-  'src/github.ts',
-  'src/github-cache.ts',
-  'src/github-response-cache.ts',
-  'src/github-charges.ts',
-  'src/github-permissions.ts',
-  'src/github-setup.ts',
-  'src/gh-pause.ts',
-  'src/cli/github-budget-attention.ts',
-  'src/server/routes/github.ts',
-  'src/server/push-credential.ts',
-  'src/main-guard.ts',
-  'src/cli/onboard.ts',
-  'src/model/import-plan.ts',
-  'src/tip-cleanup.ts',
-] as const;
-
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const clock = Date.parse('2030-05-01T00:00:00Z');
 const now = new Date(clock), at = now.toISOString();
 
-async function sourceFiles(directory: URL): Promise<string[]> {
-  return (await Promise.all((await readdir(directory, { withFileTypes: true })).map(entry => entry.isDirectory()
-    ? sourceFiles(new URL(`${entry.name}/`, directory))
-    : Promise.resolve(entry.name.endsWith('.ts') ? [new URL(entry.name, directory).pathname] : [])))).flat();
-}
-
-test('unit:github-client-removed — the GitHub API client modules are gone, no src file calls api.github.com or mints an App installation token, and the webhook route answers 404', async () => {
-  for (const path of gone) assert.equal(existsSync(new URL(path, root)), false, `${path} is deleted`);
-
-  for (const file of await sourceFiles(new URL('src/', root))) {
-    const text = await readFile(file, 'utf8');
-    assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
-    assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
-    assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
-    // Delegating the request to a subprocess still calls api.github.com: no file runs `gh api` (an
-    // argument list that opens with 'api'), whatever the endpoint, GraphQL included.
-    assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through \`gh api\``);
-  }
+test('unit:legacy-review-and-webhook-routes — legacy reviews cancel without GitHub and retired routes refuse requests', async () => {
   const { installRequestFromArgs } = await import('../src/install/index.js');
   assert.throws(() => installRequestFromArgs(['--repo', 'owner/project', '--restore-protection', '--plan']), /Unknown option '--restore-protection'/);
   // A pending pull-request reviewer session from before the control-plane merger settles cancelled
@@ -153,7 +121,6 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -216,7 +183,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   const trials: string[] = [];
   const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => {
     trials.push(input.mergeSha);
-    return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 5, logTail: 'ok', files: ['tests/a.test.ts'], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) };
+    return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 5, logTail: 'ok', files: ['tests/a.test.ts'], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
   const record: MergePorts['record'] = async (item, event) => {
     const response = await request(coordinator, `work/${item.id}/merge-record`, event, mergeRecordKey(item, event));
@@ -224,7 +191,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
     return response.body;
   };
   const master = config(), state = emptyDaemonState(master);
-  const reads = mergeWriterReads(master, checkout, run, { base: managed, record, merger: async () => 'control-plane', trial });
+  const reads = mergeWriterReads(master, checkout, run, { base: managed, record,  trial });
   const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   const realFetch = globalThis.fetch, requested: string[] = [];
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
@@ -266,8 +233,9 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   for (const text of [...actions, summary]) assert.doesNotMatch(text, /Main guard|main guard|GitHub (request )?budget|githubBudget/, `no Main guard or GitHub budget line: ${text.slice(0, 300)}`);
   const status = await request(coordinator, 'status');
   assert.equal(status.status, 200);
-  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions', 'reviewerApps']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
-  assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
+  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions', 'reviewerApps', 'mergeWriter']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
+  const delivery = renderToStaticMarkup(createElement(DeliveryDefaults, { status: status.body }));
+  assert.match(delivery, /<dt>Merge writer<\/dt><dd>The control plane \(GitHub only a mirror\)<\/dd>/, 'the delivery view identifies the fixed merge writer without a status switch');
   for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });
 
@@ -288,12 +256,11 @@ async function worktree(id: string, epoch: number): Promise<{ path: string; bran
   return printed[0];
 }
 
-test('unit:shadow-gate-removed — the shadow gate is gone: its modules and routes are deleted, the loop runs no shadow trial step and touches no shadow port, and its report leaves the run summary', { timeout: 120_000 }, async () => {
-  for (const path of ['src/daemon/cycle-shadow.ts', 'src/merge-writer/shadow.ts', 'src/server/shadow-verdict.ts']) assert.equal(existsSync(new URL(path, root)), false, `${path} is deleted`);
+test('unit:merge-writer-idle-cycle — an empty board runs no trial and retired shadow routes return 404', { timeout: 120_000 }, async () => {
   const master = config(), state = emptyDaemonState(master);
   const children: string[][] = [];
   const run: ChildRun = (command, args, options) => { children.push([command, ...args]); return defaultChildRun(command, args, options); };
-  const reads = mergeWriterReads(master, checkout, run, { base: managed, record: async () => { throw new Error('nothing to record'); }, merger: async () => 'control-plane', trial: async () => { throw new Error('nothing to trial'); } });
+  const reads = mergeWriterReads(master, checkout, run, { base: managed, record: async () => { throw new Error('nothing to record'); },  trial: async () => { throw new Error('nothing to trial'); } });
   // A shadow port that throws on any touch: a cycle that ran the old gate fails here.
   const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   await runCycle(master, state, effects, () => clock);

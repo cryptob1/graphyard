@@ -68,7 +68,6 @@ before(async () => {
   await store.init();
   // A two-hour lease keeps every fixture lease live under the clock, which runs 30 minutes ahead.
   engine = new Engine(store, 7200, repository);
-  engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
@@ -268,9 +268,9 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   for (const name of withheld.filter(name => !['TMPDIR', 'TMP', 'TEMP'].includes(name))) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
+  assert.equal(dirname(seen.home), dirname(seen.tmpdir), 'the fresh home uses the short temporary root, keeping nested socket paths bounded');
+  assert.equal(existsSync(seen.home), false, 'the fresh home is removed with the trial');
   assert.notEqual(seen.home, '/home/me', 'the child\'s home is the trial\'s own fresh one (GY-2997)');
-  assert.equal(seen.home, join(seen.tmpdir, 'home'), 'the isolated home uses the short scratch root, so nested fixture sockets fit');
-  assert.equal(existsSync(seen.home), false, 'the isolated home is removed with the trial scratch');
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
 
@@ -361,8 +361,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
     const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
-    // The isolated home lives here too; npm may also keep node's compile cache here.
-    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), ['home'], 'only the isolated home is present: no node_modules, no .git');
+    // When the host allocations live under /tmp, bubblewrap also creates their
+    // mount points in its private /tmp. None is an upward-lookup poison entry.
+    const namespaceEntries = ['node-compile-cache', 'home', 'runtime', basename(repo.root), basename(base)];
+    assert.deepEqual(child.tmpEntries.filter(entry => !namespaceEntries.includes(entry)), [], 'only namespace scratch and allocated mount points exist when the suite starts: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
     assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);
@@ -373,8 +375,21 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
   if (usable) {
-    // A root that gains a package.json while the trial runs may have shadowed its lookups: no verdict, every directory removed.
-    const poisoning = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'poisons its root', { retries: 0 });
+    // The candidate sees a private parent. A write there cannot poison the
+    // host's lookup root, even when it succeeds in private temporary scratch.
+    const denied = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'cannot poison its root');
+    const refused = await denied.run();
+    // A parent under private /tmp is writable; other private-root ancestors
+    // are read-only. Both keep the host parent unchanged.
+    if (refused.build === 'fail') assert.match(refused.logTail, /EROFS|Read-only file system/);
+    assert.deepEqual(readdirSync(clean), [], 'the ungranted parent stays unchanged');
+    // A separate host process could still contaminate the parent during a trial. Inject that
+    // host write outside the child wrapper; the guard must return no verdict and clean up.
+    const poisoning = await trial({ 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'host poisons its root', { retries: 0, run: async (command, args, options) => {
+      const output = await defaultChildRun(command, args, options);
+      if (command === 'npm' && args.join(' ') === 'run build') writeFileSync(join(clean, 'package.json'), '{}');
+      return output;
+    } });
     await assert.rejects(poisoning.run(), (error: unknown) => error instanceof TrialEnvironmentError && error.root === clean && /gained a node_modules, \.git or package\.json/.test(error.message));
     assert.deepEqual(readdirSync(clean), ['package.json'], 'its directories are removed all the same');
     rmSync(join(clean, 'package.json'));
@@ -668,7 +683,8 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   git('init', '-q', '-b', 'main'); writeFileSync(join(repo, 'a.txt'), 'one\n'); git('add', '-A'); git('commit', '-q', '-m', 'base');
   const mergeSha = git('rev-parse', 'HEAD');
   const sessions = await temporaryDirectory('soak-trial-sessions', tmpdir()), clean = await temporaryDirectory('soak-trial-tmp', tmpdir());
-  const home = await temporaryDirectory('soak-trial-home', tmpdir());
+  // Shared temporary roots can hold a stray .git; the real trial checkout root lives in the home.
+  const home = await temporaryDirectory('soak-trial-home', homedir());
   const [trials] = trialCheckoutRoots(home);
   const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
   // The live owners: this process all day, and a child that dies at midday.
@@ -738,8 +754,6 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
 // GY-3008: deleting the dead base-break refresh must leave a failed trial's rework path intact —
 // the merge writer grounds and requests the rework; next-action waits on it, never on a base-break hold.
 test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', () => {
-  assert.equal(existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/master/base-break-refresh.ts')), false,
-    'the base-break refresh module is gone');
   const now = new Date('2026-10-31T12:00:00.000Z');
   const head = 'c'.repeat(40), base = 'a'.repeat(40);
   const reason = `${trialFailurePrefix}: tests tests/policy.test.ts`;

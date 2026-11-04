@@ -50,7 +50,7 @@ function memoryRegistry(host: string, home: string, concurrency = 4) {
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
     models: [{ name: 'opus', id: 'claude-opus-5' }],
     accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host, home } }],
-    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency, policy: { args: ['--setting-sources', 'user'] } }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], policy: { args: ['--setting-sources', 'user'] }, concurrency }],
     reason: 'fixture reviewer fleet',
   }, { actor: 'operator', at: new Date().toISOString() }).registry;
   const at = () => new Date().toISOString();

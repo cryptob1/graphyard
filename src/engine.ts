@@ -21,7 +21,7 @@ import { buildIdentity } from './protocol-version.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
-import { actionAccount, nextActionKinds, sameAction } from './model/next-action.js';
+import { actionAccount, sameAction } from './model/next-action.js';
 import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
@@ -29,8 +29,7 @@ import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
-import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
-import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
+import { openActions, reconcileActions, settleDelivered } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
@@ -41,7 +40,7 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -131,22 +130,6 @@ const commands = {
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
-const actionClaimSchema = z.object({
-  /** The identity the claim is recorded under; the credential's own principal by default. */
-  executor: executorName.optional(),
-  host: executorName,
-  /** The action kinds this executor can actually run. A kind it cannot run is left for one that can. */
-  kinds: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
-  /** Every kind this executor has a handler for, whatever a launch hold lets it claim this tick (GY-1539); presence records it. */
-  serves: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
-  leaseSeconds: z.number().int().min(10).max(900).optional(),
-  work: z.string().min(1).max(200).optional(),
-}).strict();
-/** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
-const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
-// A renewal carries no result: it says only that the executor named on the claim is still
-// inside the handler, and asks for the lease it already holds to run on.
-const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
 const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional(), wait: z.boolean().optional() }).strict();
@@ -546,21 +529,11 @@ export class Engine {
   principals: Principal[] = [];
   // Reviewer identities and the control-plane App are deployment facts, not client input.
   /**
-  }
-  /**
-   * Observes the pull request a worker submits before the submission is recorded, so a candidate
-   * that reverts shipped code outside its planned files is refused at `complete` instead of after
-   * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
-   * disables the pre-check, and every later observation still re-derives the refusal.
-   */
-  submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
-  /**
    * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
    * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
-  /**
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
@@ -570,27 +543,9 @@ export class Engine {
   constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
-  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
-    if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
-    if (this.submissionObserver === undefined) this.submissionObserver = null;
-    if (!this.submissionObserver || !id) return null;
-    // A replayed submission returns its receipt; it must not depend on the provider again.
-    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
-    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    // Without a GitHub App there is nothing to read, and the transaction refuses the pull request.
-    // The landing check reads each open submitted peer's observation scope, which a projection leaves
-    // out (GY-1042): those peers are read whole. This read holds no coordination lock.
-    const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
-    const work = all.find(w => w.id === id || w.key === id);
-    if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
-    // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr! } }, all);
-    await this.reconcileLanded(observation, all);
-    return observation;
-  }
   /**
    * GY-1523: the control plane's own observation of a head submitted with `complete --head`, read
-   * from the shared object store before the transaction, as GitHub is read for a pull request.
+   * from the shared object store before the transaction.
    * Receipt first, so a replayed `complete` runs no git. The candidate's change number is
    * allocated inside the transaction, which binds it to this observation.
    */
@@ -603,6 +558,9 @@ export class Engine {
     // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
     // its replacement commit is read from the shared object store, never from the pull request.
     if (!work || work.stage === 'done' || !workspace) return null;
+    // A superseded owner reaches the transaction's lease refusal before observation. Leave
+    // expiry to that transaction: a recorded renewal fault may still keep this lease live.
+    if (!work.lease || work.lease.owner !== actor.id || work.lease.epoch !== data.epoch) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -633,38 +591,6 @@ export class Engine {
       if (delta.status === 0) observation.headDelta = delta.stdout.split('\n').map(line => line.trim()).filter(Boolean);
     }
     return observation;
-  }
-  /**
-   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
-   * on the base branch tip while its item still records it unlanded: the peer's pull request is
-   * observed and that observation saved, so the ordinary delivery path records it merged, with its
-   * merge commit, now rather than whenever its own observation comes round — and the stale state
-   * that named it unlanded does not recur. A failure is logged and left to that later observation.
-   *
-   * GY-756. The peer is re-read before it is observed, so several observations in one round that
-   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
-   * rest find it delivered, or already observed at this head against this base tip, and skip it.
-   * A peer that is not merged (its commits reached the branch while its pull request closed
-   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
-   * until the base branch moves.
-   */
-  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
-    const reconciled: Work[] = [];
-    if (!observer) return reconciled;
-    for (const entry of observation?.landing?.landed ?? []) {
-      const known = all.find(item => item.key === entry.key);
-      if (!known) continue;
-      try {
-        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
-        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
-        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
-        const seen = await observer(peer, all);
-        reconciled.push(await this.observe(peer.id, peer.revision, seen));
-      } catch (error) {
-        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
-      }
-    }
-    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -844,7 +770,7 @@ export class Engine {
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
-    const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    const observation = command === 'submit' ? context.observation ?? (data.head !== undefined ? await this.observeSubmittedHead(actor, id, data, key) : null) : null;
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
@@ -1019,7 +945,7 @@ export class Engine {
           timeline.attempts.splice(timeline.attempts.indexOf(untouched), 1);
           work.workspaces = work.workspaces.filter(w => w.epoch !== data.epoch);
           work.epoch = data.epoch - 1;
-        } else endAttempt(work, data.epoch, 'released', now);
+        } else endAttempt(work, data.epoch, 'released', now, data.cause);
         work.lease = null;
       }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
@@ -1170,9 +1096,8 @@ export class Engine {
         const workspace = work.workspaces.find(w => w.epoch === data.epoch);
         demand(workspace, 'Register the assignment workspace first');
         // GY-1523: the control plane is the only merge writer, so a submission is a head it observed
-        // (`complete --head`). A pull request (an attempt launched before the cutover) is still
-        // recorded; the observation job then reads its head from the shared object store, which
-        // hands it to the merge writer.
+        // (`complete --head`). The HTTP route refuses a bare number (GY-2999); it is a test seam here,
+        // standing for a head without a git checkout.
         let observed = observation, number: number;
         if (data.head !== undefined) {
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
@@ -1355,112 +1280,6 @@ export class Engine {
 
   }
 
-  /**
-   * The one item holding action row `id`, found by containment rather than by loading every document.
-   * `retired` also finds an item that has moved the row to its queue's history (GY-1586).
-   */
-  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string, retired = false): Promise<Work | undefined> {
-    // Given the owning item's id, the owner is read again by its primary key instead of found by a scan (GY-1276).
-    const scope = item === undefined ? 'w.id IN (SELECT id FROM work_index WHERE NOT settled)' : 'w.id=$2::uuid AND w.id IN (SELECT id FROM work_index WHERE NOT settled)';
-    const holds = (list: string) => `document->'actionQueue'->'${list}' @> jsonb_build_array(jsonb_build_object('id', $1::text))`;
-    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND (${retired ? `${holds('actions')} OR ${holds('history')}` : holds('actions')}) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
-  }
-  /**
-   * Claim the next action for a stateless executor.
-   *
-   * The executor names itself and its host, and the kinds it can actually run; the control plane
-   * hands back the first open row it can take in claim order, leased for a bounded time. Two
-   * executors on two hosts calling this at the same instant are serialized by the coordination lock, so the first
-   * gets the row and the second gets the next one. Neither is configured with the other, and
-   * neither reports to a master: the queue is the whole of their coordination.
-   */
-  async claimNextAction(actor: Principal, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = actionClaimSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.claim', data })).digest('hex');
-    // An idle poll takes no lock and loads no document (GY-185). A replayed key answers from its
-    // receipt, and the rows an executor could take are found in SQL; only when there are some is
-    // the lock taken, and then only their items are loaded, and claimed again under it.
-    const replayed = (await this.store.pool.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (replayed) { demand(replayed.fingerprint === fingerprint, idempotencyMismatch); return replayed.result as { action: ActionRow | null }; }
-    const candidates: string[] = (await this.store.pool.query(claimCandidatesSql, claimCandidatesParams(data.work, data.kinds))).rows.map(row => row.id);
-    if (!candidates.length) {
-      const at = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      return { action: null, open: 0, at: at.toISOString() };
-    }
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow | null }; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items WHERE id = ANY($1::uuid[]) ORDER BY number', [candidates])).rows.map(r => r.document);
-      const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host, principal: actor.id }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
-      const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
-      // A poll that claims nothing changed nothing, so it leaves no receipt: an idle executor
-      // asking every few seconds must not write a row per question it asked.
-      if (claimed) {
-        await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, principal: actor.id, attempt: claimed.row.attempts });
-        // A row this executor last failed on stepped aside for this claim; its mark makes that once (GY-1132).
-        for (const work of claimed.yielded) await save(db, work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, yielded: work.actionQueue!.actions.filter(row => row.yielded === claimed.row.claim!.executor).map(row => row.id) });
-        await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      }
-      return result;
-    });
-  }
-  /**
-   * Record what an executor's attempt did. Only the executor holding the live claim may settle its
-   * row: a claim that expired and was taken by another executor can no longer report a result, so
-   * an executor that comes back from the dead never double-counts the action that replaced it.
-   */
-  async settleClaimedAction(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = actionSettleSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.settle', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow }; }
-      const work = await this.actionOwner(db, id);
-      demand(work, 'Action is not open on any work item', 404);
-      const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
-      // A row settled on a delivered item was the last claim holding it open: it is retired with
-      // the rest of what the delivery no longer needs, rather than offered again (GY-185).
-      if (work!.stage === 'done') settleDelivered(work!, (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item), now);
-      await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
-      if (work!.submission) await wakeJob(db, work!.id);
-      const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
-  /**
-   * Hold a claim while the handler is still running.
-   *
-   * A claim is a short lease so that a dead executor's row is offered again quickly, but the
-   * handlers are not short: a dispatch prepares a worktree and waits on a runtime, and a guarded
-   * merge chains provider calls that each have their own timeout. Without this a handler that
-   * outlives its lease is run a second time by another executor while the first is still inside
-   * it — the double execution AC-2 forbids. The executor that holds the claim says here that it
-   * is still running; anybody else, and an expired claim, is refused.
-   */
-  async renewClaimedAction(actor: Principal, id: string, input: unknown) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const data = actionRenewSchema.parse(input);
-    return this.store.transaction(async (db, now) => {
-      const owner = await this.actionOwner(db, id);
-      demand(owner, 'Action is not open on any work item', 404);
-      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it,
-      // read again by its id: the action can only have left it, never moved to another item.
-      await lockItem(db, owner!.id);
-      const work = await this.actionOwner(db, id, owner!.id);
-      demand(work, 'Action is not open on any work item', 404);
-      const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
-      // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
-      // the item and without an event or revision of its own, so a long handler costs one update
-      // per interval and a reader's ledger lookback still counts saves exactly.
-      await rewriteDocument(db, work!);
-      return { action: row, work: { id: work!.id, key: work!.key } };
-    }, { lane: 'lease' });
-  }
   /**
    * The pull model: a free worker session asks for its next assignment instead of waiting for a
    * dispatcher to inject one.

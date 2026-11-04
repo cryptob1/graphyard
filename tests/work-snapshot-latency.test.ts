@@ -367,7 +367,7 @@ test('integration:hot-paths-read-no-settled-documents — /api/status, /api/boar
   const control = await settledDocumentsRead(() => hotRead(`work/${encodeURIComponent(summaries[0].key)}`));
   assert.deepEqual([...control.keys], [summaries[0].key], 'the whole-document route reads its own document, which the scan sees');
   assert.equal(control.value.pipeline.attempts.length, SETTLED_HISTORY, 'the whole document keeps its history');
-  for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board'], ['/api/actions', 'actions'], ['/api/delegation', 'delegation'], ['/api/principals', 'principals']] as const) {
+  for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board'], ['/api/delegation', 'delegation'], ['/api/principals', 'principals']] as const) {
     const read = await settledDocumentsRead(() => hotRead(path));
     assert.deepEqual([...read.keys], [], `${name} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
   }

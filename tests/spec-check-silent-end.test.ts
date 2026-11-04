@@ -105,7 +105,7 @@ test('integration:spec-check-silent-end-surfaces — a checker that ends without
       checks.push({ key: item.key, at: clock });
       item.specCheckLaunch = { id: `launch-${launches}`, reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at: new Date(clock).toISOString(), expiresAt: new Date(clock + 3_600_000).toISOString(), policyRevision: item.policyRevision };
       live.add(`pane-${launches}`);
-      return { pane: `pane-${launches}` };
+      return { pane: `pane-${launches}`, launch: item.specCheckLaunch.id };
     },
     persist: current => writeDaemonState(master, current),
   };

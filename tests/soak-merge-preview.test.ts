@@ -135,7 +135,7 @@ class World {
   ports(): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now, merger: async () => 'control-plane',
+      baseBranch: 'main', retrials: 3, now: this.now,
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         // commit-tree stamps the time, so a head merged again on the same tip (a timed-out preview's retry) is a fresh merge commit.

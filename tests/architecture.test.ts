@@ -176,7 +176,6 @@ export interface AllowlistEntry {
  * calls behind the merge writer); unit:git-network-door-baseline keeps the set from growing.
  */
 export const allowlist: Record<string, AllowlistEntry> = {
-  'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch refreshes the workspace checkout\'s own remote-tracking refs for `restore-branch`\'s lease push and for an adopted pull request\'s branch, which the merge writer neither holds nor pushes; a rework workspace reads the registered local head and fetches nothing (GY-2017), and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
   'src/cli/upgrade.ts': { subcommands: ['fetch'], runs: 'graphyard-deploy.service (`upgrade --watch`) reading the base tip it deploys; GY-2877 moved this read out of the loop\'s self-upgrade with the deploy itself', credential: 'the coordinator checkout\'s own git credential', door: 'the deploy restarts the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
@@ -196,10 +195,10 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * and above in the same commit; GY-1944 moved the worker CLI's trailing fetch behind the control
  * plane's own push (the route validates the fast-forward onto the commit the worker built, so the
  * remote-tracking ref follows locally) and removed that entry here and above in the same commit;
- * its other three entries record in `door` why their calls cannot go through the merge writer.
+ * its other entries record in `door` why their calls cannot go through the merge writer. GY-2999
+ * deleted complete's PR submission and its push, removing complete from both lists.
  */
 export const baseline = [
-  'src/cli/complete.ts',
   'src/cli/upgrade.ts',
   'src/cli/workspace-worktree.ts',
   'src/daemon/cycle-merge-writer.ts',
@@ -251,7 +250,7 @@ const scanCheckout = async () => {
   return files;
 };
 
-test('unit:git-network-door — every file that spawns a git network subcommand is allowlisted, and every allowlist entry still spawns one', async () => {
+test('unit:architecture — every file that spawns a git network subcommand is allowlisted, and every allowlist entry still spawns one', async () => {
   const { refusals, detected } = audit(await scanCheckout());
   assert.deepEqual(refusals, []);
   for (const [path, entry] of Object.entries(allowlist)) {
@@ -368,4 +367,15 @@ test('unit:git-network-door-baseline — the allowlist is exactly the set that s
   assert.deepEqual(Object.keys(allowlist).sort(), [...baseline].sort(), 'the allowlist and the baseline are the same files: an entry the base did not spawn from must not join the door (move the calls behind the merge writer instead), and a file whose calls moved leaves both lists in the same commit');
   const { detected } = audit(await scanCheckout());
   assert.deepEqual([...detected.keys()].sort(), [...baseline].sort(), 'the checkout spawns from exactly the baseline files; a new spawner is a door opening, not an entry to add');
+});
+
+
+test('unit:architecture — source files never call the GitHub API or mint App installation tokens', async () => {
+  for (const [file, text] of await scanCheckout()) {
+    if (!file.startsWith('src/')) continue;
+    assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
+    assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
+    assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
+    assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through gh api`);
+  }
 });

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -22,7 +24,7 @@ async function privateDirectory() {
 function config(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], ...overrides });
+    masterAgentName: 'graphyard-master-project', mergeMethod: 'merge', workers: [], ...overrides });
 }
 function profile(name: string, credentialFile: string, overrides: Partial<WorkerProfile> = {}): WorkerProfile {
   return { name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex',
@@ -252,7 +254,7 @@ test('one cycle closes finished sessions, dispatches, leaves proofs to CI and th
 test('a disabled automatic merge keeps the loop cycling, never merges, and asks no operator for a merge GitHub makes', async () => {
   const { directory, token } = await privateDirectory();
   try {
-    const master = config(token, { autoMerge: false });
+    const master = config(token, {});
     const mergeable = submitted({ id: 'mergeable', key: 'GY-45', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     const log: string[] = [];
     const state = emptyDaemonState(master);
@@ -456,3 +458,115 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     assert.equal(failing.failures.last?.call, 'snapshot');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+{
+  const start = Date.parse('2030-01-10T00:00:00Z');
+  const iso = (at: number) => new Date(at).toISOString();
+  const sha = (n: number) => String(n).padStart(40, 'c');
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const flakyName = 'unit:fleet-panel-renders — the fleet panel renders';
+
+  /** An item as the snapshot lists it, around the fields the old flake filer read. */
+  const item = (fields: Record<string, unknown>) => ({
+    description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item'] }],
+    policy: { checks: ['test', 'typecheck'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+    stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], ...fields,
+  }) as unknown as Work;
+
+  test('unit:daemon-passed-reruns — a day of loop cycles over passed reruns and recorded trial flakes files no work item, though the filing effect and the failed-log read stand ready', async () => {
+    const state = emptyDaemonState(config);
+    const work: Work[] = [], filed: string[] = [], reads: number[] = [];
+    let now = start;
+    const effects = {
+      agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+      snapshot: async () => ({ work, now: iso(now) }),
+      closeSession: () => {}, dispatch: async () => {},
+      decide: async () => { throw new Error('the soak decides nothing'); }, decisions: async () => ({ decisions: [] }),
+      persist: async () => {},
+      // What the old filer consumed: each passed rerun's failed log read, and the operator-agent filing route.
+      failedTests: async (job: number) => { reads.push(job); return [flakyName]; },
+      fileFaultClass: async (input: { title: string }) => { filed.push(input.title); throw new Error(`no work item is filed for a flake (GY-2086): ${input.title}`); },
+    } as unknown as DaemonEffects;
+    // One merged item whose `test` check failed and passed on its rerun, one whose merge ledger keeps
+    // a trial flake (the trial's test files failed and passed on their rerun of the same merge commit),
+    // and one with a main guard flake: every shape the flake filer once read.
+    work.push(
+      item({ id: 'work-1', key: 'GY-1', title: 'Item 1', stage: 'done', submission: { epoch: 1, pr: 1 },
+        checkReruns: [{ sha: sha(1), check: 'test', failedRunId: 501, state: 'passed', at: iso(start - 120_000), rerunId: 601, resolvedAt: iso(start - 60_000) }] }),
+      item({ id: 'work-2', key: 'GY-2', title: 'Item 2', stage: 'done', submission: { epoch: 1, pr: 2 },
+        mergeLedger: { key: 'GY-2', state: 'reconciled', head: sha(2), baseTip: sha(0), mergeSha: sha(20), risk: 'normal', intentAt: iso(start - 60_000), pushedAt: iso(start - 30_000), observedTip: sha(20), refusal: null, events: 3,
+          flakes: [{ head: sha(2), mergeSha: sha(20), files: ['tests/fleet-panel.test.ts'], tests: [flakyName], at: iso(start - 30_000) }] } }),
+      item({ id: 'work-3', key: 'GY-3', title: 'Item 3', stage: 'done', submission: { epoch: 1, pr: 3 },
+        mainGuardFlakes: [{ mergeSha: sha(3), check: 'test', failedRunId: 503, rerunRunId: 603, at: iso(start - 30_000) }] }),
+    );
+    for (let cycle = 0; cycle < 12; cycle++) {
+      now = start + cycle * 5 * 60_000;
+      await runCycle(config, state, effects, () => now);
+    }
+    assert.deepEqual(filed, [], 'no "Flaky test" item is filed, on any cycle');
+    assert.deepEqual(reads, [], 'the failed job logs are not read for flake filing either');
+    const created = work.filter(entry => !['GY-1', 'GY-2', 'GY-3'].includes(entry.key));
+    assert.deepEqual(created, [], 'the loop creates no item of its own for the flakes');
+  });
+
+}
+
+{
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const start = Date.parse('2030-05-01T00:00:00Z'), iso = (at: number) => new Date(at).toISOString();
+  const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
+  const tip = sha('main-tip');
+  const configFor = (credentialFile: string) => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  const passed = ['ready', 'build', 'review', 'test'];
+  const submitted = (n: number, minutesAgo: number) => {
+    const candidate = { sha: sha(`head${n}`), baseSha: tip, pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' };
+    return {
+      id: `w${n}`, key: `GY-${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
+      policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+      stageEnteredAt: iso(start - minutesAgo * 60_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: n }, candidate, reworkRequested: false,
+      scenarioRequirements: [], evidence: [], blocker: null, violations: [], stage: 'build',
+      gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: passed.includes(name), reasons: passed.includes(name) ? [] : [`${name} refused`] })),
+      observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: tip },
+    } as unknown as Work;
+  };
+
+  test('unit:daemon-single-merge-trial — a cycle with submitted heads starts exactly one trial (the merge writer\'s), a cursor carrying old shadow verdicts loads without them, and master status has no shadowGate', async () => {
+
+    const directory = await temporaryDirectory('no-shadow-trial');
+    const config = configFor(join(directory, 'coordinator.token'));
+    const work = [submitted(2, 5), submitted(1, 30)];
+    const trials: string[] = [];
+    const mergeWriter: MergeWriterReads = {
+      baseBranch: 'main', retrials: 3, now: () => start,
+      fetch: async () => tip,
+      merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
+      trial: async mergeSha => { trials.push(mergeSha); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0, skipped: 0 } } }; },
+      push: async () => 'pushed', holds: async () => false, record: async () => undefined,
+    };
+    // An effects object still carrying the old `shadow` reads: the cycle never touches them.
+    const shadow = new Proxy({}, { get: (_, name) => { throw new Error(`the cycle read the deleted shadow gate (${String(name)})`); } });
+    const github = new Proxy({}, { get: (_, name) => { throw new Error(`the cycle called GitHub (${String(name)})`); } });
+    const effects = {
+      agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(start) }),
+      closeSession: () => {}, dispatch: async () => {},
+      decisions: async () => ({ decisions: [] }), persist: async () => {},
+      github, merge: github, shadow, mergeWriter,
+    } as unknown as DaemonEffects;
+    const state = emptyDaemonState(config), now = () => start;
+    await runCycle(config, state, effects, now);
+    await mergeWriterIdle(state);
+    assert.deepEqual(trials, [sha(`merge:${sha('head1')}`)], 'one trial, the merge writer\'s, of the oldest head');
+    assert.ok(!('shadowGate' in daemonSummary(state, start, 60_000, config.hostId)), 'the loop summary has no shadowGate');
+
+    // A cursor an older loop wrote, its shadow verdicts included, loads; the verdicts are dropped.
+    const legacy = { ...emptyDaemonState(config), shadow: [{ key: 'GY-1', id: 'w1', head: sha('head1'), baseTip: tip, mergeSha: null, risk: 'normal', build: 'pass', tests: { passed: 0, failed: [], files: 0 }, conflict: [], durationMs: 1, at: iso(start), outcome: 'pending' }] };
+    await writeFile(daemonStatePath(config), JSON.stringify(legacy));
+    const loaded = await readDaemonState(root, config);
+    assert.ok(!('shadow' in loaded), 'the old verdicts are not carried');
+    assert.equal(loaded.repository, 'owner/project');
+  });
+
+}
