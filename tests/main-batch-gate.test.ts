@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bootstrapGate, gateCauses, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { bootstrapGate, catalogBudgetMs, catalogFits, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -122,8 +122,8 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   // Graphyard's own graphyard.json names the core set.
   assert.deepEqual(checkoutRepositoryPolicy(process.cwd()).gate.core, ['create-work-item', 'smoke']);
 
-  // The whole catalog replaces the subset once the diagnostics measured it within the limit.
-  const fits = { ...bootstrapGate(repository, verified), catalogMs: gateLimitMs - 1 };
+  // The whole catalog replaces the subset once its measured time fits half the limit.
+  const fits = { ...bootstrapGate(repository, verified), catalogMs: catalogBudgetMs - 1 };
   const whole = reads(coordinator);
   const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
   assert.equal((await runGate(batchGatePorts({ ...whole.value, git: whole.value.git! }, work), fits)).outcome, 'verified');
@@ -407,4 +407,53 @@ test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minut
     await writer.trial(tip, [], gateItem);
     assert.deepEqual(timeouts, [gateLimitMs, trialTimeoutMinutes * 60_000]);
   }
+});
+
+test('unit:batch-gate-catalog-by-measured-time — the gate runs the whole E2E catalog only when the catalog time measured from recent gate runs, batch tests included, fits half the 45-minute limit; otherwise smoke, the bound cases, gate.core and the affected tests; the full catalog still runs as the diagnostic', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3)];
+  const day = Date.parse('2026-11-05T12:00:00Z');
+  const catalog = ['create-work-item', 'smoke', 'case-2', 'case-3', 'other'];
+  const subset = ['build', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:smoke', 'affected'];
+  const whole = ['build', ...catalog.map(id => `e2e:${id}`), 'affected'];
+  const gate = (record: GateRecord, runMs: number, slow = false) => {
+    const { ports, runs } = gatePorts(batch, () => false);
+    let clock = day;
+    ports.now = () => clock;
+    ports.catalog = async () => catalog;
+    ports.run = async (commit, checks) => { runs.push({ commit, checks: [...checks] }); clock += slow ? gateLimitMs + 1 : runMs; return []; };
+    return runGate(ports, record).then(outcome => ({ outcome, checks: runs[0]!.checks }));
+  };
+  assert.equal(catalogBudgetMs, gateLimitMs / 2);
+
+  // Nothing measured: the subset. The quiet diagnostics' 9.5 minutes fit half the limit: the whole catalog.
+  assert.deepEqual((await gate(bootstrapGate(repository, verified), 60_000)).checks, subset);
+  const quiet = { ...bootstrapGate(repository, verified), catalogMs: 571_824 };
+  const first = await gate(quiet, 30 * 60_000);
+  assert.deepEqual(first.checks, whole, 'the whole catalog runs while its measured time fits');
+  assert.equal(first.outcome.outcome, 'verified', 'a run that does fit the limit still verifies');
+  // That gate run measured 30 minutes under load: the next batch runs the subset, whatever the diagnostics measured.
+  assert.deepEqual(quiet.gateRuns!.map(run => run.ms), [30 * 60_000], 'the gate run is measured, batch tests included');
+  quiet.verified = verified;
+  assert.deepEqual((await gate(quiet, 60_000)).checks, subset, 'the measured gate run does not fit half the limit');
+  assert.equal(quiet.gateRuns!.length, 1, 'a subset run measures nothing of the catalog');
+
+  // A whole-catalog run that times out counts its elapsed time.
+  const timed = { ...bootstrapGate(repository, verified), catalogMs: 5 * 60_000 };
+  assert.equal((await gate(timed, 0, true)).outcome.outcome, 'timeout');
+  assert.ok(timed.gateRuns![0]!.ms > gateLimitMs, 'the timeout is measured');
+
+  // A fast recent gate run fits; the slowest of the recent runs decides; old runs age out.
+  const fast = { ...bootstrapGate(repository, verified), catalogMs: 40 * 60_000, gateRuns: [{ ms: 12 * 60_000, at: new Date(day - 60_000).toISOString() }] };
+  assert.equal(measuredCatalogMs(fast, day), 12 * 60_000, 'recent gate runs, not the diagnostics');
+  assert.ok(catalogFits(fast, day));
+  assert.ok(!catalogFits({ ...fast, gateRuns: [...fast.gateRuns, { ms: catalogBudgetMs + 1, at: fast.gateRuns[0]!.at }] }, day), 'the slowest recent run decides');
+  assert.ok(!catalogFits(fast, day + gateRunsMaxAgeMs), 'aged-out runs leave the diagnostics\' measure');
+
+  // The full catalog still runs as the scheduled diagnostic, whatever the gate runs.
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const seen: string[][] = [];
+  const base: MergeWriterReads = { ...reads('/unused').value, git: async args => args[0] === 'ls-tree' ? catalog.map(id => `${id}.json`).join('\n') : '',
+    trial: async (_commit, _files, trialItem) => { seen.push(trialItem.criteria.flatMap(criterion => criterion.proofs)); return { build: 'pass', tests: { passed: 0, failed: [], files: 0 }, e2e: [] } as unknown as MergeTrialRun; } };
+  await batchGatePorts({ ...base, git: base.git! }, []).diagnose(verified);
+  assert.deepEqual(seen.at(-1)!.sort(), catalog.map(id => `e2e:${id}`).sort(), 'the diagnostic runs the whole catalog');
 });

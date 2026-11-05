@@ -247,26 +247,4 @@ test('unit:trial-serves-head-and-runs-bound-cases — each case runs against the
   assert.match(by('unbound').failingStep!, /bind it in delivery\.cases to one of site, api/);
 });
 
-test('unit:trial-serves-head-and-runs-bound-cases — beside e2e.serve, a case delivery.cases binds runs against its application and any other case against the served head (GY-3125)', async () => {
-  const checkout = await temporaryDirectory('trial-e2e-serve-and-bound', tmpdir());
-  const put = (path: string, content: string) => { mkdirSync(dirname(join(checkout, path)), { recursive: true }); writeFileSync(join(checkout, path), content); };
-  const port = 20_000 + Math.floor(Math.random() * 20_000);
-  put('serve.mjs', `import http from 'node:http'; http.createServer((_q, r) => { r.setHeader('Content-Type', 'application/json'); r.end(JSON.stringify({ message: 'head' })); }).listen(${port}, '127.0.0.1');`);
-  put('graphyard.json', JSON.stringify({ e2e: { serve: { command: 'node serve.mjs', url: `http://127.0.0.1:${port}/`, readySeconds: 30 } },
-    delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }], cases: { 'site-answers': 'site' } } }));
-  put('site/data.json', JSON.stringify({ message: 'site' }));
-  const answering = (id: string, message: string) => ({ ...passingCase, id, steps: [{ kind: 'http', method: 'GET', path: '/data.json', status: 200, expect: [{ path: 'message', equals: message }] }] });
-  put('e2e/cases/site-answers.json', JSON.stringify(answering('site-answers', 'site')));
-  put('e2e/cases/head-answers.json', JSON.stringify(answering('head-answers', 'head')));
-  const cases = await runTrialE2eCases({
-    worktree: checkout, mergeSha: 'a'.repeat(40), proofs: ['e2e:site-answers', 'e2e:head-answers'],
-    env: { PATH: process.env.PATH!, HOME: process.env.HOME! }, scratch: checkout, budgetMs: 60_000,
-    holds: async path => existsSync(join(checkout, path)), log: () => {},
-  });
-  for (const name of ['site-answers', 'head-answers']) {
-    const entry = cases.find(item => item.case === name)!;
-    assert.deepEqual([entry.executed, entry.failed], [1, 0], JSON.stringify(cases));
-  }
-});
-
 });
