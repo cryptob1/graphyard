@@ -29,7 +29,7 @@ docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
-        '--user', str(os.getuid()) + ':' + str(os.getgid()),
+        '--ulimit', 'core=0', '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
 for source, target, readonly in spec['mounts']:
