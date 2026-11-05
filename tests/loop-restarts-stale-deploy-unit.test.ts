@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { emptyDaemonState, writeDaemonState } from '../src/daemon/state.js';
-import { readDeployUnitProcess, runDaemon, type DeployUnitProcess } from '../src/daemon/run.js';
+import type { DeployUnitProcess } from '../src/daemon/run.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -15,6 +15,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const old = 'a'.repeat(40), served = 'b'.repeat(40);
 
 test('unit:loop-restarts-stale-deploy-unit — the loop restarts the deploy unit once when its watch runs older code than the served commit and no pass is in progress, records why, and leaves a unit running the served commit alone', async () => {
+  // Imported in the test so a tree without the restart fails this case, not the file's load.
+  const { readDeployUnitProcess, runDaemon } = await import('../src/daemon/run.js');
   // The deploy unit is read from the loop's cgroup sibling: the watch's cli.ts names the code it loaded; any other process is a pass.
   const files: Record<string, string> = {
     '/proc/self/cgroup': '0::/user.slice/user-1000.slice/user@1000.service/app.slice/graphyard-master.service\n',
