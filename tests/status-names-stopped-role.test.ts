@@ -30,7 +30,7 @@ const account = (name: string, quota = { ...unobservedQuota }) => ({ name, runti
 
 /** The incident's registry: master held by an orphan for 2.5 h, reviewer on one spent account, a worker role busy with work. */
 function registry(refusedFor: { master: number; reviewer: number }): AgentRegistry {
-  const spent = { ...unobservedQuota, state: 'exhausted', resetsAt: '2026-11-05T21:00:00Z', observedAt: iso(clock - minutes(5)), source: 'probe' };
+  const spent = { ...unobservedQuota, state: 'exhausted' as const, resetsAt: '2026-11-05T21:00:00Z', observedAt: iso(clock - minutes(5)), source: 'probe' as const };
   const masterRefusal = 'role master is at its concurrency limit (1 of 1 live: codex-master)';
   const reviewerRefusal = 'no eligible account for reviewer: codex-review quota is exhausted until 2026-11-05T21:00:00Z';
   return { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: null }],
