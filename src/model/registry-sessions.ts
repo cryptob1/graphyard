@@ -88,6 +88,8 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
  * outage during the one prompt would otherwise keep a sound account out until an operator changed it.
  */
 export const smokeRetestMs = 3_600_000;
+/** The runtimes whose accounts are smoke-tested before a session is chosen on them: Pi's headless runs, and agy, whose interactive session waits silently at a missing login (GY-3108). */
+export const smokeTestedKinds: readonly string[] = ['pi', 'agy'];
 /**
  * Whether an account's failed smoke test is due for the retest its executor runs (GY-515): the age
  * rule `needsSmoke` applies. A due failure no longer bars a launch — the launch is what tests the
@@ -113,7 +115,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
   if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
-  const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && runtime.launch.kind === 'pi');
+  const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && smokeTestedKinds.includes(runtime.launch.kind));
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   const plan = deriveAccountPlan(account, registry.accounts);
   const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
