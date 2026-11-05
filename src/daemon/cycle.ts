@@ -624,11 +624,17 @@ async function releaseBacklog(cycle: Cycle) {
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {
-      const released = await effects.release!(item, `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`) as Work | undefined;
+      const overCap = !!item.yardRepair && slots <= 0;
+      const reason = overCap
+        ? `${item.key} is a yard repair, so the loop releases it past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency of ${item.key} is done`
+        : `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`;
+      const released = await effects.release!(item, reason) as Work | undefined;
       const index = snapshot.work.findIndex(entry => entry.id === item.id);
       if (index >= 0 && released && typeof released === 'object' && 'ready' in released) snapshot.work[index] = released;
       if (!item.yardRepair) slots -= 1;
-      await note(cycle, key, 'judgement', item.key, 'done', `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`, config.operatorAgent?.id ?? null);
+      await note(cycle, key, 'judgement', item.key, 'done', overCap
+        ? `Released yard repair ${item.key} past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`
+        : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`, config.operatorAgent?.id ?? null);
     }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
   }
