@@ -205,7 +205,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
       version: 1, url, credentialFile: secret, cliPath: join(checkout, 'bin/graphyard.mjs'),
       repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host',
       masterAgentName: 'test-master', workers: [], run: { intervalSeconds: 300 },
-    })));
+    })), { mode: 0o600 });
     const upgrade = join(checkout, 'src/cli/upgrade.ts');
     await cp(join(source, 'tests/fixtures/deploy-predecessor/upgrade.ts.txt'), upgrade);
     oldWatch = watcher(checkout, run); await oldWatch.started;
