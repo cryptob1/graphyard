@@ -20,6 +20,12 @@ import { assertReviewCandidate, launchReview, readReviewLedger, reviewRecordSche
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
+
+/** A fresh registry per launch: the registry alone grants the reviewer its slot. */
+const reviewProbe = () => registryFixture(hostname(), ['claude'], ['reviewer']).probe;
+
 
 // GY-1525: review by risk in control-plane mode. The reviewer launch binds a one-time verdict
 // token; `review post` sends the verdict to the API as that token; the server records it on the
@@ -166,10 +172,10 @@ test('unit:review-post-control-plane-api — the binding gains mode, head, baseT
     const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     // A launch the control plane refuses starts nothing and keeps no record or binding.
     const refused = item('GY-8', { id: randomUUID(), candidate: { sha: M, baseSha: B, pr: 8, branch: 'graphyard/gy-8-1', author: 'graphyard-claude-1' }, submission: { epoch: 1, pr: 8 }, observation: planeObservation({ sha: M, baseSha: B, pr: 8, branch: 'graphyard/gy-8-1', author: 'graphyard-claude-1' }, ['src/x.ts']) });
-    await assert.rejects(launchReview(root, refused, 'reviewer-claude', [], now(), { run: herdr, registerLaunch: async () => { throw new Error('refused (409): already reviewed'); } }), /refused \(409\)/);
+    await assert.rejects(launchReview(root, refused, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdr, registerLaunch: async () => { throw new Error('refused (409): already reviewed'); } }), /refused \(409\)/);
     assert.equal((await readReviewLedger(root)).reviews.length, 0, 'the refused launch leaves no record');
     const work = item('GY-7');
-    const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run: herdr, registerLaunch: async (_work, launch) => { registered.push(launch); return { launch: 'launch-1' }; } }) as { mode?: string; launch?: string | null; reviewer: string };
+    const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdr, registerLaunch: async (_work, launch) => { registered.push(launch); return { launch: 'launch-1' }; } }) as { mode?: string; launch?: string | null; reviewer: string };
     assert.deepEqual([launched.mode, launched.launch, launched.reviewer], ['control-plane', 'launch-1', 'review-claude-1']);
     const tab = calls.filter(args => args[0] === 'tab' && args[1] === 'create').at(-1)!;
     const directory = tab.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length);
@@ -289,7 +295,7 @@ test('unit:review-request-names-merge-base — the reviewer request, the session
       await saveReviewerProfile(repo.root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
       const calls: string[][] = [], registered: unknown[] = [];
       const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-merge-base', tab_id: 'tab-merge-base' }, tab: { tab_id: 'tab-merge-base' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
-      await launchReview(repo.root, movedBaseItem('GY-2948', repo), 'reviewer-claude', [], now(), { run: herdr, registerLaunch: async (_work, launch) => { registered.push(launch); return { launch: 'launch-merge-base' }; } });
+      await launchReview(repo.root, movedBaseItem('GY-2948', repo), 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdr, registerLaunch: async (_work, launch) => { registered.push(launch); return { launch: 'launch-merge-base' }; } });
       const tab = calls.filter(args => args[0] === 'tab' && args[1] === 'create').at(-1)!;
       const sessionDirectory = tab.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length);
       const sessionBinding = JSON.parse(await readFile(join(sessionDirectory, reviewBindingFile), 'utf8')) as ReviewPostBinding;
@@ -538,7 +544,7 @@ test('integration:control-plane-reviewer-profile-launch — without a reviewer A
   try {
     const calls: string[][] = [];
     const work = await insert(item('GY-9007'));
-    const launched = await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) }) as { reviewer: string; mode?: string; launch: string | null; sha: string; baseSha: string };
+    const launched = await launchReview(master.root, work, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdrStub(calls) }) as { reviewer: string; mode?: string; launch: string | null; sha: string; baseSha: string };
     assert.equal(launched.reviewer, reviewerIdentity, 'the profile agent identity');
     assert.deepEqual([launched.mode, launched.sha, launched.baseSha], ['control-plane', H, B], 'one launch on the requested head and base');
     assert.ok(launched.launch, 'the real route registered the launch');
@@ -563,7 +569,7 @@ test('unit:review-verdict — a master config with no githubAppId launches a rev
     await writeFile(file, JSON.stringify(config));
     const calls: string[][] = [];
     const work = await insert(item('GY-9011'));
-    await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) });
+    await launchReview(master.root, work, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdrStub(calls) });
     const [tab] = tabsOf(calls);
     const binding = JSON.parse(await readFile(join(tab!.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
     const approved = await request(binding.verdictToken!, `work/${work.id}/review-verdict`, verdict(binding.verdictToken!, 'APPROVE'));
@@ -578,7 +584,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
   try {
     const calls: string[][] = [];
     const work = await insert(item('GY-9008'));
-    await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) });
+    await launchReview(master.root, work, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdrStub(calls) });
     const [tab] = tabsOf(calls);
     assert.equal(tabsOf(calls).length, 1);
     const binding = JSON.parse(await readFile(join(tab!.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
@@ -608,7 +614,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
     // The reviewer identity implementing the item: the launcher refuses before anything starts, and the
     // route refuses the verdict with review.independence-refused recorded and the token withdrawn.
     const implemented = await insert(item('GY-9009', { implementers: [reviewerIdentity], workspaces: [] }));
-    await assert.rejects(launchReview(master.root, implemented, 'reviewer-claude', [], now(), { run: herdrStub(calls) }), /review-claude-1 implemented GY-9009/);
+    await assert.rejects(launchReview(master.root, implemented, 'reviewer-claude', [], now(), { probe: reviewProbe(), run: herdrStub(calls) }), /review-claude-1 implemented GY-9009/);
     assert.equal(tabsOf(calls).length, 1, 'no session for a reviewer of its own work');
     const own = freshToken();
     assert.equal((await request(tokenOf(coordinator), `work/${implemented.id}/review-launch`, launchBody(own, { reviewer: reviewerIdentity }))).status, 200);
