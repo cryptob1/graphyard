@@ -25,4 +25,4 @@ Control-plane mode is shipped; the Snake pilot remains the rollout exercise.
 
 Use item histories and serving observations. Aggregate throughput/latency metrics are not recorded.
 
-Before a leased push, single and batch writers require each declared `unit:`/`integration:`/`e2e:` proof to report `executed > 0` and `failed = 0` in the real trial. A successful command alone supplies no proof count. Missing, unexecuted or failing proofs keep their actual trial records and refuse the head with the proof name for ordinary rework. A failed batch retries individually. Other items’ proofs and declared post-deploy observations add no premerge requirement.
+Before a leased push, the merge writer requires each declared `unit:`/`integration:`/`e2e:` proof to report `executed > 0` and `failed = 0` in the real trial. A successful command alone supplies no proof count. Missing, unexecuted or failing proofs keep their actual trial records and refuse the head with the proof name for ordinary rework. A failed trial returns its own head for rework; the heads beside it land. Other items’ proofs and declared post-deploy observations add no premerge requirement.

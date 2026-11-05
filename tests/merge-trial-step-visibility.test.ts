@@ -285,7 +285,7 @@ test('integration:trial-step-timings — finished steps survive the flight and m
 
   let clock = start, duration = 0;
   const ports = timedMergePorts({ baseBranch: 'main', fetch: async () => base,
-    merge: async () => ({ mergeSha: head, files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
+    merge: async (mergeHead, baseTip) => ({ mergeSha: sha(`merge:${mergeHead}:${baseTip}`), files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
     step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
     return {} as never;
   }, push: async () => { clock += 20; return 'pushed'; }, preview: async () => { clock += 30; return null; } } as MergePorts,
@@ -301,6 +301,15 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.equal(summary.trials![0]!.mergeSha, sha('1'));
   assert.deepEqual(summary.trials![0]!.heads, heads);
   assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, preview: 30, push: 20 });
+
+  // GY-3120: a landing that re-merges onto a moved tip still records its push on the head's own trial record.
+  const remergeHead = sha('ninth');
+  await ports.trial(sha('nine'), [], item(), base, undefined, undefined, [{ key: 'GY-9', head: remergeHead }]);
+  const landing = await ports.merge(remergeHead, sha('moved'));
+  if (!('mergeSha' in landing)) throw new Error('the re-merge conflicts with its own base');
+  await ports.push(landing.mergeSha, sha('moved'));
+  const record = mergeWriterSummary(made.state.mergeWriter).trials!.find(entry => entry.mergeSha === sha('nine'))!;
+  assert.deepEqual(record.steps.at(-1), { step: 'push', durationMs: 20 });
 });
 
 test('integration:trial-step-timings — parallel test shards report their own durations', async () => {

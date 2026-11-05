@@ -10,7 +10,7 @@ import type { Work } from '../model.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
-import { mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
+import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
@@ -203,11 +203,12 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(error); return status === null || status >= 500 || status === 408 || status === 429; };
 
 /**
- * GY-2053: the writer's worst case for one flight — one trial timeout plus one cycle, since a passing head lands without
- * another trial (GY-3120) — the bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`).
+ * GY-2053: the writer's worst case for one flight — one trial timeout, then a landing that re-merges onto each
+ * tip move another head's landing makes (GY-3120), one cycle's allowance per head that can trial at once
+ * (`run.mergeWriter.parallel`) — the bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`).
  */
-export const mergeWriterFlightBoundMs = (run: { intervalSeconds?: number }) =>
-  trialTimeoutMinutes * 60_000 + (run.intervalSeconds ?? 20) * 1000;
+export const mergeWriterFlightBoundMs = (run: { intervalSeconds?: number; mergeWriter?: { parallel?: number } }) =>
+  trialTimeoutMinutes * 60_000 + (run.mergeWriter?.parallel ?? defaultMergeWriterParallel) * (run.intervalSeconds ?? 20) * 1000;
 
 /**
  * GY-2053: what one recorded write says, as the reader reads it — the attempt step the writer's summary reports as its newest movement.
