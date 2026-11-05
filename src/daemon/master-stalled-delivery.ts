@@ -7,6 +7,7 @@ import type { ServingReport } from '../deploy-watch.js';
 import type { Work } from '../model.js';
 import { parseBaseFailureReason } from '../merge-writer/executor.js';
 import { gateCauses, type GateRecord } from '../batch-gate.js';
+import { repeatedFailureCause, repeatingItems } from './repeated-failure.js';
 
 export const stalledDeliveryAction = 'Diagnose the shared base failure, file or advance its repair, and resume delivery with every test and merge requirement intact. Act as the operator-agent; no human review or approval is needed.';
 
@@ -31,12 +32,19 @@ export type MasterCause = { key: string; detail: string; digest: string };
 const cause = (key: string, detail: string): MasterCause => ({ key, detail, digest: createHash('sha1').update(detail).digest('hex') });
 const subject = (kind: string, id: string) => `${kind}:${createHash('sha1').update(id).digest('hex')}`;
 
-/** Current board/cursor refusals only: successful retries and resolved work drop their subjects. */
-export function masterCauses(work: readonly Work[], actions: DaemonState['actions'] = {}): MasterCause[] {
+/**
+ * Current board/cursor refusals only: successful retries and resolved work drop their subjects. An
+ * item in a run of repeated equal failures (GY-3104) wakes the master by its run's one cause instead
+ * of each failure's.
+ */
+export function masterCauses(work: readonly Work[], actions: DaemonState['actions'] = {}, runs: DaemonState['failureRuns'] = {}): MasterCause[] {
   const open = work.filter(item => item.stage !== 'done');
   const causes = stalledDelivery(open);
+  const repeating = repeatingItems(runs);
   for (const item of open) {
     if (item.blocker) causes.push(cause(subject('blocker', item.id), `${item.key}: ${item.blocker}`));
+    const repeat = repeatedFailureCause(runs[item.id]);
+    if (repeat) { causes.push(cause(repeat.key, repeat.detail)); continue; }
     for (const action of item.actionQueue?.actions ?? []) {
       const last = action.history.at(-1);
       if (last?.event === 'failed') causes.push(cause(subject('operation', action.id), `${item.key} ${action.kind}: ${last.reason}${last.result ? `; ${last.result}` : ''}`));
@@ -46,6 +54,7 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
     // GY-3122: a disk shortage the loop could not reclaim names no item, and holds every trial and worker.
     if (key === 'disk-headroom') { if (action.state === 'failed') causes.push(cause('disk-headroom', action.detail)); continue; }
     const item = open.find(item => item.key === action.work);
+    if (item && repeating.has(item.key)) continue;
     const earlyExit = key.startsWith('early-exit:');
     if (!item || (!earlyExit && action.epoch !== null && action.epoch !== item.epoch)) continue;
     if (key.startsWith('spec-check-') && specCheckCurrent(item)) continue;

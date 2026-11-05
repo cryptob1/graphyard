@@ -162,6 +162,13 @@ export function masterSummary(master: MasterSessionState, now: number, agent?: {
     state: masterSessionState(master, now, agent, screen) };
 }
 
+/** GY-3104: one item's current run of equal-signature failures (daemon/repeated-failure.ts) and the failure occurrences already counted. */
+const failureRunSchema = z.object({
+  key: z.string().max(100), kind: z.enum(['launch', 'trial', 'review']), signature: z.string().max(100),
+  reasons: z.array(z.string().max(1000)).max(2), count: z.number().int().min(0), at: z.string(), seen: z.array(z.string().max(300)).max(20),
+}).strict();
+export type FailureRun = z.infer<typeof failureRunSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -185,6 +192,8 @@ export const daemonStateSchema = z.object({
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** A disk shortage the headroom step could not reclaim (GY-3122): while set, no new merge trial or worker starts; null with room above the floor. */
   diskHeadroom: z.object({ at: z.string(), floorBytes: z.number(), volumes: z.array(z.object({ path: z.string().max(1000), freeBytes: z.number() }).strict()).max(20), shortage: z.string().max(2000) }).strict().nullable().default(null),
+  /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
+  failureRuns: z.record(z.string(), failureRunSchema).default({}),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory(new Date().toISOString())),
 }).strip();
