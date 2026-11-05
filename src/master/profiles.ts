@@ -270,6 +270,12 @@ export const masterRunSchema = z.object({
   smokeWorkflow: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Name the trusted post-deployment smoke workflow file, such as deploy-smoke.yml').optional(),
   // Unused since GY-1983 removed the release-candidate drive it paced; still accepted so an older master.json loads.
   promoteEveryMinutes: z.number().int().min(0).max(10080).optional(),
+  // GY-3101: the stalled-yard alert. The operator's webhook — any receiver that takes a POST
+  // body, such as an ntfy topic — the loop tells directly when queued work can neither start
+  // nor merge, and how long a stop lasts before it alerts. The operator owns both; no CLI
+  // path writes them.
+  alertUrl: z.string().url().max(500).optional(),
+  alertMinutes: z.number().int().min(5).max(1440).optional(),
   // GY-1398: how long the deployment step reuses its last verified release observation while every
   // delivery is already served and none is pending, instead of reading GitHub every cycle. Unset: 15
   // (`defaultDeploymentReuseMinutes`); 0 reads live every cycle.

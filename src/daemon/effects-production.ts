@@ -224,6 +224,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    // GY-3101: one plain-text line POSTed to the operator's alert webhook (run.alertUrl) — any receiver that takes a body, such as an ntfy topic.
+    alertWebhook: async text => {
+      const response = await fetcher(current().run.alertUrl!, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text, signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`the alert webhook answered ${response.status} ${response.statusText}`.trim());
+    },
     persist,
   } satisfies DaemonEffects, {});
 }

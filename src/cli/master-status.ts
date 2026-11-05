@@ -14,6 +14,7 @@ import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/s
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { specCheckCurrent } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
+import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import { stoppedRoles } from '../master/stopped-roles.js';
 import type { FleetView } from '../model/registry.js';
@@ -81,6 +82,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     attention: stopped,
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
+    // GY-3101: the stalled-yard alert. On, with the stop it last recorded; off names itself, because no run.alertUrl is configured.
+    alerts: master.run.alertUrl
+      ? { on: true, url: master.run.alertUrl, minutes: alertMinutesOf(master.run), stoppedAt: state?.alerts.stoppedAt ?? null, lastAlertAt: state?.alerts.lastAlertAt ?? null }
+      : { on: false },
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },

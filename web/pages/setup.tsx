@@ -80,6 +80,20 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
 }
 
 /**
+ * Whether the loop tells the operator directly when queued work can neither start nor merge
+ * (GY-3101), as the live loop names it in the status (`setup.alerts`): on, off, or not known yet
+ * (no live loop has named it).
+ */
+export function AlertsLine({ status }: { status: any }) {
+  const alerts = status?.setup?.alerts;
+  return <p data-alerts={alerts === true ? 'on' : alerts === false ? 'off' : 'unknown'}>
+    {alerts === true ? <span className="green">Alerts are on: the loop tells you directly when queued work cannot start or merge.</span>
+      : alerts === false ? <span className="amber">Alerts are off: set run.alertUrl in .graphyard/master.json and the loop will tell you directly when queued work cannot start or merge.</span>
+        : 'Whether the loop alerts you is not known yet.'}
+  </p>;
+}
+
+/**
  * The page body for a status answer and the work items (WORK, read at NOW), without the dashboard's
  * state: what the tests render. The onboarding change is a step of its own while it is open, as
  * `graphyard up` waits for it. WORKUNREAD: the work items are not read yet (or the read failed), so
@@ -98,6 +112,7 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
+    <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
   </>;
 }
 

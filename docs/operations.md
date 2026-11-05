@@ -35,7 +35,7 @@ Ended assignments use `git worktree remove` without force. Sessions and trials r
 
 ## Master coordination loop
 
-See the [five steps and wake limits](master-agent.md#the-loop). Systemd detects incomplete cycles; the AI master diagnoses delivery failures. The separate deploy supervisor reports `serving.failedDeploy`.
+See the [five steps and wake limits](master-agent.md#the-loop). Systemd detects incomplete cycles; the AI master diagnoses delivery failures. The separate deploy supervisor reports `serving.failedDeploy`. A stopped yard reaches the operator directly: set `run.alertUrl` in `.graphyard/master.json` and the loop posts one line when queued work has neither started nor merged for `run.alertMinutes` (default 20), repeated hourly, with one all-clear; `master status` and the dashboard say whether alerts are on.
 
 ## Lost worker before submission
 

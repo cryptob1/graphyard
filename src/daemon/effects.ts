@@ -119,6 +119,8 @@ export interface DaemonEffects {
   adoptRuns?: () => Promise<AdoptedRun[]>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
+  /** POSTs one plain-text line to the operator's alert webhook (GY-3101: `run.alertUrl`, any receiver that takes a body, such as an ntfy topic). Absent, no alert is sent. */
+  alertWebhook?: (text: string) => Promise<void>;
   /** The release this process loaded, read once at startup. */
   loadedRelease?: LoopRelease | null;
   persist: (state: DaemonState) => Promise<void>;
