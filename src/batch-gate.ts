@@ -7,8 +7,9 @@
 // affected selection picks for the changed files — the whole E2E catalog in place of the subset
 // only when its measured gate-run time fits half the 45-minute limit (GY-3144). A passing gate records the tip as
 // verified in .graphyard/main-gate.json; the deploy watch serves only that commit. A failing check
-// is re-run once (a pass is a filed flake), an affected test that also fails on the last verified
-// commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
+// is re-run once (a pass is a filed flake), an affected test — or, when the whole catalog ran, a
+// catalog case no batch item binds, gate.core does not name and smoke is not (GY-3147) — that also
+// fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
 // merge order: the last item of the smallest failing prefix is reverted through the serve-revert
 // path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
 // commit served and wakes the master. The full suite and catalog run daily against the verified
@@ -68,7 +69,7 @@ export interface GateRecord {
   attempt: { recuts: number; timeouts: number };
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
   held: { tip: string; reason: string; at: string } | null;
-  /** Per commit, whether a check fails there (the known-red cache). */
+  /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
   results: Record<string, Record<string, boolean>>;
   /** The last merges judged, oldest first. */
   merges: GateMerge[];
@@ -194,12 +195,15 @@ export function catalogFits(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, 
   return measured !== null && measured <= catalogBudgetMs;
 }
 
+/** The E2E cases the batch's items bind; a reverted item's own cases left main with it. */
+function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): string[] {
+  const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
+}
+
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  // A reverted item's own cases left main with it.
-  const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-  const bound = landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
-  const cases = whole ? await ports.catalog(tip) : [...bound, ...await ports.core(tip)];
+  const cases = whole ? await ports.catalog(tip) : [...new Set([...boundCaseIds(record, landings), ...await ports.core(tip)])];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
@@ -289,15 +293,23 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       const again = await run(tip, failed, files);
       flakes = failed.filter(check => !again.includes(check));
       for (const check of flakes) await fileFailure(ports, record, at(), { key: `flake:${check}`, title: `Flaky check on main: ${check}`, description: `The batch gate's check ${check} failed on ${tip.slice(0, 12)} and passed on its re-run. Make it deterministic.` });
+      // The e2e cases that must pass outright (GY-3147): smoke, whatever gate.core names, and every
+      // case a batch item binds. A whole-catalog case outside them was red before the batch whenever
+      // it is red on the verified commit too, so it is a filed known red, never a revert.
+      let outright: Set<string> | null = null;
+      const mustPass = async () => outright ??= new Set(['e2e:smoke', ...(await ports.core(tip)).map(id => `e2e:${id}`), ...boundCaseIds(record, landings).map(id => `e2e:${id}`)]);
       for (const check of again) {
-        // Only an affected test may be a known red: one that also fails on the last verified commit.
-        if (check.startsWith('test:')) {
+        // A known red is a check that also fails on the last verified commit: an affected test, or a
+        // catalog-only e2e case — one no batch item binds, gate.core does not name and smoke is not.
+        const catalogOnly = check.startsWith('e2e:') && !(await mustPass()).has(check);
+        if (check.startsWith('test:') || catalogOnly) {
           let failsThere = record.results[verified]?.[check];
           if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
+          await ports.checkpoint?.(); // the probe's verdict is saved to the record before anything is filed (GY-3147)
           if (failsThere) {
             knownRed.push(check);
-            await fileFailure(ports, record, at(), { key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `The test ${check.slice(5)} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
+            await fileFailure(ports, record, at(), { key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `${check.startsWith('test:') ? `The test ${check.slice(5)}` : `The E2E case ${check.slice(4)}`} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
             continue;
           }
         }
