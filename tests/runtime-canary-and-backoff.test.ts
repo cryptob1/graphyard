@@ -132,7 +132,7 @@ test('unit:runtime-canary-and-backoff — a failed canary keeps the pinned versi
   assert.match(refused.state.canaries.opencode.failed!, /never started/);
 });
 
-test('unit:runtime-canary-and-backoff — launch failures back off per runtime and item: 1 min doubling to 30 min, nine profiles count as one, a useful launch of the runtime resets it', async () => {
+test('unit:runtime-canary-and-backoff — launch failures back off per runtime and item: 1 min doubling to 30 min, nine profiles count as one, a useful launch of the runtime resets it for the item', async () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 12].map(launchBackoffMs), [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000, 1_800_000]);
   const items = [work('x', 'GY-10')];
   const run = harness(items, { ...registryOf([runtime('2.2.5')]), roles: [{ name: 'worker', accounts: ['oc-a'] }] as AgentRegistry['roles'] });
@@ -159,10 +159,11 @@ test('unit:runtime-canary-and-backoff — launch failures back off per runtime a
   await mixed.cycle(t0);
   assert.deepEqual(mixed.launches.map(launch => [launch.key, launch.exclude]), [['GY-10', ['oc-a']], ['GY-11', []]]);
 
-  // A launch of the runtime that outlives the failed-launch window clears its back-off.
-  const useful = work('y', 'GY-11', { epoch: 1, stage: 'build', ready: true, sessions: [session(t0 - 120_000, { host: 'machine-a', principal: 'worker-0' })] } as Partial<Work>);
+  // A launch of the runtime for the item that outlives the failed-launch window clears its back-off; another item's back-off stands.
+  const useful = work('x', 'GY-10', { epoch: 1, stage: 'build', ready: true, sessions: [session(t0 - 120_000, { host: 'machine-a', principal: 'worker-0' })] } as Partial<Work>);
   const reset = harness([useful]);
   reset.state.launchBackoff['opencode:x'] = { failures: 3, reason: 'opencode TUI exited', until: iso(t0 + 240_000) };
+  reset.state.launchBackoff['opencode:z'] = { failures: 1, reason: 'opencode TUI exited', until: iso(t0 + 60_000) };
   await reset.cycle(t0);
-  assert.deepEqual(reset.state.launchBackoff, {}, 'a successful launch of the runtime resets its back-off');
+  assert.deepEqual(Object.keys(reset.state.launchBackoff), ['opencode:z'], 'a successful launch of the runtime resets its back-off for that item');
 });

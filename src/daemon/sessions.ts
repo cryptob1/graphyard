@@ -55,8 +55,8 @@ export function readyToRetry(previous: DaemonAction | undefined, cycle: number, 
  * GY-3103: a worker launch failure backs off its runtime for that item — 1 minute, doubling with
  * each further failure to at most 30 minutes — however many profiles or accounts run the runtime.
  * A failure that names no runtime (it failed before one was chosen) backs off the item on every
- * runtime. A launch of the runtime that does useful work (it outlives the failed-launch window,
- * commits or submits) clears every back-off of that runtime.
+ * runtime. A launch of the runtime for the item that does useful work (it outlives the
+ * failed-launch window, commits or submits) clears that back-off.
  */
 export const launchBackoffMs = (failures: number) => Math.min(60_000 * 2 ** Math.max(0, failures - 1), 1_800_000);
 export const anyRuntime = 'any';
@@ -65,8 +65,9 @@ export function recordLaunchFailure(state: DaemonState, runtime: string | null, 
   const key = backoffKey(runtime ?? anyRuntime, item), failures = (state.launchBackoff[key]?.failures ?? 0) + 1;
   state.launchBackoff[key] = { failures, reason: reason.slice(0, 500), until: new Date(now + launchBackoffMs(failures)).toISOString() };
 }
-export function clearLaunchFailures(state: DaemonState, runtime: string) {
-  for (const key of Object.keys(state.launchBackoff)) if (key.startsWith(`${runtime}:`) || key.startsWith(`${anyRuntime}:`)) delete state.launchBackoff[key];
+export function clearLaunchFailures(state: DaemonState, runtime: string, item: Pick<Work, 'id'>) {
+  delete state.launchBackoff[backoffKey(runtime, item)];
+  delete state.launchBackoff[backoffKey(anyRuntime, item)];
 }
 /** The back-off holding `runtime` off `item`, or null when it may launch. */
 export function launchBackoff(state: DaemonState, runtime: string, item: Pick<Work, 'id'>, now: number) {

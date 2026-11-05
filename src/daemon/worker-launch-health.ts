@@ -24,7 +24,7 @@ export async function workerLaunchHealth(cycle: Cycle, item: Work, session: Sess
   const age = Date.parse(ended ? end.endedAt! : new Date(clock).toISOString()) - Date.parse(startedAt);
   const key = earlyExitKey(item);
   const runtime = session.runtime ?? null;
-  const recovered = () => { delete state.actions[key]; if (runtime) clearLaunchFailures(state, runtime); return null; };
+  const recovered = () => { delete state.actions[key]; if (runtime) clearLaunchFailures(state, runtime, item); return null; };
   if (item.submission?.epoch === epoch || age >= resumeExitWindowMs) return recovered();
   const space = item.workspaces.find(space => space.epoch === epoch && space.host === config.hostId);
   const reading = space && session.initialHead ? await Promise.resolve().then(() => effects.worktreeState?.(space)).catch(() => null) : null;
