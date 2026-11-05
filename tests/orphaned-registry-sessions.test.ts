@@ -10,7 +10,7 @@ import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
 import { exactApproval } from '../src/model/review.js';
 import type { FleetClient } from '../src/fleet.js';
-import { loadMasterConfig, type MasterConfig } from '../src/master.js';
+import { loadMasterConfig, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
@@ -371,4 +371,62 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.equal(done.gates.find(gate => gate.name === 'review')!.passed, false);
     assert.equal(exactApproval(done), null, 'COMMENTED cannot supply independent approval');
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
+});
+
+// GY-3116: on 2026-11-05 the post-merge reviews of GY-3090 and GY-3098 completed (their ledger
+// records closed with no pane recorded) and both items merged and left the open-work snapshot,
+// yet their reviewer registry sessions held two of four slots for up to 38 minutes: the close step
+// never saw the done items, and the orphan sweep needed a pane to miss.
+test('unit:review-session-released-after-merge — a closed review record with no pane releases its registry session on the next tick, though its item is done and absent', async () => {
+  const host = 'vishrog', at = Date.now();
+  const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
+    models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host, home: null } }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency: 4 }],
+    reason: 'fixture reviewer fleet',
+  }, { actor: 'operator', at: new Date(at).toISOString() }).registry;
+  const session = (id: string, work: string): FleetSession => ({ id, role: 'reviewer', account: 'reviewer-account', runtime: 'claude', model: 'opus', host, work, principal: 'reviewer',
+    selectedAt: new Date(at - 30 * 60_000).toISOString(), selectedBy: 'coordinator', reason: 'fixture', skipped: [], endedAt: null, endReason: null });
+  // The incident's records: GY-3090's post-merge review completed with no pane recorded, its item
+  // merged and gone from the snapshot; GY-3104's review is still running, also without a pane.
+  registry.sessions.push(session('36ec50d6', 'GY-3090'), session('be198685', 'GY-3098'), session('running', 'GY-3104'));
+  const records = [
+    { key: 'GY-3090', session: '36ec50d6', pane: null, runtime: 'claude', state: 'completed', agentName: 'review-claude-1-ee30901e' },
+    { key: 'GY-3098', session: 'be198685', pane: null, runtime: 'claude', state: 'failed', agentName: 'review-claude-1-ee309881' },
+    { key: 'GY-3104', session: 'running', pane: null, runtime: 'claude', state: 'pending', agentName: 'review-claude-1-ee310400' },
+  ];
+  // An empty Herdr inventory: nothing to miss, and the first sighting ends each closed review.
+  assert.deepEqual(orphanedRegistrySessions(registry, host, [], records, at), [
+    { id: '36ec50d6', role: 'reviewer', work: 'GY-3090', pane: null, agentName: 'review-claude-1-ee30901e', closedReview: 'completed' },
+    { id: 'be198685', role: 'reviewer', work: 'GY-3098', pane: null, agentName: 'review-claude-1-ee309881', closedReview: 'failed' },
+  ]);
+  // A closed review whose pane is still listed stays counted until that pane goes, as before.
+  const listed = [{ ...records[0], pane: 'w4G:p3B' }];
+  assert.deepEqual(orphanedRegistrySessions(registry, host, [{ pane_id: 'w4G:p3B' }], listed, at), []);
+
+  // One dispatch tick, the done items absent from its snapshot, ends both sessions.
+  const ended: Record<string, string> = {};
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/token', cliPath: '/nonexistent/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: host, masterAgentName: 'graphyard-master-project', workers: [] });
+  const effects = {
+    snapshot: async () => ({ work: [], now: new Date(at).toISOString() }),
+    agents: () => [],
+    credentials: async () => ({}),
+    reconcileReviews: async () => ({ reviews: records }),
+    reconcileProducers: async () => ({ producers: [] }),
+    launchReview: async () => { throw new Error('nothing is launched here'); },
+    launchProducer: async () => { throw new Error('nothing is launched here'); },
+    registry: async () => structuredClone(registry),
+    endRegistrySession: async (orphan: { id: string }, reason: string) => { ended[orphan.id] = reason; },
+    persist: async () => {},
+  } as unknown as DispatchEffects;
+  const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects);
+  assert.deepEqual(tick.registryClosed, [
+    { work: 'GY-3090', id: '36ec50d6', role: 'reviewer', pane: null },
+    { work: 'GY-3098', id: 'be198685', role: 'reviewer', pane: null },
+  ]);
+  assert.match(ended['36ec50d6'], /review record is completed/);
+  assert.match(ended['be198685'], /review record is failed/);
+  assert.equal(ended.running, undefined, 'a running review keeps its slot');
 });

@@ -481,6 +481,9 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   if (revertState.reverts.some(entry => entry.serve === serve)) return false;
   if (snapshot.work.some(item => item.mergeLedger?.serveReverts?.some(entry => entry.serve === serve && entry.outcome === 'refused'))) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
+  // GY-3122: below the disk floor no new trial starts — the revert flight's trial is the loop's
+  // most disk-heavy one — and an owed retrial keeps its place until room returns.
+  if (state.diskHeadroom) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
   // An owed retrial waits the base-failure hold like a base-held head (executor.ts GY-1834)
@@ -731,7 +734,8 @@ export async function mergeWriterStep(cycle: Cycle) {
       // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
       const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === ordered[0]?.id) ?? null;
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
-      const due = next?.candidate && (reads.admit?.() ?? true) ? next : null;
+      // GY-3122: below the disk floor no new trial starts; one in flight settles.
+      const due = next?.candidate && !state.diskHeadroom && (reads.admit?.() ?? true) ? next : null;
       // GY-2088: the oldest heads, up to the batch size, are merged together; the flight is named by the oldest. A yielding head (GY-2079) merges alone, so its timeouts are its own.
       // Up to `parallel` such batches are trialled at once, each stacked on the one before it (batch.ts `mergeStack`); a bug item (GY-2984) is a position of its own.
       const yields = (work: Work) => yielding.has(`${work.key}:${work.candidate?.sha.toLowerCase()}`);

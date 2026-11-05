@@ -134,11 +134,18 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   }
 }
 
-/** `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried. `repository` is the record's owner: the repository the watch serves. */
-export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void; repository?: string | null }) {
+/**
+ * `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried.
+ * `repository` is the record's owner: the repository the watch serves. `handover` runs after a pass
+ * served a new tip; it may stop the watch by throwing, so the process that restarts it loads the
+ * code the checkout published — the watch runs the code it deploys (GY-3123).
+ */
+export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void; repository?: string | null; handover?: (tip: string) => Promise<void> }) {
   const log = options.log ?? (line => console.error(line));
   for (;;) {
-    try { await deployOnce(file, ports, log, options.repository ?? null); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
+    let served: Awaited<ReturnType<typeof deployOnce>> | undefined;
+    try { served = await deployOnce(file, ports, log, options.repository ?? null); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
+    if ((served === 'deployed' || served === 'kept') && options.handover) await options.handover(readDeployRecord(file)?.tip ?? '');
     if (options.once || options.signal?.aborted) return;
     try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { return; }
   }

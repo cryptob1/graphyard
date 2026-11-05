@@ -32,6 +32,11 @@ export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' 
  */
 export function foldObservation(account: FleetAccount, observed: QuotaObservation, context: { actor: string; at: string }) {
   const held = account.quota, now = Date.parse(context.at);
+  // An exhaustion observed at or before an operator's latest decision (GY-3117) is what that decision overrode: only the login state is taken.
+  if (observed.state === 'exhausted' && observed.since && account.quotaDecision && Date.parse(observed.since) <= Date.parse(account.quotaDecision.at)) {
+    if (observed.loggedIn === null || observed.loggedIn === held.loggedIn) return false;
+    account.quota = { ...held, loggedIn: observed.loggedIn }; return true;
+  }
   const operatorHold = held.source === 'operator' && held.state === 'exhausted' && (!held.resetsAt || Date.parse(held.resetsAt) > now);
   if (operatorHold) {
     const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
