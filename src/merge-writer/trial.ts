@@ -355,6 +355,10 @@ export type TrialNoVerdictOutcome = 'timeout' | 'cancelled' | 'host-failure';
 export interface TrialNoVerdict { outcome: TrialNoVerdictOutcome; phase: TrialPhase; reason: string; phases: TrialPhaseDurations }
 /** The signals that end a runner child as cancelled rather than failed: a stop, an interrupt or a hangup sent from outside the trial. */
 export const trialCancelSignals: readonly string[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+/** GY-3099: a trial the merge writer stopped because a head it carries was refused or replaced; it is never retried and its heads stay queued. */
+export class TrialCancelledError extends Error {
+  constructor(readonly reason: string) { super(`The trial was cancelled: ${reason}`); this.name = 'TrialCancelledError'; }
+}
 /** How many times a trial that reached no verdict is tried again before its outcome is final (GY-1832). */
 export const trialRetries = 1;
 /** One runner process of a trial (GY-1548): the files it ran, how it ended, and the failing files its records or log named. */
@@ -586,6 +590,8 @@ export interface RunTrialInput {
   /** GY-2963: called at each step's start — checkout, install, build, selection, the tests, each repository check by name — so the merge writer records where the trial is. */
   onStep?: (step: string) => void;
   onTiming?: (step: string, durationMs: number) => void;
+  /** GY-3099: aborting it kills the trial's install, build and test children and starts no more, rejecting with its reason (`TrialCancelledError`), never retried. */
+  signal?: AbortSignal;
   /** Where the trial's temporary directory may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
   /** Where the trial's short checkout may go; `trialCheckoutRoots()`, kept out of `trialExcludedRoots()`, unless a test names others, taken as named. */
@@ -710,6 +716,7 @@ export function trialNoVerdict(error: unknown): TrialNoVerdict {
   const context = typeof error === 'object' && error ? attemptContext.get(error) : undefined;
   const phases = context?.phases ?? { install: 0, build: 0, selection: 0, tests: 0 }, reason = (error instanceof Error ? error.message : String(error)).slice(0, 900);
   if (error instanceof TrialTimeoutError) return { outcome: 'timeout', phase: error.phase, reason, phases };
+  if (error instanceof TrialCancelledError) return { outcome: 'cancelled', phase: context?.phase ?? 'tests', reason, phases };
   if (error instanceof TrialRunnerError) return { outcome: error.signal && trialCancelSignals.includes(error.signal) ? 'cancelled' : 'host-failure', phase: error.phase, reason, phases };
   return { outcome: 'host-failure', phase: context?.phase ?? 'install', reason, phases };
 }
@@ -735,7 +742,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries) {
+      if (attempt >= retries || input.signal?.aborted) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -859,7 +866,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv; entries?: string[] } = {}): Promise<Ended> => {
     const entries = options.entries ?? log;
     let out: string;
-    try { out = String(await run(command, args, { cwd: worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining(), ...(wrapper ? { wrapper } : {}) })); }
+    if (input.signal?.aborted) throw input.signal.reason;
+    try { out = String(await run(command, args, { cwd: worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining(), ...(wrapper ? { wrapper } : {}), ...(input.signal ? { signal: input.signal } : {}) })); }
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
