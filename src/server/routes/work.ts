@@ -1,5 +1,6 @@
 import { takeWorkerVerifications, finishWorkerVerification } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
+import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
 import { RenewalFault, type Command } from '../../engine.js';
@@ -42,7 +43,11 @@ export const workRoutes = defineRoutes('work', [
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
     async handle(context, [id]) {
-      return workerVerification(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
+      const input = await parseJson(context);
+      // Upload/header limits stay unchanged. Only this reply waits for the host's
+      // trial; leave a minute beyond its deadline to send the result or refusal.
+      context.res.setTimeout(workerVerificationTimeoutMs + 60_000);
+      return workerVerification(context.services, context.actor, decodeURIComponent(id), input);
     },
   },
   // The two waits that stall only their own item (GY-89): a human-only decision a worker records
