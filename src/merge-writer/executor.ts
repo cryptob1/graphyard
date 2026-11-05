@@ -381,7 +381,6 @@ export interface MergeTrialInput extends RunTrialInput {
    */
   discoverProofFiles?: (options: { timeoutMs?: number }) => Promise<readonly string[]>;
 }
-const runner = 'tests/helpers/run-tests.ts';
 const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => /^tests\/[\w./-]+\.test\.ts$/.test(line));
 const childOutput = (error: unknown) => { const failed = error as { stdout?: unknown; stderr?: unknown }; return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}`; };
 
@@ -389,23 +388,12 @@ const childOutput = (error: unknown) => { const failed = error as { stdout?: unk
  * The trial (trial.ts `runTrial`) on the merge commit, with the test selection
  * widened to the files carrying the item's proofs and the run reported as TAP, so the verdict counts
  * each proof's executed and failed cases (AC-2). The child runner is decorated, never the trial:
- * the affected selection (`scripts/ci-tests.mjs affected`, or the `select` fallback an older merge
- * needs) gains the proof files it lacks, and every shard's test run gets the TAP reporter on stdout,
+ * the declared selection gains the proof files it lacks, and every shard's test run gets the TAP reporter on stdout,
  * which `runTrial` still reads its failing files from; the proofs are counted over all the shards.
  */
 export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialRun> {
   const inner = input.run ?? defaultChildRun;
   let tap = '', files: string[] = [], only: string[] | null = null;
-  const widened = (out: string, proofFiles: readonly string[]) => {
-    // GY-1834: a rerun, or the run on the base tip, runs exactly the failing files.
-    if (only) return `${only.join('\n')}\n`;
-    const have = listed(out);
-    // A `full:` selection that lists nothing hands over to `select`; the files are added to that run instead.
-    if (!have.length && /^full:/.test(out.trimStart())) return out;
-    const extra = proofFiles.filter(path => !have.includes(path));
-    files = [...have, ...extra];
-    return extra.length ? `${out.replace(/\s+$/, '')}\n${extra.join('\n')}\n` : out;
-  };
   // The trial's shards run beside each other (GY-1832), so their TAP streams are joined: each proof's
   // cases are counted over every shard, as one runner process would count them. A retried trial runs
   // in a fresh checkout, and only the attempt that answered is counted: each attempt starts its TAP
@@ -426,10 +414,9 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
   const run: ChildRun = async (command, args, options) => {
-    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && args[1] === 'affected') { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
-    const at = command === 'node' ? args.indexOf(runner) : -1;
+    const at = args.indexOf('--files-from');
     if (at >= 0) {
-      return capture(() => inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options));
+      return capture(() => inner(command, [...args.slice(0, at), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at)], options));
     }
     // GY-2960: a repository check's npm test/typecheck output is the TAP the base-failure attribution reads for cases.
     if (command === 'npm' && (args[0] === 'test' || (args[0] === 'run' && (args[1] === 'test' || args[1] === 'typecheck')))) {
@@ -437,10 +424,14 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     }
     return inner(command, args, options);
   };
+  const selectFiles = async (selected: string[], timeoutMs: number) => {
+    files = only ?? [...new Set([...selected, ...await proofFiles({ timeoutMs })])];
+    return files;
+  };
   const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
   let verdict: TrialRun, leftover: string | undefined;
   const onAttempt = (index: number) => { epoch++; tap = ''; files = []; input.onAttempt?.(index); };
-  try { verdict = await runTrial({ ...input, run, onAttempt }); }
+  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
@@ -455,12 +446,12 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   const rerunInput = { ...input, e2eProofs: [] as const };
   const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = []) => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
+    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
   };
   const ownProofFiles = discovered ?? input.proofFiles;
   // The proof files the selection discovered are held like those the input named.
-  const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, proofFiles: ownProofFiles }, inner, retest);
+  const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, selectFiles, proofFiles: ownProofFiles }, inner, retest);
   if (!input.bug || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
   return reproduceOnBase(attributed, input, ownProofFiles, inner, retest);
 }

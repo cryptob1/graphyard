@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -120,6 +120,7 @@ async function call(path: string, actor: Principal, data?: unknown, key = random
   return { status: response.status, body: await response.json() as any };
 }
 
+describe('unit:trial-e2e-cases — declared serving and case verdicts survive the trial phases', () => {
 test('unit:trial-serves-head-and-runs-bound-cases — a head whose bound case is absent is refused naming the missing path', async () => {
   const merged = await trialMerge(gitOfRoot, { head, baseTip });
   assert.ok('mergeSha' in merged);
@@ -244,4 +245,6 @@ test('unit:trial-serves-head-and-runs-bound-cases — each case runs against the
   assert.deepEqual([by('site-answers').executed, by('site-answers').failed], [1, 0], JSON.stringify(cases));
   assert.equal(by('unbound').failed, 1);
   assert.match(by('unbound').failingStep!, /bind it in delivery\.cases to one of site, api/);
+});
+
 });

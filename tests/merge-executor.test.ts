@@ -267,6 +267,11 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
   const tap = ['TAP version 13', '# Subtest: tests/a.test.ts', '    ok 1 - unit:alpha-works — the thing', '    not ok 2 - integration:beta-holds — more', '    1..2', 'not ok 1 - tests/a.test.ts', '# Subtest: tests/proof.test.ts', '    ok 1 - unit:alpha-works — again', '    ok 2 - unit:alpha-works-not-this — a longer title is another proof', '    1..2', 'ok 2 - tests/proof.test.ts', '1..2', ''].join('\n');
   let listed: string[] = [], runnerArgs: string[] = [];
   const runner = recordingRun(async (command, args) => {
+    if (command === 'git' && args.includes('worktree') && args.includes('add')) {
+      const worktree = args[args.indexOf('--detach') + 1]!;
+      await mkdir(worktree, { recursive: true });
+      await writeFile(join(worktree, 'graphyard.json'), readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'));
+    }
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') { assert.deepEqual(args.slice(1), ['affected', 'src/app.ts']); return 'affected: 1 of 5 test files are affected by 1 changed file(s)\ntests/a.test.ts\n'; }
     if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) {
       runnerArgs = args;

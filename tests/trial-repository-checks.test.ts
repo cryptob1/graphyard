@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
@@ -20,7 +20,7 @@ import {
 } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-2958: without scripts/ci-tests.mjs the trial runs the managed repository's own test checks.
+// Repository declarations choose the trial strategy, regardless of similarly named files.
 // GY-2960: a failing check names its files and first case; a failure the base tip shares is held, not reworked.
 
 const identity = {
@@ -48,7 +48,7 @@ async function managedRepo(files: Record<string, string>) {
   return { root, base, write };
 }
 
-test('unit:trial-runs-repository-test-check — a fixture without scripts/ci-tests.mjs whose graphyard.json preMerge names npm run test fails the trial when that script fails, and passes with checks recorded when it passes', async () => {
+test('unit:trial-runs-repository-test-check — a fixture with an unrelated scripts/ci-tests.mjs whose graphyard.json preMerge names npm run test fails the trial when that script fails, and passes with checks recorded when it passes', async () => {
   assert.deepEqual(
     repositoryTrialChecks({
       preMerge: [gateCheck('build', 'npm run build'), gateCheck('test', 'npm run test')],
@@ -68,6 +68,7 @@ test('unit:trial-runs-repository-test-check — a fixture without scripts/ci-tes
     'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'true', test: 'node test.js' } }),
     'graphyard.json': JSON.stringify({ delivery: policy }),
     'test.js': 'process.exit(1);\n',
+    'scripts/ci-tests.mjs': 'throw new Error("unrelated script must never select the trial strategy");\n',
   });
   const head = (() => {
     gitIn(repo.root, 'checkout', '-q', '--detach', repo.base);
@@ -206,6 +207,8 @@ const twoFileFailure = [
 ].join('\n');
 
 test('unit:repository-check-refusal-names-failing-tests — a repository test check whose npm test fails two named cases in two files refuses naming both files and the first case, and the verdict carries the log tail', async () => {
+  const custom = repositoryCheckFailure('not ok 1 - spec/a.spec.js\ntest at spec/a.spec.js:1:1');
+  assert.deepEqual(custom.files, ['spec/a.spec.js']);
   const parsed = repositoryCheckFailure(twoFileFailure);
   assert.deepEqual(parsed.files, ['tests/a.test.ts', 'tests/b.test.ts']);
   assert.equal(parsed.firstCase, 'first case in a');
@@ -485,4 +488,33 @@ test('unit:base-tip-check-cache-bounds — a new tip drops the previous tip\'s e
   }
   assert.ok(baseTipCheckCacheSize() <= baseTipCheckCacheLimit, `cache held ${baseTipCheckCacheSize()} entries past its bound of ${baseTipCheckCacheLimit}`);
   clearBaseTipCheckCache();
+});
+
+
+test('unit:trial-declared-selection — a non-Node repository selects and shards its own layout and counts declared conditional checks', async () => {
+  const preMerge = [
+    { ...gateCheck('ui', 'check-ui'), paths: ['frontend/'] },
+    { ...gateCheck('specs', 'check-specs'), selection: { command: 'select-specs', pattern: '^spec/.*[.]spec[.]js$' } },
+  ];
+  const repo = await managedRepo({ 'graphyard.json': JSON.stringify({ delivery: { mergeGate: { preMerge } } }) });
+  assert.deepEqual(trialTestGateStatus(repo.root), { configured: true, via: 'checks', checks: ['ui', 'specs'] });
+  const commands: string[] = [];
+  const run: typeof defaultChildRun = async (command, args, options) => {
+    if (command === 'git') return defaultChildRun(command, args, options);
+    commands.push(command);
+    if (command === 'select-specs') {
+      assert.deepEqual(args, ['frontend/app.js']);
+      return 'selected specs:\nspec/a.spec.js\nspec/b.spec.js\n';
+    }
+    if (command === 'check-specs') {
+      const files = readFileSync(args[args.indexOf('--files-from') + 1]!, 'utf8').trim().split('\n');
+      assert.deepEqual(files, ['spec/a.spec.js', 'spec/b.spec.js']);
+      writeFileSync(args[args.indexOf('--durations') + 1]!, files.map(file => JSON.stringify({ file, passed: true, durationMs: 1 })).join('\n'));
+    }
+    return '';
+  };
+  const verdict = await runTrial({ root: repo.root, base: await temporaryDirectory('declared-trial'), mergeSha: repo.base,
+    changedFiles: ['frontend/app.js'], timeoutMs: 60_000, run, retries: 0, cores: 2, checkoutRoots: [] });
+  assert.deepEqual(commands, ['check-ui', 'select-specs', 'check-specs']);
+  assert.deepEqual(verdict.tests, { passed: 3, failed: [], files: 3 });
 });
