@@ -4,6 +4,7 @@ import { trialFailureReason } from '../src/merge-writer/executor.js';
 import { trialFailureTests } from '../src/cli/complete.js';
 import { trialFailureRework } from '../src/daemon/cycle-merge-writer.js';
 import { reworkBriefSection } from '../src/master/rework-brief.js';
+import { failureSignature } from '../src/daemon/repeated-failure.js';
 import type { Work } from '../src/model/work.js';
 
 // GY-3150: a refused trial step names the failing tests its output reports and a bounded, masked
@@ -34,6 +35,9 @@ test('unit:trial-refusal-records-failing-tests node test failures name their cas
   assert.match(reason, /^trial failed: tests tests\/merge-ledger\.test\.ts\nfailing tests: fold keeps the refusal\nlog tail:\n/);
   assert.doesNotMatch(reason, /hunter2/);
   const refusal = { kind: 'merge', reason };
+  // Two runs of the same failure whose tails differ by run noise still read as the same failure.
+  const again = trialFailureReason({ run: { build: 'pass', tests: { passed: 1, failed: ['tests/merge-ledger.test.ts'], files: 2 }, logTail: `${nodeTap}\n/var/tmp/graphyard-trial-QwErTy/x` } })!;
+  assert.equal(failureSignature('trial', again), failureSignature('trial', reason));
   assert.deepEqual(trialFailureTests(refusal), ['tests/merge-ledger.test.ts'], 'a test path printed in the log tail is no failing file');
   // A case the reason already names is not repeated.
   const named = trialFailureReason({ run: { build: 'pass', tests: { passed: 1, failed: ['tests/merge-ledger.test.ts'], files: 2 }, failingCase: 'fold keeps the refusal', logTail: nodeTap } })!;
