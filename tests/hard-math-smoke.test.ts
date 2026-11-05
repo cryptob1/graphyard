@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdir, cp } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
 import { command, git } from '../benchmarks/hard-math/process.js';
@@ -15,6 +15,7 @@ import { oracle, oracleDigest, oracleSource } from '../benchmarks/hard-math/orac
 import { execute } from '../benchmarks/hard-math/runner.js';
 import { verifyArtifact } from '../benchmarks/hard-math/artifact.js';
 import { benchmarkRoot } from '../benchmarks/hard-math/isolation.js';
+import { pinnedPython } from '../benchmarks/hard-math/python.js';
 import { fixtureExecutor, writeControlledArtifact } from '../benchmarks/hard-math/fixture.js';
 import { validateReceipt, comparison } from '../benchmarks/hard-math/receipt-schema.js';
 import { routeAccounts } from '../benchmarks/hard-math/routing.js';
@@ -22,8 +23,9 @@ import { emptyRegistry, applyRegistryMutation } from '../src/model/registry.js';
 import { chooseSession } from '../src/model/registry-sessions.js';
 import { countProofCases } from '../src/merge-writer/executor.js';
 
-// CI/producer installs these pinned dependencies outside implementation worktrees.
-const python=process.env.HARD_MATH_PYTHON??'/opt/graphyard-hard-math-oracle/bin/python';
+// Pinned dependencies outside implementation worktrees: the trial image's, or digest-pinned wheels.
+const python=await pinnedPython(await temporaryDirectory('hard-math-python',process.cwd()));
+const pythonEnvironment=dirname(dirname(python));
 test('integration:hard-math-smoke — seed npm test emits a positive canonical TAP proof count',async()=>{
   const root=await temporaryDirectory('hard-math-seed-tap',process.cwd());
   await cp(join(benchmarkRoot,'seed'),root,{recursive:true});
@@ -155,13 +157,13 @@ test('integration:hard-math-smoke — failed and usage-limited runs release actu
 
 test('integration:hard-math-smoke — private-root trials expose the immutable pinned producer Python environment',async()=>{
   const allocation=await temporaryDirectory('hard-math-oracle-container',process.cwd());
-  const [program,...wrapper]=trialContainerWords([allocation]);
-  const result=await command(program,[...wrapper,'/opt/graphyard-hard-math-oracle/bin/python','-I','-c',`
+  const [program,...wrapper]=trialContainerWords([allocation],[pythonEnvironment]);
+  const result=await command(program,[...wrapper,python,'-I','-c',`
 import sympy, mpmath
 assert sympy.__version__ == '1.14.0'
 assert mpmath.__version__ == '1.3.0'
 try:
-    open('/opt/graphyard-hard-math-oracle/producer-write-probe', 'w')
+    open(${JSON.stringify(pythonEnvironment+'/producer-write-probe')}, 'w')
     raise AssertionError('producer oracle environment is writable')
 except (PermissionError, OSError):
     pass

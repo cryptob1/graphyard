@@ -27,10 +27,9 @@ these frozen inputs after observing a result.
 ## Native setup and checks
 
 The trial Dockerfile provisions pinned SymPy 1.14.0 and mpmath 1.3.0 in
-`/opt/graphyard-hard-math-oracle`. Use the candidate's ordinary private-root trial
-image with installed Chromium. The oracle environment is read-only in nested
-trials; no host HOME or implicit Python fallback is used. For focused host
-checks, explicitly select an already provisioned pinned interpreter.
+`/opt/graphyard-hard-math-oracle`. Without it (trials run on the deployed image),
+the tests build the same pins from digest-checked wheels in a temporary directory,
+mounted read-only in nested trials; no host HOME Python is used.
 
 The embedded `runner.ts` passes its isolated coordinator checkout explicitly to
 native worker, reviewer, spec-check and producer launches (including headless
@@ -49,7 +48,7 @@ a confined implementation worker without that capability cannot certify them.
 ```sh
 npm run build
 npm run docs:check
-HARD_MATH_PYTHON=/opt/graphyard-hard-math-oracle/bin/python npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts tests/hard-math-confinement.test.ts
+npm test -- tests/hard-math-smoke.test.ts tests/hard-math-lifecycle.test.ts tests/hard-math-confinement.test.ts
 ```
 
 The bound case `e2e:hard-math-smoke` runs the same head's smoke and confinement
