@@ -4,12 +4,13 @@ import { masterConfigSchema, workerPrompt, type MasterConfig, type WorkerProfile
 import { daemonStateSchema, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import { advanceFailureRuns, diagnosisSection, failureSignature, normalizeFailureReason } from '../src/daemon/repeated-failure.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
 
 const proof = 'unit:repeated-failure-requires-diagnosis';
+// Reached dynamically, so this file loads on a base without the module and each case fails on its own.
+const repeated = () => import('../src/daemon/repeated-failure.js');
 const observedAt = '2030-01-01T12:00:00.000Z', clock = Date.parse(observedAt);
 const minute = (n: number) => new Date(clock - 3_600_000 + n * 60_000).toISOString();
 const worker = { name: 'codex-a', principal: 'graphyard-codex-a', agentName: 'builder-a', mode: 'launch', kind: 'codex', credentialFile: '/srv/codex-a.token', agentArgs: [], approvals: 'auto', environment: {} } as WorkerProfile;
@@ -29,7 +30,8 @@ function item(epoch: number, rework: Work['lastRework'], overrides: Partial<Work
 }
 const verdict = (n: number, sha: string) => ({ reason: `GY-9: review-codex-${n} requested changes on ${sha.slice(0, 12)}: BLOCKING: tests/widget.test.ts:${40 + n} still fails at ${minute(n)} for graphyard-codex-a`, binding: `${sha}:verdict:review-codex-${n}`, at: minute(10 * n) });
 
-test(`${proof} — signature strips SHAs, ids, numbers, timestamps and account names; kinds stay apart`, () => {
+test(`${proof} — signature strips SHAs, ids, numbers, timestamps and account names; kinds stay apart`, async () => {
+  const { failureSignature, normalizeFailureReason } = await repeated();
   const a = `trial failed: tests 3 failed on ${'b'.repeat(40)} at 2030-01-01T10:00:00.000Z for graphyard-codex-a (run 1f2e3d4c-aaaa-bbbb-cccc-0123456789ab)`;
   const b = `trial failed:   tests 7 failed on ${'c'.repeat(40)} at 2030-01-02T11:30:05Z for builder-a (run 9f2e3d4c-aaaa-bbbb-cccc-0123456789cd)`;
   const accounts = ['graphyard-codex-a', 'builder-a', 'codex-a'];
@@ -92,7 +94,8 @@ test(`${proof} — the second equal failure wakes the master once and asks the n
   assert.deepEqual(dispatched.at(-1), { epoch: 4, diagnosis: '' });
 });
 
-test(`${proof} — a different signature or a success of the same kind ends the run; per-failure causes give way to the run's one cause`, () => {
+test(`${proof} — a different signature or a success of the same kind ends the run; per-failure causes give way to the run's one cause`, async () => {
+  const { advanceFailureRuns, diagnosisSection } = await repeated();
   const state = emptyDaemonState(config), accounts = ['graphyard-codex-a'];
   const trial = (head: string, reason: string, intentAt: string) => ({ key: 'GY-9', state: 'refused', head, baseTip: null, mergeSha: null, risk: null, intentAt, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason }, events: 2 }) as unknown as Work['mergeLedger'];
   const refused = (n: number, reason = `${trialFailurePrefix}: tests ${n} failed`) => item(n, null, { mergeLedger: trial(String(n).repeat(40), reason, minute(n)) });
