@@ -17,7 +17,8 @@ import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPrevi
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { defaultMergeBatch, mergeStack, type BatchResult } from '../merge-writer/batch.js';
-import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
+import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -114,6 +115,22 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),
   };
+}
+
+/**
+ * GY-3140: the due heads a recorded base failure on main's current tip holds out of trial, and that
+ * failure's reason. Nothing is held when no base failure is recorded, the tip has moved past it,
+ * the checkout cannot be read, or the reads carry no git.
+ */
+async function baseFailureHolds(reads: MergeWriterReads, ledger: Readonly<Record<string, MergeLedgerState>>, due: readonly Work[]): Promise<{ held: Set<string>; reason: string }> {
+  const none = { held: new Set<string>(), reason: '' };
+  if (!reads.git || !due.length || !Object.values(ledger).some(entry => entry.state === 'refused' && entry.refusal?.reason.startsWith(baseFailurePrefix))) return none;
+  try {
+    const tip = (await reads.fetch()).toLowerCase(), failure = standingBaseFailure(ledger, tip);
+    if (!failure) return none;
+    const git = reads.git;
+    return { held: await heldByBaseFailure(args => git(args), tip, failure, due.map(work => ({ id: work.id, head: work.candidate!.sha.toLowerCase() }))), reason: failure.reason };
+  } catch { return none; }
 }
 
 /** What a serve-revert flight (GY-2990) settled as: the pushed revert, a held revert, or one to try again. */
@@ -731,15 +748,26 @@ export async function mergeWriterStep(cycle: Cycle) {
       // GY-2079: a yield whose head the queue no longer holds goes with it.
       const kept = writer.timeouts.filter(entry => ordered.some(queued => queued.key === entry.key && queued.head === entry.head));
       if (kept.length !== writer.timeouts.length) { writer.timeouts = kept; changed = true; }
+      // GY-3140: while a base failure stands on main's tip, a head that cannot repair it starts no trial: it is refused with the base failure at once and stays queued, trialled once the tip moves on.
+      const holding = await baseFailureHolds(reads, ledger, queue.due);
+      for (const work of queue.due.filter(entry => holding.held.has(entry.id))) {
+        const head = work.candidate!.sha.toLowerCase(), prior = ledger[work.key];
+        if (prior?.state === 'refused' && prior.head === head && prior.refusal?.reason === holding.reason) continue;
+        await record(work, { kind: 'refused', head, reason: holding.reason });
+        performed.push(storeAction(state, `merge-writer-base-hold:${work.key}:${head}`, { kind: 'merge', work: work.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+          detail: `Held ${work.key} head ${head} without a trial: ${reads.baseBranch} fails on its tip and the head touches neither the failing tests nor the files they select (${holding.reason.slice(0, 500)}); it is trialled once ${reads.baseBranch} moves on` }));
+        changed = true;
+      }
+      const runnable = ordered.filter(entry => !holding.held.has(entry.id));
       // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
-      const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === ordered[0]?.id) ?? null;
+      const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === runnable[0]?.id) ?? null;
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
       // GY-3122: below the disk floor no new trial starts; one in flight settles.
       const due = next?.candidate && !state.diskHeadroom && (reads.admit?.() ?? true) ? next : null;
       // GY-2088: the oldest heads, up to the batch size, are merged together; the flight is named by the oldest. A yielding head (GY-2079) merges alone, so its timeouts are its own.
       // Up to `parallel` such batches are trialled at once, each stacked on the one before it (batch.ts `mergeStack`); a bug item (GY-2984) is a position of its own.
       const yields = (work: Work) => yielding.has(`${work.key}:${work.candidate?.sha.toLowerCase()}`);
-      const inOrder = ordered.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work);
+      const inOrder = runnable.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work);
       const positions: Work[][] = due && yields(due) ? [[due]] : [];
       if (!positions.length) for (const work of inOrder.filter(work => !yields(work))) {
         const last = positions.at(-1);
