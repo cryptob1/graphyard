@@ -28,7 +28,7 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   const [reported] = registryHoldObservations(registry, HOST, 'opencode-c', hold)!;
   assert.equal(reported.quota.since, hold.at);
 
-  const fold = (quota: typeof replayed, at: number, smoke?: { result: 'passed'; reason: string }) =>
+  const fold = (quota: typeof replayed, at: number, smoke?: { result: 'pass'; reason: string }) =>
     foldObservations(registry, { host: HOST, observations: [{ account: 'opencode-c', quota, ...smoke ? { smoke } : {} }] }, { actor: 'master-loop', at: iso(at) });
   const quota = () => registry.accounts.find(entry => entry.name === 'opencode-c')!.quota;
   fold(replayed, t0 + 1_000);
@@ -39,7 +39,7 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   registry = applyRegistryMutation(registry, 'account.quota', { name: 'opencode-c', quota: { loggedIn: true, state: 'available' }, reason: 'misattributed notice' }, { actor: 'master', at: iso(decided) }).registry;
   fold(replayed, decided + 60_000);
   assert.equal(quota().state, 'available', 'a probe carrying the old hold does not re-apply it');
-  fold({ ...reported.quota }, decided + 90_000, { result: 'passed', reason: 'smoke ok' });
+  fold({ ...reported.quota }, decided + 90_000, { result: 'pass', reason: 'smoke ok' });
   assert.equal(quota().state, 'available', 'nor does a smoke test, nor a report of the pending hold');
 
   // An ordinary probe moves the reading on; the decision still stands against the old observation.
