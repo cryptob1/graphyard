@@ -30,7 +30,7 @@ export function normalizeFailureReason(reason: string, accounts: readonly string
   for (const name of [...accounts].sort((a, b) => b.length - a.length)) text = text.split(name).join(' ');
   return text
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g, ' ')
-    .replace(/\b(?=[0-9a-f-]*\d)[0-9a-f]{7,}(?:-[0-9a-f]{4,})*\b/gi, ' ')
+    .replace(/\b(?:[0-9a-f]{32,}|(?=[0-9a-f-]*\d)[0-9a-f]{7,}(?:-[0-9a-f]{4,})*)\b/gi, ' ')
     .replace(/\d+/g, ' ')
     .replace(/\s+/g, ' ').trim();
 }
