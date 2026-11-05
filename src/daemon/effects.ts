@@ -99,11 +99,12 @@ export interface DaemonEffects {
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /**
+   * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
    * result's `canary` names the one it ran, with its start failure if any); `exclude` names the
    * accounts whose runtime backs off this item; `onRuntime` hears the runtime each launch chose.
    */
-  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
+  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
   /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
   registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */

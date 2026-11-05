@@ -8,7 +8,8 @@ import type { Cycle } from './cycle.js';
 import { record } from './effects.js';
 import { clearLaunchFailures, recordLaunchFailure } from './sessions.js';
 
-export const earlyExitKey = (item: Pick<Work, 'id'>) => `early-exit:${item.id}`;
+import { earlyExitKey } from './repeated-failure.js';
+export { earlyExitKey };
 
 /** Read before the pane closes. Only an unsuccessful supervisor exit is a launch incident. */
 export async function workerLaunchHealth(cycle: Cycle, item: Work, session: SessionHandle): Promise<string | null> {
