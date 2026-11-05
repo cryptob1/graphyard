@@ -41,7 +41,10 @@ const withDeployment = (work: Work): Work => ({
 } as unknown as Work);
 
 test('unit:plain-stage-labels — every derived stage maps to exactly one plain label, and master status items carry it', async () => {
-  const { liveFailingLine, plainStage, plainStageLines, plainStages } = await import('../src/model/plain-stage.js');
+  const { liveFailingLine, plainStage: stageAt, plainStageLines, plainStages, noServe } = await import('../src/model/plain-stage.js');
+  const { noRelease } = await import('../src/model/release.js');
+  // The page's clock is the caller's (src/model stays clock-free).
+  const plainStage = (work: Work, release: ReleaseView = noRelease, serve: ServeView = noServe) => stageAt(work, release, serve, Date.now());
   // Each open stage has one plain label; done is refined by the release and the serve verdict below.
   const byStage: Record<Stage, string> = {
     backlog: 'Not started', ready: 'Not started', build: 'Building',
