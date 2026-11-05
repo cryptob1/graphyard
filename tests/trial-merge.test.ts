@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, declaredPreMerge, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { listTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -827,7 +827,10 @@ test('unit:trial-merge — a failed trial grounds a rework for the candidate and
   assert.notEqual(account.wait?.on, 'graphyard', 'no base-break wait stands in for the rework');
 });
 
-test('unit:trial-declared-policy-refusal — a head whose graphyard.json is malformed, fails the delivery schema, declares an empty selection command or a selection pattern that is no regular expression is refused naming graphyard.json, never retried as a host failure', () => {
+test('unit:trial-declared-policy-refusal — a head whose graphyard.json is malformed, fails the delivery schema, declares an empty selection command or a selection pattern that is no regular expression is refused naming graphyard.json, never retried as a host failure', async () => {
+  // Imported here, not at the top: declaredPreMerge exists only with this change, and a static
+  // import would fail the whole file against a tree without it — this case must fail as a case.
+  const { declaredPreMerge } = await import('../src/merge-writer/trial.js');
   const policy = (check: Record<string, unknown>) => JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm test', source: 'script', reason: 'r', ...check }], perCandidate: [] } } });
   const refusal = (text: string) => { const declared = declaredPreMerge(text); return 'refusal' in declared ? declared.refusal : null; };
   assert.match(refusal('{ not json')!, /graphyard\.json is not valid JSON/);
