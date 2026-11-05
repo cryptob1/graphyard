@@ -120,3 +120,50 @@ export function recordIntervention(work: Work, kind: keyof PipelineTimeline['int
   if (kind === 'requirements' && !timeline.attempts.length) return;
   timeline.interventions[kind] += 1;
 }
+
+/** GY-3105: delivery speed, computed at query time from the event ledger for the last merged items; nothing is stored. */
+export const deliverySpeedStages = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'] as const;
+export const deliverySpeedWindow = 50;
+export interface SpeedEvent { kind: string; created_at: string; payload?: { work?: { stage?: string } } }
+export interface MergedItem { key: string; mergedAt: string; attempts: number; events: SpeedEvent[] }
+export interface Spread { median: number; p90: number; samples: number }
+
+const nearestRank = (sorted: number[], fraction: number) => sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
+const minutes = (ms: number) => Math.round(ms / 6000) / 10;
+/** Median and p90 in minutes of `values` (milliseconds); null when there are none. */
+export function spread(values: number[]): Spread | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return { median: minutes(nearestRank(sorted, 0.5)), p90: minutes(nearestRank(sorted, 0.9)), samples: sorted.length };
+}
+
+/** The item's time from its first `ready` event to its merge, and the time it spent in each stage, from the stage each event's snapshot records. */
+export function itemSpeed(item: MergedItem) {
+  const merged = Date.parse(item.mergedAt);
+  const events = item.events.map(event => ({ at: Date.parse(event.created_at), stage: event.payload?.work?.stage })).sort((a, b) => a.at - b.at);
+  const start = item.events.map(event => ({ kind: event.kind, at: Date.parse(event.created_at) })).filter(event => event.kind === 'ready').map(event => event.at).sort((a, b) => a - b)[0];
+  if (start === undefined || !Number.isFinite(merged) || merged < start) return null;
+  const stages: Record<string, number> = {};
+  let stage: string | undefined, since = start;
+  for (const event of events.filter(entry => entry.at >= start && entry.at <= merged)) {
+    if (stage) stages[stage] = (stages[stage] ?? 0) + event.at - since;
+    since = event.at; stage = event.stage ?? stage;
+  }
+  if (stage) stages[stage] = (stages[stage] ?? 0) + merged - since;
+  return { releaseToMerge: merged - start, stages };
+}
+
+/** The `master status` delivery-speed section over `merged` (any order; the last 50 by merge time are read) and the open items. */
+export function deliverySpeed(merged: MergedItem[], open: Pick<Work, 'key' | 'stage' | 'stageEnteredAt'>[], now: number) {
+  const items = [...merged].sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)).slice(0, deliverySpeedWindow);
+  const speeds = items.map(item => ({ item, speed: itemSpeed(item) }));
+  const measured = speeds.flatMap(entry => entry.speed ? [entry.speed] : []);
+  const longest = open.filter(item => Number.isFinite(Date.parse(item.stageEnteredAt))).sort((a, b) => Date.parse(a.stageEnteredAt) - Date.parse(b.stageEnteredAt))[0];
+  return {
+    items: items.length,
+    readyToMerge: spread(measured.map(speed => speed.releaseToMerge)),
+    stages: Object.fromEntries(deliverySpeedStages.map(stage => [stage, spread(measured.flatMap(speed => stage in speed.stages ? [speed.stages[stage]] : []))])),
+    attempts: Object.fromEntries(items.map(item => [item.key, item.attempts])),
+    longestWait: longest ? { key: longest.key, stage: longest.stage, minutes: minutes(now - Date.parse(longest.stageEnteredAt)) } : null,
+  };
+}
