@@ -1,3 +1,5 @@
+import { takeWorkerVerifications, finishWorkerVerification } from '../worker-verification-queue.js';
+import { workerVerification } from '../worker-verification.js';
 import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
 import { RenewalFault, type Command } from '../../engine.js';
@@ -31,6 +33,18 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
 
 /** Work mutations: the human-only waits, the merge writer's record and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  { method: 'POST', path: '/api/worker-verifications/take', async handle(context) {
+    return takeWorkerVerifications(context.services, context.actor, await parseJson(context));
+  } },
+  { method: 'POST', path: '/api/worker-verifications/finish', async handle(context) {
+    return finishWorkerVerification(context.services, context.actor, await parseJson(context));
+  } },
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
+    async handle(context, [id]) {
+      return workerVerification(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
+    },
+  },
   // The two waits that stall only their own item (GY-89): a human-only decision a worker records
   // (`park`) and the human answers (`answer`), and the provider capacity the loop observes
   // (`capacity`). They precede the generic route, which would read them as commands.

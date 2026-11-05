@@ -5,8 +5,7 @@ import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { completeCommand, rerunFailingCases } from '../src/cli/complete.js';
-import type { CliContext } from '../src/cli/context.js';
+import { completionRerun, rerunFailingCases } from '../src/cli/complete.js';
 
 // GY-2968: on 2026-10-27 a finished item was refused because complete's automatic rerun hit one
 // browser time-out in a case unrelated to the item (298/299 passing), and the refusal blamed an
@@ -16,7 +15,6 @@ import type { CliContext } from '../src/cli/context.js';
 // fails too is recorded as a base failure — and only a case that fails the head again while the
 // base passes it refuses, the refusal naming that case, its file and line, from this run.
 
-const head = 'a'.repeat(40);
 
 /** One failing case a fixture run reports: the case, where the run locates it, the timing it gives. */
 const flakyCase = { case: 'unit:outside-proof — case A', file: 'tests/flaky.test.ts', line: 59, durationMs: 30000 };
@@ -79,59 +77,43 @@ const refused = (reason: string, baseTip = 'c'.repeat(40)) => ({ state: 'refused
 
 const workFor = (mergeLedger: unknown) => ({ id: 'id-1', key: 'GY-1', criteria: [{ id: 'AC-1', text: 'the item\'s own behaviour', proofs: ['unit:own-proof'] }], mergeLedger }) as never;
 
-const context = (root: string, calls: { path: string; body: any }[]) => ({
-  args: ['1', '--head', head],
-  api: async (path: string, body: unknown) => { calls.push({ path, body }); return { key: 'GY-1', submission: { epoch: 1, head } }; },
-  print: () => undefined,
-  repositoryRoot: () => root,
-}) as unknown as CliContext;
 
 const reruns = async (root: string) => (await readFile(join(root, 'rerun.log'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]);
 
 test('unit:complete-rerun-retries-flake-and-names-failing-case — a case outside the item\'s proofs that passes on its retry is a flake the submission records, not a refusal', async () => {
   const { root } = await worktree([[flakyCase], []]);
-  const calls: { path: string; body: any }[] = [];
-  await completeCommand.run(context(root, calls), workFor(refused('trial failed: tests tests/docs-current-model.test.ts, tests/flaky.test.ts')));
-  assert.equal(calls.length, 1, 'the flaked rerun refused the submission');
-  assert.equal(calls[0]!.path, 'work/id-1/submit');
+  const result = await completionRerun(root, workFor(refused('trial failed: tests tests/docs-current-model.test.ts, tests/flaky.test.ts')));
   // The history entry the submission carries names the flaked case, its file and line, and its timing.
-  assert.deepEqual(calls[0]!.body.flaked, [flakyCase]);
-  assert.equal(calls[0]!.body.baseFailures, undefined);
+  assert.deepEqual(result.flaked, [flakyCase]);
+  assert.deepEqual(result.baseFailures, []);
   assert.deepEqual(await reruns(root), [['tests/docs-current-model.test.ts', 'tests/flaky.test.ts'], ['tests/flaky.test.ts']],
     'the retry runs just the failing case\'s file, not the whole refusal list');
 });
 
 test('unit:complete-rerun-retries-flake-and-names-failing-case — a case that fails the head again and passes on the base refuses, naming that case, its file and line, none of the earlier refusal', async () => {
   const { root, base } = await worktree([[flakyCase], [flakyCase]]);
-  const calls: { path: string; body: any }[] = [];
   await assert.rejects(
-    completeCommand.run(context(root, calls), workFor(refused('trial failed: tests tests/docs-current-model.test.ts, tests/flaky.test.ts', base))),
+    completionRerun(root, workFor(refused('trial failed: tests tests/docs-current-model.test.ts, tests/flaky.test.ts', base))),
     (error: Error) => {
       assert.match(error.message, /complete refused: unit:outside-proof — case A at tests\/flaky\.test\.ts:59 fails on this head again and passes on the base/);
       assert.doesNotMatch(error.message, /docs-current-model/, 'the refusal named the earlier refusal\'s passing file');
       return true;
     });
-  assert.deepEqual(calls, [], 'the refused complete submitted anyway');
 });
 
 test('unit:complete-rerun-ignores-base-failures — a case outside the item\'s proofs that the base fails too is recorded with the submission, not refused', async () => {
   const { root, base } = await worktree([[baseCase], [baseCase]], [baseCase]);
-  const calls: { path: string; body: any }[] = [];
-  await completeCommand.run(context(root, calls), workFor(refused('trial failed: tests tests/broken-elsewhere.test.ts', base)));
-  assert.equal(calls.length, 1, 'the base failure refused the submission');
-  assert.equal(calls[0]!.path, 'work/id-1/submit');
-  assert.deepEqual(calls[0]!.body.baseFailures, [baseCase]);
-  assert.equal(calls[0]!.body.flaked, undefined);
+  const result = await completionRerun(root, workFor(refused('trial failed: tests tests/broken-elsewhere.test.ts', base)));
+  assert.deepEqual(result.baseFailures, [baseCase]);
+  assert.deepEqual(result.flaked, []);
 });
 
 test('unit:complete-rerun-retries-flake-and-names-failing-case — a failing case of the item\'s own proofs refuses at once, naming that case and its file and line', async () => {
   const ownCase = { case: 'unit:own-proof — the behaviour', file: 'tests/own.test.ts', line: 12, durationMs: 5 };
   const { root } = await worktree([[ownCase]]);
-  const calls: { path: string; body: any }[] = [];
   await assert.rejects(
-    completeCommand.run(context(root, calls), workFor(refused('trial failed: tests tests/own.test.ts'))),
+    completionRerun(root, workFor(refused('trial failed: tests tests/own.test.ts'))),
     /complete refused: the merge trial's failing tests still fail on this head: unit:own-proof — the behaviour at tests\/own\.test\.ts:12/);
-  assert.deepEqual(calls, [], 'the refused complete submitted anyway');
   assert.equal((await reruns(root)).length, 1, 'an own-proof failure retried instead of refusing at once');
 });
 
