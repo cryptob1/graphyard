@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -126,9 +127,9 @@ test('unit:slow-tick-independent-execution-retained — the retained output of t
   assert.ok(includesFault(verifyIndependentExecution(local, receiptDigest).faults, 'not run on a CI runner'), 'a run on a non-CI host is refused');
 });
 
-// CI's sharded suite sits at its 6-minute bound per shard, and this execution takes ~110 s of
-// twenty sequential runs, so a shard leaves it to the proof producer, which runs the whole file.
-const sharded = process.env.SHARD ? 'a CI shard leaves the twenty-run execution to the proof producer' : false;
+// Twenty sequential runs take ~110-330 s: past a CI shard's 6-minute bound and the merge trial's
+// 5-minute file bound, so both leave the execution to the proof producer, which runs the whole file.
+const sharded = process.env.SHARD || existsSync('/etc/graphyard-trial') ? 'a CI shard or merge trial leaves the twenty-run execution to the proof producer' : false;
 
 test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: sharded }, async t => {
   const execution = await executeSlowTickReceiptRuns();
