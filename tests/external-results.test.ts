@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { CaseOutcome, CaseVerdict, FlakyAcceptance } from '../src/e2e/runner.js';
 
 // GY-1842: an external test system hands a whole run in through one documented format
-// (`graphyard-external-run-v1`, docs/validation.md). The import keeps every verdict as the
+// (`graphyard-external-run-v1`). The import keeps every verdict as the
 // producer gave it — `blocked` (a precondition or environment was missing) is its own verdict
 // with its reason, never dropped and never read as failed — and the run blocks exactly as the
 // runner's own result would: a required failed, blocked or unrun case blocks, flaky follows the
