@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
+import { Refusal } from '../model/refusal.js';
 import type { Services } from './routes.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import { workerVerificationTimeoutMs, type WorkerVerificationInput } from '../merge-writer/worker-verification.js';
@@ -25,7 +26,7 @@ export async function dispatchWorkerVerification(services: Services, job: Omit<W
   let timer: NodeJS.Timeout;
   try {
     return await new Promise<WorkerVerificationResult>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('Host worker verification timed out')), workerVerificationTimeoutMs);
+      timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
       pending.set(id, { job: { ...job, id }, resolve, reject });
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
@@ -48,7 +49,8 @@ export function finishWorkerVerification(services: Services, actor: Principal, b
   demand(pending && pending.executor === actor.id, 'No verification assigned to this coordinator', 409);
   demand(!!input.result !== !!input.error, 'Return a result or a runner error', 400);
   queue(services).delete(input.id);
-  if (input.error) pending!.reject(new Error(input.error));
+  // The runner's own words (a refusal, a failing rerun) reach the worker, never a bare 500.
+  if (input.error) pending!.reject(new Refusal(input.error, 422));
   else pending!.resolve(input.result!);
   return { accepted: true };
 }
