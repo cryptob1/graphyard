@@ -11,7 +11,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 
 // GY-3099: a merge trial carrying a head that is refused or replaced while it runs is cancelled the
-// next cycle; the heads it carried stay queued and are trialled again on the current base.
+// next cycle. GY-3120: each head trials alone, so the heads beside it are never cancelled.
 
 const start = Date.parse('2030-05-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -35,8 +35,8 @@ const item = (key: string, ageMinutes: number): Work => {
   } as unknown as Work;
 };
 
-/** The step over `work` with fake ports: the first trial runs until it is cancelled, every later one passes and delivers. */
-function harness(work: Work[]) {
+/** The step over `work` with fake ports: `hang`'s first trial runs until it is cancelled, every other one passes and delivers. */
+function harness(work: Work[], hang: string) {
   const trials: { heads: string[]; signal: AbortSignal | undefined; finished: boolean }[] = [], events: { key: string; event: MergeRecordEvent }[] = [];
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
@@ -47,8 +47,8 @@ function harness(work: Work[]) {
     trial: async (_mergeSha, _files, _item, _baseTip, _onStep, _onTiming, heads, _share, signal) => {
       const trial = { heads: (heads ?? []).map(entry => entry.key), signal, finished: false };
       trials.push(trial);
-      // The first trial's test step never finishes on its own: only its cancellation ends it.
-      if (trials.length === 1) await new Promise(() => {});
+      // The hanging head's first test step never finishes on its own: only its cancellation ends it.
+      if (trial.heads[0] === hang && trials.filter(entry => entry.heads[0] === hang).length === 1) await new Promise(() => {});
       trial.finished = true;
       return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
@@ -63,7 +63,7 @@ function harness(work: Work[]) {
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports };
+  const reads: MergeWriterReads = { ...ports, parallel: 3 };
   const state = emptyDaemonState(config);
   const effects = { mergeWriter: reads, persist: async () => {}, rework: async () => {} };
   let clock = start;
@@ -73,34 +73,37 @@ function harness(work: Work[]) {
 
 const settle = async (made: ReturnType<typeof harness>) => { for (let cycle = 0; cycle < 10; cycle++) { await made.step(); await mergeWriterIdle(made.state); } };
 
-test('unit:merge-trial-cancels-on-refusal — a running batch trial whose head gets a new head is cancelled the next cycle and its other heads are requeued on the current base', async () => {
+test('unit:merge-trial-cancels-on-refusal — a running trial whose head gets a new head is cancelled the next cycle; the heads trialled beside it land uncancelled, and the new head is trialled afresh', async () => {
   const work = [item('GY-1', 30), item('GY-2', 20), item('GY-3', 10)];
-  const made = harness(work);
+  const made = harness(work, 'GY-2');
   await made.step();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(made.trials.map(entry => entry.heads), [['GY-1', 'GY-2', 'GY-3']], 'the three heads are trialled together');
-  assert.ok(made.trials[0]!.signal && !made.trials[0]!.signal.aborted);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(made.trials.map(entry => entry.heads).sort(), [['GY-1'], ['GY-2'], ['GY-3']], 'each head is trialled alone, all at once');
+  const hung = made.trials.find(entry => entry.heads[0] === 'GY-2')!;
+  assert.ok(hung.signal && !hung.signal.aborted);
   // GY-2's worker submits a new head while the trial runs.
   const replaced = sha('head:GY-2:second');
   work[1]!.candidate = candidateOf('GY-2', replaced);
   (work[1]!.observation as { candidate: unknown }).candidate = candidateOf('GY-2', replaced);
   await made.step();
-  assert.ok(made.trials[0]!.signal!.aborted, 'the cycle that sees the new head cancels the trial and kills its children');
+  assert.ok(hung.signal!.aborted, 'the cycle that sees the new head cancels its trial and kills its children');
+  assert.ok(made.trials.filter(entry => entry !== hung).every(entry => !entry.signal?.aborted && entry.finished), 'no other head\'s trial is cancelled');
   await mergeWriterIdle(made.state);
-  assert.equal(made.trials[0]!.finished, false, 'the flight settled without waiting for the test step');
+  assert.equal(hung.finished, false, 'the flight settled without waiting for the test step');
+  assert.deepEqual(work.map(entry => entry.stage), ['done', 'build', 'done'], 'the heads beside it landed');
   await made.step();
-  for (const key of ['GY-1', 'GY-3']) assert.match(made.state.actions[`merge-writer:${key}:${sha(`head:${key}`)}`]?.detail ?? '', /trial was cancelled because GY-2's head .* was replaced/);
-  // No head is refused to rework: the trial's open intents settle against the base and every current head is trialled afresh.
-  assert.equal(made.state.mergeWriter.reworks.length, 0);
+  // The harness mutates the item in place, so the settled action is keyed by the head the item now carries.
+  assert.match(made.state.actions[`merge-writer:GY-2:${replaced}`]?.detail ?? '', /trial was cancelled because GY-2's head .* was replaced/);
+  assert.equal(made.state.mergeWriter.reworks.length, 0, 'no head is refused to rework');
   await settle(made);
-  assert.deepEqual(made.trials.slice(1).map(entry => entry.heads), [['GY-1', 'GY-2', 'GY-3']], 'the carried heads and GY-2\'s new head are trialled again');
+  assert.deepEqual(made.trials.slice(3).map(entry => entry.heads), [['GY-2']], 'GY-2\'s new head is trialled afresh');
   assert.deepEqual(work.map(entry => entry.stage), ['done', 'done', 'done']);
   assert.equal(made.events.filter(({ key, event }) => key === 'GY-2' && event.kind === 'reconciled').length, 1);
 });
 
 test('unit:merge-trial-cancels-on-refusal — a running trial whose head is returned for rework is cancelled and the head is not merged', async () => {
   const work = [item('GY-1', 30), item('GY-2', 20)];
-  const made = harness(work);
+  const made = harness(work, 'GY-1');
   await made.step();
   await new Promise(resolve => setImmediate(resolve));
   work[0]!.reworkRequested = true;
@@ -108,7 +111,7 @@ test('unit:merge-trial-cancels-on-refusal — a running trial whose head is retu
   assert.ok(made.trials[0]!.signal!.aborted);
   await mergeWriterIdle(made.state);
   await settle(made);
-  assert.deepEqual(made.trials.slice(1).map(entry => entry.heads), [['GY-2']], 'only the head still owed a merge is trialled again');
+  assert.deepEqual(made.trials.map(entry => entry.heads), [['GY-1'], ['GY-2']], 'the reworked head is never trialled again; the head beside it landed on its own trial');
   assert.deepEqual(work.map(entry => entry.stage), ['build', 'done']);
 });
 
