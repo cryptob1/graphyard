@@ -269,13 +269,14 @@ const abandonedTrialCheckouts = new Set<string>();
  * Takes back the short checkouts a crashed trial left in `root` (GY-2020): a `gy-c` directory here
  * whose owner marker names a process that is gone, or
  * one this process failed to remove (`clearTrialCheckout`), is removed, with its marker, before the
- * next trial makes its own. Best effort: nothing here fails a trial.
+ * next trial makes its own. Best effort: nothing here fails a trial. The disk headroom step
+ * (GY-3122) takes back a crashed trial's temporary and home directories the same way, by `prefixes`.
  */
-export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
+export async function reclaimTrialCheckouts(root: string, prefixes: readonly string[] = [trialCheckoutPrefix]): Promise<string[]> {
   const removed: string[] = [];
   const names = await readdir(root).catch(() => [] as string[]);
   for (const name of names) {
-    if (!name.startsWith(trialCheckoutPrefix) || name.endsWith('.owner')) continue;
+    if (!prefixes.some(prefix => name.startsWith(prefix)) || name.endsWith('.owner')) continue;
     const directory = join(root, name), owner = await readTempOwner(directory).catch(() => null);
     if (!owner || !(abandonedTrialCheckouts.has(directory) || tempOwnerGone(owner))) continue;
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); abandonedTrialCheckouts.delete(directory); removed.push(directory); } catch { /* the next */ }

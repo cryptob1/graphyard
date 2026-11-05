@@ -72,6 +72,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
+    // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
+    diskHeadroom: state?.diskHeadroom ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen),
