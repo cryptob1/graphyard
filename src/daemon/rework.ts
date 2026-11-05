@@ -1,8 +1,8 @@
 // Concern: the loop's routine rework — a head nothing can carry forward goes back to a worker at once, under the master's own identity.
 import { type Work } from '../model.js';
 import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.js';
-import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
-import { unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
+import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures, unexercisedFindings } from '../model/mechanical-proofs.js';
+import { unactedProducerAttempts } from '../dispatch/attempts.js';
 import { reworkBriefMax } from '../master/rework-brief.js';
 import { failedHumanProof } from '../model/human-proof.js';
 
@@ -91,7 +91,7 @@ export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = 
 
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for
- * the head's proof group ended without trusted evidence (auto-dispatch.ts `abandon`).
+ * the head's proof group ended without trusted evidence (dispatch/tick.ts `abandon`).
  */
 export interface ExhaustedProof { requestId: string; work: string; sha: string; group: string | null; proofs: string[]; attempts: string[]; reason: string }
 const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} proof group${entry.proofs.length ? ` (${entry.proofs.join(', ')})` : ''}`;

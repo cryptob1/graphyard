@@ -157,7 +157,7 @@ export { runningSessions, sessionSummary } from './session-state.js';
  * nothing ever contradicted it — so a session that crashed, lost its pane or was killed stayed
  * recorded as running for good, and every reader believed it, the launcher's own busy check
  * included. That is why a dead session held its role slot until somebody noticed by hand. So the
- * record is reconciled, by a sweep on a bounded interval (`auto-dispatch.ts`, every dispatch tick)
+ * record is reconciled, by a sweep on a bounded interval (`dispatch/tick.ts`, every dispatch tick)
  * rather than a reaction to something reporting in — a session that died reports nothing, which is
  * the whole problem. Two further closures come from the item rather than the runtime: a review or
  * proof session bound to a head, a candidate or an item that has moved on is over, and two live
@@ -167,7 +167,7 @@ export { runningSessions, sessionSummary } from './session-state.js';
  *
  * What is here is the rule: what the runtime says about one handle, and what the item says about
  * one session. The sweep that applies it across the graph, and the closure it writes back, belong
- * to the interval that runs them (`auto-dispatch.ts`, `reconcileSessionLiveness`).
+ * to the interval that runs them (`dispatch/session-sweep.ts`, `reconcileSessionLiveness`).
  */
 
 /** What a runtime reports about one session it is running: its own name for it, the pane it holds, and its state. */
