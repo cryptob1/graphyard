@@ -14,6 +14,7 @@ import { clearRuns } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
 // narrow role; with `pi` the unit proof producer runs through the headless runner
@@ -77,13 +78,16 @@ async function installation(runtimes?: { producer?: 'herdr' | 'pi' }) {
   const script = join(scratch, 'fake-pi.mjs'), wrapper = join(scratch, 'pi-fake'), scenario = join(scratch, 'scenario.json');
   await writeFile(script, fakePi);
   await writeFile(wrapper, `#!/bin/sh\nFAKE_PI_SCENARIO='${scenario}' exec '${process.execPath}' --import '${tsx}' '${script}' "$@"\n`); await chmod(wrapper, 0o755);
+  // A registry Pi account runs its runtime's own `pi` (GY-3030): the same wrapper, under that name.
+  const bin = join(scratch, 'bin'); await mkdir(bin);
+  await writeFile(join(bin, 'pi'), await readFile(wrapper, 'utf8')); await chmod(join(bin, 'pi'), 0o755);
   const file = join(root, '.graphyard/master.json'), config = JSON.parse(await readFile(file, 'utf8'));
   if (runtimes) config.run = { ...config.run, runtimes, pi: { command: wrapper, model: 'zai/glm-5.3-flash' } };
   await writeFile(file, JSON.stringify(masterConfigSchema.parse(config), null, 2), { mode: 0o600 });
   const posted: { url: string; auth: string | null; body: any }[] = [];
   let answer = (_url: string): Response => new Response('{}', { status: 200 });
   const fetcher = (async (url: string, init: RequestInit) => { posted.push({ url: String(url), auth: new Headers(init.headers).get('authorization'), body: JSON.parse(String(init.body)) }); return answer(String(url)); }) as typeof fetch;
-  return { root, managed, scenario, posted, fetcher, answer: (next: typeof answer) => { answer = next; }, cleanup: () => { clearRuns(); return rm(scratch, { recursive: true, force: true }); } };
+  return { root, managed, scenario, posted, fetcher, bin, answer: (next: typeof answer) => { answer = next; }, cleanup: () => { clearRuns(); return rm(scratch, { recursive: true, force: true }); } };
 }
 
 function work(key: string, group: string, proofs: string[], overrides: Partial<Work> = {}): Work {
@@ -120,7 +124,8 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
 });
 
 test('integration:pi-narrow-roles with pi selected the unit proof producer runs headless, its evidence is submitted as the producer principal, and the session record keeps the run', async () => {
-  const { root, scenario, posted, fetcher, cleanup } = await installation({ producer: 'pi' });
+  const { root, scenario, posted, fetcher, bin, cleanup } = await installation({ producer: 'pi' });
+  const path = process.env.PATH; process.env.PATH = `${bin}:${path}`;
   try {
     const proofs = ['unit:pi-graphyard-tools', 'unit:pi-destructive-guard'];
     const item = work('GY-89', 'unit', proofs);
@@ -130,7 +135,7 @@ test('integration:pi-narrow-roles with pi selected the unit proof producer runs 
       { tool: 'graphyard_submit_evidence', input: evidence(proofs[1], 'fail') },
     ] }));
     const config = await loadMasterConfig(root);
-    const launched = await launchProducer(root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { fetcher, filesystem: durable }) as any;
+    const launched = await launchProducer(root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { fetcher, filesystem: durable, probe: registryFixture(config.hostId!, ['pi'], ['producer']).probe }) as any;
     assert.equal(launched.runtime, 'pi');
     assert.equal(launched.pane, null);
     let ledger = await readProducerLedger(root);
@@ -144,7 +149,7 @@ test('integration:pi-narrow-roles with pi selected the unit proof producer runs 
     ], 'each proof submitted on the evidence route with the producer credential');
     const { environment, ...submitted } = posted[0].body;
     assert.deepEqual(submitted, evidence(proofs[0]), 'the validated payload, unchanged');
-    assert.equal(environment, `pi zai/glm-5.3-flash via ${config.run.pi!.command}`);
+    assert.equal(environment, 'pi default on pi-fixture', 'the run names the registry account it ran on');
     assert.ok(run.events.some((event: any) => event.kind === 'tool-end' && event.tool === 'bash' && event.error && /Graphyard refused this command/.test(event.text)), 'the destructive-command guard ran in the session');
     const launch = JSON.parse(await readFile(`${scenario}.launched`, 'utf8'));
     assert.equal(launch.role, 'producer');
@@ -164,7 +169,7 @@ test('integration:pi-narrow-roles with pi selected the unit proof producer runs 
     assert.equal(ledger.producers[0].state, 'completed');
     assert.match(ledger.producers[0].resolution!, /trusted evidence failed for unit:pi-destructive-guard/);
     assert.equal(existsSync(launched.checkout), false);
-  } finally { await cleanup(); }
+  } finally { process.env.PATH = path; await cleanup(); }
 });
 
 test('integration:pi-narrow-roles without the setting, and for non-unit proof groups, the roles launch in Herdr as today', async () => {
@@ -175,7 +180,7 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(config.run.runtimes, undefined);
     const item = work('GY-90', 'unit', ['unit:pi-graphyard-tools']);
     const calls: string[][] = [];
-    const launched = await launchProducer(root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }) as any;
+    const launched = await launchProducer(root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: registryFixture(config.hostId!, ['codex'], ['producer']).probe }) as any;
     assert.equal(launched.pane, 'pane-1', 'a Herdr pane was created');
     assert.equal(launched.runtime, undefined);
     assert.ok(calls.some(args => args[0] === 'tab' && args[1] === 'create'));
@@ -187,7 +192,7 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
   try {
     const config = await loadMasterConfig(selected.root);
     const item = work('GY-91', 'integration', ['integration:pi-narrow-roles']);
-    const launched = await launchProducer(selected.root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { run: herdr(), filesystem: durable }) as any;
+    const launched = await launchProducer(selected.root, item, requestOf(item), config.producers[0], [], new Date().toISOString(), { run: herdr(), filesystem: durable, probe: registryFixture(config.hostId!, ['codex'], ['producer']).probe }) as any;
     assert.equal(launched.pane, 'pane-1', 'an integration group still launches in Herdr');
     assert.equal(existsSync(`${selected.scenario}.launched`), false);
   } finally { await selected.cleanup(); }
