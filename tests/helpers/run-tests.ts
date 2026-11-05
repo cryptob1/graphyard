@@ -9,6 +9,7 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPor
 import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
+import { stopServersUnder } from '../../src/postgres-stop.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
 // needs nothing the session has to know about the host.
@@ -45,7 +46,7 @@ export async function sweepLeftoverTempDirectories(tmpRoot = tmpdir()) {
   const removed: string[] = [];
   for (const name of await readdir(tmpRoot).catch(() => [] as string[])) {
     const directory = join(tmpRoot, name), owner = name.startsWith('graphyard-') && !name.endsWith('.owner') ? await readTempOwner(directory) : null;
-    if (!owner || !tempOwnerGone(owner)) continue;
+    if (!owner || !tempOwnerGone(owner) || !stopServersUnder(directory)) continue;
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); } catch { /* the next sweep */ }
   }
   return removed;
@@ -195,7 +196,8 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
         // order is ordered-tests.mjs's own concurrency, which stays node's default as CI has it.
         ...(selection.ordered || options.breadth === undefined || !Number.isFinite(options.breadth) || options.breadth < 1 || runnerOptions(args).rest.some(argument => argument.startsWith('--test-concurrency')) ? [] : [`--test-concurrency=${Math.floor(options.breadth)}`]),
         ...selection.args]];
-    const child = spawn(command, commandArgs, { cwd, env: environment, stdio: options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
+    // Core dumps off for the run and every Postgres it starts (GY-3112): a crash costs no disk.
+    const child = spawn('/bin/sh', ['-c', 'ulimit -c 0 && exec "$@"', 'sh', command, ...commandArgs], { cwd, env: environment, stdio: options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
     let stdout = '', stderr = '';
     child.stdout?.on('data', chunk => { stdout += chunk; });
     child.stderr?.on('data', chunk => { stderr += chunk; });

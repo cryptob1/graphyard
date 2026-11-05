@@ -12,7 +12,7 @@ import { atomicPrivateWrite, readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -187,12 +187,11 @@ const smokesInFlight = new Map<string, Promise<SmokeResult>>();
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
- * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
- * session that cannot start fails its launch — and the registry's launch contract names no
- * one-prompt headless mode for it, so it has no smoke test to run.
+ * runtime (Pi, the narrow roles' runner) or of agy, whose interactive session waits silently at a
+ * missing login (GY-3108), with no result since it last changed, or whose last test failed
+ * `smokeRetestMs` ago or more (GY-515). Any other interactive runtime's session is its own check.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => smokeTestedKinds.includes(runtime.launch.kind) && account.enabled
   && (!account.smoke || smokeFailureDue(account, now));
 
 /**

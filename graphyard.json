@@ -79,6 +79,9 @@
       "readySeconds": 120
     }
   },
+  "gate": {
+    "core": ["create-work-item", "smoke"]
+  },
   "product": {
     "ui": [
       "web/"

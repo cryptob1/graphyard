@@ -183,6 +183,8 @@ export const daemonStateSchema = z.object({
   personalMasters: z.record(z.string(), masterSessionSchema).default({}),
   /** The control plane the snapshot could not reach (GY-2966): since when, and on a compose install the loop's last `docker compose up -d` with the server's last exit and the free disk space; null while it answers. */
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
+  /** A disk shortage the headroom step could not reclaim (GY-3122): while set, no new merge trial or worker starts; null with room above the floor. */
+  diskHeadroom: z.object({ at: z.string(), floorBytes: z.number(), volumes: z.array(z.object({ path: z.string().max(1000), freeBytes: z.number() }).strict()).max(20), shortage: z.string().max(2000) }).strict().nullable().default(null),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory(new Date().toISOString())),
 }).strip();
