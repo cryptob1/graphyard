@@ -1,6 +1,7 @@
 import { defineTable } from '../tables.js';
 import { eventWorkFunctions } from '../snapshot-delta.js';
 import { eventsImmutableDdl } from '../compaction.js';
+import { DELIVERY_EVENT_PREDICATE } from './production.js';
 
 /** Work aggregates, their immutable history, and the durable integration jobs behind them. */
 export const workItems = defineTable({
@@ -51,9 +52,19 @@ CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,s
   WHERE kind='production.deployment-pending';
 CREATE INDEX IF NOT EXISTS events_work_revision ON events (work_id,(payload->'work'->>'revision'),seq)
   WHERE payload ? 'work';
+-- Ledger compaction (store/compaction.ts, GY-3111): an item's first delivery event, and the deltas
+-- naming a whole row as their base, each one index probe instead of a scan of the item's history.
+CREATE INDEX IF NOT EXISTS events_work_delivery ON events(work_id,seq)
+  WHERE ${DELIVERY_EVENT_PREDICATE};
+CREATE INDEX IF NOT EXISTS events_delta_base ON events(work_id,(payload->'delta'->>'base')) WHERE payload ? 'delta';
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
+});
+/** Where the next ledger compaction batch starts (store/compaction.ts): a lost row only restarts the pass. */
+export const ledgerCompactionCursor = defineTable({
+  name: 'ledger_compaction_cursor', orderBy: 'id', cache: true,
+  ddl: `CREATE TABLE IF NOT EXISTS ledger_compaction_cursor (id boolean PRIMARY KEY DEFAULT true CHECK (id), seq bigint NOT NULL);`,
 });
 export const receipts = defineTable({
   name: 'receipts', orderBy: 'actor,key',
@@ -84,4 +95,4 @@ ALTER TABLE jobs DROP COLUMN IF EXISTS refreshed_until, DROP COLUMN IF EXISTS he
   DROP COLUMN IF EXISTS refusals, DROP COLUMN IF EXISTS held_until, DROP COLUMN IF EXISTS held_reason;`,
 });
 
-export const workTables = [workItems, events, receipts, jobs];
+export const workTables = [workItems, events, ledgerCompactionCursor, receipts, jobs];
