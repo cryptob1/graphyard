@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { isHerdrCommand, herdrSubcommand } from '../src/master/herdr.js';
-import { emptyRegistry, fleetView, proposedRuntimes, unobservedQuota, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, fleetView, proposedRuntimes, unobservedQuota, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -26,23 +26,26 @@ async function config(): Promise<MasterConfig> {
 
 const session = (id: string, role: string, account: string, work: string | null, at: number): FleetSession => ({ id, role, account, runtime: 'codex', model: 'gpt', host: HOST, work, principal: 'p',
   selectedAt: iso(at), selectedBy: 'coordinator', reason: 'recorded', skipped: [], endedAt: null, endReason: null }) as FleetSession;
-const account = (name: string, quota = { ...unobservedQuota }) => ({ name, runtime: 'codex', model: 'gpt', enabled: true, credential: { host: HOST, home: null }, quota });
+// One session per account: since GY-3092 a role fails over to any free fleet account, so a role has no usable account only when every account is spent or busy.
+const account = (name: string, quota = { ...unobservedQuota }) => ({ name, runtime: 'codex', model: 'gpt', enabled: true, maxSessions: 1, credential: { host: HOST, home: null }, quota });
 
 /** The incident's registry: master held by an orphan for 2.5 h, reviewer on one spent account, a worker role busy with work. */
 function registry(refusedFor: { master: number; reviewer: number }): AgentRegistry {
-  const spent = { ...unobservedQuota, state: 'exhausted' as const, resetsAt: '2026-11-05T21:00:00Z', observedAt: iso(clock - minutes(5)), source: 'probe' as const };
+  const spent = { ...unobservedQuota, state: 'exhausted' as const, resetsAt: '2026-11-05T21:00:00Z', observedAt: iso(clock - minutes(5)), source: 'probe' as const, reason: 'usage limit reached' };
   const masterRefusal = 'role master is at its concurrency limit (1 of 1 live: codex-master)';
-  const reviewerRefusal = 'no eligible account for reviewer: codex-review quota is exhausted until 2026-11-05T21:00:00Z';
-  return { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: null }],
+  const document = { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: null }],
     accounts: [account('codex-master'), account('codex-review', spent), account('codex-a'), account('codex-b')],
     roles: [{ name: 'master', accounts: ['codex-master'], concurrency: 1, policy: {} }, { name: 'reviewer', accounts: ['codex-review'], concurrency: 2, policy: {} },
       { name: 'worker', accounts: ['codex-a', 'codex-b'], concurrency: 2, policy: {} }],
     sessions: [session('orphan', 'master', 'codex-master', null, clock - minutes(600)), session('w1', 'worker', 'codex-a', 'GY-1', clock - minutes(20)), session('w2', 'worker', 'codex-b', 'GY-2', clock - minutes(10))],
     refusals: [
       { at: iso(clock - refusedFor.master), role: 'master', host: HOST, work: null, by: 'coordinator', reason: masterRefusal, skipped: [] },
-      { at: iso(clock - refusedFor.reviewer), role: 'reviewer', host: HOST, work: 'GY-1', by: 'coordinator', reason: reviewerRefusal, skipped: [] },
       { at: iso(clock - minutes(30)), role: 'worker', host: HOST, work: 'GY-3', by: 'coordinator', reason: 'role worker is at its concurrency limit (2 of 2 live: codex-a on GY-1, codex-b on GY-2)', skipped: [] },
     ] } as unknown as AgentRegistry;
+  // The reviewer's recorded refusal is the one selection gives: its spent account, then every fleet account it would fail over to, busy.
+  const reviewer = chooseSession(document, { role: 'reviewer', host: HOST }, clock);
+  document.refusals.splice(1, 0, { at: iso(clock - refusedFor.reviewer), role: 'reviewer', host: HOST, work: 'GY-1', by: 'coordinator', reason: reviewer.reason, skipped: [] });
+  return document;
 }
 
 /** master status over a control plane answering the work snapshot and the registry as this host sees it. */
