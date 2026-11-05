@@ -184,7 +184,7 @@ async function fixtureRepo() {
   gitIn(root, 'init', '-q', '-b', 'main');
   const write = (path: string, content: string) => writeFileSync(join(root, path), content);
   write('package.json', JSON.stringify({ name: 'fixture', scripts: { build: 'node -e ""' } }));
-  write('graphyard.json', JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } } }));
+  write('graphyard.json', JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] } } }));
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
   const baseTip = gitIn(root, 'rev-parse', 'HEAD');
   gitIn(root, 'checkout', '-q', '--detach', baseTip);
@@ -307,7 +307,7 @@ test('integration:trial-step-timings — parallel test shards report their own d
   const repo = await fixtureRepo();
   await mkdir(join(repo.root, 'scripts'));
   await writeFile(join(repo.root, 'scripts/ci-tests.mjs'), '// fixture selection\n');
-  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'node tests/helpers/run-tests.ts',
+  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'node tests/helpers/run-tests.ts', source: 'script', reason: 'fixture',
     selection: { command: 'node scripts/ci-tests.mjs affected', pattern: '^tests/[\\w./-]+\\.test\\.ts$' } }], perCandidate: [] } } }));
   gitIn(repo.root, 'add', 'scripts/ci-tests.mjs', 'graphyard.json');
   gitIn(repo.root, 'commit', '-q', '-m', 'test selector');
@@ -340,7 +340,7 @@ test('integration:trial-step-timings — bound E2E success and failure have sepa
   await writeFile(join(repo.root, 'e2e/cases/timed.json'), '{}');
   await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({
     e2e: { serve: { command: 'node server.js', url: 'http://127.0.0.1:8080', readySeconds: 10 } },
-    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } },
+    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] } },
   }));
   gitIn(repo.root, 'add', '-A');
   gitIn(repo.root, 'commit', '-q', '-m', 'bound E2E fixture');
