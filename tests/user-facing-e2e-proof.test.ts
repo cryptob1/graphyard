@@ -8,6 +8,7 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
 import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
+import { setProjectDelivery } from '../src/model-boundary/project-applications.js';
 import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import { parseCase } from '../src/e2e/case.js';
@@ -97,12 +98,14 @@ test('unit:every-item-owes-e2e-proof — requirements refuses a revision that dr
 
 test('unit:e2e-serve-declaration-required-and-documented — create refuses an e2e: proof where the repository declares neither e2e.serve nor a previewable application, naming the declaration', async () => {
   setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: null } });
+  // This repository's own graphyard.json declares previewable fixture applications; the case is a repository declaring none.
+  setProjectDelivery({ mode: 'local', previews: 'off', candidateMaxChanges: null, productionVerification: true, applications: [], cases: {}, source: 'graphyard.json' });
   try {
     const message = await refusalOf(withE2e(of('chore')));
     assert.match(message, /e2e:home-shows-change has no way to serve a head/);
     assert.match(message, /"e2e": \{ "serve": \{ "command", "url", "readySeconds" \} \} in graphyard\.json/);
     assert.match(message, /delivery\.applications/);
-  } finally { setRepositoryPolicy(servePolicy); }
+  } finally { setRepositoryPolicy(servePolicy); setProjectDelivery(null); }
   const accepted = await engine.execute(operator, 'create', null, withE2e(of('chore')), id());
   assert.equal(accepted.scenarioRequirements.length, 1, 'with the serve declared, the same create is accepted');
 });

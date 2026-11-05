@@ -45,7 +45,7 @@ Items default to \`systemDriven: true\`. \`master dispatch GY-N PROFILE\` still 
 
 ### File every item with an e2e: proof
 
-Every item needs an \`e2e:NAME\` criterion bound to a new or existing \`e2e/cases/NAME.json\`; there is no chore exemption or opt-out. Create and requirements enforce the E2E rule. Loop repairs name \`e2e:create-work-item\`; follow-ups reuse delivered cases (legacy items: \`create-work-item\`); onboarding names the repository's first case.
+Every item needs an \`e2e:NAME\` criterion bound to a new or existing \`e2e/cases/NAME.json\`; there is no chore exemption or opt-out. Create and requirements enforce the E2E rule. Loop repairs name \`e2e:create-work-item\`; follow-ups reuse delivered cases (legacy items: \`create-work-item\`); onboarding names the repository's first case. In the merge trial, beside a declared \`e2e.serve\`, a case \`delivery.cases\` binds still runs against its own application; every unbound case runs against the served head, or the sole app when no serve is declared.
 
 ### Session liveness is reconciled, not trusted
 
