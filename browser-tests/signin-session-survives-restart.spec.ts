@@ -11,14 +11,17 @@ test('e2e:signin-session-survives-restart — login link remains signed in after
   // expect default (the batch gate's flaky failure), so each wait gets half the test's own budget.
   const settled = { timeout: 15_000 };
   try {
-    // The UI is served by Vite; all API requests reach the real, restartable control plane. The
+    // The UI is served by Vite; all API requests reach the real, restartable control plane. Every
+    // request is carried here rather than by the browser: Chromium fails its queued requests with
+    // ERR_NETWORK_CHANGED whenever any interface on the host comes or goes (a container's veth), and
+    // losing one of the dev server's ~150 modules leaves a blank page that never recovers. The
     // dashboard keeps polling while the plane is replaced below, so a request can arrive while no
     // server is listening: answer as the down server would (the dashboard holds its session and
     // retries the poll) instead of letting the fetch failure escape the handler, which hangs the
     // page's request and can take the Playwright worker down with it.
-    await page.route('**/api/**', async route => {
-      const target = http.url + new URL(route.request().url()).pathname;
-      await route.fetch({ url: target }).then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+    await page.route('**/*', async route => {
+      const { pathname } = new URL(route.request().url());
+      await route.fetch(pathname.startsWith('/api/') ? { url: http.url + pathname } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
     });
     const response = await fetch(http.url + '/api/sign-in-links', { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } });
     const { code } = await response.json() as { code: string };
