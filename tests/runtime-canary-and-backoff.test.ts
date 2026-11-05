@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { runCycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
-import { canaryOffer, launchBackoffMs } from '../src/daemon/sessions.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -18,6 +17,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * GY-3103: a newer installed runtime version runs one canary session before the fleet switches to
  * it, and a worker launch failure backs off its runtime for its item (1 min doubling to 30 min).
  */
+// Imported at run time, so the same file run against the base fails case by case rather than at load.
+const { canaryOffer, launchBackoffMs } = await import('../src/daemon/sessions.js') as typeof import('../src/daemon/sessions.js');
 const scratch = await temporaryDirectory('runtime-canary');
 after(() => rm(scratch, { recursive: true, force: true }));
 const t0 = Date.parse('2030-01-01T00:00:00Z');
