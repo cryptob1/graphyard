@@ -140,5 +140,7 @@ try {
   assert.match(failing.error, /complete refused: required proofs failed/);
   const records = (await store.events(work.id)).filter(event => event.kind === 'work.self-verified');
   assert.equal(records.length, 2);
-  assert.equal(records[1].payload.details.record.ran[0].failed, 1);
+  // Events read newest first: pick the failing head's record by its head, not position.
+  const failed = records.find(event => event.payload.details.record.head === git('rev-parse', 'HEAD'));
+  assert.equal(failed?.payload.details.record.ran[0].failed, 1, JSON.stringify(records.map(event => event.payload.details.record)));
 });
