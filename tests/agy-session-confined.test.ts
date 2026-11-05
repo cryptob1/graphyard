@@ -4,7 +4,6 @@ import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { credentialMaskFor, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { runtimeLoginHomes } from '../src/master/profiles.js';
-import { agySmoke } from '../src/runner/roles.js';
 import { needsSmoke } from '../src/fleet.js';
 import type { FleetLaunchAccount } from '../src/fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -26,6 +25,8 @@ const fakeAgy = (directory: string, body: string) => {
 const loginReader = 'if [ -r "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then echo "tool step: read $PWD"; echo OK; exit 0; fi\necho "Authentication required. Please visit the URL to log in:"; exec sleep 30';
 
 test('unit:agy-session-works-confined — a confined agy session reads its login and acts on its prompt, and the agy smoke test fails a session that starts but never acts', async () => {
+  // Imported here, so a tree without agySmoke fails this case rather than the file.
+  const { agySmoke } = await import('../src/runner/roles.js') as any;
   const base = await temporaryDirectory('agy-confined');
   const root = join(base, 'checkout'), session = join(root, '.graphyard', 'worktrees', 'GY-3108-1'), home = join(base, 'antigravity-cli');
   mkdirSync(session, { recursive: true }); mkdirSync(home, { recursive: true });
