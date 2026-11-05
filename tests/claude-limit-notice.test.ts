@@ -110,5 +110,7 @@ test('unit:claude-limit-wordings-recognised — Claude\'s session, usage and Fab
   await chosen.release?.('fixture');
   const solo = masterConfigSchema.parse({ ...config, workers: [worker(['claude-a'])] }) as MasterConfig;
   fleet.workerAccounts(['claude-a']);
-  await assert.rejects(selectAccount(solo, 'worker', solo.workers[0], probe), /exhausted its quota mid-session/, 'a role with only the held account waits for its reset');
+  // GY-3092: a role whose only account is held fails over to a usable fleet account, never the held one.
+  const failover = await selectAccount(solo, 'worker', solo.workers[0], probe);
+  assert.equal(failover.account?.name, 'claude-b', 'a role with only the held account fails over rather than reusing it');
 });
