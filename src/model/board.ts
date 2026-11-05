@@ -8,7 +8,7 @@ import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from '
 import { prSteps, stepSince } from './pr-steps.js';
 import { noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { mergeQueuePositions, queuedSentence, stalledCards, type QueuedBehind } from './actionless.js';
-import { resourceConflicts } from '../coordination.js';
+import { resourceConflicts } from './coordination.js';
 
 /**
  * The board (GY-200): every open item in its one group, with who acts next, the command that
@@ -134,7 +134,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(humanAsk(work.humanRequest)) : 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
-    return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };
+    return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready', now).text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes): the master agent acts next.
@@ -151,7 +151,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
  * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it. Null: a free builder takes it. */
 export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window' | 'observation'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
-  if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
+  if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready', now).text };
   const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
   const observing = loopObservation(work, new Date(now), all); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no builder is assigned` };
   const held = resourceConflicts(work, all, now);

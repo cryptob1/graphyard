@@ -5,7 +5,7 @@ import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -16,7 +16,8 @@ import { itemLine } from '../src/cli/master-status.js';
 import { supervise } from '../src/supervisor.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 

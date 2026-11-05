@@ -15,9 +15,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { baseFailureItem, type BaseFailure } from '../src/model/base-failure.js';
 import { postMergeFollowUp } from '../src/model/post-merge-review.js';
 import { onboardingWorkRequest } from '../src/model/onboarding-work.js';
-import { filingRefusal } from '../src/model/user-facing.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-import { setProjectDelivery } from '../src/project-applications.js';
+import { filingRefusal } from '../src/model-boundary/user-facing.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
+import { setProjectDelivery } from '../src/model-boundary/project-applications.js';
 
 // GY-3037 AC-2: every item Graphyard files itself — a base-failure repair, a post-merge review
 // follow-up, onboarding work — is accepted under the rule that every item owes an e2e proof, and

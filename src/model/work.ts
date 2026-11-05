@@ -1,23 +1,21 @@
-import { z } from 'zod';
-import type { BaseRefresh, BaseRefreshRequest } from './base-refresh.js';
+import type { z } from 'zod';
+import type { observationWindowSchema, createSchema } from '../model-boundary/work.js';
 import type { LandingCheck, RevertedDelivery } from './landing-check.js';
-import type { MergeRefusal } from './merge-authorization.js';
-import { criteriaSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { EvaluationAttempt, Evidence } from './evidence.js';
-import type { Delivery, ReleaseDelivery } from './delivery.js';
-import type { BlockingRulingAction } from './delegation.js';
+import type { Criterion } from './policy.js';
+import type { HumanRequest } from './human-request.js';
+import type { Closure } from './closure.js';
+import type { CapacityState } from './capacity.js';
+import type { BaseRefresh, BaseRefreshRequest } from './base-refresh.js';
+import type { MergeRefusal } from './merge-authorization.js';
 import type { AutoDispatch } from './dispatch.js';
-import type { NextAction } from './next-action.js';
+import type { NextAction } from './action-kinds.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import type { CapacityState } from './capacity.js';
-import type { HumanRequest } from './human-request.js';
-import type { Closure } from './closure.js';
-import { proofSchema } from './proof.js';
-import { closedQuestionsSchema } from './closed-question.js';
+import type { Delivery, ReleaseDelivery } from './delivery.js';
+import type { BlockingRulingAction } from './delegation.js';
 import { demand } from './refusal.js';
-
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
@@ -25,57 +23,7 @@ export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as cons
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
 export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
-/**
- * GY-1698: a post-deploy follow-up whose criterion is a rolling-window reading — an intervention
- * rate below a threshold per N days, a hold for N consecutive days — can produce nothing before
- * the window has run: GY-1689, filed at 03:36Z for a 03:11Z merge, was released at 06:39Z and
- * spent two worker attempts, a review and two approver sessions on a reading the intervention
- * report itself projected no earlier than 2026-10-17T14:31Z. The product computes that instant
- * already; the follow-up now carries it, as one fact in one place: `notBefore` is the earliest
- * instant the reading can exist, taken from the report's projection for the pattern
- * (`intervention-report`) or from the delivered item's merge time plus the window the criterion
- * states (`criterion-window`), whichever is later. A master release before it stays operator
- * intent — the item may be released — but `nextAction` holds the dispatch on the instant and the
- * loop dispatches it once the instant passes, without a master session.
- */
-export const observationWindowSchema = z.object({
-  notBefore: z.string().datetime({ offset: true }),
-  basis: z.enum(['intervention-report', 'criterion-window', 'worker-reading', 'operator-hold']),
-  detail: z.string().max(2000),
-}).strict();
 export type ObservationWindow = z.infer<typeof observationWindowSchema>;
-export const createSchema = z.object({
-  owner: z.string().trim().min(1).max(200).nullable().optional(),
-  title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
-  /** One plain sentence a person can read first on the item page (GY-2011); optional on master create, set from a plan item's `plain` at release. */
-  summary: z.string().trim().min(1).max(400).optional(),
-  type: z.enum(['feature', 'bug', 'chore']).default('feature'),
-  priority: z.number().int().min(0).max(4).default(2),
-  dependencies: z.array(z.string().uuid()).max(50).default([]),
-  criteria: criteriaSchema(50),
-  policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  exclusiveResources: resourcesSchema.optional(),
-  plannedFiles: z.array(z.string().trim().min(1).max(500)).max(200).optional(),
-  slice: z.enum(sliceIds).optional(),
-  // Manual proofs a launched producer session may run on the item's behalf. Unit and
-  // integration proofs are always producer-runnable; every other manual proof stays with
-  // the human operator. See model/dispatch.ts.
-  producerProofs: z.array(proofSchema).max(50).optional().refine(proofs => !proofs || proofs.every(proof => proof.startsWith('manual:')), 'producerProofs names only manual: proofs; unit and integration proofs are producer-runnable already')
-    .refine(proofs => !proofs || new Set(proofs).size === proofs.length, 'producerProofs must be unique'),
-  // Proofs a criterion declares answerable as a closed question: Graphyard asks the configured
-  // responder against the bound candidate state instead of launching a producer session, and
-  // records the answer as evidence. See model/closed-question.ts.
-  closedQuestions: closedQuestionsSchema.optional(),
-  // Retired (GY-2875): where Graphyard itself opened an item; one filed with it keeps parsing.
-  origin: z.unknown().optional(),
-  // A system-driven item moves only through the loop: the master CLI refuses the hand actions the
-  // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
-  // created before the field existed carries none and is not system-driven.
-  systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
-  // The earliest instant the observation this item owes can exist (GY-1698): a post-deploy
-  // follow-up for a windowed reading carries it; released, the item is not dispatched before it.
-  observationWindow: observationWindowSchema.optional(),
-}).strict();
 export type Create = z.infer<typeof createSchema>;
 /**
  * GY-1726: a post-deploy follow-up's proof (`manual:…-on-serving-release`, master-verification.ts

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { neededRework, proofRework } from '../src/daemon/rework.js';
 import { intentInput } from '../src/master/autonomy.js';
-import { exerciseRefusal, proofExerciseSchema, type Evidence, type Work } from '../src/model.js';
+import { exerciseRefusal, type Evidence, type Work } from '../src/model.js';
+import { proofExerciseSchema } from '../src/model-boundary/evidence.js';
 
 // GY-523. On 2026-09-26 GY-374's and GY-393's attestations were approved but carried no exercise
 // record, so each pass was stored untrusted as unexercised, and the loop answered with rework — the
