@@ -12,6 +12,7 @@ import { launchAuthorization } from '../src/repository-setup.js';
 import { launchProducer, producerPrompt, readProducerLedger } from '../src/producer.js';
 import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 import { expandTypedCommand, typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
 import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js';
@@ -191,9 +192,10 @@ test('unit:launch-command-bounded — the typed launch command line is short and
       const config = await loadMasterConfig(root);
       const item = requested(), dispatch = item.autoDispatch!.producers[0];
       const live = new FakePane(readyAtOnce);
-      const launched = await launchProducer(root, item, dispatch, config.producers[0], [], new Date().toISOString(), { run: live.run, start: live.bounds() });
+      const launched = await launchProducer(root, item, dispatch, config.producers[0], [], new Date().toISOString(), { run: live.run, start: live.bounds(), probe: registryFixture(config.hostId!, ['claude'], ['producer']).probe });
       assert.ok(Buffer.byteLength(live.typed!) <= launchCommandLimit, `the producer launch typed ${Buffer.byteLength(live.typed!)} bytes`);
-      const file = join(launched.checkout, '.graphyard/launch/produce-a.request');
+      const { agentName } = (await readProducerLedger(root)).producers[0];
+      const file = join(launched.checkout, `.graphyard/launch/${agentName}.request`);
       assert.equal(await readFile(file, 'utf8'), producerPrompt(config, { key: 'GY-121', pr: 121, sha: H, baseSha: B, policyRevision: 1, group: dispatch.group!, proofs: dispatch.proofs!, checkout: launched.checkout }, { principal: 'proof-runner' }), 'the request file inside the session checkout holds the producer\'s exact request');
       assert.equal(positionalOf(expandTypedCommand(live.typed!).args), await readFile(file, 'utf8'));
       assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
@@ -289,13 +291,13 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
     const config = await loadMasterConfig(root);
     const item = requested();
     const pane = new FakePane(() => ({ screen: `Last login: Mon Sep 22 05:27:00 2026\n${echoLine}\n` }));
-    const closed: string[] = [];
+    const closed: string[] = [], fleet = registryFixture(config.hostId!, ['claude'], ['producer']);
     const run = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'close') closed.push(args[2]); return pane.run(command, args); };
     const effects: DispatchEffects = {
       snapshot: async () => ({ work: [item], now: new Date().toISOString() }), agents: () => [], credentials: async () => ({ 'claude-producer': { available: true, reason: null } }),
       reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: (await readProducerLedger(root)).producers }),
       launchReview: async () => { throw new Error('no reviewer in this test'); },
-      launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run, start: pane.bounds() }),
+      launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run, start: pane.bounds(), probe: fleet.probe }),
       persist: async () => {},
     };
     const cursor = emptyDispatchCursor(config);

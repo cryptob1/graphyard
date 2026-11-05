@@ -1,6 +1,6 @@
 export { shellQuote } from '../shell-quote.js';
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
@@ -19,7 +19,8 @@ import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
-import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import type { FleetProbe } from '../fleet.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, type HerdrAgent } from './herdr.js';
@@ -28,7 +29,7 @@ import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessio
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { carryTranscript, freshLaunch, readAttemptLaunch, resumeLaunchVariable, resumePlan, type AttemptLaunch } from './session-resume.js';
-import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch } from './dispatch-reservation.js';
+import { dispatchedFile, DispatchReservedError, profileLaunchedFile, reclaimableAgent } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
@@ -53,12 +54,12 @@ type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
   /** Closes, bounded, the pane of a finished session a launch takes its profile's name back from (GY-1322); closeHerdrPane by default. */
   closePane?: (pane: string) => Promise<void>;
-  /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
+  /** A fresh runtime inventory for safe pane reclamation. */
   agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
@@ -179,21 +180,11 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
     rework = appliedReworkBrief(work);
-    // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
-    // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
-    const unreserve = await reserveDispatch(root, work, profile, observedAt);
-    try {
-      const visible = (await currentAgents(root, profile, agents, observedAt, run, options.agents)).find(agent => agent.name === profile.agentName);
-      if (visible && (!reclaimableAgent(profile, visible, allWork, now) || await launchedSinceSnapshot(root, profile, allWork)))
+    // Inventory only identifies an old pane to reclaim. The registry selection below reserves capacity.
+    {
+      const visible = (options.agents ? await options.agents() : agents).find(agent => agent.name === profile.agentName);
+      if (visible && !reclaimableAgent(profile, visible, allWork, now))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
-      // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
-      // closed, bounded, and the launch goes on as on a profile with no agent.
-      if (visible) {
-        try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
-        catch (error) { throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error }); }
-        closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
-        target = undefined;
-      }
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
@@ -204,7 +195,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // without it could hand the same spent account back, and the loop's retry takes it from there.
       // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
       const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
-      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+      await holdRepeatedLimitAccount(config, work, holdAt, { registry: options.probe?.registry }).catch((error: unknown) => {
         throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
       });
       let startError: unknown = null;
@@ -233,6 +224,18 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         // The repository root rides the choice, so an opencode launch derives its repository-tree
         // permission from the checkout the dispatch serves (GY-2959).
         const chosen = selected;
+        // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
+        // closed, bounded, only once the registry granted this launch its slot, so a dispatch from a
+        // stale snapshot that the registry refuses never closes a session launched since.
+        if (visible && !closedAgent) {
+          try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
+          catch (error) {
+            await chosen.release?.(`worker launch for ${work.key}: the finished pane holding its name could not be closed`);
+            throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error });
+          }
+          closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
+          target = undefined;
+        }
         const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
         launched = launch;
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
@@ -244,9 +247,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               let epoch: number;
               ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
               claimedEpoch = epoch;
-              // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
+              // History supports session resume and status; it never grants or reserves a slot.
               const at = new Date().toISOString();
               // It also names the runtime session the next attempt may resume (GY-2971).
+              await mkdir(resolve(root, '.graphyard/dispatch'), { recursive: true }).catch(() => {});
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at, runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...resumed }), { mode: 0o600 }).catch(() => {});
               // The dispatch record names the runtime and account the session runs on, the preference
               // that ordered the accounts (GY-1772), every account whose runtime failed to start
@@ -279,7 +283,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         }
         break;
       }
-    } finally { await unreserve(); }
+    }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   // The epoch the launch claimed rides the result (GY-1791): the launcher registered the session

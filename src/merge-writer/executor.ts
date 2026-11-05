@@ -630,9 +630,9 @@ export interface MergePorts {
   /**
    * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
    * `share` is how many trials run at once (`mergeHeads`): each takes that share of the host's cores.
-   * Aborting `signal` stops the trial's children (GY-3099).
+   * Aborting `signal` stops the trial's children (GY-3099). `timeoutMs` bounds the whole trial; absent, the merge-trial deadline (`trialTimeoutMinutes`).
    */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).

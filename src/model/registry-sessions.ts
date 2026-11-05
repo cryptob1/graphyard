@@ -13,7 +13,7 @@ import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from './pr
  */
 export const sessionHistoryLimit = 100, refusalHistoryLimit = 20;
 export const launchGraceMs = 5 * 60_000, reviewSessionMs = 2 * 3_600_000, producerSessionMs = 24 * 3_600_000, sessionCapMs = 48 * 3_600_000;
-type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Partial<Pick<Work, 'specCheckLaunch'>>;
+type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Partial<Pick<Work, 'specCheckLaunch' | 'sessions'>>;
 /**
  * Whether a recorded session still occupies its account, and why not when it does not. Nothing
  * reports a session's end: the control plane already knows what each one was launched for, so a
@@ -23,6 +23,11 @@ type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Part
  */
 export function sessionEnded(session: FleetSession, work: SessionWork | undefined, now: number): string | null {
   if (session.endedAt) return session.endReason ?? 'ended';
+  // A worker whose runtime already ended with no live lease left frees its reservation at once, so
+  // the item's retry is not refused by its own dead attempt for the rest of the launch grace.
+  if (session.role === 'worker' && work && !(work.lease && Date.parse(work.lease.expiresAt) > now) && work.sessions?.some(handle => handle.kind === 'implementation'
+    && handle.state === 'finished' && (!session.principal || handle.principal === session.principal) && Date.parse(handle.endedAt ?? handle.updatedAt) >= Date.parse(session.selectedAt)))
+    return `${work.key}'s implementation session finished`;
   const age = now - Date.parse(session.selectedAt);
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';
@@ -215,13 +220,16 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
  * registry account the role can run on serves, the choice naming the failover (GY-3092); the role
  * is refused only when no account in the registry can serve it.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
   const running = liveSessions(registry).filter(session => session.role === role.name && (role.name !== 'master' || (session.group ?? null) === (request.group ?? null)));
   if (running.length >= role.concurrency) return { account: null, skipped: [],
     reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${role.concurrency} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
+  const occupied = running.find(session => request.work && session.work === request.work
+    && (request.role !== 'producer' || (session.group ?? null) === (request.group ?? null)));
+  if (occupied) return { account: null, skipped: [], reason: `role ${role.name} already reserved for ${occupied.work ?? occupied.principal}` };
   const skipped: SessionSkip[] = [], diverse = role.name === 'reviewer' ? diversity : null, others: SessionSkip[] = [], busy: SessionSkip[] = [], order = workerOrder(registry, role, request.prefer ?? null);
   let fallback: { account: FleetAccount; index: number; skip: SessionSkip } | null = null; const shared = new Set<SessionSkip>();
   const chosen = (account: FleetAccount, index: number, passed: SessionSkip[], note: string): SessionChoice => {

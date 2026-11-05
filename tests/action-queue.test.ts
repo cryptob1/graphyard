@@ -636,6 +636,8 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
     // Scoped to this item: a dispatch tick sweeps the whole graph, and the subject here is the
     // handle one launch records, not which items the sweep finds.
     snapshot: async () => ({ work: [await reload(item.id)], now: new Date().toISOString() }),
+    // The shipped dispatcher reads Herdr's inventory (GY-3030); this host has none, so it reads empty.
+    inventory: async () => ({ available: true, sessions: [] }),
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: async () => ({ reviews: [] }),

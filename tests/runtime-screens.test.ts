@@ -145,6 +145,33 @@ async function installed() {
   return { root, master, profile, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); } };
 }
 
+/**
+ * GY-3030: the control-plane registry grants every launch. Its worker role names opencode-a, then
+ * claude-b, and it honours the launch's `exclude`, so an account whose runtime failed to start is
+ * passed over for the next one. Each dispatch takes a fresh registry: a launched session holds its
+ * item's reservation until its work ends.
+ */
+function workerRegistry(host: string): FleetProbe {
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['opencode', 'claude'].includes(runtime.name))
+    .map(runtime => runtime.name === 'claude' ? { ...runtime, launch: { ...runtime.launch, args: [...runtime.launch.args, '--setting-sources', 'user'] } } : runtime),
+    models: [{ name: 'glm', id: 'zai-coding-plan/glm-5' }, { name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'opencode-a', runtime: 'opencode', model: 'glm', credential: { host, home: null } }, { name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }],
+    roles: [{ name: 'worker', accounts: ['opencode-a', 'claude-b'], concurrency: 4 }], reason: 'fixture' }, { actor: 'operator', at }).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      const choice = chooseSession(registry, request, clock);
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
+        selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id ? { ...session, endedAt: at, endReason: reason } : session) }; },
+  };
+  return { registry: client, quota: false, cacheMs: 0 };
+}
+
 test('unit:start-failure-fallback-visible — a launch whose preferred account\'s runtime never starts falls back to the profile\'s next account and the dispatch record and master status name both; three consecutive failures raise one attention item naming the account and runtime', async () => {
   const { root, master, profile, cleanup } = await installed();
   try {
@@ -154,7 +181,7 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     const release = async () => {};
     const dispatch = async (healthy: Set<string>) => {
       const pane = new FallbackPane(healthy);
-      return { dispatched: await dispatchWork(root, item, profile, [], pane.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: pane.bounds() }), pane };
+      return { dispatched: await dispatchWork(root, item, profile, [], pane.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: pane.bounds(), probe: workerRegistry(master.hostId!) }), pane };
     };
 
     // The preferred account's runtime never comes up; the launch falls forward to the Claude account
@@ -195,7 +222,7 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     // A profile whose every account failed to start says so instead of dying on the last one alone.
     const lone: WorkerProfile = { ...profile, name: 'opencode-only', accounts: ['opencode-a'] };
     const failing = new FallbackPane(new Set());
-    await assert.rejects(dispatchWork(root, item, lone, [], failing.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: failing.bounds() }),
+    await assert.rejects(dispatchWork(root, item, lone, [], failing.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: failing.bounds(), probe: workerRegistry(master.hostId!) }),
       (error: unknown) => error instanceof Error && error.message.startsWith('opencode-a failed to start: ')
         && error.message.endsWith('; launched on no named account; no further account of profile opencode-only to fall back to'));
   } finally { await cleanup(); }

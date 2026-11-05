@@ -2,7 +2,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,10 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { isProfileSession, loadMasterConfig, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import type { FleetClient } from '../src/fleet.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, launchGraceMs, liveSessions, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -67,11 +70,42 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
 }
 
 /**
- * A master with a stubbed Herdr: every typed launch becomes a visible
- * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
- * count against a profile's limit is exactly what they started.
+ * The control-plane agent registry (GY-3030), the only authority for a role's slots: one claude
+ * account on this host in the reviewer role, whose concurrency an operator changes live with
+ * `master registry role set` — the dispatcher reads it on the next launch, with no restart.
  */
-async function fleet(profiles: { reviewers: Record<string, unknown>[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
+function reviewerRegistry(host: string, concurrency: number) {
+  const at = new Date().toISOString(), context = { actor: 'operator', at };
+  const role = (concurrency: number) => ({ name: 'reviewer' as const, accounts: ['claude-fixture'], concurrency });
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'default', id: null }],
+    accounts: [{ name: 'claude-fixture', runtime: 'claude', model: 'default', credential: { host, home: null } }], roles: [role(concurrency)], reason: 'fixture',
+  }, context).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      const choice = chooseSession(registry, request, Date.now());
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host,
+        work: request.work, principal: request.principal, group: request.group, selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id && !session.endedAt ? { ...session, endedAt: new Date().toISOString(), endReason: reason } : session) }; },
+  };
+  return {
+    client, probe: { registry: client, quota: false, cacheMs: 0 } as const,
+    live: () => liveSessions(registry).map(session => session.work),
+    setConcurrency: (next: number) => { registry = applyRegistryMutation(registry, 'role.set', { role: role(next), reason: `concurrency ${next}` }, context).registry; },
+  };
+}
+
+/**
+ * A master with a stubbed Herdr: every typed launch becomes a visible
+ * agent, every `pane close` removes one, and each tab gets its own pane; its launches take their
+ * slots from the registry, whose reviewer role runs `concurrency` sessions at once.
+ */
+async function fleet(profiles: { reviewers: Record<string, unknown>[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }, concurrency = 1) {
   const root = await temporaryDirectory('concurrency'), credentialDirectory = await temporaryDirectory('concurrency-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
@@ -96,31 +130,39 @@ async function fleet(profiles: { reviewers: Record<string, unknown>[]; producers
     return startedAtOnce(args, 'working') ?? JSON.stringify({ result: {} });
   };
   const registerLaunch = async () => ({ launch: 'fixture-launch' });
-  /** The dispatcher wired to the real launchers, the stubbed Herdr, and a live configuration. */
+  const config = await loadMasterConfig(root);
+  const registry = reviewerRegistry(config.hostId!, concurrency);
+  /**
+   * The loop's clock, past the launch grace of every registry session: a settled review whose pane
+   * is gone has its registry session ended by the next tick's reconciliation (GY-2945), so its slot frees.
+   */
+  const clock = () => Date.now() + launchGraceMs + 1_000;
+  /** The dispatcher wired to the real launchers, the stubbed Herdr, the registry and a live configuration. */
   const effects = (items: () => Work[], config: () => MasterConfig): DispatchEffects => ({
-    snapshot: async () => ({ work: items(), now: new Date().toISOString() }),
+    snapshot: async () => ({ work: items(), now: new Date(clock()).toISOString() }),
+    registry: () => registry.client.document(),
+    endRegistrySession: (session, reason) => registry.client.end(session.id, reason),
     agents: () => [...agents],
     credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: (work, herdr) => reconcileReviews(root, config(), { run, work, agents: herdr, observe: () => null }),
     reconcileProducers: (work, herdr) => reconcileProducers(root, config(), work, herdr, { run }),
-    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, registerLaunch, requestId: request.id }),
+    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, registerLaunch, requestId: request.id, probe: registry.probe }),
     launchProducer: (work, request, profile, herdr, observedAt) => launchProducer(root, work, request, profile, herdr, observedAt, { run }),
     persist: async () => {},
   });
   const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); };
-  return { root, credentialDirectory, agents, calls, seen, run, registerLaunch, effects, cleanup };
+  return { root, credentialDirectory, agents, calls, seen, run, registerLaunch, registry, clock, effects, cleanup };
 }
 const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'rename').map(call => call[3]);
 const tag = (requestId: string) => requestId.slice(0, 8);
 
-test('integration:concurrent-reviews — a reviewer profile with concurrency 3 runs three reviews at once, each session named for its request, and the second launches while the first runs', async () => {
-  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', concurrency: 3 }], producers: [] });
+test('integration:concurrent-reviews — a registry reviewer role with concurrency 3 runs three reviews at once, each session named for its request, and the second launches while the first runs', async () => {
+  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude' }], producers: [] }, 3);
   try {
     const config = await loadMasterConfig(host.root);
-    assert.equal(config.reviewers[0].concurrency, 3); assert.equal(profileConcurrency(config.reviewers[0]), 3);
     const items = [requested(1), requested(2), requested(3)];
     const requests = items.map(item => item.autoDispatch!.review!);
-    const tick = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => items, () => config), Date.now);
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => items, () => config), host.clock);
     // Three sessions run concurrently under the limit: one per item, launched in the same tick.
     assert.deepEqual(tick.launched.filter(entry => entry.kind === 'review').map(entry => [entry.work, entry.profile]), [['GY-201', 'claude-reviewer'], ['GY-202', 'claude-reviewer'], ['GY-203', 'claude-reviewer']]);
     assert.deepEqual(tick.waiting.filter(entry => entry.kind === 'review'), []);
@@ -133,20 +175,21 @@ test('integration:concurrent-reviews — a reviewer profile with concurrency 3 r
     // The second review launched while the first was running, and the third while both were.
     assert.deepEqual(host.seen[pending[1].agentName], [pending[0].agentName]);
     assert.deepEqual(host.seen[pending[2].agentName], [pending[0].agentName, pending[1].agentName]);
-    assert.deepEqual(profileSessions(config.reviewers[0], host.agents, pending), { running: pending.map(record => record.agentName), limit: 3, free: 0 });
+    assert.deepEqual(host.registry.live(), ['GY-201', 'GY-202', 'GY-203'], 'each holds one of the registry role\'s three slots');
     for (const call of host.calls.filter(entry => entry[0] === 'tab')) assert.ok(call.some(argument => /review · review-claude-[0-9a-f]{8}$/.test(argument)), 'the tab label carries the session name');
-    // A fourth request waits on the limit, by name, rather than being refused as a failure.
+    // A fourth request waits on the registry's limit, by name, rather than being refused as a failure.
     const fourth = requested(4);
-    const full = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [...items, fourth], () => config), Date.now);
+    const full = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [...items, fourth], () => config), host.clock);
     assert.deepEqual(full.launched.filter(entry => entry.kind === 'review'), []); assert.deepEqual(full.refused, []);
     const held = full.waiting.find(entry => entry.kind === 'review')!;
-    assert.equal(held.work, 'GY-204'); assert.match(held.reason, /every reviewer profile is busy: claude-reviewer: at its concurrency limit \(3 running, limit 3\)/);
-    await assert.rejects(launchReview(host.root, fourth, 'claude-reviewer', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: fourth.autoDispatch!.review!.id }), /Reviewer profile claude-reviewer is at its concurrency limit \(3 running, limit 3: review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}\)/);
-    // A verdict settles one session; its slot goes to the waiting request on the next tick.
+    assert.equal(held.work, 'GY-204'); assert.match(held.reason, /waits for a reviewer slot, launched on the first tick one frees: .*role reviewer is at its concurrency limit \(3 of 3 live: claude-fixture on GY-201, claude-fixture on GY-202, claude-fixture on GY-203\)/);
+    await assert.rejects(launchReview(host.root, fourth, 'claude-reviewer', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: fourth.autoDispatch!.review!.id, probe: host.registry.probe }), /role reviewer is at its concurrency limit \(3 of 3 live/);
+    // A verdict settles one session; the next tick ends its registry session and its slot goes to the waiting request.
     const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 77, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: items, agents: host.agents, observe: record => record.key === 'GY-201' ? verdict : null });
     assert.equal(host.agents.length, 2);
-    const freed = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [...items.slice(1), fourth], () => config), Date.now);
+    const freed = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [...items.slice(1), fourth], () => config), host.clock);
+    assert.deepEqual(freed.registryClosed?.map(entry => entry.work), ['GY-201']);
     assert.deepEqual(freed.launched.filter(entry => entry.kind === 'review').map(entry => entry.work), ['GY-204']);
     assert.equal(starts(host.calls).at(-1), `review-claude-${tag(fourth.autoDispatch!.review!.id)}`);
     // A relaunch for the same request takes the attempt into its name, so it never collides with the pane it replaces.
@@ -189,70 +232,59 @@ test('integration:concurrent-producers — the control plane refuses evidence fo
   assert.ok(own.autoDispatch!.producers.every(request => request.group !== 'unit'), 'trusted evidence satisfies the unit request');
 });
 
-test('integration:role-concurrency-configured — concurrency is declared per role in master.json and honoured by the dispatcher: raising it starts more sessions on the next tick without a restart, lowering it drains without stopping a running one', async () => {
-  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude' }], producers: [] });
+test('integration:role-concurrency-configured — concurrency is declared per role in the control-plane registry and honoured by the dispatcher: raising it starts more sessions on the next tick without a restart, lowering it drains without stopping a running one', async () => {
+  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude' }], producers: [] }, 1);
   try {
-    const initial = await loadMasterConfig(host.root);
-    assert.equal(initial.reviewers[0].concurrency, undefined); assert.equal(profileConcurrency(initial.reviewers[0]), 1, 'absent means one session at a time');
-    // The loop's live configuration: re-read before each tick, adopted without a restart.
-    const live = liveMasterConfig(host.root, initial);
-    const write = async (concurrency: number) => {
-      const current = JSON.parse(await readFile(join(host.root, '.graphyard/master.json'), 'utf8'));
-      current.reviewers[0].concurrency = concurrency;
-      await writeFile(join(host.root, '.graphyard/master.json'), JSON.stringify(current, null, 2), { mode: 0o600 });
-      const reload = await live.reload();
-      assert.equal(reload.refused, null, 'a concurrency change is not a bound setting'); assert.deepEqual(reload.changed, ['reviewers']);
-      return reload.config;
-    };
+    const config = await loadMasterConfig(host.root);
     const items = [requested(1), requested(2), requested(3)];
-    const effects = host.effects(() => items, () => live.current);
-    const cursor = emptyDispatchCursor(initial);
-    // Concurrency 1: one review runs, two wait on the limit — nothing is refused, nothing fails.
-    const one = await runDispatchTick(live.current, cursor, effects, Date.now);
+    const effects = host.effects(() => items, () => config);
+    const cursor = emptyDispatchCursor(config);
+    // Concurrency 1: one review runs, two wait on the registry's limit — nothing is refused, nothing fails.
+    const one = await runDispatchTick(config, cursor, effects, host.clock);
     assert.deepEqual(one.launched.map(entry => entry.work), ['GY-201']);
-    assert.deepEqual(one.waiting.filter(entry => entry.kind === 'review').map(entry => [entry.work, entry.reason]), [['GY-202', 'every reviewer profile is busy: claude-reviewer: at its concurrency limit (1 running, limit 1); raise concurrency in .graphyard/master.json or add a reviewer profile'], ['GY-203', 'every reviewer profile is busy: claude-reviewer: at its concurrency limit (1 running, limit 1); raise concurrency in .graphyard/master.json or add a reviewer profile']]);
-    assert.deepEqual(starts(host.calls), ['review-claude'], 'a profile that runs one session keeps its fixed name');
-    // Raised to 3 mid-run: the next tick launches the two that waited, on the same loop.
-    const three = await write(3);
-    assert.deepEqual(masterConfigChanges(initial, three), { changed: ['reviewers'], bound: [] });
-    const more = await runDispatchTick(live.current, cursor, effects, Date.now);
+    const limit = 'waits for a reviewer slot, launched on the first tick one frees: role reviewer is at its concurrency limit (1 of 1 live: claude-fixture on GY-201)';
+    assert.deepEqual(one.waiting.filter(entry => entry.kind === 'review').map(entry => [entry.work, entry.reason]), [['GY-202', limit], ['GY-203', limit]]);
+    assert.deepEqual(starts(host.calls), [`review-claude-${tag(items[0].autoDispatch!.review!.id)}`], 'every session is named for its request');
+    // Raised to 3 in the registry mid-run: the next tick launches the two that waited, on the same loop.
+    host.registry.setConcurrency(3);
+    const more = await runDispatchTick(config, cursor, effects, host.clock);
     assert.deepEqual(more.launched.map(entry => entry.work), ['GY-202', 'GY-203']); assert.deepEqual(more.waiting.filter(entry => entry.kind === 'review'), []);
     assert.equal(host.agents.length, 3);
-    assert.deepEqual(starts(host.calls).slice(1), items.slice(1).map(item => `review-claude-${tag(item.autoDispatch!.review!.id)}`), 'sessions beyond the first slot are named for their request');
-    // The second and third items carry the all-digit tag 00000000 and the hex tag a1b2c3d4 (fixedTags), so this counts a name that used to be misread on every run.
-    assert.ok(isProfileSession(three.reviewers[0], 'review-claude') && starts(host.calls).slice(1).every(name => isProfileSession(three.reviewers[0], name)));
-    assert.equal(isProfileSession(three.reviewers[0], 'review-claude-10'), false, 'another profile whose name extends this one is not counted as its session');
+    assert.deepEqual(starts(host.calls), items.map(item => `review-claude-${tag(item.autoDispatch!.review!.id)}`), 'each session is named for its request');
+    // The first and second items carry the all-digit tags 12345678 and 00000000 (fixedTags), so this recognises a name that used to be misread on every run.
+    assert.ok(starts(host.calls).every(name => isProfileSession(config.reviewers[0], name)));
+    assert.equal(isProfileSession(config.reviewers[0], 'review-claude-10'), false, 'another profile whose name extends this one is not counted as its session');
     // A profile name near the runtime's 32-character limit still gets a distinct, launchable name per request, recognised as its own.
     const long = { name: 'long', agentName: 'review-claude-on-the-second-acct', concurrency: 2 };
     const derived = sessionAgentName(long, { id: randomUUID(), requestId: items[1].autoDispatch!.review!.id });
     assert.ok(derived.length <= sessionNameLimit && derived.endsWith(`-${tag(items[1].autoDispatch!.review!.id)}`) && derived !== long.agentName, derived);
-    assert.ok(isProfileSession(long, derived) && !isProfileSession(three.reviewers[0], derived));
+    assert.ok(isProfileSession(long, derived) && !isProfileSession(config.reviewers[0], derived));
     assert.equal(sessionAgentName(long, { id: randomUUID(), requestId: items[1].autoDispatch!.review!.id, attempt: 3 }).length <= sessionNameLimit, true);
     // Lowered to 1 while three run: nothing is stopped, nothing new launches until the sessions drain.
-    await write(1);
+    host.registry.setConcurrency(1);
     const fourth = requested(4);
     const closesBefore = host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length;
-    const drain = await runDispatchTick(live.current, cursor, host.effects(() => [...items, fourth], () => live.current), Date.now);
+    const drain = await runDispatchTick(config, cursor, host.effects(() => [...items, fourth], () => config), host.clock);
     assert.deepEqual(drain.launched, []); assert.deepEqual(drain.refused, []);
     assert.equal(host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length, closesBefore, 'lowering the limit kills no running session');
     assert.equal(host.agents.length, 3); assert.equal((await readReviewLedger(host.root)).reviews.filter(record => record.state === 'pending').length, 3);
-    assert.match(drain.waiting.find(entry => entry.kind === 'review' && entry.work === 'GY-204')!.reason, /at its concurrency limit \(3 running, limit 1\)/);
-    assert.deepEqual(profileSessions(live.current.reviewers[0], host.agents, []), { running: host.agents.map(agent => agent.name), limit: 1, free: 0 });
+    assert.match(drain.waiting.find(entry => entry.kind === 'review' && entry.work === 'GY-204')!.reason, /at its concurrency limit \(3 of 1 live/);
+    assert.deepEqual(host.registry.live(), ['GY-201', 'GY-202', 'GY-203']);
     // Two verdicts drain to one running session: still at the limit of one; a third frees the slot.
     const verdict = (key: string) => ({ state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: Number(key.slice(3)), submittedAt: new Date().toISOString() });
-    await reconcileReviews(host.root, live.current, { run: host.run, work: items, agents: host.agents, observe: record => ['GY-201', 'GY-202'].includes(record.key) ? verdict(record.key) : null });
+    await reconcileReviews(host.root, config, { run: host.run, work: items, agents: host.agents, observe: record => ['GY-201', 'GY-202'].includes(record.key) ? verdict(record.key) : null });
     assert.equal(host.agents.length, 1);
-    const still = await runDispatchTick(live.current, cursor, host.effects(() => [items[2], fourth], () => live.current), Date.now);
-    assert.deepEqual(still.launched, []); assert.match(still.waiting.find(entry => entry.kind === 'review')!.reason, /\(1 running, limit 1\)/);
-    await reconcileReviews(host.root, live.current, { run: host.run, work: items, agents: host.agents, observe: record => record.key === 'GY-203' ? verdict(record.key) : null });
-    const drained = await runDispatchTick(live.current, cursor, host.effects(() => [fourth], () => live.current), Date.now);
+    const still = await runDispatchTick(config, cursor, host.effects(() => [items[2], fourth], () => config), host.clock);
+    assert.deepEqual(still.registryClosed?.map(entry => entry.work), ['GY-201', 'GY-202'], 'the settled sessions give their registry slots back');
+    assert.deepEqual(still.launched, []); assert.match(still.waiting.find(entry => entry.kind === 'review')!.reason, /\(1 of 1 live: claude-fixture on GY-203\)/);
+    await reconcileReviews(host.root, config, { run: host.run, work: items, agents: host.agents, observe: record => record.key === 'GY-203' ? verdict(record.key) : null });
+    const drained = await runDispatchTick(config, cursor, host.effects(() => [fourth], () => config), host.clock);
     assert.deepEqual(drained.launched.map(entry => entry.work), ['GY-204']);
-    assert.equal(starts(host.calls).at(-1), 'review-claude', 'back at concurrency 1 the fixed name returns');
-    // The schema bounds the declaration and the launch refusal names the limit for the one-session case as before.
+    assert.equal(starts(host.calls).at(-1), `review-claude-${tag(fourth.autoDispatch!.review!.id)}`);
+    // The profile schema still bounds a declared concurrency.
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'review-r', kind: 'claude', concurrency: 0 }).success, false);
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'review-r', kind: 'claude', concurrency: 21 }).success, false);
     assert.equal(reviewerProfileSchema.safeParse({ name: 'r', agentName: 'review-r', kind: 'claude', concurrency: 2.5 }).success, false);
-    assert.match(profileAtLimit('Reviewer', { name: 'r', agentName: 'review-r' }, { running: ['review-r'], limit: 1 }), /Reviewer agent review-r is already visible in Herdr; profile r runs one session at a time/);
   } finally { await host.cleanup(); }
 });
 

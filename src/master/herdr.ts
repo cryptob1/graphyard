@@ -6,7 +6,6 @@ import { delimiter, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, type ChildRunOptions, defaultChildTimeoutMs, type BoundChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import type { MasterConfig } from './profiles.js';
-import { withRunnerAgents } from '../runner/registry.js';
 import { herdrConnectCommands } from '../herdr-connect.js';
 
 /**
@@ -182,12 +181,11 @@ export async function herdrJson(args: string[], run: ChildRun = defaultChildRun)
   return parsed.result ?? parsed;
 }
 export async function herdrRun(args: string[], run: ChildRun = defaultChildRun) { await herdrCall(run, args); }
-// The headless runs this process started (GY-169) are listed beside Herdr's sessions, so every
-// supervision that reads the inventory sees a live run under its session name and an ended one as gone.
+// Only the Herdr source; session-inventory.ts composes it with headless observations.
 export async function listHerdrAgents(run?: ChildRun, scope: string | null = processScope): Promise<HerdrAgent[]> {
   let listed: any;
   try { listed = await herdrJson(['agent', 'list'], run); serverSeen = true; } catch (error) { serverSeen = false; throw error; }
-  return withRunnerAgents((listed.agents ?? []).filter((agent: HerdrAgent) => inHerdrScope(agent, scope)));
+  return (listed.agents ?? []).filter((agent: HerdrAgent) => inHerdrScope(agent, scope));
 }
 export async function observeHerdrAgents(run?: ChildRun, scope: string | null = processScope) {
   try { return { agents: await listHerdrAgents(run, scope), available: true, reason: null }; }

@@ -11,6 +11,8 @@ import { launchReview, readReviewLedger, reviewerCredentialDirectory, saveReview
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 // Every instant this file holds is derived from the run's own clock (GY-1694): a base reading taken
 // at load and offsets from it. No calendar literal is constructed, so no wall-clock reading here is
 // judged against a fixed date.
@@ -86,7 +88,7 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   /** The merge commit's first parent when the ledger names one; the launcher reads it from the object store when not. */
   const mergeBaseTip = (work: Work) => { const tip = work.mergeLedger?.baseTip; return tip && tip !== unknownParent ? { baseTip: tip } : {}; };
   const realLaunch = (work: Work, id: string) => launchReview(root, work, 'reviewer-claude', [], at(), {
-    run: herdr, requestId: id, filesystem: durable,
+    run: herdr, requestId: id, filesystem: durable, probe: registryFixture(hostname(), ['claude'], ['reviewer']).probe,
     postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
     registerLaunch: async (item, launch) => {
       registrations.push({ key: item.key, at: instantMs, postMerge: launch.postMerge, head: launch.head, baseTip: launch.baseTip });

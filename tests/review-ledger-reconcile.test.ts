@@ -11,6 +11,8 @@ import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import type { Observation, Work } from '../src/model.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: integration:review-ledger-reconcile and
@@ -23,6 +25,8 @@ const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f'
 const H = sha40('a1'), H2 = sha40('a2'), B = sha40('b1');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const registerLaunch = async () => ({ launch: 'fixture-launch' });
+/** GY-3030: the registry is the only authority for a reviewer's slot; each launch takes one from a fresh in-memory registry. */
+const fleet = () => registryFixture(hostname(), ['claude'], ['reviewer']).probe;
 const verdict = (state = 'APPROVED') => ({ state, reviewer: 'graphyard-reviewer[bot]', reviewId: 77, submittedAt: new Date().toISOString() });
 
 async function boundMaster() {
@@ -63,7 +67,7 @@ test('integration:review-ledger-reconcile — a verdict GitHub shows on the exac
     const calls: string[][] = [];
     const run = herdrRun(calls);
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch });
     const sessionDirectory = (await readReviewLedger(root)).reviews[0].sessionDirectory;
     // The verdict lands (first attempt or after a retry) while Herdr cannot confirm the pane:
     // the record is completed anyway, with the close failure kept as attention on the record.
@@ -79,7 +83,7 @@ test('integration:review-ledger-reconcile — a verdict GitHub shows on the exac
     assert.equal(again.changed, 0);
     assert.equal((await readReviewLedger(root)).reviews[0].state, 'completed');
     // The completed record no longer holds the key: the next review request launches.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch });
     assert.equal(next.work, 'GY-64');
     const ledger = await readReviewLedger(root);
     assert.deepEqual(ledger.reviews.map(record => record.state), ['completed', 'pending']);
@@ -91,10 +95,10 @@ test('integration:review-ledger-reconcile — a pending record for a superseded 
   try {
     const calls: string[][] = [];
     const run = herdrRun(calls);
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
-    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch }), /already pending on a1f+/);
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch });
+    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch }), /already pending on a1f+/);
     // The head moved on (rework pushed): launching for the new head cancels the old record and proceeds.
-    const launched = await launchReview(root, moved(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
+    const launched = await launchReview(root, moved(), 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch });
     assert.equal(launched.sha, H2);
     const ledger = await readReviewLedger(root);
     assert.deepEqual(ledger.reviews.map(record => record.state), ['cancelled', 'pending']);
@@ -112,7 +116,7 @@ test('integration:review-ledger-reconcile — a session that stops before postin
     const run = herdrRun(calls);
     const config = await loadMasterConfig(root);
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch, requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const start = Date.parse(record.requestedAt);
     const blocked = [{ name: 'review-claude-1', pane_id: 'pane-review', agent_status: 'blocked' }];
@@ -167,7 +171,7 @@ test('integration:reviewer-posts-autonomously — the launch grants the post as 
     const request = item.autoDispatch!.review!;
     const calls: string[][] = [];
     const run = herdrRun(calls);
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: request.id });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, probe: fleet(), registerLaunch, requestId: request.id });
     const prompts: string[] = [];
     const launches: string[] = [];
     let clock = Date.now();

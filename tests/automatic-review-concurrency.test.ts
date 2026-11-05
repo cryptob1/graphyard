@@ -3,11 +3,31 @@ import assert from 'node:assert/strict';
 import { chmod, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, withReviewerDefaults } from '../src/master.js';
+import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, sessionAgentName, withReviewerDefaults } from '../src/master.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
-import { fleet, requested, starts } from './helpers/review-fleet.js';
+import { fleet as reviewFleet, requested, requestId, starts } from './helpers/review-fleet.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import type { DispatchEffects } from '../src/auto-dispatch.js';
+import { hostname } from 'node:os';
 import { masterGuide } from '../src/master/guide.js';
+
+/**
+ * GY-3030: the control-plane registry alone grants a reviewer its slot. Each fleet gets one
+ * in-memory registry whose reviewer role runs the automatic default's four sessions, and every
+ * launch — the dispatcher's and a direct one — takes its slot there.
+ */
+async function fleet(...args: Parameters<typeof reviewFleet>) {
+  const host = await reviewFleet(...args);
+  const registry = registryFixture(hostname(), ['claude'], ['reviewer'], automaticReviewerConcurrency);
+  const launch = (...[root, work, profile, agents, observedAt, dependencies]: Parameters<typeof launchReview>) =>
+    launchReview(root, work, profile, agents, observedAt, { ...dependencies, probe: registry.probe });
+  const effects = (...effectArgs: Parameters<typeof host.effects>): DispatchEffects => ({ ...host.effects(...effectArgs),
+    launchReview: (work, request, profile, herdr, observedAt) => launch(host.root, work, profile.name, herdr, observedAt, { run: host.run, registerLaunch: host.registerLaunch, requestId: request.id }) });
+  return { ...host, effects, launch, registry };
+}
+/** GY-3030: every reviewer session, whatever its profile's concurrency, takes a name derived from the request it answers. */
+const named = (n: number) => sessionAgentName({ agentName: 'claude-reviewer' }, { id: requestId(n), requestId: requestId(n), attempt: 1 });
 
 // GY-1072: on 2026-10-01 every automatic review went to the one profile run.reviewerProfile named,
 // whose concurrency was unset (one session), and a finished reviewer left idle in its pane held
@@ -42,7 +62,7 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
     const parallel = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
     try {
       const more = [requested(4), requested(5), requested(6)];
-      const results = await Promise.allSettled(more.map(item => launchReview(parallel.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: parallel.run, registerLaunch: parallel.registerLaunch, requestId: item.autoDispatch!.review!.id })));
+      const results = await Promise.allSettled(more.map(item => parallel.launch(parallel.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: parallel.run, registerLaunch: parallel.registerLaunch, requestId: item.autoDispatch!.review!.id })));
       assert.deepEqual(results.map(result => result.status === 'rejected' ? String(result.reason) : 'launched'), ['launched', 'launched', 'launched']);
       assert.equal(new Set(starts(parallel.calls)).size, 3);
     } finally { await parallel.cleanup(); }
@@ -54,19 +74,20 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
   } finally { await host.cleanup(); }
 });
 
-test('unit:automatic-reviews-run-in-parallel — master guide describes the reviewer concurrency default', () => {
-  assert.match(masterGuide, new RegExp(`run\\.reviewerProfile[^\\n]*${automaticReviewerConcurrency} sessions`), 'master guide states the automatic reviewer profile\'s default concurrency');
+test('unit:automatic-reviews-run-in-parallel — master guide says the registry alone owns reviewer capacity', () => {
+  // GY-3030: profile concurrency no longer grants slots, so the guide states the registry's ownership instead of the profile default.
+  assert.match(masterGuide, /The control-plane registry alone owns session capacity\. Configure every role there before launching; profile concurrency and Herdr names do not grant slots\./, 'master guide states that the registry owns session capacity');
 });
 
-test('unit:settled-reviewer-releases-name — a reviewer whose request settled but whose pane was left idle is closed on the next pass and the next review launches on its name', async () => {
-  // One session at a time, declared: the fixed name is the only one the profile has.
+test('unit:settled-reviewer-releases-name — a reviewer whose request settled but whose pane was left idle is closed on the next pass and the next review launches', async () => {
+  // One session at a time, declared; since GY-3030 its sessions still take request-derived names.
   const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude', concurrency: 1 }, 'claude-reviewer');
   try {
     const config = await loadMasterConfig(host.root);
     const first = requested(1), second = requested(2);
     const launched = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [first], () => config), Date.now);
     assert.deepEqual(launched.launched.map(entry => entry.work), ['GY-501']);
-    assert.deepEqual(starts(host.calls), ['claude-reviewer']);
+    assert.deepEqual(starts(host.calls), [named(1)]);
     const pane = host.agents[0].pane_id!;
 
     // The verdict is posted; Herdr fails to close the pane, so the settled reviewer stays idle in it.
@@ -77,9 +98,9 @@ test('unit:settled-reviewer-releases-name — a reviewer whose request settled b
     assert.equal(settled.state, 'completed', 'the request is settled');
     assert.match(settled.closeFailure ?? '', /could not close pane/);
     host.agents[0].agent_status = 'idle';
-    assert.deepEqual(host.agents.map(agent => [agent.name, agent.pane_id, agent.agent_status]), [['claude-reviewer', pane, 'idle']]);
-    // While it sits there it holds the only name: a launch on it is refused.
-    await assert.rejects(launchReview(host.root, second, 'claude-reviewer', [...host.agents], new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: second.autoDispatch!.review!.id }), /claude-reviewer is already visible in Herdr/);
+    assert.deepEqual(host.agents.map(agent => [agent.name, agent.pane_id, agent.agent_status]), [[named(1), pane, 'idle']]);
+    // GY-3030: the next request's session takes its own request-derived name, so the idle pane holds no name it needs.
+    assert.notEqual(named(2), named(1));
 
     // The next dispatcher pass closes the settled session's pane and launches the next review on the name, in that one tick.
     host.refuseClose.clear();
@@ -87,28 +108,28 @@ test('unit:settled-reviewer-releases-name — a reviewer whose request settled b
     assert.ok(host.calls.some(call => call[0] === 'pane' && call[1] === 'close' && call[2] === pane), 'the stale pane is closed');
     assert.deepEqual(next.refused, []);
     assert.deepEqual(next.launched.map(entry => entry.work), ['GY-502'], 'the next review launches');
-    assert.equal(starts(host.calls).at(-1), 'claude-reviewer', 'on the name the settled reviewer held');
+    assert.equal(starts(host.calls).at(-1), named(2), 'on its own request-derived name');
     const ledger = (await readReviewLedger(host.root)).reviews;
     assert.equal(ledger.find(record => record.key === 'GY-501')!.closeFailure, undefined, 'the close failure is cleared once the pane is gone');
     assert.equal(ledger.find(record => record.key === 'GY-502')!.state, 'pending');
-    assert.deepEqual(host.agents.map(agent => agent.name), ['claude-reviewer']);
+    assert.deepEqual(host.agents.map(agent => agent.name), [named(2)]);
     assert.notEqual(host.agents[0].pane_id, pane);
 
     // A pending record holding the name is never closed by this pass: the live reviewer keeps its pane.
     const closes = host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length;
-    await reconcileReviews(host.root, config, { run: host.run, work: [first, second], agents: [...host.agents, { name: 'claude-reviewer', pane_id: pane, agent_status: 'idle' }], observe: () => null });
+    await reconcileReviews(host.root, config, { run: host.run, work: [first, second], agents: [...host.agents, { name: named(2), pane_id: pane, agent_status: 'idle' }], observe: () => null });
     assert.equal(host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length, closes);
   } finally { await host.cleanup(); }
 });
 
-test('unit:automatic-reviews-run-in-parallel — launches answering different requests from one stale inventory stop at the automatic profile\'s limit', async () => {
+test('unit:automatic-reviews-run-in-parallel — launches answering different requests from one stale inventory stop at the registry\'s reviewer limit', async () => {
   const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
   try {
-    // Six launches at once, each handed the same empty inventory: the ledger's pending sessions, read under its lock, are what count.
+    // Six launches at once, each handed the same empty inventory: the registry's live reviewer sessions are what count (GY-3030).
     const items = [1, 2, 3, 4, 5, 6].map(n => requested(n));
-    const results = await Promise.allSettled(items.map(item => launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: item.autoDispatch!.review!.id })));
+    const results = await Promise.allSettled(items.map(item => host.launch(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: item.autoDispatch!.review!.id })));
     assert.equal(results.filter(result => result.status === 'fulfilled').length, automaticReviewerConcurrency, 'exactly the default number launch');
-    for (const result of results.filter(result => result.status === 'rejected')) assert.match(String((result as PromiseRejectedResult).reason), /profile claude-reviewer is at its concurrency limit \(4 running, limit 4/);
+    for (const result of results.filter(result => result.status === 'rejected')) assert.match(String((result as PromiseRejectedResult).reason), /role reviewer is at its concurrency limit \(4 of 4 live/);
     assert.equal(host.agents.length, automaticReviewerConcurrency);
     assert.equal((await readReviewLedger(host.root)).reviews.filter(record => record.state === 'pending').length, automaticReviewerConcurrency);
   } finally { await host.cleanup(); }
@@ -138,7 +159,7 @@ test('unit:settled-reviewer-releases-name — a settled reviewer\'s pane Herdr k
     assert.equal(record.closeAttempts, settledCloseAttempts);
     const held = heldNameAttention([record]);
     assert.equal(held.length, 1, 'the held name is reported, not left as a silent bound');
-    assert.match(held[0].text, new RegExp(`Settled reviewer session claude-reviewer on GY-501 .* still holds its agent name in pane ${pane}`));
+    assert.match(held[0].text, new RegExp(`Settled reviewer session ${named(1)} on GY-501 .* still holds its agent name in pane ${pane}`));
     assert.match(held[0].next, new RegExp(`herdr pane close ${pane}`));
 
     // Once the pane is gone (closed by hand), the failure clears in one pass and nothing is reported.
@@ -188,7 +209,7 @@ test('unit:settled-reviewer-releases-name — a credential directory a forced se
     assert.match((await record()).closeFailure ?? '', new RegExp(`could not close pane ${pane}.*credential directory .* could not be removed`));
     // The sweep closes the pane; the credential failure is kept, not dropped with the pane failure.
     const swept = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: () => null });
-    assert.deepEqual(swept.released, [{ pane, agentName: 'claude-reviewer' }]);
+    assert.deepEqual(swept.released, [{ pane, agentName: named(1) }]);
     assert.deepEqual(host.agents, []);
     assert.match((await record()).closeFailure ?? '', /^the reviewer credential directory .* could not be removed/);
     assert.deepEqual(heldNameAttention([await record()]), [], 'no pane holds the name, so no held name is reported');
@@ -217,12 +238,12 @@ test('unit:settled-reviewer-releases-name — a running session handle recorded 
     Object.assign(host.agents[0], { agent: 'claude', agent_status: 'idle' });
     host.refuseClose.clear();
     // The production launcher registered the session: its handle is still running on that pane.
-    const handle = { id: 'review-501', kind: 'review', runtime: 'claude', host: config.hostId, agentName: 'claude-reviewer', pane, head: first.candidate!.sha, subject: 'Review GY-501', state: 'running', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const handle = { id: 'review-501', kind: 'review', runtime: 'claude', host: config.hostId, agentName: named(1), pane, head: first.candidate!.sha, subject: 'Review GY-501', state: 'running', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const recorded = { ...first, sessions: [handle] } as unknown as typeof first;
     const next = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [recorded, second], () => config), Date.now);
     assert.ok(host.closes.includes(pane), 'the stale pane is closed');
     assert.deepEqual(next.waiting.filter(entry => entry.work === 'GY-502'), [], 'the closed reviewer\'s handle holds no slot');
     assert.deepEqual(next.launched.map(entry => [entry.work, entry.profile]), [['GY-502', 'claude-reviewer']], 'the next review launches on the freed name in the same tick, not on the spare profile');
-    assert.equal(starts(host.calls).at(-1), 'claude-reviewer');
+    assert.equal(starts(host.calls).at(-1), named(2));
   } finally { await host.cleanup(); }
 });

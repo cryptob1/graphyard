@@ -6,7 +6,6 @@ import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
 import { masterProfile } from '../src/master/master-session.js';
-import { heldAwareProbe } from '../src/master/environments.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, unobservedQuota, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -64,7 +63,7 @@ function effectsFor(master: MasterConfig, registry: ReturnType<typeof registryFi
     dispatch: async () => { throw new Error('no worker dispatch in this test'); },
     masterSession: {
       launch: async () => {
-        const selected = (await selectFleetSession(master, 'master', { name: masterProfile }, await heldAwareProbe(master, { registry: registry.client, now: () => clock, runtime: { agents: [], available: true } })))!;
+        const selected = (await selectFleetSession(master, 'master', { name: masterProfile }, { registry: registry.client, now: () => clock, runtime: { agents: [], available: true } }))!;
         launched.push(selected.account.fleet.session);
         return { agentName: MASTER, pane: 'pNew', runtime: selected.account.kind, account: selected.account.name, session: selected.account.fleet.session };
       },

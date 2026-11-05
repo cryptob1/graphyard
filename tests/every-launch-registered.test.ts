@@ -72,7 +72,7 @@ await t.test('integration:every-launch-registered — the loop\'s reviewer launc
     order.length = 0;
     const config = masterConfigSchema.parse({ ...master });
     const loopTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...dispatchEffects(root, () => config, { snapshot: async () => ({ work: [withReview(await reload(item.id))], now: new Date().toISOString() }), mutate, run: () => '' }),
-      agents: () => [], credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), persist: async () => {},
+      inventory: undefined, agents: () => [], credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), persist: async () => {},
       launchReview: async () => { order.push('start:loop-review'); return { pane: 'wA:p71' }; }, recordSession: record });
     assert.ok(loopTick.launched.length, `the tick launched the reviewer; it waited on ${JSON.stringify([loopTick.waiting, loopTick.refused])}`);
     assert.deepEqual(order, [`record:${request.id}:running`, 'start:loop-review', `record:${request.id}:running:wA:p71`]);

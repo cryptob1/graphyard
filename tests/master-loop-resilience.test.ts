@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { assertOutsideWorktrees, autonomousSession, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { assertOutsideWorktrees, autonomousSession, dispatchWork, selectAccount, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
@@ -20,6 +20,8 @@ import { emptyDaemonState, readDaemonState } from '../src/daemon/state.js';
 import { noteConfigReload, runDaemon } from '../src/daemon/run.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 // Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative registerLaunch expiries.
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
@@ -83,6 +85,8 @@ const herdr = (calls: string[][], extra: (args: string[]) => unknown = () => und
 };
 const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
 const registerLaunch = async () => ({ launch: 'fixture-launch' });
+/** GY-3030: the registry is the only authority for a session's slot; each launch takes one from a fresh in-memory registry. */
+const fleet = (runtime = 'claude') => registryFixture(hostname(), [runtime], ['worker', 'reviewer', 'producer']).probe;
 function masterConfig(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
     producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: join(credentialFile, '..', 'producer-a.token') }], ...overrides });
@@ -127,13 +131,15 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     const item = requested();
     const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
     const calls: string[][] = [];
-    const first = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr(calls) });
+    const first = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr(calls), probe: fleet() });
     assert.equal(first.attempt, 1);
     // The session takes up its request (GY-93: acknowledged after sustained activity), then
     // finishes without submitting; after the grace period it is recorded failed, not left pending.
-    const working = [{ name: 'produce-a', pane_id: 'pane-1', agent_status: 'working' }];
-    const idle = [{ name: 'produce-a', pane_id: 'pane-1', agent_status: 'done' }];
-    const start = Date.parse((await readProducerLedger(root)).producers[0].requestedAt);
+    // Every session's Herdr name is derived per request and attempt (GY-3030: no local slot count keeps the fixed name).
+    const { agentName: firstName, requestedAt: firstAt } = (await readProducerLedger(root)).producers[0];
+    const working = [{ name: firstName, pane_id: 'pane-1', agent_status: 'working' }];
+    const idle = [{ name: firstName, pane_id: 'pane-1', agent_status: 'done' }];
+    const start = Date.parse(firstAt);
     await reconcileProducers(root, config, [item], working, { run: herdr([]), now: () => new Date(start + 1000) });
     const acknowledged = await reconcileProducers(root, config, [item], working, { run: herdr([]), now: () => new Date(start + 1000 + sustainedActivityMs) });
     assert.equal(acknowledged.producers[0].acknowledgedAt, new Date(start + 1000 + sustainedActivityMs).toISOString());
@@ -143,16 +149,16 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     assert.equal(settled.producers[0].state, 'failed');
     assert.match(settled.producers[0].resolution!, /^the session finished \(done\) without trusted evidence/);
     // The same request is launched again: the next attempt, not a refusal.
-    await assert.rejects(launchProducer(root, item, request, config.producers[0], idle, new Date().toISOString(), { run: herdr([]) }), /already visible in Herdr/, 'the old pane still holds the agent name');
-    const second = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]) });
+    // The old pane, still visible, does not hold the retry back: the next attempt has a name of its own.
+    const second = await launchProducer(root, item, request, config.producers[0], idle, new Date().toISOString(), { run: herdr([]), probe: fleet() });
     assert.equal(second.attempt, 2); assert.equal(second.requestId, request.id);
-    await assert.rejects(launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]) }), /already pending/);
+    await assert.rejects(launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]), probe: fleet() }), /already pending/);
     const ledger = await readProducerLedger(root);
     assert.deepEqual(ledger.producers.map(record => [record.requestId, record.attempt, record.state]), [[request.id, 1, 'failed'], [request.id, 2, 'pending']]);
     // At the limit the launcher refuses the request itself, whatever the loop asks.
     ledger.producers = [1, 2, 3, 4].map(attempt => ({ ...ledger.producers[0], id: randomUUID(), attempt, state: 'expired' as const }));
     await writeFile(join(root, '.graphyard/producers.json'), JSON.stringify(ledger), { mode: 0o600 });
-    await assert.rejects(launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]) }), /no further automatic attempt/);
+    await assert.rejects(launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]), probe: fleet() }), /no further automatic attempt/);
     void credentials;
   } finally { await cleanup(); }
 
@@ -163,21 +169,36 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     const config = masterConfig(coordinator, { reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: join(directory, 'reviewer.json'), boundAt: at }, reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {} }] });
     const item = requested();
     const log: string[] = [];
-    const effects = stubDispatch(() => [item], log);
+    // GY-3030: each launch takes its slot from the registry, one live session per role here; a
+    // settled session is ended there, as the reconcile ends it, and frees the slot.
+    const registry = registryFixture(config.hostId, ['claude'], ['reviewer', 'producer'], 1), sessionOf = new Map<string, string>();
+    const take = async (role: 'reviewer' | 'producer', work: Work, request: { id: string; group?: string }, profile: { name: string }) => {
+      await selectAccount(config, role, profile, { ...registry.probe, work: work.key, group: request.group });
+      sessionOf.set(request.id, registry.sessions().at(-1)!.id);
+    };
+    const settle = async (record: any, change: object) => { Object.assign(record, change); await registry.client.end(sessionOf.get(record.requestId)!, 'settled'); };
+    const effects = stubDispatch(() => [item], log, {
+      launchReview: async (work, request, profile) => { await take('reviewer', work, request, profile); log.push(`review:${work.key}:${profile.name}`); effects.reviews.push({ requestId: request.id, state: 'pending', requestedAt: new Date().toISOString() }); },
+      launchProducer: async (work, request, profile) => { await take('producer', work, request, profile); log.push(`producer:${request.group}:${profile.name}`); effects.producers.push({ requestId: request.id, state: 'pending', requestedAt: new Date().toISOString() }); },
+    });
     const cursor = emptyDispatchCursor(config);
     const t0 = Date.now();
-    await runDispatchTick(config, cursor, effects, () => t0);
-    assert.deepEqual(log, ['review:GY-69:claude-reviewer', 'producer:unit:producer-a'], 'one producer profile takes the first group; the second waits for it');
+    const first = await runDispatchTick(config, cursor, effects, () => t0);
+    assert.deepEqual(log, ['review:GY-69:claude-reviewer', 'producer:unit:producer-a'], 'the one producer slot takes the first group; the second waits for it');
+    assert.match(first.waiting.find(entry => entry.requestId === 'producer-integration')!.reason, /waits for a producer slot.*role producer is at its concurrency limit/);
     const unit = effects.producers[0];
-    Object.assign(unit, { state: 'failed', closedAt: new Date(t0).toISOString(), resolution: 'the session finished (done) without trusted evidence for unit:autonomous-session-prompts (missing)' });
-    Object.assign(effects.reviews[0], { state: 'expired', closedAt: new Date(t0).toISOString(), resolution: 'the reviewer token expired without a verdict' });
+    await settle(unit, { state: 'failed', closedAt: new Date(t0).toISOString(), resolution: 'the session finished (done) without trusted evidence for unit:autonomous-session-prompts (missing)' });
+    await settle(effects.reviews[0], { state: 'expired', closedAt: new Date(t0).toISOString(), resolution: 'the reviewer token expired without a verdict' });
     const waiting = await runDispatchTick(config, cursor, effects, () => t0 + 1000);
     const unitWait = waiting.waiting.find(entry => entry.requestId === unit.requestId)!;
     assert.match(unitWait.reason, /producer session attempt 1 failed: the session finished \(done\) without trusted evidence .*; attempt 2 of 4 at /);
     assert.match(waiting.waiting.find(entry => entry.kind === 'review')!.reason, /reviewer session attempt 1 expired: .*attempt 2 of 4 at/);
-    assert.deepEqual(log.slice(2), ['producer:integration:producer-a'], 'nothing relaunches before its retry time; the freed profile takes the group that waited');
+    assert.deepEqual(log.slice(2), ['producer:integration:producer-a'], 'nothing relaunches before its retry time; the freed slot takes the group that waited');
     await runDispatchTick(config, cursor, effects, () => t0 + sessionRetryBaseMs + 1);
-    assert.deepEqual(log.slice(3), ['review:GY-69:claude-reviewer', 'producer:unit:producer-a'], 'the same requests are launched again once due');
+    assert.deepEqual(log.slice(3), ['review:GY-69:claude-reviewer'], 'the review is launched again once due; the unit retry waits for the slot the integration session holds');
+    await settle(effects.producers[1], { state: 'completed', closedAt: new Date(t0).toISOString(), resolution: 'trusted passing evidence recorded for integration:producer-session-retry' });
+    await runDispatchTick(config, cursor, effects, () => t0 + sessionRetryBaseMs + 2);
+    assert.deepEqual(log.slice(4), ['producer:unit:producer-a'], 'the same request is launched again once a slot frees');
     assert.deepEqual(effects.producers.filter(record => record.requestId === unit.requestId).map(record => record.state), ['failed', 'pending']);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -352,7 +373,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const profile: WorkerProfile = { name: 'claude-worker', principal: 'graphyard-claude-1', agentName: 'engineering-claude-1', mode: 'launch', kind: 'claude', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const calls: string[][] = [];
     await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] }), profile, [], herdr(calls), undefined,
-      async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), async () => {}, 5_000);
+      async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), async () => {}, 5_000, undefined, { probe: fleet() });
     const workerFile = sessionHarnessFile(root, 'worker', 'claude-worker');
     const run = calls.find(call => call[0] === 'pane' && call[1] === 'run')!;
     // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
@@ -372,7 +393,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     // Reviewer: its own file allows exactly the verdict the master's rules deny.
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
     const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), probe: fleet(), registerLaunch });
     const reviewerFile = sessionHarnessFile(root, 'reviewer', 'claude-reviewer');
     const typedReview = expandTypedCommand(reviewCalls[1][3]);
     assert.deepEqual(reviewCalls[1].slice(0, 2), ['pane', 'run']); assert.equal(typedReview.kind, 'claude');
@@ -389,7 +410,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: producerCredential }, producerVerify('proof-runner'));
     const item = requested();
     const produceCalls: string[][] = [];
-    await launchProducer(root, item, item.autoDispatch!.producers[0], (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(produceCalls) });
+    await launchProducer(root, item, item.autoDispatch!.producers[0], (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), probe: fleet() });
     const producerFile = sessionHarnessFile(root, 'producer', 'producer-a');
     const typedProduce = expandTypedCommand(produceCalls[1][3]);
     assert.deepEqual(typedProduce.args.slice(-7, -3), ['--setting-sources', 'user', '--settings', producerFile]);
@@ -403,7 +424,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     await saveReviewerProfile(root, { name: 'cursor-reviewer', agentName: 'review-cursor-1', kind: 'cursor' });
     const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
     const cursorCalls: string[][] = [];
-    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), registerLaunch });
+    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), probe: fleet('cursor'), registerLaunch });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
     assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
@@ -431,18 +452,20 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const master = await loadMasterConfig(root);
     const item = requested();
-    await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]) });
-    const started = Date.parse((await readProducerLedger(root)).producers[0].requestedAt);
-    const blocked = [{ name: 'produce-a', pane_id: 'pane-1', agent_status: 'blocked' }];
+    await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]), probe: fleet() });
+    const { agentName: producerName, requestedAt: producerAt } = (await readProducerLedger(root)).producers[0];
+    const started = Date.parse(producerAt);
+    const blocked = [{ name: producerName, pane_id: 'pane-1', agent_status: 'blocked' }];
     await reconcileProducers(root, master, [item], blocked, { run: herdr([]), now: () => new Date(started + 1000) });
     const producer: ProducerRecord = (await reconcileProducers(root, master, [item], blocked, { run: herdr([]), now: () => new Date(started + 1000 + producerIdleGraceMs) })).producers[0];
     assert.equal(producer.state, 'failed');
     assert.match(producer.resolution!, /ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
 
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), registerLaunch, requestId: 'review-request' });
-    const reviewStart = Date.parse((await readReviewLedger(root)).reviews[0].requestedAt);
-    const reviewAgents = [{ name: 'review-claude-1', pane_id: 'pane-1', agent_status: 'blocked' }];
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), probe: fleet(), registerLaunch, requestId: 'review-request' });
+    const { agentName: reviewName, requestedAt: reviewAt } = (await readReviewLedger(root)).reviews[0];
+    const reviewStart = Date.parse(reviewAt);
+    const reviewAgents = [{ name: reviewName, pane_id: 'pane-1', agent_status: 'blocked' }];
     const pending = await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: reviewAgents, now: () => new Date(reviewStart + 1000) });
     assert.equal(pending.reviews[0].state, 'pending', 'a grace period first');
     const review: ReviewRecord = (await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: reviewAgents, now: () => new Date(reviewStart + 1000 + reviewIdleGraceMs) })).reviews[0];

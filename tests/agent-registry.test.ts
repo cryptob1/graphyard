@@ -315,8 +315,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   assert.equal(refusedLaunch.principal, 'implementer-c'); assert.ok(refusedLaunch.endedAt, 'the refused launch gives its session back');
   assert.match(refusedLaunch.endReason!, /worker launch for GY-\d+ failed: Graphyard refuses to launch the claude runtime/);
 
-  // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
-  assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
+  // A role missing from the registry cannot fall back to local profiles.
+  await assert.rejects(selectAccount(config, 'reviewer', { name: 'review-a' }, probe), /must be configured in the control-plane registry/);
 
   // A launch that fails *after* the choice gives its session back on every path, not only the
   // worker's: the review launch registration fails here, and its account and the role's one slot are
@@ -335,24 +335,23 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const relaunch = await launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, registerLaunch: registerReviewerSession });
   assert.equal(relaunch.account!.environment, 'claude-fresh');
 
-  // And a review relaunched for a new head supersedes the live session of the head it replaces:
-  // the local ledger cancels its record, and the registry frees the slot in the same breath.
+  // A new head cannot steal an active reservation. Reconciliation ends the old session first.
+  await assert.rejects(launchReview(root, reviewWork('GY-960', 'd'.repeat(40)), 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, registerLaunch: registerReviewerSession }), /concurrency limit/);
+  const previousReview = (await ok('agent-registry/document', coordinator) as Registry).sessions.find(entry => entry.role === 'reviewer' && !entry.endedAt)!;
+  await ok(`agent-registry/sessions/${previousReview.id}/end`, coordinator, { reason: 'the previous review ended' });
   const next = await launchReview(root, reviewWork('GY-960', 'd'.repeat(40)), 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, registerLaunch: registerReviewerSession });
   assert.equal(next.account!.environment, 'claude-fresh');
-  const reviewSessions = (await ok('agent-registry/document', coordinator) as Registry).sessions.filter(entry => entry.role === 'reviewer' && entry.work === 'GY-960');
-  assert.equal(reviewSessions.filter(entry => !entry.endedAt).length, 1, 'one live reviewer session for the item, the newest');
-  assert.match(reviewSessions.at(-2)!.endReason!, /superseded by the reviewer session requested for GY-960/);
 
-  // A producer is superseded only within its own proof group, so the groups of one item still run
-  // side by side while each group's relaunch replaces its own predecessor.
+  // Proof groups run independently, but a racing request cannot replace either group's slot.
   await ok('agent-registry/roles', operator, { role: { name: 'producer', accounts: ['claude-fresh'], concurrency: 2 }, reason: 'two proof groups at a time' });
   const select = (group: string) => ok('agent-registry/select', coordinator, { role: 'producer', host: HOST, work: 'GY-961', group, observations: [] });
-  assert.equal((await select('integration')).selected, true); assert.equal((await select('manual')).selected, true);
-  const again = await select('integration');
-  assert.equal(again.selected, true, 'the integration group replaces its own session rather than waiting for the concurrency limit');
+  const integration = await select('integration');
+  assert.equal(integration.selected, true); assert.equal((await select('manual')).selected, true);
+  assert.equal((await select('integration')).selected, false);
+  await ok(`agent-registry/sessions/${integration.session.id}/end`, coordinator, { reason: 'the integration run ended' });
+  assert.equal((await select('integration')).selected, true);
   const producers = (await ok('agent-registry/document', coordinator) as Registry).sessions.filter(entry => entry.role === 'producer' && entry.work === 'GY-961');
   assert.deepEqual(producers.filter(entry => !entry.endedAt).map(entry => entry.group), ['manual', 'integration']);
-  assert.match(producers.find(entry => entry.endedAt)!.endReason!, /superseded by the producer session requested for GY-961/);
 
   // The one end the control plane cannot infer — a launcher killed mid-flight, a host that went
   // away — is an operator's own command rather than a wait for the session's outer cap.
@@ -364,7 +363,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // An outage never hands a registry-decided role back to a file: nothing launches until the control plane answers.
   const down = { ...probe, fetch: (async (target: string, init: any) => String(target).includes('/api/agent-registry') ? new Response('bad gateway', { status: 502 }) : probe.fetch!(target, init)) as unknown as typeof fetch };
-  await assert.rejects(selectAccount({ ...config, url: `${url}/` }, 'worker', config.workers[0], down), /answered 502; role worker is decided by the agent registry .* nothing launches for it until the control plane answers/);
+  await assert.rejects(selectAccount({ ...config, url: `${url}/` }, 'worker', config.workers[0], down), /agent registry .* answered 502/);
 });
 
 // ---------------------------------------------------------------------------

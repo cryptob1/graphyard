@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { nonInteractiveLaunch } from './harness.js';
 import { spawn } from 'node:child_process';
@@ -8,7 +8,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
-import { atomicPrivateWrite, readCredentialFile } from './private-file.js';
+import { readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
@@ -22,9 +22,7 @@ export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
  * probes the logins that live on its own host, reports what it saw, and the control plane picks
  * the first eligible account of the role and records the choice. Nothing is cached between
  * actions beyond the probe's own short cache, so a registry change takes effect on the next
- * action with no restart and no file edit. A role the registry does not define yet keeps
- * launching from the local profile, which is how an installation moves onto the registry one
- * role at a time.
+ * action with no restart and no file edit. Every role must be defined before it can launch.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
 export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
@@ -65,7 +63,7 @@ export class FleetUnreachableError extends Error {
  * not a fault of any account and not a decision to give up on: the launch waits for a slot, and the
  * loop makes it again on the first cycle after one frees.
  */
-export const roleAtCapacity = (reason: string) => /^role \S+ is at its concurrency limit\b/.test(reason);
+export const roleAtCapacity = (reason: string) => /^role \S+ (?:is at its concurrency limit|already reserved for)\b/.test(reason);
 /** The refusal's reason when `error` is a launch refused for its role's capacity, else null. (A tag, not a subclass: fleet.ts and master.ts import each other.) */
 export const capacityRefusal = (error: unknown): string | null => { const tag = error instanceof Error ? (error as Error & { roleAtCapacity?: unknown }).roleAtCapacity : null; return typeof tag === 'string' ? tag : null; };
 
@@ -118,13 +116,6 @@ export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pic
     observe: request => call('agent-registry/observe', request) };
 }
 
-// The registry as this executor last read it, kept beside the coordinator's other private state.
-// It is never launched from: it only tells an unreachable control plane ("refuse, the registry
-// decides this role") apart from one that never held a registry ("launch from the local profile").
-const fleetCachePath = (config: Pick<MasterConfig, 'credentialFile'>) => resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.registry.json`);
-async function readFleetCache(config: Pick<MasterConfig, 'credentialFile'>): Promise<{ revision: number; roles: string[]; readAt: string } | null> {
-  try { const parsed = JSON.parse(await readFile(fleetCachePath(config), 'utf8')); return typeof parsed?.revision === 'number' && Array.isArray(parsed.roles) ? parsed : null; } catch { return null; }
-}
 // One failed read is not repeated for every launch of the same cycle.
 const unreachable = new Map<string, { at: number; error: FleetUnreachableError }>();
 export const unreachableRetryMs = 30_000;
@@ -143,14 +134,9 @@ export async function readFleet(config: FleetConfig, role: FleetRoleName, probe:
   } catch (error) {
     if (!(error instanceof FleetUnreachableError)) throw error;
     if (!probe.registry && error !== failed?.error) unreachable.set(config.url!, { at: now, error });
-    const cached = await readFleetCache(config);
-    // Once the registry has decided a role, an outage never quietly hands that role back to a file.
-    if (cached?.roles.includes(role)) throw new Error(`${error.message}; role ${role} is decided by the agent registry (revision ${cached.revision}, read ${cached.readAt}), so nothing launches for it until the control plane answers`);
-    return { managed: false, reason: error.message };
+    throw error;
   }
   const roles = (registry.roles ?? []).map(entry => entry.name);
-  const cached = await readFleetCache(config);
-  if (!cached || cached.roles.join() !== roles.join()) await atomicPrivateWrite(fleetCachePath(config), { revision: registry.revision, roles, readAt: new Date(now).toISOString() }).catch(() => {});
   if (!roles.includes(role)) return { managed: false, reason: registry.roles?.length ? `role ${role} is not configured in the agent registry` : 'the agent registry is empty' };
   return { managed: true, registry, client };
 }
@@ -201,7 +187,7 @@ export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = D
  */
 export async function selectFleetSession(config: FleetConfig, role: FleetRoleName, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
   const fleet = await readFleet(config, role, probe);
-  if (!fleet.managed) return null;
+  if (!fleet.managed) throw new Error(`Role ${role} must be configured in the control-plane registry: ${fleet.reason}`);
   const host = config.hostId ?? 'unknown-host', { registry, client } = fleet;
   // Every enabled account on this host is observed, not only the role's own: any of them may serve a failover (GY-3092).
   const local = registry.accounts.filter(account => account.enabled && account.credential.host === host);

@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry } from '../src/model/registry.js';
-import { heldOverlay, observedExhaustions, recordObservedExhaustion, registryHoldObservations, releaseOperatorClearedHolds } from '../src/master/environments.js';
+import { heldOverlay, observedExhaustions, recordObservedExhaustion, registryHoldObservations, releasedSince } from '../src/master/environments.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -17,12 +17,12 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   const account = { name: 'opencode-c', runtime: runtime.name, model: 'glm', credential: { host: HOST, home: '/home/fixture/opencode-c' } };
   let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: [runtime], models: [{ name: 'glm', id: 'glm-5' }], accounts: [account], roles: [{ name: 'worker', accounts: ['opencode-c'], concurrency: 2 }], reason: 'fixture' }, { actor: 'operator', at: iso(t0 - 3_600_000) }).registry;
 
-  // The host's stored hold: the misattributed notice, reset 13:00Z.
+  // The misattributed notice the host reported, reset 13:00Z.
   const root = await temporaryDirectory('quota-decision-stale');
   const credentialFile = join(root, 'coordinator.token');
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   const config = { credentialFile, hostId: HOST } as Pick<MasterConfig, 'credentialFile' | 'hostId'>;
-  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(t0), resetsAt: '2026-11-05T13:00:00Z', reason: 'Usage limit reached · limit resets 1pm', role: 'worker', profile: 'builder', work: 'GY-1' }, t0);
+  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(t0), resetsAt: '2026-11-05T13:00:00Z', reason: 'Usage limit reached · limit resets 1pm', role: 'worker', profile: 'builder', work: 'GY-1' }, t0, { registry: { observe: async () => registry } as never });
   const replayed = heldOverlay({ 'opencode-c': hold }, 'opencode-c', { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null });
   assert.equal(replayed.since, hold.at, 'a replayed hold names when it was observed');
   const [reported] = registryHoldObservations(registry, HOST, 'opencode-c', hold)!;
@@ -53,9 +53,10 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   fold(replayed, decided + 3 * 3_600_000 + 60_000);
   assert.equal(quota().state, 'available', 'after an account change');
 
-  // The host releases its hold on the decision, though the registry reading is now a probe's.
-  assert.deepEqual(await releaseOperatorClearedHolds(config, { 'opencode-c': hold }, registry, decided + 4 * 3_600_000), {});
-  assert.equal((await observedExhaustions(config, decided + 4 * 3_600_000))['opencode-c'], undefined);
+  // Every executor reads the decision from the registry, though its reading is now a probe's.
+  const client = { document: async () => registry };
+  assert.equal(await releasedSince(config, 'opencode-c', hold.at, client), true);
+  assert.equal((await observedExhaustions(config, decided + 4 * 3_600_000, client))['opencode-c'], undefined);
 
   // A notice observed after the decision still holds the account.
   fold({ ...replayed, since: iso(decided + 5 * 3_600_000) }, decided + 5 * 3_600_000 + 1_000);

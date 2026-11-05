@@ -6,14 +6,48 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
-import { launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
-import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
+import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchProducer } from '../src/producer.js';
 import { readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
+import { hostname } from 'node:os';
+import type { FleetClient, FleetProbe } from '../src/fleet.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
+
+/**
+ * The control-plane registry every launch takes its account and slot from (GY-3030), in memory:
+ * each account on this host with its own login home, each role naming its accounts in order. As
+ * the control plane does, a selection folds what the executor observed of each login (logged in,
+ * quota) before it chooses, so a spent or logged-out account is passed over with its reason.
+ */
+function homeRegistry(accounts: { name: string; kind: string; home: string | null }[], roles: Partial<Record<FleetRoleName, string[]>>, host = hostname()) {
+  const at = new Date().toISOString();
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => accounts.some(account => account.kind === runtime.name)), models: [{ name: 'default', id: null }],
+    accounts: accounts.map(account => ({ name: account.name, runtime: account.kind, model: 'default', credential: { host, home: account.home } })),
+    roles: Object.entries(roles).map(([name, names]) => ({ name, accounts: names, concurrency: 4 })), reason: 'fixture',
+  }, { actor: 'operator', at }).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    select: async request => {
+      foldObservations(registry, request, { actor: 'master', at: new Date().toISOString() });
+      const choice = chooseSession(registry, request, Date.now());
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host,
+        work: request.work, principal: request.principal, group: request.group, selectedAt: at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry = { ...registry, sessions: [...registry.sessions, session] };
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async (id, reason) => { registry = { ...registry, sessions: registry.sessions.map(session => session.id === id && !session.endedAt ? { ...session, endedAt: new Date().toISOString(), endReason: reason } : session) }; },
+    observe: async () => ({ revision: registry.revision }),
+  };
+  return client;
+}
 
 // Each test is named for the proof it produces: integration:agent-env-discovery,
 // integration:agent-quota-failover, integration:prompt-delivery-confirmed and
@@ -213,15 +247,21 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal((await checkAgentEnvironment({ name: 'codex-reset', kind: 'codex', home: join(directory, 'codex-reset') }, probe)).quota, 'available', 'a window past its reset is spendable again');
     assert.equal((await checkAgentEnvironment(config.environments![2], usage({ 'claude-c-oauth-token': 503 }))).quota, 'unknown', 'an unreadable quota does not block a launch');
 
-    const selected = await selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-68' });
+    // The registry is the only authority for which account a launch runs on (GY-3030): each role
+    // names its accounts in order, and this host reports each login's health before it chooses.
+    const registry = (roles: Partial<Record<FleetRoleName, string[]>>): FleetProbe => ({ ...probe, registry: homeRegistry(config.environments!, roles) });
+    // A fleet holding only the spent accounts, so GY-3092's fleet failover has nowhere to go.
+    const spentFleet = (roles: Partial<Record<FleetRoleName, string[]>>): FleetProbe => ({ ...probe, registry: homeRegistry(config.environments!.filter(entry => ['claude-a', 'claude-b'].includes(entry.name)), roles) });
+    const workers = registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }), spentWorkers = spentFleet({ worker: ['claude-a', 'claude-b'] });
+    const selected = await selectAccount(config, 'worker', config.workers[0], { ...workers, work: 'GY-68' });
     assert.equal(selected.account!.name, 'claude-c');
     assert.deepEqual(selected.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
-    await assert.rejects(selectAccount(config, 'worker', config.workers[1], probe), (error: any) => error instanceof NoHealthyAccountError && error.skipped.length === 2 && /claude-a quota is exhausted.*claude-b is not logged in/.test(error.message));
+    await assert.rejects(selectAccount(config, 'worker', config.workers[1], spentWorkers), (error: any) => error instanceof NoHealthyAccountError && error.skipped.length === 2 && /claude-a quota is exhausted.*claude-b is not logged in/.test(error.message));
 
     // Worker dispatch: the exhausted Codex account is skipped before anything is claimed, and the
     // session starts on claude-c with that runtime, its home, and without the Codex-only arguments.
     const calls: string[][] = []; let claims = 0;
-    const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe });
+    const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }) });
     const tab = tabEnvironment(calls[0]);
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
     // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
@@ -234,52 +274,36 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.doesNotMatch(typedRuntime(calls[1][3]!) + worker.args.join(' '), /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
-    await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe }), /No healthy agent account for worker profile worker-spent/);
+    await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe: spentWorkers }), /No healthy agent account for worker profile worker-spent/);
     assert.equal(claimed, false, 'a profile with no healthy account claims nothing');
 
     // The durable loop reads the same health: the spent profile is unavailable, with reasons.
-    const health = await inspectWorkerCredentials(root, config.workers, probe);
-    assert.equal(health['worker-a'].available, true); assert.equal(health['worker-spent'].available, false);
-    assert.match(health['worker-spent'].reason!, /No healthy agent account: claude-a quota is exhausted.*; claude-b is not logged in/);
-    assert.equal((await inspectProducerCredentials(root, config.producers, probe))['producer-a'].available, true);
+    // The registry's health is its role's, read from what this host reported: a role with a healthy account is available, one with none is not.
+    assert.equal((await inspectWorkerCredentials(root, config.workers, workers))['worker-a'].available, true);
+    const spentHealth = (await inspectWorkerCredentials(root, config.workers, spentWorkers))['worker-spent'] as { available: boolean; accounts?: { environment: string; healthy: boolean; reason: string | null }[] };
+    assert.equal(spentHealth.available, false);
+    assert.deepEqual(spentHealth.accounts?.map(entry => [entry.environment, entry.healthy]), [['claude-a', false], ['claude-b', false]]);
+    assert.match(spentHealth.accounts!.map(entry => entry.reason).join('; '), /claude-a quota is exhausted.*; claude-b is not logged in/);
+    assert.equal((await inspectProducerCredentials(root, config.producers, registry({ producer: ['claude-b', 'claude-c'] })))['producer-a'].available, true);
 
     // A reviewer launch: the configured profile has no healthy account, so it refuses before minting
     // a token; the automatic loop fails over to the next reviewer profile and says why.
     const registerLaunch = async () => ({ launch: 'fixture-launch' });
     let minted = 0;
-    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe }), (error: any) => error.accountsExhausted === true);
+    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe: spentFleet({ reviewer: ['claude-a', 'claude-b'] }) }), (error: any) => error.accountsExhausted === true);
     assert.equal(minted, 0); assert.deepEqual((await readReviewLedger(root)).reviews, []);
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch, probe });
+    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch, probe: registry({ reviewer: ['claude-c'] }) });
     assert.equal(reviewed.account!.environment, 'claude-c'); assert.equal(tabEnvironment(reviewCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
     const produceCalls: string[][] = [];
     const requested = { id: 'request-producer', kind: 'producer', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, group: 'integration', proofs: ['integration:agent-quota-failover'], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
     const producing = work({ autoDispatch: { review: null, producers: [requested], history: [] } } as any);
-    const produced = await launchProducer(root, producing, requested, config.producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), probe });
+    const produced = await launchProducer(root, producing, requested, config.producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), probe: registry({ producer: ['claude-b', 'claude-c'] }) });
     assert.equal(produced.account!.environment, 'claude-c'); assert.deepEqual(produced.account!.skipped.map(entry => entry.environment), ['claude-b']);
     assert.equal(tabEnvironment(produceCalls[0]).GRAPHYARD_TOKEN_FILE, producerCredential);
 
-    // No cross-runtime failover for a reviewer (GY-1306): the Codex profile's only Codex account is
-    // exhausted, and the healthy Claude account it also lists is passed over with that reason, so the
-    // profile waits for its own runtime's reset rather than starting Claude in a checkout prepared for Codex.
-    const reviewLedger = await readReviewLedger(root);
-    await saveReviewLedger(root, { ...reviewLedger, reviews: reviewLedger.reviews.filter(record => record.state !== 'pending') });
-    const reviewCrossCalls: string[][] = [];
-    await assert.rejects(launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), registerLaunch, probe }), (error: any) => error instanceof NoHealthyAccountError
-      && error.capacityExhausted && JSON.stringify(error.skipped.map((entry: any) => [entry.environment, entry.cause])) === JSON.stringify([['codex', 'exhausted'], ['claude-c', 'cross-runtime']])
-      && /claude-c runs claude, not codex: a reviewer launch of profile review-cross starts only on codex accounts/.test(error.message));
-    assert.deepEqual(reviewCrossCalls, [], 'no tab is created and no session started');
-
-    // Nor for a producer: the Claude profile's Claude accounts are spent or logged out, and the
-    // healthy Codex account it lists is passed over rather than started.
-    const produceLedger = await readProducerLedger(root);
-    await saveProducerLedger(root, { ...produceLedger, producers: produceLedger.producers.filter(record => record.state !== 'pending') });
-    const requestedCross = { ...requested, id: 'request-producer-cross', proofs: ['integration:prompt-delivery-confirmed'] };
-    const producingCross = work({ autoDispatch: { review: null, producers: [requestedCross], history: [] } } as any);
-    const produceCrossCalls: string[][] = [];
-    await assert.rejects(launchProducer(root, producingCross, requestedCross, config.producers.find(profile => profile.name === 'producer-cross')!, [], new Date().toISOString(), { run: herdr(produceCrossCalls), probe }),
-      (error: any) => error instanceof NoHealthyAccountError && JSON.stringify(error.skipped.map((entry: any) => [entry.environment, entry.cause])) === JSON.stringify([['claude-a', 'exhausted'], ['claude-b', 'logged-out'], ['codex-b', 'cross-runtime']]));
-    assert.deepEqual(produceCrossCalls, [], 'no tab is created and no session started');
+    // GY-1306's cross-runtime refusal lived on the per-profile account path GY-3030 removed: the
+    // registry's role chooses the runtime, and the harness follows the account's runtime.
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
     const item = work({ autoDispatch: { review, producers: [], history: [] } } as any);
@@ -341,7 +365,7 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
     // A reviewer on Muse, once prompted after start, starts on its own request: nothing is pasted, so no prompt can drop.
     await saveReviewerProfile(root, { name: 'review-muse', agentName: 'review-muse', kind: 'muse' });
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), registerLaunch: async () => ({ launch: 'fixture-launch' }), prompt: fast });
+    const reviewed = await launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), registerLaunch: async () => ({ launch: 'fixture-launch' }), prompt: fast, probe: { cacheMs: 0, registry: homeRegistry([{ name: 'muse-a', kind: 'muse', home: null }], { reviewer: ['muse-a'] }) } });
     assert.equal(reviewed.delivery, 'request'); assert.equal(reviewCalls.filter(args => args[1] === 'prompt').length, 0);
 
     // The loop relaunches such a session once before it records a refusal.
@@ -364,7 +388,7 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
     // A worker on Muse likewise: one claim, one launch, its request on the command line and never pasted.
     const workerCalls: string[][] = []; const claims: number[] = [];
     const result = await dispatchWork(root, ready(), profile, [], herdr(workerCalls, args => args[1] === 'prompt' ? stalled : undefined), [ready()],
-      async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { prompt: fast });
+      async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { prompt: fast, probe: { cacheMs: 0, registry: homeRegistry([{ name: 'muse-a', kind: 'muse', home: null }], { worker: ['muse-a'] }) } as FleetProbe });
     assert.deepEqual(claims, [1]); assert.equal(result.delivery, 'request'); assert.equal(result.relaunched, 0);
     assert.equal(workerCalls.filter(args => args[0] === 'agent' && args[1] === 'prompt').length, 0);
   } finally { await cleanup(); }
@@ -394,7 +418,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     // Worker, reviewer and producer sessions: broadest approval, each with only its own role's credential.
     const credential = await token(credentialDirectory, 'workers', 'worker-oc', 'worker-oc-token-');
     const workerCalls: string[][] = [];
-    await dispatchWork(root, ready(), { name: 'oc', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0 } });
+    await dispatchWork(root, ready(), { name: 'oc', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a'] }) } as FleetProbe });
     const workerTab = tabEnvironment(workerCalls[0]);
     // GY-2959: the worker launch derives the repository-tree grant from the checkout it serves; the reviewer keeps the broad allow-all.
     const workerGrant = JSON.parse(workerTab.OPENCODE_PERMISSION).external_directory;
@@ -403,7 +427,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(workerCalls).includes('worker-oc-token-'), false);
     await saveReviewerProfile(root, { name: 'review-oc', agentName: 'review-oc', kind: 'opencode', accounts: ['opencode-a'] });
     const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), probe: { cacheMs: 0 } });
+    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { reviewer: ['opencode-a'] }) } });
     const reviewTab = tabEnvironment(reviewCalls[0]);
     assert.equal(JSON.parse(reviewTab.OPENCODE_PERMISSION)['*'], 'allow'); assert.ok(reviewTab.GH_CONFIG_DIR);
     assert.equal(reviewTab.GRAPHYARD_TOKEN_FILE, undefined, 'a reviewer still holds no Graphyard credential');
@@ -491,7 +515,7 @@ test('unit:opencode-launch-pregrants-repository-tree — an opencode worker laun
     await configure(root, next => { next.environments = [opencodeAccount]; });
     const credential = await token(credentialDirectory, 'workers', 'worker-oc2', 'worker-oc2-token-');
     const workerCalls: string[][] = [];
-    await dispatchWork(root, ready(), { name: 'oc2', principal: 'worker-oc2', agentName: 'eng-oc2', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a2'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0 } });
+    await dispatchWork(root, ready(), { name: 'oc2', principal: 'worker-oc2', agentName: 'eng-oc2', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a2'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a2'] }) } as FleetProbe });
     const grant = JSON.parse(tabEnvironment(workerCalls[0]).OPENCODE_PERMISSION).external_directory;
     assert.equal(grant[`${root}/**`], 'allow', 'the repository tree is granted: a bisect worktree beside the assigned one never prompts');
     assert.equal(grant[`${root}/.graphyard/**`], 'allow', 'the managed and bisect worktrees under .graphyard are granted beside it');

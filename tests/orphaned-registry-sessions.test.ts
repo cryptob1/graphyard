@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
-import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type FleetSession } from '../src/model/registry.js';
 import { exactApproval } from '../src/model/review.js';
 import type { FleetClient } from '../src/fleet.js';
-import { loadMasterConfig, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { loadMasterConfig, masterConfigSchema, workerProfileSchema, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
@@ -60,7 +60,6 @@ function memoryRegistry(host: string, home: string, concurrency = 4) {
   const client: FleetClient = {
     document: async () => structuredClone(registry),
     select: async request => {
-      for (const superseded of supersededByRequest(registry, request)) Object.assign(superseded, { endedAt: at(), endReason: 'superseded' });
       const choice = chooseSession(registry, request, Date.now());
       if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
       const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
@@ -371,6 +370,55 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.equal(done.gates.find(gate => gate.name === 'review')!.passed, false);
     assert.equal(exactApproval(done), null, 'COMMENTED cannot supply independent approval');
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
+});
+
+test('unit:orphaned-registry-sessions — GY-3012 submitted epoch 4 frees its worker slot when the finished pane is gone', async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
+  try {
+    const config = await loadMasterConfig(host.root), registry = memoryRegistry(config.hostId, await claudeLogin('submitted-worker'));
+    const selectedAt = '2026-11-04T15:44:00.000Z', endedAt = '2026-11-04T15:46:59.000Z', clock = Date.parse('2026-11-04T15:47:00.000Z');
+    const item = requested(12);
+    item.key = 'GY-3012'; item.epoch = 4; item.submission!.epoch = 4; item.autoDispatch = undefined;
+    item.sessions = [{ id: 'worker:4', kind: 'implementation', principal: 'worker', epoch: 4, runtime: 'codex', host: config.hostId,
+      workspace: null, tab: null, pane: 'w4G:finished', agentName: 'worker', role: null, head: item.candidate!.sha,
+      attach: null, transcript: null, subject: item.title, startedAt: selectedAt, updatedAt: endedAt, endedAt, state: 'finished', outcome: 'submitted' }];
+    const reservation: FleetSession = { id: 'cadad93d-0335-4c72-b4b6-959eebb04aaf', role: 'worker', account: 'reviewer-account', runtime: 'claude', model: 'opus',
+      host: config.hostId, work: item.key, principal: 'worker', group: null, selectedAt, selectedBy: 'master', reason: 'worker launch', skipped: [], endedAt: null, endReason: null };
+    registry.registry.roles.push({ ...registry.registry.roles[0], name: 'worker', concurrency: 1 });
+    registry.registry.sessions.push(reservation);
+    const kept = structuredClone(item);
+    const orphans = (items = [item], agents: { pane_id?: string }[] | null = []) => orphanedRegistrySessions(registry.registry, config.hostId, agents, [], clock, items);
+    assert.deepEqual(orphans([item], null), [], 'unreadable inventory is a gap');
+    assert.deepEqual(orphans([item], [{ pane_id: 'w4G:finished' }]), [], 'a visible pane keeps the reservation');
+    const active = structuredClone(item); active.sessions![0].state = 'running';
+    assert.deepEqual(orphans([active]), [], 'a genuinely active implementation keeps its slot');
+    const leased = structuredClone(item); leased.lease = { owner: 'worker', epoch: 4, expiresAt: new Date(clock + 60_000).toISOString() };
+    assert.deepEqual(orphans([leased]), [], 'a live lease is preserved');
+    const otherEpoch = structuredClone(item); otherEpoch.sessions![0].epoch = 3;
+    assert.deepEqual(orphans([otherEpoch]), [], 'another attempt cannot end this reservation');
+    assert.equal(orphans()[0].id, reservation.id, 'finished submitted work releases even within launch grace');
+    const effects = tickEffects(host, config, registry, () => [item], 0, clock);
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => clock);
+    assert.deepEqual(tick.registryClosed, [{ work: item.key, id: reservation.id, role: 'worker', pane: 'w4G:finished' }]);
+    assert.match(reservation.endReason!, /submitted implementation is finished/);
+    // The next automatic worker dispatch takes the slot; no manual release or claim is needed.
+    const queued = requested(51);
+    Object.assign(queued, { key: 'GY-3051', type: 'chore', stage: 'ready', epoch: 17, submission: null, candidate: null, observation: null, autoDispatch: undefined });
+    config.workers = [workerProfileSchema.parse({ name: 'worker', principal: 'worker', agentName: 'worker', kind: 'claude', mode: 'launch', credentialFile: config.credentialFile })];
+    const dispatched: string[] = [];
+    await runCycle(config, emptyDaemonState(config), {
+      snapshot: async () => ({ work: [item, queued], now: new Date(clock).toISOString() }), agents: () => [],
+      credentials: async () => ({ worker: { available: true, reason: null } }), closeSession: async () => {}, persist: async () => {},
+      dispatch: async work => {
+        const next = await registry.client.select({ role: 'worker', host: config.hostId, group: null, work: work.key, principal: 'worker', observations: [] });
+        assert.equal(next.selected, true);
+        dispatched.push(work.key);
+        return { epoch: 18, pane: 'w4G:next-worker', runtime: 'claude' };
+      },
+    }, () => clock);
+    assert.deepEqual(dispatched, ['GY-3051']);
+    assert.deepEqual(item, kept, 'slot reconciliation preserves the submitted candidate and requirements');
+  } finally { await host.cleanup(); }
 });
 
 // GY-3116: on 2026-11-05 the post-merge reviews of GY-3090 and GY-3098 completed (their ledger
