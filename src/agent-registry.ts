@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
-import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, supersededByRequest, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
 import { holdLimitNoticeAccount } from './model/account-quota.js';
@@ -143,11 +143,6 @@ export class AgentRegistry {
     return this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
       const registry = await readRegistry(db), at = now.toISOString();
       let changed = settleSessions(registry, await this.sessionWork(db, registry), at).length > 0;
-      // The request supersedes the session it replaces before any limit is counted, so a relaunch
-      // for the same work is never refused by its own dead predecessor.
-      for (const superseded of supersededByRequest(registry, request)) {
-        superseded.endedAt = at; superseded.endReason = `superseded by the ${request.role} session requested for ${request.work}`; changed = true;
-      }
       // Its quotas and the smoke tests it ran (GY-446), for the logins on its own host only.
       if (foldObservations(registry, request, { actor: actor.id, at })) changed = true;
       const choice = chooseSession(registry, request, now.getTime(), await this.reviewDiversity(db, registry, request));

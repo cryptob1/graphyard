@@ -21,7 +21,7 @@ import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
-import { profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
+import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
@@ -944,13 +944,6 @@ export async function launchReview(root: string, work: Work, profileName: string
     // record could not be written must never leave a running pane behind that holds the agent's name.
     try { assertSessionLedgerRoom(ledger.reviews, reviewLedgerSpec, `${binding.key} review of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: now().toISOString(), key: binding.key, sha: binding.sha, requestId: dependencies.requestId }); }
     catch (error) { return { refusal: error as Error }; }
-    // Every pending session of the profile holds a slot (GY-1072), whether or not the inventory this
-    // launch was handed shows it yet: launches answering different requests from one stale
-    // inventory each take a name of their own, so only the ledger, read under this lock, keeps them
-    // within the limit. A pending record whose session died is settled by reconciliation.
-    const reserved = ledger.reviews.filter(entry => entry.state === 'pending' && entry.profile === profile.name).map(entry => ({ name: entry.agentName }));
-    const sessions = profileSessions(profile, [...agents, ...reserved], ledger.reviews);
-    if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
     const requestedAt = now().toISOString();
     // Read before this launch's own record joins the ledger: the rounds before this one. A control-plane
     // re-review takes its earlier round from the item's own observation (GY-1988): its verdicts are
@@ -979,7 +972,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   try {
     // GY-1705: re-hold a reviewer account this item's last two sessions each spent, before
     // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
-    await holdRepeatedLimitAccount(config, work, now().getTime(), {}, 'reviewer').catch((error: unknown) => {
+    await holdRepeatedLimitAccount(config, work, now().getTime(), { registry: dependencies.probe?.registry }, 'reviewer').catch((error: unknown) => {
       throw new Error(`${work.key}'s last reviewer sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500), { cause: error });
     });
     // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
@@ -1083,7 +1076,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no
       // accepted answer settles as a session that finished without one, and the request relaunches.
-      if (answered) void answered.then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
+      if (answered) void answered.finally(() => selected.release?.(`the headless review of ${work.key} finished`)).then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
         .catch(() => { /* reconciliation settles a record this could not write */ });
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,

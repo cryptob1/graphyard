@@ -172,7 +172,7 @@ export { runningSessions, sessionSummary } from './session-state.js';
 
 /** What a runtime reports about one session it is running: its own name for it, the pane it holds, and its state. */
 /** `agent` is the agent the runtime detects in the pane: `null` says the pane holds none (it exited to a shell); absent, the runtime does not say. */
-export interface RuntimeSession { name?: string; pane_id?: string; agent_status?: string; agent?: string | null }
+export interface RuntimeSession { name?: string; pane_id?: string; agent_status?: string; agent?: string | null; workspace_id?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> }
 /**
  * The reported states that mean a session has ended rather than one still holding its place. Any
  * other state is live — `idle`, `done` and `blocked` all included.

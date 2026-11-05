@@ -17,6 +17,7 @@ import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { readReviewBinding } from '../src/review-post.js';
 import { startedAtOnce, expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 // Every instant this file holds is derived from the run's own clock (GY-1694): a base reading taken
 // at load and offsets from it. No calendar literal is constructed, so no wall-clock reading here is
 // judged against a fixed date.
@@ -55,7 +56,7 @@ const principals = [admin, coordinator];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const tokenOf = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let store: Store, http: ReturnType<typeof server>, url: string;
-let root: string, credentialDirectory: string, config: Awaited<ReturnType<typeof loadMasterConfig>>;
+let root: string, credentialDirectory: string, config: Awaited<ReturnType<typeof loadMasterConfig>>, fleet: ReturnType<typeof registryFixture>['probe'];
 const herdrCalls: string[][] = [];
 before(async () => {
   store = await withDatabase('post-merge-review-launch'); await store.init();
@@ -72,6 +73,8 @@ before(async () => {
   await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('post-merge-launch-checkouts', '/var/tmp') } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
   config = await loadMasterConfig(root);
+  // GY-3030: the registry is the only authority for a reviewer's slot; each item reviewed here takes one.
+  fleet = registryFixture(config.hostId, ['claude'], ['reviewer'], 8).probe;
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
@@ -88,7 +91,7 @@ const herdr = (_command: string, args: string[]) => { herdrCalls.push(args); ret
 const mergeBaseTip = (work: Work) => { const tip = work.mergeLedger?.baseTip; return tip && tip !== unknownParent ? { baseTip: tip } : {}; };
 /** The real post-merge wiring: the launch through `launchReview`, registration through the real route, keyed like `dispatchEffects` keys it. */
 const realLaunch = (work: Work, requestId: string) => launchReview(root, work, 'reviewer-claude', [], at(), {
-  run: herdr, requestId, postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
+  run: herdr, probe: fleet, requestId, postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
 });
 const items: Work[] = [];
 const effects: DispatchEffects = {
@@ -233,7 +236,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
       }
       return herdr(command, args);
     };
-    await launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
+    await launchReview(root, work, 'reviewer-claude', [], at(), { run, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
     const record = (await readReviewLedger(root)).reviews.find(entry => entry.key === work.key)!;
     assert.deepEqual(record.reviewInputs, { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements });
     // A changed later snapshot must not replace the launch facts when its session is reminded.
@@ -263,7 +266,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
     }
     assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
     assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'review-claude-1');
-    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
+    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
     assert.equal(prompts.length, 1, 'one session answers this head');
     const session = await readReviewBinding(record.sessionDirectory!);
     const body = { event: 'APPROVE', body: verdictBody, sha: record.sha, token: session.verdictToken };

@@ -12,6 +12,8 @@ import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 // Time-bomb allowance (GY-1694): every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test passes (localNow pinned where the probe runs); the lone new Date() status call carries no fixture instant.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -115,14 +117,21 @@ test('master commands refuse a changed repository or managed base binding', () =
   assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main' }));
 });
 
+/** dispatchWork, each call over a fresh in-memory registry on this host: the registry alone grants a launch its account and slot. */
+function registryDispatch(runtimes: string[]): typeof dispatchWork {
+  return (root, item, profile, agents, run, allWork, prepare, release, timeout, observedAt, options) =>
+    dispatchWork(root, item, profile, agents, run, allWork, prepare, release, timeout, observedAt, { ...options, probe: { ...registryFixture(hostname(), runtimes).probe, ...options?.probe } });
+}
+
 test('dispatch launches through watch, with the instruction on the supervised command line, and accepts a session already working on it', async () => {
+  const dispatch = registryDispatch(['codex']);
   const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const calls: string[][] = [];
   try {
     const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
     const profile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch' as const, kind: 'codex' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
     let probes = 0;
-    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); if (args[0] === 'pane' && args[1] === 'read') return 'Codex ready'; return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent: 'codex', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
+    const result = await dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); if (args[0] === 'pane' && args[1] === 'read') return 'Codex ready'; return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'p1', agent: 'codex', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.match(result.ownership, /supervising/);
     assert.deepEqual(calls[0].slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']); assert.ok(calls[0].includes('GRAPHYARD_HERDR_AGENT_KIND=codex'));
     assert.deepEqual(calls[1].slice(0, 3), ['pane', 'run', 'p1']); assert.match(typedRuntime(calls[1][3]), / watch GY-42 4 -- codex /);
@@ -135,54 +144,55 @@ test('dispatch launches through watch, with the instruction on the supervised co
     assert.equal(probes, 1, 'a session working on its request is accepted at first sight'); assert.equal(result.delivery, 'request');
     assert.deepEqual(calls.at(-1)!.slice(0, 3), ['agent', 'rename', 'p1']); assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
     const failedCalls: string[][] = []; let releasedEpoch = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /the codex runtime never started within 0 s in pane late-pane \(no runtime under the pane\)/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base: 'd'.repeat(40) }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /the codex runtime never started within 0 s in pane late-pane \(no runtime under the pane\)/);
     assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-pane']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
     const promptCalls: string[][] = []; let promptRelease = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       promptCalls.push(args); if (args[1] === 'rename') throw new Error('rename refused');
       if (args[0] === 'pane' && args[1] === 'read') return 'Codex ready';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'prompt-pane' } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'prompt-pane', agent: 'codex', agent_status: 'idle' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 6, path: join(root, 'prompt'), base: 'e'.repeat(40) }), async (_root, _key, epoch) => { promptRelease = epoch; }), /rename refused/);
     assert.equal(promptRelease, 6); assert.deepEqual(promptCalls.at(-2), ['pane', 'close', 'prompt-pane']); assert.deepEqual(promptCalls.at(-1), ['pane', 'list']);
     let unsafeRelease = false;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'pane' && args[1] === 'close') throw new Error('daemon unavailable');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'unsafe-pane' } : {} });
     }, undefined, async () => ({ epoch: 7, path: join(root, 'unsafe'), base: 'f'.repeat(40) }), async () => { unsafeRelease = true; }, 1), /retained epoch 7/);
     assert.equal(unsafeRelease, false, 'ownership remains fenced until pane shutdown is confirmed');
     let malformedRelease = 0; const malformedCalls: string[][] = [];
     let cleanupProbes = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       malformedCalls.push(args);
       return JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: null }, tab: { tab_id: 'worker-malformed-tab' } } : args[0] === 'tab' && args[1] === 'list' ? { tabs: ++cleanupProbes === 1 ? [{ tab_id: 'worker-malformed-tab' }] : [] } : {} });
     }, undefined, async () => ({ epoch: 8, path: join(root, 'malformed'), base: '1'.repeat(40) }), async (_root, _key, epoch) => { malformedRelease = epoch; }), /valid new pane/);
     assert.equal(malformedRelease, 8); assert.equal(cleanupProbes, 2); assert.deepEqual(malformedCalls.at(-3), ['tab', 'close', 'worker-malformed-tab']); assert.deepEqual(malformedCalls.at(-1), ['tab', 'list']);
     let blockedProbes = 0, blockedRelease = 0; const blockedStarted = performance.now();
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') { blockedProbes++; return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } }); }
       if (args[0] === 'pane' && args[1] === 'read') return '❯ No, keep this model\n  Yes, switch models\n';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async (_root, _key, epoch) => { blockedRelease = epoch; }, 5_000), /blocked before it is ready/);
     assert.equal(blockedProbes, 1); assert.equal(blockedRelease, 9); assert.ok(performance.now() - blockedStarted < 1_000, 'blocked state must bypass lookup retries');
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } });
       if (args[0] === 'pane' && args[1] === 'read') return '❯ No, keep this model\n  Yes, switch models\n';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async () => {}, 5_000), /blocked on a dialog the launcher does not recognise: "❯ No, keep this model \/ Yes, switch models"\); the pane last showed: "Yes, switch models"/, 'GY-121, GY-1561: the refusal shows the dialog the runtime is blocked on');
     // Claude Code's folder-trust menu with its question scrolled out of view is named by its options (GY-1561).
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-pane', agent: 'codex', agent_status: 'blocked' } } });
       if (args[0] === 'pane' && args[1] === 'read') return '❯ No, exit\n  Yes, I trust this folder\n';
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-pane' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 9, path: join(root, 'blocked'), base: '2'.repeat(40) }), async () => {}, 5_000), /stopped at a workspace-trust prompt in pane blocked-pane .*"❯ No, exit \/ Yes, I trust this folder"/);
     const existing = { name: 'existing', principal: 'worker-a', agentName: 'existing-a', mode: 'existing' as const, agentArgs: [], approvals: 'auto' as const, environment: {} };
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'existing-a', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
     const dependency = work({ id: 'dependency', key: 'GY-41', stage: 'build' });
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null, dependencies: [dependency.id] }), profile, [], undefined, [dependency]), /unfinished dependencies/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null, dependencies: [dependency.id] }), profile, [], undefined, [dependency]), /unfinished dependencies/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
 test('Muse dispatch runs the installed binary through claim, assigned worktree, Herdr, and watch with its own credential only', async () => {
+  const dispatch = registryDispatch(['muse']);
   const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const calls: string[][] = [];
   const previousToken = process.env.GRAPHYARD_TOKEN; process.env.GRAPHYARD_TOKEN = coordinatorToken;
   try {
@@ -206,7 +216,7 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     assert.equal(prepared.epoch, 4); const claim = prepareCalls.find(call => call.args[1] === 'claim')!;
     assert.equal(claim.options.env.GRAPHYARD_TOKEN_FILE, credential); assert.equal(claim.options.env.GRAPHYARD_TOKEN, undefined); assert.equal(claim.options.env.GRAPHYARD_MASTER_TOKEN, undefined);
     let probes = 0;
-    const result = await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); if (args[0] === 'pane' && args[1] === 'process-info') return JSON.stringify({ result: { process_info: { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [{ argv: ['muse'] }] } } }); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent: 'muse', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base }), undefined, undefined, undefined, { start: { wait: () => {} } });
+    const result = await dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { calls.push(args); if (args[0] === 'pane' && args[1] === 'process-info') return JSON.stringify({ result: { process_info: { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [{ argv: ['muse'] }] } } }); return JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent: 'muse', agent_status: ++probes === 1 ? 'working' : 'idle' } } : {} }); }, undefined, async () => ({ epoch: 4, path: join(root, 'assigned'), base }), undefined, undefined, undefined, { start: { wait: () => {} } });
     assert.match(result.ownership, /supervising/); assert.equal(result.principal, 'muse-1'); assert.equal(result.launch.applied, true);
     const tab = calls[0]; assert.deepEqual(tab.slice(0, 4), ['tab', 'create', '--workspace', 'workspace-graphyard']);
     assert.equal(tab[tab.indexOf('--cwd') + 1], join(root, 'assigned'));
@@ -224,24 +234,24 @@ test('Muse dispatch runs the installed binary through claim, assigned worktree, 
     // A Muse session that never becomes visible is closed and its epoch released; one Herdr
     // cannot confirm closed keeps the epoch fenced.
     const failedCalls: string[][] = []; let releasedEpoch = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /the muse runtime never started within 0 s in pane late-muse \(no runtime under the pane\)/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => { failedCalls.push(args); return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'late-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); }, undefined, async () => ({ epoch: 5, path: join(root, 'late'), base }), async (_root, _key, epoch) => { releasedEpoch = epoch; }, 1), /the muse runtime never started within 0 s in pane late-muse \(no runtime under the pane\)/);
     assert.equal(releasedEpoch, 5); assert.deepEqual(failedCalls.at(-2), ['pane', 'close', 'late-muse']); assert.deepEqual(failedCalls.at(-1), ['pane', 'list']);
     let blockedRelease = 0;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { pane_id: 'blocked-muse', agent: 'muse', agent_status: 'blocked' } } });
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'blocked-muse' } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
     }, undefined, async () => ({ epoch: 6, path: join(root, 'blocked'), base }), async (_root, _key, epoch) => { blockedRelease = epoch; }, 5_000), /blocked before it is ready/);
     assert.equal(blockedRelease, 6);
     let unsafeRelease = false;
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [], (_command, args) => {
       if (args[0] === 'pane' && args[1] === 'close') throw new Error('daemon unavailable');
       return JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'unsafe-muse' } : {} });
     }, undefined, async () => ({ epoch: 7, path: join(root, 'unsafe'), base }), async () => { unsafeRelease = true; }, 1), /retained epoch 7/);
     assert.equal(unsafeRelease, false, 'ownership remains fenced until Muse pane shutdown is confirmed');
     // An already-running Muse session is observable but never adopted for new work.
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [{ name: 'engineering-muse-1', agent: 'muse', agent_status: 'idle', cwd: root }]), /already visible in Herdr/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), profile, [{ name: 'engineering-muse-1', agent: 'muse', agent_status: 'idle', cwd: root }]), /already visible in Herdr/);
     const existing = { ...profile, name: 'muse-existing', principal: 'muse-2', agentName: 'engineering-muse-2', mode: 'existing' as const, kind: undefined, credentialFile: undefined };
-    await assert.rejects(dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'engineering-muse-2', agent: 'muse', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
+    await assert.rejects(dispatch(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, mergeAuthorization: null }), existing, [{ name: 'engineering-muse-2', agent: 'muse', agent_status: 'idle', cwd: root }]), /cannot be safely adopted/);
   } finally {
     if (previousToken === undefined) delete process.env.GRAPHYARD_TOKEN; else process.env.GRAPHYARD_TOKEN = previousToken;
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });

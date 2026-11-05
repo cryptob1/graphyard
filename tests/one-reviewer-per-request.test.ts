@@ -19,6 +19,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type Dispat
 import { neededRework, standingVerdict } from '../src/daemon/rework.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 import { hostMemoryVariable } from '../src/master/host-memory.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -101,6 +102,9 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // one, as the incident's two sessions ran two runtimes.
   const loaded = await loadMasterConfig(master.root);
   const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
+  // GY-3030: the registry is the only authority for the reviewer's slot; both launchers ask one
+  // registry, fresh for each race, so the session the winner holds never carries into the next.
+  const fleet = registryFixture(loaded.hostId, ['claude'], ['reviewer']).probe;
   // A review is requested only once the head's mechanical proofs pass (GY-115): prove it first.
   const item = work({ evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: H, baseSha: B, policyRevision: 3, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
   reconcileAutoDispatch(item, [item], new Date());
@@ -113,7 +117,7 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // launcher there keeps its record `launching` while the second one is let in.
   const registerLaunch = (who: Launcher) => async () => { minting[who].resolve(); if (order.at === 'launching' && order.first === who) await settled[other(who)].promise; return master.registerLaunch(); };
   const launch = (who: Launcher, profile: string) => (work: Work, dispatch: { id: string }, herdr: { name?: string }[], observedAt: string) => door[who].promise
-    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
+    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, probe: fleet, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
     .then(result => { outcomes[who] = { launched: true }; settled[who].resolve(); return result; }, error => { outcomes[who] = { launched: false, error: error.message }; settled[who].resolve(); throw error; });
   // A dispatch tick, launching through the real launcher with WHO's profile.
   const effects = (who: Launcher): DispatchEffects => ({
@@ -128,7 +132,8 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   if (!order.first) { door.cycle.resolve(); door.dispatcher.resolve(); }
   else {
     door[order.first].resolve();
-    await (order.at === 'launching' ? minting : settled)[order.first].promise;
+    // A first launcher that fails before it mints settles instead: the race goes on and its assertions name the failure, rather than waiting forever.
+    await Promise.race([(order.at === 'launching' ? minting : settled)[order.first].promise, settled[order.first].promise]);
     door[other(order.first)].resolve();
   }
   const [tick, dispatched] = await both;

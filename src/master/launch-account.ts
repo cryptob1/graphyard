@@ -107,9 +107,9 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
  */
 export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
   const repeated = repeatedLimitAccount(work, now, role);
-  if (!repeated || (await observedExhaustions(config, now))[repeated.account]) return null;
+  if (!repeated || (await observedExhaustions(config, now, report?.registry?.document ? { document: report.registry.document } : undefined))[repeated.account]) return null;
   const last = repeated.records.at(-1)!;
-  if (await releasedSince(config, repeated.account, last.at)) return null; // GY-3100: an operator released it after that notice
+  if (await releasedSince(config, repeated.account, last.at, report?.registry?.document ? { document: report.registry.document } : undefined)) return null; // GY-3100: an operator released it after that notice
   const launches = role === 'worker'
     ? `worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')})`
     : `${role} sessions (${repeated.records.map(entry => entry.requestId ?? entry.at).join(', ')})`;

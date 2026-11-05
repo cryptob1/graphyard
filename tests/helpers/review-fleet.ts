@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,8 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
   const root = await temporaryDirectory('auto-review'), credentialDirectory = await temporaryDirectory('auto-review-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+  // A fresh checkout of the head (the private verification trial) has no .graphyard directory yet.
+  await mkdir(join(process.cwd(), '.graphyard'), { recursive: true });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } }, coordinatorStatus as typeof fetch);
   // Fake runtime launches must not load the host's project-level Claude settings.
   await saveReviewerProfile(root, { agentArgs: ['--setting-sources', 'user'], ...reviewer });

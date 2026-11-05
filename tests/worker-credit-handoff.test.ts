@@ -14,6 +14,7 @@ import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { masterConfigSchema, workerPrompt, observedExhaustions, selectAccount, recordEnvironmentLog, selectionKey, type MasterConfig } from '../src/master.js';
 import { accountHeldForRole } from '../src/model/capacity.js';
+import { proposedRuntimes } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -98,6 +99,14 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
       await mkdir(join(root, name));
       await writeFile(join(root, name, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
     }
+    // GY-3030: the control-plane registry is the only authority for accounts and their exhaustion, so
+    // the executor's two accounts are this control plane's registry, read with the coordinator token.
+    await writeFile(config.credentialFile, token(coordinator), { mode: 0o600 });
+    await ok(operator, 'POST', 'agent-registry/apply', {
+      runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'default', id: null }],
+      accounts: ['claude-c', 'claude-d'].map(name => ({ name, runtime: 'claude', model: 'default', credential: { host: HOST, home: join(root, name) } })),
+      roles: [{ name: 'worker', accounts: ['claude-c', 'claude-d'], concurrency: 4 }], reason: 'The executor\'s two accounts',
+    });
     config.workers.push({ ...config.workers[0]!, name: 'spent-builder', principal: workerA.id });
     await recordEnvironmentLog(config, [], [], { key: selectionKey('worker', 'spent-builder'), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: filed.key });
     const clock = Date.now();
@@ -112,6 +121,8 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
     const effects: DaemonEffects = {
       ...real,
       agents: () => herdr as any, herdr: () => ({ agents: herdr as any, available: true }),
+      // GY-3030: the cycle reads its session inventory (session-inventory.ts) before Herdr alone; this stub's Herdr is that inventory.
+      inventory: async () => ({ available: true, sessions: herdr.map(agent => ({ name: agent.name, runtime: null, state: agent.agent_status, pane: agent.pane_id, workspace: null })) }),
       credentials: async () => ({ builder: { available: true, reason: null } }),
       closeSession: pane => { closed.push(pane); },
       promptSession: async () => { assert.fail('the limit stop needs no re-prompt'); },

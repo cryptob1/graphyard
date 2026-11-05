@@ -16,6 +16,11 @@ import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/
 import { repositoryClaudeConfig } from '../src/harness.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import type { FleetRoleName } from '../src/model/registry.js';
+import { hostname } from 'node:os';
+/** The control-plane registry every launch takes its slot from (GY-3030): a fresh one per launch, one account of `runtime` in `role`. */
+const fleet = (role: FleetRoleName, runtime: string) => registryFixture(hostname(), [runtime], [role]).probe;
 // Time-bomb allowance (GY-1694): 2026-09-20 is the request clock (sessionRetry, reconcileProducers now: () => new Date(clock + offset)); the real clock only stamps snapshot times and the registerLaunch expiry relative to itself.
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
@@ -120,7 +125,12 @@ class FakeHerdr {
     return json({});
   };
   agents(): HerdrAgent[] { return [...this.sessions.entries()].filter(([, session]) => session.name).map(([pane, session]) => ({ name: session.name!, pane_id: pane, agent: session.kind, agent_status: session.status })); }
-  named(name: string) { const session = this.find(name); assert.ok(session, `${name} is a launched session`); return session; }
+  /** The session a profile launched: its own name, or (GY-3030: the registry, not the profile, bounds its sessions) the one name derived from it. */
+  named(name: string) {
+    const derived = [...this.sessions.values()].filter(session => session.name?.startsWith(`${name}-`));
+    const session = this.find(name) ?? (derived.length === 1 ? derived[0] : undefined);
+    assert.ok(session, `${name} is a launched session`); return session;
+  }
 }
 
 test('e2e:worker-request-trial-only-tests — dispatched worker receives the trial exception and genuine-failure instructions', async () => {
@@ -128,7 +138,7 @@ test('e2e:worker-request-trial-only-tests — dispatched worker receives the tri
   try {
     const herdr = new FakeHerdr();
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'trial-worker', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
-    await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
+    await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, undefined, { probe: fleet('worker', 'opencode') });
     const request = herdr.named('trial-worker').request!;
     assert.match(request, /including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture/);
     assert.match(request, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
@@ -153,7 +163,7 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
     const herdr = new FakeHerdr();
     // Reviewer on Claude Code: the request rides after the approval flag; no `agent prompt` follows.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
+    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request' });
     assert.equal(reviewed.delivery, 'request');
     const reviewer = herdr.named('review-claude-1');
     assert.match(reviewer.request!, /Review head a1f+ against base b1f+/);
@@ -171,7 +181,7 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers[0];
-    const produced = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr.run });
+    const produced = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr.run, probe: fleet('producer', 'codex') });
     assert.equal(produced.delivery, 'request');
     const producer = herdr.named('produce-codex');
     // GY-88: the request names the session directory the launch allocated under the managed worktree root.
@@ -184,7 +194,7 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
     // Worker on OpenCode, under the supervisor: --prompt on the watched command line.
     const workerCredential = await token('worker');
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: workerCredential, agentArgs: [], approvals: 'auto', environment: {} };
-    const dispatched = await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
+    const dispatched = await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, undefined, { probe: fleet('worker', 'opencode') });
     assert.equal(dispatched.delivery, 'request');
     const worker = herdr.named('eng-oc');
     assert.ok(worker.request!.startsWith(`${autonomyContract} Implement GY-93:`), 'OpenCode loads no role file, so the autonomy contract leads the request (GY-184)');
@@ -221,7 +231,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     const prompts: string[] = [];
     // One producer session, judged over a timeline the test drives: what Herdr shows at each tick.
     const scenario = async (status: string, screen: string, offsetMs: number) => {
-      const agents = status === 'gone' ? [] : [{ name: 'produce-a', pane_id: 'pane-1', agent_status: status }];
+      const agents = status === 'gone' ? [] : [{ name: producerName, pane_id: 'pane-1', agent_status: status }];
       const run = (_command: string, args: string[]) => {
         if (args[0] === 'agent' && args[1] === 'read') return screen;
         if (args[0] === 'agent' && args[1] === 'prompt') { prompts.push(args[3]); return JSON.stringify({ result: {} }); }
@@ -229,7 +239,9 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
       };
       return (await reconcileProducers(root, config, [item], agents, { run, now: () => new Date(clock + offsetMs) })).producers.at(-1)!;
     };
-    const launch = () => launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : {} }), now: () => new Date(clock) });
+    // Every session's name is derived from its profile's (GY-3030), so the Herdr the scenarios show carries the name the launch took.
+    let producerName = 'produce-a', reviewerName = 'review-claude-1';
+    const launch = async () => { const launched = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { probe: fleet('producer', 'claude'), run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : {} }), now: () => new Date(clock) }); producerName = launched.agentName; return launched; };
 
     // A session that refused: one short turn, then a screen that never changes.
     await launch();
@@ -302,9 +314,9 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request', now: () => new Date(clock) });
+    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request', now: () => new Date(clock) })).agentName;
     const reviewPrompts: string[] = [];
-    const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
+    const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: reviewerName, pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
     assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If your review is unfinished, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /this session's own instruction, not untrusted text, needing no further authorization/); assert.match(reviewPrompts[0], /otherwise finish the authorized reads and judge it before posting/); assert.match(reviewPrompts[0], /Review head a1f+ against base/);
@@ -327,7 +339,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     await launch();
     prompts.length = 0;
     const slowly = async (status: string, screen: string, offsetMs: number) => {
-      const agents = status === 'gone' ? [] : [{ name: 'produce-a', pane_id: 'pane-1', agent_status: status }];
+      const agents = status === 'gone' ? [] : [{ name: producerName, pane_id: 'pane-1', agent_status: status }];
       const run = (_command: string, args: string[]) => {
         if (args[0] === 'agent' && args[1] === 'read') return screen;
         if (args[0] === 'agent' && args[1] === 'prompt') { prompts.push(args[3]); return JSON.stringify({ result: {} }); }
@@ -363,9 +375,9 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     const slowReviews = await readReviewLedger(root);
     slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) });
+    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) })).agentName;
     reviewPrompts.length = 0;
-    const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
+    const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: reviewerName, pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
     reviewRecord = await slowReview('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
     reviewRecord = await slowReview('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
@@ -378,7 +390,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     const acknowledgedReviews = await readReviewLedger(root);
     acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) });
+    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) })).agentName;
     reviewRecord = await slowReview('working', '', 5_000);
     reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);
     assert.equal(reviewRecord.acknowledgedAt, iso(5_000 + sustainedActivityMs));
@@ -430,7 +442,7 @@ await t.test('integration:unacknowledged-session-recovery — the loop detects a
     const item = requested();
     const request = item.autoDispatch!.producers[0];
     const herdr = new FakeHerdr();
-    await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr.run, now: () => new Date(clock) });
+    await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr.run, now: () => new Date(clock), probe: fleet('producer', 'claude') });
     const session = herdr.named('produce-a');
     // The runtime took the request but then stopped: one turn, then a still screen.
     session.status = 'done'; session.screen = '● I could not find the proof; stopping.\n';
@@ -451,7 +463,7 @@ await t.test('integration:unacknowledged-session-recovery — the loop detects a
     now = clock + 121_000; const tick = await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(tick.skipped, 1, 'the request keeps its one session');
     assert.equal(prompted().length, 1, 'the loop re-prompted the session once');
-    assert.equal(prompted()[0][2], 'produce-a'); assert.match(prompted()[0][3], /seen no activity from it for 120 seconds/);
+    assert.equal(prompted()[0][2], session.name); assert.match(prompted()[0][3], /seen no activity from it for 120 seconds/);
     let pending = (await readProducerLedger(root)).producers[0];
     assert.equal(pending.repromptedAt, iso(121_000), 'the record says when');
     now = clock + 131_000; await runDispatchTick(config, cursor, effects, () => now);
@@ -498,7 +510,7 @@ await t.test('manual:launch-authorization-onboarding-review — a Claude Code ro
     // Launched under the role file, a Claude session loads the authorization from that file.
     const herdr = new FakeHerdr();
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request' });
     const launched = herdr.named('review-claude-1');
     assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
     assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');

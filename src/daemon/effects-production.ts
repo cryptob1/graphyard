@@ -1,3 +1,4 @@
+import { sessionInventory } from '../session-inventory.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { workerVerificationPump } from './worker-verification.js';
@@ -84,6 +85,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return snapshot;
     },
     sessionHistory: deps.sessionHistory,
+    inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     credentials: profiles => inspectWorkerCredentials(root, profiles),

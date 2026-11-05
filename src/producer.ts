@@ -17,7 +17,7 @@ import { closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/h
 import { credentialMaskFor } from './master/confinement.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
-import { profileAtLimit, profileSessions, runtimeLoginHomes, sessionAgentName, type MasterConfig, type ProducerProfile } from './master/profiles.js';
+import { runtimeLoginHomes, sessionAgentName, type MasterConfig, type ProducerProfile } from './master/profiles.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -391,8 +391,6 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
   // The ledger's room is local state, judged before any session exists (see launchReview).
   assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: new Date().toISOString(), key: binding.key, sha: binding.sha, requestId: request.id });
-  const sessions = profileSessions(profile, agents, ledger.producers);
-  if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   const credential = await readProducerCredential(root, profile.credentialFile);
   // A closed question answers in seconds what a session takes most of an hour to; the session is
   // launched only for the proofs no confident answer decided.
@@ -413,7 +411,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // relaunch for that group replaces its own predecessor instead of being refused by it.
   // GY-1705: re-hold a producer account this item's last two sessions each spent, before registry /
   // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
-  await holdRepeatedLimitAccount(config, work, now().getTime(), {}, 'producer').catch((error: unknown) => {
+  await holdRepeatedLimitAccount(config, work, now().getTime(), { registry: dependencies.probe?.registry }, 'producer').catch((error: unknown) => {
     throw new Error(`${work.key}'s last producer sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500), { cause: error });
   });
   // GY-170: when the registry defines the producer role its choice decides the runtime: a unit-group

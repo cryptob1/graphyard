@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { dispatchReserved, dispatchWork, setupMaster, watchSupervisorRunning, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { capacityRefusal } from '../src/fleet.js';
+import { dispatchWork, setupMaster, watchSupervisorRunning, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 
 // GY-273: concurrent dispatchers launch implementation work from their own snapshots of
 // Herdr's agents. Two of them picking one profile used to mean two claims, two runtimes started,
@@ -84,29 +87,30 @@ test('unit:profile-reserved-before-claim — two concurrent dispatchWork calls f
     const profile = launchProfile('one', fixture.credential);
     const herdr = fakeHerdr(), claims = fakeClaims(fixture.root);
     const first = work('GY-1'), second = work('GY-2');
-    // Both dispatchers chose the profile from the same snapshot, in which its name is free.
+    // GY-3030: the control-plane registry is the only slot authority. The worker role holds one
+    // session, so of two dispatchers that chose the profile from the same snapshot, the registry
+    // refuses the second its slot before it claims anything.
+    const registry = registryFixture(hostname(), ['codex'], ['worker'], 1);
     const observedAt = new Date().toISOString(), snapshot: HerdrAgent[] = [];
-    const results = await Promise.allSettled([first, second].map(item => dispatchWork(fixture.root, item, profile, snapshot, herdr.run, [first, second], claims.prepare, claims.release, 1, observedAt)));
+    const results = await Promise.allSettled([first, second].map(item => dispatchWork(fixture.root, item, profile, snapshot, herdr.run, [first, second], claims.prepare, claims.release, 1, observedAt, { probe: registry.probe })));
     const launched = results.filter(result => result.status === 'fulfilled'), refused = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
     assert.equal(launched.length, 1, 'exactly one dispatch launches');
     assert.equal(refused.length, 1, 'the other is refused');
-    assert.ok(dispatchReserved(refused[0].reason), `the refusal is the reservation's own, not a failed launch: ${refused[0].reason?.message}`);
-    assert.equal(refused[0].reason.resource, 'profile');
-    assert.match(refused[0].reason.message, /Worker profile one is reserved by another dispatch|already visible in Herdr/);
+    assert.match(capacityRefusal(refused[0].reason) ?? '', /role worker is at its concurrency limit/, `the refusal is the registry's slot refusal, not a failed launch: ${refused[0].reason?.message}`);
     assert.equal(claims.claims.size, 1, 'exactly one item was claimed');
     assert.deepEqual(claims.released, [], 'nothing was claimed and then released');
     assert.equal(herdr.calls.filter(args => args[0] === 'tab' && args[1] === 'create').length, 1, 'exactly one pane was created');
     assert.equal(herdr.typed.length, 1, 'exactly one runtime was started');
     assert.deepEqual(herdr.closed, [], 'no pane was closed');
     assert.deepEqual(herdr.agents.map(agent => agent.name), ['agent-one']);
+    assert.equal(registry.sessions().filter(session => !session.endedAt).length, 1, 'the registry holds one live worker session');
 
-    // A dispatcher that reads its snapshot before that launch and dispatches after it is released
-    // re-reads Herdr under the reservation and is refused the name, still before any claim.
-    const late = await dispatchWork(fixture.root, work('GY-3'), profile, [], herdr.run, [work('GY-3')], claims.prepare, claims.release, 1, observedAt).then(() => null, error => error);
-    assert.ok(dispatchReserved(late), `a stale snapshot is refused cleanly: ${late?.message}`);
-    assert.match(late.message, /agent-one is already visible in Herdr/);
-    assert.ok(herdr.calls.some(args => args[0] === 'agent' && args[1] === 'list'), 'Herdr was read again under the reservation');
+    // A dispatcher that reads its snapshot before that launch dispatches while the launched session
+    // still holds the slot: the registry refuses it, still before any claim.
+    const late = await dispatchWork(fixture.root, work('GY-3'), profile, [], herdr.run, [work('GY-3')], claims.prepare, claims.release, 1, observedAt, { probe: registry.probe }).then(() => null, error => error);
+    assert.match(capacityRefusal(late) ?? '', /role worker is at its concurrency limit/, `a stale snapshot is refused cleanly: ${late?.message}`);
     assert.equal(claims.claims.size, 1, 'the stale dispatcher claimed nothing');
+    assert.equal(herdr.typed.length, 1, 'the stale dispatcher started nothing');
   } finally { await fixture.cleanup(); }
 });
 
@@ -114,7 +118,7 @@ test('unit:launch-failure-closes-pane — a rename refused after `pane run` clos
   const fixture = await installation();
   try {
     const empty = fakeHerdr({ failRename: true }), emptyClaims = fakeClaims(fixture.root);
-    await assert.rejects(dispatchWork(fixture.root, work('GY-2'), launchProfile('two', fixture.credential), [], empty.run, [work('GY-2')], emptyClaims.prepare, emptyClaims.release, 1, new Date().toISOString()), /agent_name_taken/);
+    await assert.rejects(dispatchWork(fixture.root, work('GY-2'), launchProfile('two', fixture.credential), [], empty.run, [work('GY-2')], emptyClaims.prepare, emptyClaims.release, 1, new Date().toISOString(), { probe: registryFixture(hostname(), ['codex']).probe }), /agent_name_taken/);
     assert.deepEqual(empty.closed, ['pane-1'], 'the pane is closed');
     assert.deepEqual(emptyClaims.released, ['GY-2@1']);
 
