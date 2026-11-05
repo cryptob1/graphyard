@@ -9,7 +9,7 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
 import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
-import { stopServersUnder } from './postgres-stop.js';
+import { stopServersUnder } from '../../src/postgres-stop.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
 // needs nothing the session has to know about the host.

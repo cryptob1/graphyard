@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempOwnerMarker, writeTempOwner } from '../../src/tmp-reclaim.js';
-import { liveServersUnder, stopServersUnder } from './postgres-stop.js';
+import { liveServersUnder, stopServersUnder } from '../../src/postgres-stop.js';
 
 // The one shared helper for a test that needs a temporary directory (GY-421): an embedded-Postgres
 // data dir, a worktree, a store, a home. Every test in the suite creates its directories here and
