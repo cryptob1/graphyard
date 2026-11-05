@@ -70,6 +70,19 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
 
 const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
 
+/**
+ * One record writer at a time per file: the gate's mid-flight checkpoints and the diagnostics'
+ * settled write each merge onto the latest state on disk, and two unserialized read-modify-writes
+ * interleave — the later write carrying a stale snapshot erases what the earlier one recorded, a
+ * batch's finished steps included. Each merge reads inside the chain, after the last write landed.
+ */
+const recordWrites = new Map<string, Promise<unknown>>();
+function mergeGateRecord(file: string, merge: (latest: GateRecord | null) => GateRecord): Promise<void> {
+  const chained = (recordWrites.get(file) ?? Promise.resolve()).then(() => writeGateRecord(file, merge(readGateRecord(file))));
+  recordWrites.set(file, chained.catch(() => undefined));
+  return chained;
+}
+
 /** The commit served at rollout, which becomes the first verified commit: the deploy record's when it names this repository, else main's tip. */
 async function rolloutCommit(root: string, repository: string, reads: MergeWriterReads) {
   const deployed = readDeployRecord(deployRecordPath(root));
@@ -98,10 +111,12 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     const current = record;
     live.gate = (async () => {
       try {
-        const outcome = await runGate({ ...ports, started: () => writeGateRecord(file, current) }, current);
+        // Each mid-flight write keeps the diagnostics' fields, as the settled gate's own write does:
+        // the batch it carries — tip, files, checks, finished steps — is what the next loop adopts
+        // after a restart (GY-3135).
+        const outcome = await runGate({ ...ports, checkpoint: () => mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt })) }, current);
         // The diagnostics' fields are theirs: a gate's write keeps what they recorded meanwhile.
-        const latest = readGateRecord(file);
-        await writeGateRecord(file, { ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt });
+        await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt }));
         if (outcome.outcome !== 'idle') note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${'reason' in outcome ? `: ${outcome.reason}` : 'culprit' in outcome ? `: reverted ${outcome.culprit} for ${outcome.check}` : ''}`);
       } catch (error) { note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`); }
       finally { live.gate = null; }
@@ -114,8 +129,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         const failed = await runDiagnostics(ports, fresh);
         if (failed) {
           // Re-read so the diagnostics' fields never overwrite what a gate recorded meanwhile.
-          const latest = readGateRecord(file) ?? fresh;
-          await writeGateRecord(file, { ...latest, catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt });
+          await mergeGateRecord(file, latest => ({ ...(latest ?? fresh), catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt }));
           note('batch-gate:diagnostics', 'done', `Diagnostics on ${fresh.verified?.slice(0, 12)}: ${failed.length} failure(s) filed`);
         }
       } catch (error) { note('batch-gate:diagnostics', 'failed', `The diagnostics failed and run again next cycle: ${message(error)}`); }
