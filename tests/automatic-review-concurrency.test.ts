@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { chmod, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, withReviewerDefaults } from '../src/master.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
 import { fleet, requested, starts } from './helpers/review-fleet.js';
+import { masterGuide } from '../src/master/guide.js';
 
 // GY-1072: on 2026-10-01 every automatic review went to the one profile run.reviewerProfile named,
 // whose concurrency was unset (one session), and a finished reviewer left idle in its pane held
@@ -54,9 +54,8 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
   } finally { await host.cleanup(); }
 });
 
-test('unit:automatic-reviews-run-in-parallel — docs describe the reviewer concurrency default', async () => {
-  const text = await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8');
-  assert.match(text, new RegExp(`run\\.reviewerProfile[^\\n]*${automaticReviewerConcurrency} sessions`), 'docs/master-agent.md states the automatic reviewer profile\'s default concurrency');
+test('unit:automatic-reviews-run-in-parallel — master guide describes the reviewer concurrency default', () => {
+  assert.match(masterGuide, new RegExp(`run\\.reviewerProfile[^\\n]*${automaticReviewerConcurrency} sessions`), 'master guide states the automatic reviewer profile\'s default concurrency');
 });
 
 test('unit:settled-reviewer-releases-name — a reviewer whose request settled but whose pane was left idle is closed on the next pass and the next review launches on its name', async () => {

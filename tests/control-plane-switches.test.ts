@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
@@ -17,7 +15,6 @@ import type { Observation, Work } from '../src/model/work.js';
 // sessions and budget blockers — while github mode keeps each
 // exactly as before.
 
-const root = fileURLToPath(new URL('..', import.meta.url));
 const start = Date.parse('2030-05-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
@@ -92,14 +89,6 @@ test('unit:landability-github-snapshot — a github-observed candidate keeps the
   // The trial counts on the ledger are no evidence in github mode.
   const tried = item(null, ['src/store/schema.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 1, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 } }) });
   assert.deepEqual(landabilityRefusals(evaluateLandability(tried, [tried], new Date(start)), 'acceptance'), reasons);
-});
-
-test('unit:control-plane-mode-docs — docs/coordination.md names in one sentence what control-plane mode switches off', () => {
-  for (const page of ['docs/coordination.md']) {
-    const sentences = readFileSync(`${root}${page}`, 'utf8').split(/(?<=\.)\s+/).filter(sentence => /^Control-plane mode switches off /.test(sentence));
-    assert.equal(sentences.length, 1, `${page} has the sentence once`);
-    for (const named of ['plan refusals', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
-  }
 });
 
 test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands starts no new trial, so the loop\'s upgrade between cycles kills none; the next cycle starts it', async () => {

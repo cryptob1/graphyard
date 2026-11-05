@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client';
 import { type Work } from '../src/model';
 import { isBoard, type Board, type OpenGroup } from './groups';
 import './style.css';
-import Docs from './docs';
 import type { IntegrationJob } from '../src/coordination';
 import Sidebar from './components/sidebar';
 import type { Dashboard } from './pages/dashboard';
@@ -102,4 +101,4 @@ function App() {
     {creating && <CreateWork {...dashboard}/>}
   </div>;
 }
-createRoot(document.getElementById('root')!).render(location.pathname.startsWith('/docs') ? <Docs/> : <App/>);
+createRoot(document.getElementById('root')!).render(<App/>);
