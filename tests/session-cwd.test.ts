@@ -18,6 +18,7 @@ import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -120,7 +121,7 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
     try {
       const stub = herdr();
       await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'], environment: { CLAUDE_CONFIG_DIR: home } });
-      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, registerLaunch, requestId: 'review-request' });
+      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, registerLaunch, requestId: 'review-request', probe: registryFixture((await loadMasterConfig(root)).hostId!, ['claude'], ['reviewer']).probe });
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the review');
       const pane = paneCwd(stub.tabs[0]);
       assert.ok(pane, 'the reviewer pane is created with an explicit --cwd');
@@ -153,7 +154,7 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
       const request = { id: 'produce-request', kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 866, group: 'integration', proofs: [proof], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
       const item = work({ criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: [proof] }], implementers: ['implementer'], autoDispatch: { review: null, producers: [request], history: [] } } as Partial<Work>);
       const profile = (await loadMasterConfig(root)).producers.find(entry => entry.name === 'producer-claude')!;
-      const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run: stub.run });
+      const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run: stub.run, probe: registryFixture((await loadMasterConfig(root)).hostId!, ['claude'], ['producer']).probe });
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the producer');
       const pane = paneCwd(stub.tabs[0]);
       assert.ok(pane, 'the producer pane is created with an explicit --cwd');
@@ -180,7 +181,7 @@ test('unit:session-cwd-own-checkout — a worker session opens its pane in its a
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await fixture.token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
     const assigned = await temporaryDirectory('session-cwd-worktree');
     try {
-      await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000);
+      await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: registryFixture((await loadMasterConfig(root)).hostId!, ['opencode']).probe });
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the worker');
       const pane = paneCwd(stub.tabs[0]);
       assert.ok(pane, 'the worker pane is created with an explicit --cwd');

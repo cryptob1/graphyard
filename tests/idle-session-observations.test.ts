@@ -166,7 +166,7 @@ test('unit:idle-session-after-reprompt-is-ended — real observations preserve b
   assert.doesNotThrow(() => assertDispatchable(ended, all, iso()));
   const settled = await ok(coordinator, 'GET', 'agent-registry/document');
   assert.ok(settled.sessions.at(-1).endedAt, 'the registry slot is released with the lease');
-  assert.match(settled.sessions.at(-1).endReason, /holds no live lease/);
+  assert.match(settled.sessions.at(-1).endReason, /implementation session finished/);
   assert.ok((await reload(active.filed.id)).lease, 'actual activity prevents closure after the old prompt');
   assert.ok((await reload(busy.filed.id)).lease, 'working sessions are left alone');
   // New worktree progress in the very cycle an idle window expires must count immediately.
