@@ -1,4 +1,4 @@
-Paths: src/store/**, src/store.ts, src/engine.ts
+Paths: src/store/**, src/store.ts, src/engine.ts, src/engine/**, src/reconcile/**
 
 ## Tests
 
