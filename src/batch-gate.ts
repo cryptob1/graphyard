@@ -94,9 +94,9 @@ export interface GatePorts {
   /**
    * Runs checks on the commit in the private trial container — `build`, `e2e:<case>`, `affected`
    * (the selection over `files`) or `test:<file>` — and answers the failing ones, a failing
-   * affected test as `test:<file>`.
+   * affected test as `test:<file>`. The run is bounded by `timeoutMs`, what is left of the gate's own limit.
    */
-  run(commit: string, checks: readonly string[], files: readonly string[]): Promise<string[]>;
+  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]>;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`. */
@@ -167,7 +167,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     const left = deadline - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
     let timer: NodeJS.Timeout | undefined;
-    return Promise.race([ports.run(commit, runChecks, runFiles), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
+    return Promise.race([ports.run(commit, runChecks, runFiles, left), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
       .then(async failed => {
         if (ports.now() > deadline) throw new GateTimeout();
         finished[key] = failed; // the finished step survives a restart

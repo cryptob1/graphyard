@@ -1,7 +1,7 @@
 // Concern: the loop's batch gate on main (GY-3119): one gate at a time beside the cycle, the
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
-import { bootstrapGate, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
+import { bootstrapGate, gateLimitMs, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -12,11 +12,11 @@ import { message, storeAction } from './state.js';
 const gateKey = 'batch-gate';
 const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(Boolean);
 
-/** What one trial run of `checks` on `commit` failed, as gate check ids. */
-async function trialChecks(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[]): Promise<string[]> {
+/** What one trial run of `checks` on `commit` failed, as gate check ids; the trial is bounded by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142). */
+async function trialChecks(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
-  const run = await reads.trial(commit, tests, { key: gateKey, criteria: cases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: cases }] as Work['criteria'] : [] });
+  const run = await reads.trial(commit, tests, { key: gateKey, criteria: cases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: cases }] as Work['criteria'] : [] }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
   const failed = [...(run.build === 'fail' ? ['build'] : []),
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
@@ -41,7 +41,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     core: async commit => {
       try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
     },
-    run: (commit, checks, files) => trialChecks(reads, commit, checks, files),
+    run: (commit, checks, files, timeoutMs) => trialChecks(reads, commit, checks, files, timeoutMs),
     revert: async (landing, gated, check) => {
       // Merges may have landed while the gate ran: the revert goes onto main as it stands now.
       const tip = (await reads.fetch()).toLowerCase();
@@ -60,9 +60,9 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     file,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own.
     diagnose: async commit => {
-      const suite = await trialChecks(reads, commit, ['build', 'affected'], ['package.json']);
+      const suite = await trialChecks(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
       const cases = (await catalog(commit)).map(id => `e2e:${id}`), started = reads.now();
-      const failed = cases.length ? await trialChecks(reads, commit, cases, []) : [];
+      const failed = cases.length ? await trialChecks(reads, commit, cases, [], gateLimitMs) : [];
       return { failed: [...new Set([...suite, ...failed])], catalogMs: reads.now() - started };
     },
   };

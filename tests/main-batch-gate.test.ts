@@ -363,3 +363,48 @@ test('integration:batch-gate-diagnostics-and-revert-rate — the scheduled full 
   assert.match(gateCauses(high)[0]!.detail, /5\/20/);
   assert.equal(gateSummary(high)!.revertRate, '5/20', 'master status shows the revert rate');
 });
+
+test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minute limit, not the 20-minute merge-trial deadline: a 25-minute run records its verdict, only a run past 45 minutes is a timeout, and the trial it runs carries the gate\'s remaining time', async () => {
+  const { trialTimeoutMinutes } = await import('../src/master/merge-writer-settings.js');
+  const { mergeWriterReads } = await import('../src/daemon/cycle-merge-writer.js');
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const verified = sha(1), batch = [landing(2), landing(3)], tip = sha(3);
+  assert.ok(gateLimitMs === 45 * 60_000 && gateLimitMs > trialTimeoutMinutes * 60_000);
+
+  // A run needing 25 minutes completes and records its verdict; the run was handed the gate's own time left.
+  {
+    const { ports } = gatePorts(batch, () => false);
+    let clock = 0;
+    const limits: number[] = [];
+    ports.now = () => clock;
+    ports.run = async (_commit, _checks, _files, timeoutMs) => { limits.push(timeoutMs); clock += 25 * 60_000; return []; };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(ports, record)).outcome, 'verified');
+    assert.equal(record.verified, tip);
+    assert.deepEqual(limits, [gateLimitMs], 'the trial is bounded by the gate\'s 45 minutes');
+  }
+  // Only a run past 45 minutes counts as a gate timeout.
+  {
+    const { ports } = gatePorts(batch, () => false);
+    let clock = 0;
+    ports.now = () => clock;
+    ports.run = async () => { clock += gateLimitMs + 1; return []; };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(ports, record)).outcome, 'timeout');
+    assert.equal(record.attempt.timeouts, 1);
+  }
+  // The gate's trial port passes that bound down to the trial, which otherwise keeps the merge-trial deadline.
+  {
+    const seen: (number | undefined)[] = [];
+    const base: MergeWriterReads = { ...reads('/unused').value, trial: async (...args) => { seen.push(args[9]); return { build: 'pass', tests: { passed: 0, failed: [], files: 0 }, e2e: [] } as unknown as MergeTrialRun; } };
+    await batchGatePorts({ ...base, git: base.git! }, []).run(tip, ['build', 'affected'], ['src/a.ts'], 30 * 60_000);
+    assert.deepEqual(seen, [30 * 60_000]);
+    const timeouts: number[] = [];
+    const writer = mergeWriterReads({ baseBranch: 'main', run: {}, repository } as never, '/unused', async () => '', { base: '/unused', record: async () => undefined,
+      trial: async input => { timeouts.push(input.timeoutMs); return {} as never; } });
+    const gateItem = { key: 'batch-gate', criteria: [] } as unknown as Work;
+    await writer.trial(tip, [], gateItem, undefined, undefined, undefined, undefined, undefined, undefined, gateLimitMs);
+    await writer.trial(tip, [], gateItem);
+    assert.deepEqual(timeouts, [gateLimitMs, trialTimeoutMinutes * 60_000]);
+  }
+});
