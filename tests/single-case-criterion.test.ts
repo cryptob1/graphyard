@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { withDatabase } from './helpers/postgres.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // Every filed fixture owes an E2E proof and the serve declaration its trial needs.
@@ -25,19 +24,16 @@ const multi = { id: 'AC-2', text: 'The campaign completes every mission on seeds
 const single = { id: 'AC-1', text: 'The campaign completes every mission on seed 42', proofs: ['unit:campaign-seed-42', 'e2e:fixture'] };
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, token: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, token: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2975;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('single-case-criterion'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('single_case_criterion_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/single_case_criterion_test`); await store.init();
+  store = await withDatabase('single-case-criterion'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, [{ ...operator, token: token = `${operator.id}-${'t'.repeat(32)}` }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 const api = async (path: string, data?: unknown, key: string = randomUUID()) => {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',

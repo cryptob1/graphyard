@@ -1,3 +1,4 @@
+import { freePort } from '../src/cli/test-isolation.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -28,13 +29,10 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 // The bound command case runs this same real regression inside the native private-root trial.
 test('integration:merge-requires-executed-proofs — the writer refuses absent, zero-count and failing proofs before pushing; explicit TAP lands through the ordinary control plane', { timeout: 600_000 }, async () => {
   const root = await temporaryDirectory('required-proofs');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3070;
-  const servePort = port + 1;
-  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('required-proofs-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const servePort = await freePort();
   let store: Store | undefined, http: ReturnType<typeof server> | undefined;
   try {
-    await pg.initialise(); await pg.start(); await pg.createDatabase('required_proofs');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/required_proofs`); await store.init();
+    store = await withDatabase('merge-requires-executed-proofs'); await store.init();
     const engine = new Engine(store, 120, 'owner/proofs');
     const token = 'fixture-coordinator-' + 'x'.repeat(32);
     http = server(engine, [{ ...coordinator, token }]);
@@ -129,7 +127,6 @@ test('integration:merge-requires-executed-proofs — the writer refuses absent, 
   } finally {
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     if (store) await store.close();
-    await pg.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

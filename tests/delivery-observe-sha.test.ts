@@ -2,7 +2,7 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
@@ -10,7 +10,6 @@ import { Delivery } from '../src/delivery.js';
 import { server } from '../src/server.js';
 import { deliveryOutcome, deliveryLabel, shortShas } from '../src/model/format.js';
 import type { Principal, Work, Observation } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -32,15 +31,12 @@ const principals = [operator, worker, ci, observer, reader];
 const token = (p: Principal) => `${p.id}-token-${'x'.repeat(32)}`;
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
-let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
+let store: Store, engine: Engine, validation: Validation, delivery: Delivery;
 let http: ReturnType<typeof server>, url: string;
 let serial = 0;
 const production = { id: 'production', revision: 1 }, uat = { id: 'uat', revision: 1 };
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1861;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery-observe-sha'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('observe_sha_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/observe_sha_test`); await store.init();
+  store = await withDatabase('delivery-observe-sha'); await store.init();
   engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   http = server(engine, principals.map(p => ({ ...p, token: token(p) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -48,7 +44,7 @@ before(async () => {
   for (const [env, services] of [[production, ['api', 'web']], [uat, ['api', 'web']]] as const)
     await validation.define(operator, { kind: 'environment', id: env.id, expectedRevision: 0, repository: 'test/repository', url: `https://${env.id}.example.test`, instance: `instance-${env.id}`, immutable: true, services: [...services], resources: [`account-${env.id}`] }, id());
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 const id = () => randomUUID();
 const reload = async (w: Work) => (await engine.store.workItem(w.id))!;
 const sha = (label: string) => label.repeat(40).slice(0, 40);
@@ -141,7 +137,6 @@ test('unit:delivery-observe-sha — a producer sha observation is idempotent and
   assert.deepEqual([...drained.deployed].sort(), [...reached].sort());
   assert.deepEqual(new Set(drained.awaiting.map(row => row.key)), new Set([...ahead, elsewhere.key]));
   assert.equal(drained.complete, true); assert.equal(drained.next, null);
-
 });
 
 test('unit:delivery-observe-sha — a sha observation names the serving release beside the delivered label and a digest observe behaves as before', async () => {

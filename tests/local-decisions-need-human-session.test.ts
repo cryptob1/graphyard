@@ -10,7 +10,7 @@ import { localRequest } from './helpers/local-request.js';
 // The local viewer reads; it never acts. Every mutation and every human-only decision still needs
 // a signed-in human session, and an agent's credential neither answers one nor obtains a session.
 test('integration:local-decisions-need-human-session — an anonymous local mutation or human-only decision is refused; a signed-in human answers; an agent credential is still refused', async () => {
-  const database = await signInDatabase(3092);
+  const database = await signInDatabase();
   const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
   const agentAdmin: Principal = { id: 'master', role: 'admin', sessionKind: 'ai' };
   const coordinator: Principal = { id: 'loop', role: 'coordinator', sessionKind: 'ai' };

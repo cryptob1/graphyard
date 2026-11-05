@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -28,20 +27,17 @@ const principals = [operator, worker, producer, runner, collector, builder];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(32)}`]));
 const head = 'c'.repeat(40), base = 'd'.repeat(40), repository = 'owner/project';
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let pullRequest = 300, cases = 0;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 162;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test-cases'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('test_cases_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
+  store = await withDatabase('test-case-repository'); await store.init();
   engine = new Engine(store, 120, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 async function call(path: string, actor: Principal, data?: unknown, key = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',

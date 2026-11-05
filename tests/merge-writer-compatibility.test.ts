@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { DeliveryDefaults } from '../web/components/delivery-slices.js';
@@ -78,7 +78,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 /** A port the deleted GitHub client or shadow gate would have been: any touch fails the case. */
 const trap = (what: string) => new Proxy({}, { get: (_, name) => { if (name === 'then') return undefined; throw new Error(`the loop touched ${what} (${String(name)})`); } });
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof controlPlane>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof controlPlane>, url: string;
 let fixture: string, origin: string, checkout: string, managed: string, deployKey: string, baseTip: string, head: string, workerPushes: string;
 const branch = 'graphyard/gy-1-1';
 
@@ -117,10 +117,7 @@ before(async () => {
   git(tree, 'config', 'user.email', 't@example.com'); git(tree, 'config', 'user.name', 'T');
   head = await commit(tree, 'src/a.ts', 'export const a = 2;\n', 'change');
 
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2010;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-client-removed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('merge-writer-compatibility'); await store.init();
   engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials);
@@ -129,7 +126,7 @@ before(async () => {
 });
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
-  if (store) await store.close(); if (database) await database.stop();
+  if (store) await store.close();
 });
 
 const config = () => masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234,

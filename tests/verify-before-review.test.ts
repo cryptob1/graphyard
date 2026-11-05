@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -30,16 +30,13 @@ const H = sha40('c1'), H2 = sha40('c2'), B = sha40('b1');
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker' };
 const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let pr = 1150;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_VERIFY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 115);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('verify'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('verify-before-review'); await store.init();
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const events = async (item: Work, kind: string) => (await store.events(item.id)).filter(event => event.kind === kind).reverse();
 const reviewRequests = async (item: Work) => (await events(item, 'dispatch.requested')).filter(event => event.payload.details.kind === 'review');

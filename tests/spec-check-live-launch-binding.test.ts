@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -18,17 +18,13 @@ import { launchSpecCheck, type SpecCheckLaunchResult } from '../src/spec-check.j
 import { postSpecCheck } from '../src/spec-check-post.js';
 import type { Work } from '../src/model.js';
 import { fleet } from './helpers/review-fleet.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 test('integration:spec-check-live-launch-binding — stale panes cannot replace a registered live checker; ended, reported and expired current launches still close', async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 196;
-  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('spec-launch-binding-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  const database = `postgres://graphyard:testing-only@127.0.0.1:${port}/spec_binding`;
+  const database = await databaseUrl('spec-check-live-launch-binding');
   const host = await fleet({ name: 'checker', agentName: 'independent-checker', kind: 'claude', agentArgs: ['--setting-sources', 'user'] }, null);
   let store: Store | undefined;
   let http: ReturnType<typeof server> | undefined;
   try {
-    await pg.initialise(); await pg.start(); await pg.createDatabase('spec_binding');
     store = new Store(database); await store.init();
     const coordinatorToken = 'test-coordinator-'.padEnd(48, 'x');
     const engine = new Engine(store, 120, 'owner/project');
@@ -168,7 +164,6 @@ test('integration:spec-check-live-launch-binding — stale panes cannot replace 
   } finally {
     if (http) await new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve()));
     if (store) await store.close();
-    await pg.stop();
     await host.cleanup();
   }
 });

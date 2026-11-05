@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
@@ -6,7 +6,7 @@ import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine, RenewalFault, renewalFaultEvent } from '../src/engine.js';
@@ -27,16 +27,12 @@ const engineer: Principal = { id: 'lease-pool-worker', role: 'worker', sessionKi
 const rival: Principal = { id: 'lease-pool-rival', role: 'worker', sessionKind: 'ai' };
 const tokens: Record<string, string> = { [operator.id]: `operator-token-${'o'.repeat(32)}`, [engineer.id]: `worker-token-${'w'.repeat(32)}`, [rival.id]: `rival-token-${'r'.repeat(32)}` };
 const credentials = [operator, engineer, rival].map(principal => ({ ...principal, token: tokens[principal.id] }));
-let database: EmbeddedPostgres, connection: string;
+let connection: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 196;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-pool'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('lease_pool');
-  connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/lease_pool`;
+  connection = await databaseUrl('lease-pool');
   const store = new Store(connection); await store.init(); await store.close();
 });
-after(async () => { if (database) await database.stop(); });
 
 function engineOn(store: Store, leaseSeconds = 120) {
   const engine = new Engine(store, leaseSeconds, 'owner/project');
@@ -222,4 +218,3 @@ test('unit:server-fault-keeps-lease — the supervisor keeps renewing through a 
   assert.equal(renewalGraceMs(new Error(JSON.stringify({ error: 'Internal error; consult server logs' }))), null);
   assert.equal(renewalGraceMs(new TypeError('fetch failed')), null);
 });
-

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -43,21 +43,19 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const hour = 3_600_000, future = (ms = hour) => new Date(Date.now() + ms).toISOString();
 const HOST = 'build-host-1';
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_REGISTRY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 45);
   scratch = await temporaryDirectory('registry');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('registry_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/registry_test`); await store.init();
+
+  store = await withDatabase('agent-registry'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
 async function call(path: string, actor: Principal, data?: unknown, key: string = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: data === undefined ? undefined : JSON.stringify(data) });

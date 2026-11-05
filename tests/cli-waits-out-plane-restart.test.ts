@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { createContext } from '../src/cli/context.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
@@ -21,13 +21,11 @@ const portOf = (http: Server) => (http.address() as { port: number }).port;
 
 test('integration:cli-waits-out-plane-restart — CLI survives refusal during restart and replays a committed mutation exactly once after reset', async () => {
   const cwd = await temporaryDirectory('cli-restart');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 385;
-  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('cli-restart-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+
   let store: Store | undefined, plane: Server | undefined, proxy: Server | undefined;
   let restart: Promise<void> | undefined;
   try {
-    await database.initialise(); await database.start(); await database.createDatabase('cli_restart');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/cli_restart`); await store.init();
+    store = await withDatabase('cli-waits-out-plane-restart'); await store.init();
     const token = 'restart-test-token-'.padEnd(40, 'x');
     plane = server(new Engine(store, 300, 'owner/restart'), [{ id: 'restart-operator', role: 'admin', sessionKind: 'human', token }]);
     await listen(plane);
@@ -75,7 +73,7 @@ test('integration:cli-waits-out-plane-restart — CLI survives refusal during re
     await restart;
     if (proxy) await close(proxy);
     if (plane) await close(plane);
-    await store?.close(); await database.stop();
+    await store?.close();
   }
 });
 

@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -24,20 +23,18 @@ const worker: Principal = { id: 'implementer', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const principals = [operator, worker, coordinator];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, scratch: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1992;
   scratch = await temporaryDirectory('old-scope-history');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('old_scope_history_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/old_scope_history_test`); await store.init();
+
+  store = await withDatabase('old-scope-history-loads'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
 const get = async (path: string, actor: Principal = coordinator) => {
   const response = await fetch(`${url}/api/${path}`, { headers: { Authorization: `Bearer ${tokens.get(actor.id)}` } });

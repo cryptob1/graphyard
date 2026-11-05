@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -53,7 +53,7 @@ const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 const principals = [operator, worker, coordinator];
 const tokens = new Map(principals.map(entry => [entry.id, `${entry.id}-${'t'.repeat(32)}`]));
 
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let fixtureRoot: string, root: string, base: string, baseTip: string, head: string, branch: string;
 
 const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
@@ -70,10 +70,8 @@ async function commitFiles(files: Record<string, string>) {
 
 before(async () => {
   setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: serveUrl, readySeconds: 1 } } });
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 403;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('trial-e2e-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('trial_e2e_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/trial_e2e_test`); await store.init();
+
+  store = await withDatabase('trial-e2e-cases'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 
   fixtureRoot = await temporaryDirectory('trial-e2e-fixture', tmpdir());
@@ -105,7 +103,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 

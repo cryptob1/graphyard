@@ -1,11 +1,11 @@
-import { before, after, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
@@ -36,18 +36,15 @@ const promoter: Principal = { id: 'promoter', role: 'producer' };
 const lead: Principal = { id: 'product-lead', role: 'slice-lead', slice: 'product', sessionKind: 'ai' };
 const principals = [operator, worker, runner, collector, builder, auditor, observer, promoter, lead];
 const sha = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
-let pg: EmbeddedPostgres, port: number, scratch: string;
+let scratch: string;
 const id = () => randomUUID();
-const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
+const urls = new Map<string, string>();
+const url = (database: string) => urls.get(database)!;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 6);
   scratch = await temporaryDirectory('backup');
-  pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start();
-  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded', 'fenced', 'retired']) await pg.createDatabase(name);
+  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded', 'fenced', 'retired']) urls.set(name, await databaseUrl('backup-restore' + '-' + name));
 });
-after(async () => { if (pg) await pg.stop(); });
 
 /**
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an

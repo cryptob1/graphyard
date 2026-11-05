@@ -6,7 +6,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -154,22 +154,18 @@ test('integration:concurrent-reviews — a reviewer profile with concurrency 3 r
   } finally { await host.cleanup(); }
 });
 
-
 // The control plane's side of the same independence rule, on a real database: the principal that
 // held an assignment on an item is refused that item's evidence and stays trusted on every other.
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const runnerAsWorker: Principal = { id: 'proof-runner', role: 'worker' };
 const runner: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] };
 const runnerB: Principal = { id: 'proof-runner-b', role: 'producer', proofs: ['unit:*', 'integration:*'] };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_ROLE_CONCURRENCY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 29);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('role-concurrency'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('role-concurrency'); await store.init();
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, runner, runnerB];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('integration:concurrent-producers — the control plane refuses evidence for an item from the principal that held an assignment on it, and trusts the same principal on an item it never touched', async () => {
   const H = sha40('c1');

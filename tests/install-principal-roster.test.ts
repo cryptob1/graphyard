@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { principalSchema, server } from '../src/server.js';
@@ -15,7 +15,6 @@ import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fingerprint, importPrincipalToken, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
 import { externalRunsImportGrant } from '../src/server/principals.js';
-import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { catFrom, deployedRoster, harness, REPOSITORY, type Harness, type HarnessOptions } from './install-harness.js';
 
@@ -260,21 +259,18 @@ const github = {
     throw new Error(`unexpected GitHub read ${path}`);
   },
 };
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
+let store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  // A free port: verify runs each proof of this file at once, and a fixed port collides between them.
-  const port = await freePort();
   scratch = await temporaryDirectory('principal-roster');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('principal_roster_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/principal_roster_test`); await store.init();
+
+  store = await withDatabase('install-principal-roster'); await store.init();
   const engine = new Engine(store, 120, REPOSITORY);
   http = server(engine, [operator, granted, ungranted].map(entry => ({ ...entry, token: tokens.get(entry.id)! })), github as any);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
 async function call(path: string, actor: Principal, data?: unknown) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
@@ -414,7 +410,6 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     assert.match(bundle(), /127\.0\.0\.1:4317:/, 'an older record keeps the port the bundle publishes');
     assert.doesNotMatch(bundle(), /127\.0\.0\.1:4310:/);
   } finally { await compose.cleanup(); }
-
 });
 
 test('unit:install-principal-roster — init --scan --apply without an install writes no second roster or credentials', async () => {

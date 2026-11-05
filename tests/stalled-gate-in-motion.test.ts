@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -48,7 +47,7 @@ function submitted(instance: Instance, overrides: Partial<Work> = {}): Work {
   const conflicts = instance.conflicts ?? [], last = conflicts.at(-1);
   const baseRefresh = last ? { from: { sha: instance.sha!, baseSha: last.baseSha }, base: last.base, baseTree: last.base, policyRevision: 1, at: last.at, head: null,
     conflict: conflictText(instance.sha!, last.base), conflictPaths: ['src/daemon/cycle.ts', 'src/daemon/state.ts'], trigger: 'conflict confirmed', conflictSince: conflicts[0]!.at } : null;
-  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [], 
+  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: instance.claimedAt, updatedAt: instance.observedAt, stageEnteredAt: instance.claimedAt, ready: true, epoch: instance.epoch, lease: null, workspaces: [],
     candidate, submission: { epoch: instance.epoch, pr: instance.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null,
@@ -80,16 +79,13 @@ test('unit:base-hold-sighting — the hold\'s first sighting is set once per hea
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1557;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-hold'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('stalled-gate-in-motion'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('integration:base-hold-observed — the observation write records when the current head was first read withheld behind the base, keeps it across a base move, and clears it when GitHub reports the head mergeable', async () => {
   await holds();

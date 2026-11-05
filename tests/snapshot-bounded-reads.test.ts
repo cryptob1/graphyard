@@ -7,7 +7,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -40,19 +40,10 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const credentials = [operator].map(principal => ({ ...principal, token: `bounded-${principal.id}-${'x'.repeat(32)}` }));
 const operatorToken = credentials[0].token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 864;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('bounded-reads'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {},
-    postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('graphyard_bounded_reads');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_bounded_reads`);
+  store = await withDatabase('snapshot-bounded-reads');
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = credentials;
@@ -64,7 +55,6 @@ before(async () => {
 after(async () => {
   http?.close();
   if (store) await store.close();
-  if (database) await database.stop();
 });
 
 const get = async (path: string, token = operatorToken) => {
@@ -137,8 +127,8 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
 
 test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with cursor and pageSize', async () => {
   for (let index = 0; index < 30; index++) {
-    const item = await engine.execute(operator, 'create', null, { type: 'chore', 
-      title: `Paged item ${index + 1}`, 
+    const item = await engine.execute(operator, 'create', null, { type: 'chore',
+      title: `Paged item ${index + 1}`,
       criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test', 'e2e:fixture'] }],
     }, randomUUID()) as Work;
     if (index % 3 === 0) await engine.execute(operator, 'ready', item.id, {}, randomUUID());

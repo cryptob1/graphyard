@@ -1,14 +1,13 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery, type EnvironmentDelivery, type Release, type RollbackRequest } from '../src/delivery.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
 import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
@@ -39,18 +38,15 @@ const principals = [operator, worker, runner, ...runners, idleRunner, collector,
 const head = 'a'.repeat(40), inputs = `sha256:${'d'.repeat(64)}`;
 const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
 const manifests = { one: { api: digestOf('1'), web: digestOf('2') }, two: { api: digestOf('3'), web: digestOf('4') }, three: { api: digestOf('5'), web: digestOf('6') } };
-let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
+let store: Store, engine: Engine, validation: Validation, delivery: Delivery;
 let serial = 0;
 
 /** An S3-compatible object store: path-style, SigV4-authenticated, MD5 ETags, and switches to fail or corrupt the next write. */
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 5);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
+  store = await withDatabase('recovery'); await store.init();
   engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 const id = () => randomUUID();
 const at = (offsetSeconds: number, from = Date.now()) => new Date(from + offsetSeconds * 1000).toISOString();
 async function events(kind: string) { return (await store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq', [kind])).rows.map(r => r.payload); }

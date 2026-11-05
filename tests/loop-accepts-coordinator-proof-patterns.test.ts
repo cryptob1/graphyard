@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
@@ -27,16 +27,13 @@ const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'master', role: 'coordinator', proofs: ['manual:*'] };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2934;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('coordinator-proofs-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('coordinator_proofs');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/coordinator_proofs`); await store.init();
+  store = await withDatabase('loop-accepts-coordinator-proof-patterns'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('unit:loop-accepts-coordinator-proof-patterns — master run --once runs a cycle on a coordinator credential whose roster entry carries a proof pattern, and that credential\'s evidence submission is refused', async () => {
   const root = await temporaryDirectory('coordinator-proofs-run');

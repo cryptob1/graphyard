@@ -1,18 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ChildProcessError, defaultChildRun } from '../src/child-runner.js';
 import { trialEnvironment, trialHomeVariables, failureTail } from '../src/merge-writer/trial.js';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+/** The same helper under the private root's installed dependencies and source. */
+async function postgresHarness(allocation: string, root: string, modules = join(root, 'node_modules')) {
+  const helpers = join(allocation, 'tests/helpers');
+  await mkdir(helpers, { recursive: true });
+  for (const name of ['postgres.ts', 'temp-dirs.ts']) await copyFile(new URL(`./helpers/${name}`, import.meta.url), join(helpers, name));
+  await symlink(join(root, 'src'), join(allocation, 'src'));
+  await symlink(modules, join(allocation, 'node_modules'));
+  await writeFile(join(allocation, 'package.json'), '{"type":"module"}');
+  return join(helpers, 'postgres.ts');
+}
 
 test('integration:private-root-trial-assets — empty HOME reproduces the browser-cache fault, installed Chromium renders and declared Postgres libraries start a real database', { timeout: 90_000 }, async () => {
   const allocation = await temporaryDirectory('trial-assets', process.cwd());
   const home = join(allocation, 'home');
   await mkdir(home);
   const scratch = await temporaryDirectory('scratch', allocation);
-  const database = await temporaryDirectory('postgres', allocation);
+  const postgresHelper = await postgresHarness(allocation, '/graphyard-harness');
   const outerScratch = await temporaryDirectory('outer-scratch', '/var/tmp');
   await writeFile(join(outerScratch, 'sentinel'), 'outside this boundary');
   // Match the canonical service launch: full inherited environment, host LANG,
@@ -27,15 +39,14 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
     await chromium.launch({ headless: true });
   `], { cwd: allocation, wrapper, timeoutMs: 20_000, env: { ...environment, PLAYWRIGHT_BROWSERS_PATH: emptyCache } }),
   (error: any) => /Executable doesn't exist/.test(error.stderr) && error.stderr.includes(emptyCache));
-  const output = await defaultChildRun('node', ['--input-type=module', '-e', `
+  const output = await defaultChildRun('node', ['--import', '/graphyard-harness/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { readFile, realpath, lstat, stat, statfs, writeFile, access } from 'node:fs/promises';
     import { dirname, join } from 'node:path';
     import { createRequire } from 'node:module';
     import { execFileSync } from 'node:child_process';
-    import { createServer } from 'node:net';
     import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
-    import EmbeddedPostgres from '/graphyard-harness/node_modules/embedded-postgres/dist/index.js';
+    import { startPostgres } from ${JSON.stringify(postgresHelper)};
     import pg from '/graphyard-harness/node_modules/pg/lib/index.js';
     assert.equal(process.env.LANG, 'C.UTF-8');
     assert.equal(process.env.LC_ALL, 'C.UTF-8');
@@ -65,15 +76,9 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
       assert.equal((await lstat(join(packageRoot, target))).isSymbolicLink(), true, target);
       assert.equal(await realpath(join(packageRoot, target)), await realpath(join(packageRoot, source)), target);
     }
-    const probe = createServer();
-    await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
-    const port = probe.address().port;
-    await new Promise(resolve => probe.close(resolve));
-    const database = new EmbeddedPostgres({ databaseDir: ${JSON.stringify(database)}, user: 'graphyard', password: 'testing-only', port,
-      persistent: false, onLog: () => {}, onError: line => console.error(line), postgresFlags: ['-h', '127.0.0.1'] });
+    const database = await startPostgres();
     try {
-      await database.initialise(); await database.start();
-      const client = new pg.Client({ host: '127.0.0.1', port, user: 'graphyard', password: 'testing-only', database: 'postgres' });
+      const client = new pg.Client({ connectionString: database.url });
       await client.connect();
       try { assert.equal((await client.query('select 3061::integer as value')).rows[0].value, 3061); }
       finally { await client.end(); }
@@ -86,7 +91,7 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
 
 test('integration:private-root-trial-assets — service-style unsupported host locale fails native initdb, canonical trial environment starts real Postgres', { timeout: 60_000 }, async () => {
   const allocation = await temporaryDirectory('trial-service-locale');
-  const database = await temporaryDirectory('postgres', allocation);
+  const postgresHelper = await postgresHarness(allocation, new URL('..', import.meta.url).pathname, fileURLToPath(new URL('../../', import.meta.resolve('tsx'))));
   const rejectedDatabase = await temporaryDirectory('unsupported-locale', allocation);
   const home = await temporaryDirectory('home', allocation);
   const host = { ...process.env, LANG: 'graphyard_UNSUPPORTED.UTF-8', LC_ALL: undefined, LC_CTYPE: 'graphyard_UNSUPPORTED.UTF-8' };
@@ -100,20 +105,13 @@ test('integration:private-root-trial-assets — service-style unsupported host l
   assert.equal(environment.LANG, 'C.UTF-8');
   assert.equal(environment.LC_ALL, 'C.UTF-8');
   assert.ok(!('LC_CTYPE' in environment));
-  const output = await defaultChildRun(process.execPath, ['--input-type=module', '-e', `
+  const output = await defaultChildRun(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
-    import { createServer } from 'node:net';
-    import EmbeddedPostgres from ${JSON.stringify(import.meta.resolve('embedded-postgres'))};
+    import { startPostgres } from ${JSON.stringify(postgresHelper)};
     import pg from ${JSON.stringify(import.meta.resolve('pg'))};
-    const probe = createServer();
-    await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
-    const port = probe.address().port;
-    await new Promise(resolve => probe.close(resolve));
-    const database = new EmbeddedPostgres({ databaseDir: ${JSON.stringify(database)}, user: 'graphyard', password: 'testing-only', port,
-      persistent: false, onLog: () => {}, onError: line => console.error(line), postgresFlags: ['-h', '127.0.0.1'] });
+    const database = await startPostgres();
     try {
-      await database.initialise(); await database.start();
-      const client = new pg.Client({ host: '127.0.0.1', port, user: 'graphyard', password: 'testing-only', database: 'postgres' });
+      const client = new pg.Client({ connectionString: database.url });
       await client.connect();
       try {
         assert.equal((await client.query('select 3061::integer as value')).rows[0].value, 3061);

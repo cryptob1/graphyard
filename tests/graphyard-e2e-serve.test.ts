@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -100,18 +100,15 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
   }
 });
 
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const operator: Principal = { id: 'operator', role: 'admin' };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2969;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('graphyard-e2e-serve'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('graphyard_e2e_serve_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_e2e_serve_test`); await store.init();
+  store = await withDatabase('graphyard-e2e-serve'); await store.init();
   engine = new Engine(store, 120, 'cryptob1/graphyard');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });
-after(async () => { setRepositoryPolicy(defaultRepositoryPolicy); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { setRepositoryPolicy(defaultRepositoryPolicy); if (store) await store.close(); });
 
 test('unit:graphyard-feature-with-e2e-proof-accepted — create accepts a feature for cryptob1/graphyard whose criterion carries e2e:create-work-item under this head’s policy', async () => {
   setRepositoryPolicy(policy);

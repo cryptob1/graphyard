@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import { fork, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import type { Work } from '../src/model.js';
 import type { AgentRegistry, FleetSession } from '../src/model/registry.js';
 import { settleSessions } from '../src/model/registry-sessions.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const H = 'a'.repeat(40), B = 'b'.repeat(40), M = 'c'.repeat(40);
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -28,10 +27,8 @@ function item(key: string): Work {
 }
 
 test('integration:review-bearer-restart — original launch bearers survive a real server process restart and retain only their original authority', async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 195;
-  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('review-bearer-restart-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   let store: Store | undefined, child: ChildProcess | undefined, url = '';
-  const database = `postgres://graphyard:testing-only@127.0.0.1:${port}/review_restart`;
+  const database = await databaseUrl('review-bearer-restart');
   async function start() {
     child = fork(new URL('./helpers/review-restart-server.ts', import.meta.url), [database], { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
     const [ready] = await once(child, 'message'); url = ready.url; return ready.pid as number;
@@ -46,7 +43,6 @@ test('integration:review-bearer-restart — original launch bearers survive a re
   const launch = (token: string, extra = {}) => ({ reviewer: 'reviewer', head: H, baseTip: B, tokenHash: hash(token), expiresAt: expiresAt(), ...extra });
   const verdict = (token: string, sha = H) => ({ token, sha, event: 'APPROVE', body: 'AC-1 met.' });
   try {
-    await pg.initialise(); await pg.start(); await pg.createDatabase('review_restart');
     store = new Store(database); await store.init();
     const firstPid = await start();
     const ordinary = item('GY-1'), delivered = item('GY-2'), spec = item('GY-3');
@@ -111,5 +107,5 @@ test('integration:review-bearer-restart — original launch bearers survive a re
       }
     }
     assert.equal((await post(fresh(), `${ordinary.id}/review-verdict`, verdict(fresh()))).status, 401);
-  } finally { if (child) await stop(); if (store) await store.close(); await pg.stop(); }
+  } finally { if (child) await stop(); if (store) await store.close();  }
 });

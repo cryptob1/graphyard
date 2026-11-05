@@ -6,7 +6,7 @@ import { chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -34,19 +34,16 @@ const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(32)}`]))
 const root = new URL('..', import.meta.url).pathname;
 const cli = new URL('../bin/graphyard.mjs', import.meta.url).pathname;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1351;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('e2e-cases'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('e2e_cases_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/e2e_cases_test`); await store.init();
+  store = await withDatabase('e2e-cases'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 /** The CLI's authenticated request helper, as one principal. */
 const apiAs = (actor: Principal) => async (path: string, data?: unknown, key: string = randomUUID()) => {

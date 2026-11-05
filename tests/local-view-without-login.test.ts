@@ -13,7 +13,7 @@ import { localRequest } from './helpers/local-request.js';
 // loopback, addressed to the served host and port, reads as the local viewer. Any other Host
 // (a DNS-rebinding page, the tailnet proxy), forwarded or cross-origin browser request is refused.
 test('integration:local-view-without-login — local reads need no session; foreign Host, proxy and cross-site reads are refused', async () => {
-  const database = await signInDatabase(3091);
+  const database = await signInDatabase();
   const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
   const engine = new Engine(database.store, 120, 'owner/project');
   engine.gitRunner = null;
