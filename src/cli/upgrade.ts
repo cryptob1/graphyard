@@ -183,6 +183,13 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
   if (body.version !== version) throw new Error(`/healthz reports ${String(body.version)}, not ${version}`);
 }
 
+// The deploy and serve halves of one watch fetch on their own schedules, often into the same
+// repository; concurrent fetches there race for ref locks and fail a pass for a whole interval.
+let fetching: Promise<unknown> = Promise.resolve();
+const oneFetchAtATime = <T>(fetch: () => Promise<T>) => {
+  const next = fetching.then(fetch, fetch); fetching = next.catch(() => {}); return next;
+};
+
 /**
  * The git half of the deploy unit's ports: fetch Graphyard's own main (GY-2982) — never the managed
  * repository's base branch, which Graphyard's origin may not have — read HEAD, check a commit out detached.
@@ -190,7 +197,7 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
 export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout'> {
   const git = async (...args: string[]) => String(await run('git', ['-C', cliRoot, ...args])).trim();
   return {
-    fetch: async () => { await git('fetch', '--quiet', 'origin', graphyardBaseBranch); return git('rev-parse', `refs/remotes/origin/${graphyardBaseBranch}`); },
+    fetch: async () => { await oneFetchAtATime(() => git('fetch', '--quiet', 'origin', graphyardBaseBranch)); return git('rev-parse', `refs/remotes/origin/${graphyardBaseBranch}`); },
     head: () => git('rev-parse', 'HEAD'),
     checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
   };
@@ -312,7 +319,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     // so declaration() reads the root's remote-tracking ref before any serve checkout exists: a
     // repository that declares no serve.json never gets one created (or fetched into).
     fetch: async () => {
-      await rootGit('fetch', '--quiet', 'origin', input.baseBranch);
+      await oneFetchAtATime(() => rootGit('fetch', '--quiet', 'origin', input.baseBranch));
       return rootGit('rev-parse', ref);
     },
     declaration: async () => {
