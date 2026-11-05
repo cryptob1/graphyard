@@ -1,6 +1,6 @@
 // Concern: cursor action keys, and reconciling pending actions against Graphyard after a restart.
 import type { Work } from '../model.js';
-import type { WorkerProfile } from '../master.js';
+import type { WorkerProfile } from '../master/profiles.js';
 import { storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
 
 /**

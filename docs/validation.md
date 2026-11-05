@@ -87,3 +87,17 @@ A reuse policy allows the newest compatible settled pass on identical pins:
 ```
 
 Relevant services must cover every service; changed relevant or unknown paths refuse. `validation reuse decision.json` names workId, expectedWorkRevision, proof, policy `{id,revision}` and buildAttestationId. `validation replay REQUEST ATTEMPT` preserves evaluator/time/outcome and grants no authority; evaluator-error reruns at most twice, fail never does. `validation analytics` reports outcomes, faults and cost.
+
+## Host verification capacity
+
+Host verification reservations hold a kernel `flock` on their existing owner file.
+Lock acquisition uses the bounded asynchronous child runner so checks do not block
+the control-plane loop. The owning process retains the descriptor; exit or interruption releases it across
+PID namespaces, so a reused numeric PID cannot retain capacity. Budget reads reclaim
+unlocked reservations before subtracting declared files, including trial declarations.
+Ownership metadata stays immutable; declarations use a separate atomically replaced file,
+so interruption cannot erase reclamation evidence. Unreadable legacy ownership records
+remain reserved, without interrupting planning. Live locks stay reserved; slot limits and the memory floor remain unchanged. Legacy
+PID-only records lack this evidence and remain reserved until explicitly cleared.
+`tests/verification-owner-identity.test.ts` covers host release and interrupted
+private-root ownership; `e2e/cases/verification-owner-identity.json` binds the regression.

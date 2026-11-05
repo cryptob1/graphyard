@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { daemonEffects } from '../src/master-daemon.js';
+import { daemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { planeWideRefusal } from '../src/model/refusal.js';

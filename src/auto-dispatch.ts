@@ -1,3 +1,4 @@
+import { assertOutsideWorktrees, readCredentialFile } from './private-file.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -10,8 +11,11 @@ import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, s
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import type { AgentRegistry } from './model/registry.js';
-import { inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
-import { assertOutsideWorktrees, readCredentialFile } from './private-file.js';
+import { inspectProducerCredentials } from './master/config.js';
+import { listHerdrAgents, type HerdrAgent } from './master/herdr.js';
+import { profileAccount, readEnvironmentLog, recordObservedExhaustion, selectionKey, type EnvironmentLog, type ObservedExhaustion } from './master/environments.js';
+import { profileSessions, sessionAgentName, withReviewerDefaults, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master/profiles.js';
+import { herdrErrorCode, neverStarted, neverStartedReason, SessionStartError, sessionWords, type StartBounds } from './master/launch.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
@@ -1335,7 +1339,7 @@ async function boundedRead<T>(read: () => Promise<T>, timeoutMs: number): Promis
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; coordinatorRoot?: string; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
@@ -1375,13 +1379,13 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     },
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
-    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
+    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
     // The product review (GY-2989): the same session machinery, with the product prompt and a product launch registration.
-    launchProductReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision }, product: true }).catch(error => { throw watch.classify(error); }); },
-    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
+    launchProductReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision }, product: true }).catch(error => { throw watch.classify(error); }); },
+    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot }).catch(error => { throw watch.classify(error); }); },
     // Post-merge reviews (GY-1525): launched like a review of the delivered merge commit; the follow-ups
     // are filed as the master's operator-agent identity, the one that may create work, never the coordinator's.
-    launchPostMergeReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, postMerge: { mergeSha: request.sha, ...(request.baseSha !== unknownParent ? { baseTip: request.baseSha } : {}) } }).catch(error => { throw watch.classify(error); }); },
+    launchPostMergeReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, postMerge: { mergeSha: request.sha, ...(request.baseSha !== unknownParent ? { baseTip: request.baseSha } : {}) } }).catch(error => { throw watch.classify(error); }); },
     createWork: async (body, requestId) => {
       const config = current();
       if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can file follow-up items');

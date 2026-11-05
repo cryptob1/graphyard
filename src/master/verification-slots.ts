@@ -1,5 +1,7 @@
 // Concern: host verification slots — the per-host bound on concurrent full suites and type checks, and the PATH wrapper sessions run them through.
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { ChildProcessError, runChild } from '../child-runner.js';
+import { randomUUID } from 'node:crypto';
 import { totalmem } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +16,7 @@ import { fileURLToPath } from 'node:url';
  *
  * A heavy run — `npm test`, `npm run test:browser`, `npm run typecheck` and `tsc --noEmit`, directly
  * or through `npx` — started by a Graphyard session takes one slot of a host-wide semaphore first:
- * a directory `slot-N` renamed (atomically) into the lock directory, holding its owner's pid. A run
+ * a directory `slot-N` renamed (atomically) into the lock directory, holding its owner's locked file. A run
  * that finds every slot held waits, saying so and naming the directory and the holders, and takes
  * the first slot that frees. A slot whose owner died is taken back by the next waiter.
  *
@@ -43,23 +45,36 @@ export function configuredVerificationSlots(environment: NodeJS.ProcessEnv = pro
   return Number.isInteger(configured) && configured >= 1 ? configured : defaultVerificationSlots(totalBytes);
 }
 
-export interface SlotOwner { pid: number; label: string; cwd: string; at: string; /** The in-flight suite files the holder declared (`declareSlotFiles`, GY-1821): what later runs deduct from the floor's budget. */ files?: number }
+export interface SlotOwner { identity?: string; locked?: true; pid: number; label: string; cwd: string; at: string; /** The in-flight suite files the holder declared (`declareSlotFiles`, GY-1821): what later runs deduct from the floor's budget. */ files?: number }
 export interface HeldSlot { slot: number; path: string; release: () => void }
 export interface AcquireOptions {
   directory: string; slots: number; label: string;
   /** Called once, when every slot is held, with the line the run prints. */
   onWait?: (line: string) => void;
-  pollMs?: number; pid?: number;
-  /** Whether a pid still runs; a slot whose owner does not is taken back. */
-  alive?: (pid: number) => boolean;
+  pollMs?: number; firstSlot?: number; files?: number;
 }
 
-const processAlive = (pid: number) => {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+// flock locks the inherited open file description; this process retains its fd after
+// the short-lived utility exits. The kernel releases it on death, across PID namespaces.
+const identity = randomUUID();
+async function lock(fd: number): Promise<boolean> {
+  try {
+    await runChild('flock', ['--exclusive', '--nonblock', '3'], { extraFds: [fd] });
+    return true;
+  } catch (error) {
+    if (error instanceof ChildProcessError && error.status === 1 && !error.timedOut) return false;
+    throw error;
+  }
+}
+const readOwner = (path: string): SlotOwner | null => {
+  let owner: SlotOwner;
+  try { owner = JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8')); } catch { return null; }
+  try {
+    const files = JSON.parse(readFileSync(join(path, 'files.json'), 'utf8'));
+    if (Number.isInteger(files) && files >= 1) return { ...owner, files };
+  } catch { /* an absent or interrupted declaration leaves the initial budget intact */ }
+  return owner;
 };
-const readOwner = (path: string): SlotOwner | null => { try { return JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8')); } catch { return null; } };
-/** A slot directory that has had no owner file for this long was abandoned between its mkdir and its write. */
-const ownerlessGraceMs = 30_000;
 
 /** The slots held now, with their owners. */
 export function heldSlots(directory: string): { slot: number; owner: SlotOwner | null }[] {
@@ -72,44 +87,59 @@ export function heldSlots(directory: string): { slot: number; owner: SlotOwner |
 /**
  * Record on the holder's own slot how many suite files it runs at once (GY-1821): a run that starts
  * later takes only what the host's memory floor affords beyond what these runs declared. Best-effort —
- * a declaration that cannot be written leaves the slot as it was, and the next run plans on nothing.
+ * a declaration that cannot be written leaves the previous declaration or initial budget intact.
  */
 export function declareSlotFiles(held: HeldSlot, files: number, pid: number = process.pid): void {
   if (!(files >= 1)) return;
   try {
     const owner = readOwner(held.path);
-    if (!owner || owner.pid !== pid) return;
-    writeFileSync(join(held.path, 'owner.json'), JSON.stringify({ ...owner, files: Math.floor(files) }));
+    if (!owner || owner.identity !== identity || owner.pid !== pid) return;
+    // Never replace or truncate the locked inode or its ownership evidence.
+    const pending = join(held.path, 'files.json.next');
+    writeFileSync(pending, JSON.stringify(Math.floor(files)));
+    renameSync(pending, join(held.path, 'files.json'));
   } catch { /* the slot still holds the run; only the budget sharing is lost */ }
 }
 
-/** The suite files runs on other pids declared in `directory`: what this run's breadth is deducted by. */
-export function othersDeclaredFiles(directory: string, pid: number = process.pid): number {
-  return heldSlots(directory).reduce((sum, entry) => entry.owner && entry.owner.pid !== pid ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
+/** Reap dead reservations before budgeting, including trial declarations beyond the slot bound. */
+export async function othersDeclaredFiles(directory: string, pid: number = process.pid): Promise<number> {
+  for (const entry of heldSlots(directory)) await reclaimStale(join(directory, `slot-${entry.slot}`));
+  return heldSlots(directory).reduce((sum, entry) => entry.owner && !(entry.owner.identity === identity && entry.owner.pid === pid)
+    ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
 }
 
-/** Take a slot back from an owner that no longer runs. Renamed first, so two waiters never both reclaim it. */
-function reclaimStale(path: string, alive: (pid: number) => boolean) {
-  const owner = readOwner(path);
-  if (owner ? alive(owner.pid) : (() => { try { return Date.now() - statSync(path).mtimeMs < ownerlessGraceMs; } catch { return true; } })()) return false;
-  const tomb = `${path}.stale-${process.pid}-${Date.now()}`;
-  try { renameSync(path, tomb); } catch { return false; }
-  // Another waiter may have reclaimed and retaken it between the read and the rename: give a live owner's slot back.
-  const moved = readOwner(tomb);
-  if (moved && alive(moved.pid) && moved.pid !== owner?.pid) { try { renameSync(tomb, path); return false; } catch { /* its slot is gone; it holds none */ } }
-  rmSync(tomb, { recursive: true, force: true });
-  return true;
+/** Take the owner's kernel lock before removing its reservation; another reaper cannot take it. */
+async function reclaimStale(path: string) {
+  let fd: number;
+  try { fd = openSync(join(path, 'owner.json'), 'r+'); }
+  catch { return false; }
+  try {
+    if (!await lock(fd)) return false;
+    const opened = fstatSync(fd), current = statSync(join(path, 'owner.json'), { throwIfNoEntry: false });
+    if (!current || opened.ino !== current.ino || opened.dev !== current.dev) return false;
+    let owner: SlotOwner | null;
+    try { owner = JSON.parse(readFileSync(fd, 'utf8')); } catch { return false; }
+    // Old PID-only records cannot safely be judged from another namespace. Keep
+    // them: there is no kernel ownership evidence to distinguish live from stale.
+    if (!owner?.locked) return false;
+    const tomb = `${path}.stale-${randomUUID()}`;
+    try { renameSync(path, tomb); } catch { return false; }
+    rmSync(tomb, { recursive: true, force: true });
+    return true;
+  } finally { closeSync(fd); }
 }
 
-function tryTake(directory: string, slots: number, owner: SlotOwner, alive: (pid: number) => boolean): HeldSlot | null {
-  for (let slot = 0; slot < slots; slot++) {
+async function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): Promise<HeldSlot | null> {
+  for (let slot = firstSlot; slot < firstSlot + slots; slot++) {
     const path = join(directory, `slot-${slot}`);
     for (let attempt = 0; attempt < 2; attempt++) {
       // The slot appears with its owner already in it (renamed into place), so a waiter always names who holds it.
-      const taking = join(directory, `.taking-${slot}-${owner.pid}-${Date.now()}`);
+      const taking = join(directory, `.taking-${slot}-${randomUUID()}`);
       mkdirSync(taking);
-      writeFileSync(join(taking, 'owner.json'), JSON.stringify(owner));
+      const fd = openSync(join(taking, 'owner.json'), 'wx+');
       try {
+        if (!await lock(fd)) throw new Error('new verification owner file is locked');
+        writeFileSync(fd, JSON.stringify(owner));
         renameSync(taking, path);
         let released = false;
         // Renamed away before it is removed: removing in place empties the slot first, and a waiter's
@@ -118,13 +148,16 @@ function tryTake(directory: string, slots: number, owner: SlotOwner, alive: (pid
           if (released) return;
           released = true;
           const freed = `${path}.freed-${owner.pid}-${Date.now()}`;
-          try { renameSync(path, freed); } catch { return; }
-          rmSync(freed, { recursive: true, force: true });
+          try {
+            renameSync(path, freed);
+            rmSync(freed, { recursive: true, force: true });
+          } catch { /* already removed */ } finally { closeSync(fd); }
         } };
       } catch (error) {
+        closeSync(fd);
         rmSync(taking, { recursive: true, force: true });
         if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-        if (!reclaimStale(path, alive)) break;
+        if (!await reclaimStale(path)) break;
       }
     }
   }
@@ -139,12 +172,12 @@ export function waitLine(options: Pick<AcquireOptions, 'directory' | 'slots' | '
 
 /** Take a slot, waiting as long as every one is held. */
 export async function acquireVerificationSlot(options: AcquireOptions): Promise<HeldSlot> {
-  const alive = options.alive ?? processAlive, pollMs = options.pollMs ?? 1000;
+  const pollMs = options.pollMs ?? 1000;
   mkdirSync(options.directory, { recursive: true });
-  const owner: SlotOwner = { pid: options.pid ?? process.pid, label: options.label, cwd: process.cwd(), at: new Date().toISOString() };
+  const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, cwd: process.cwd(), at: new Date().toISOString() };
   let told = false;
   for (;;) {
-    const held = tryTake(options.directory, options.slots, owner, alive);
+    const held = await tryTake(options.directory, options.slots, owner, options.firstSlot);
     if (held) {
       if (told) options.onWait?.(`graphyard: ${options.label} took host verification slot ${held.slot}`);
       return held;

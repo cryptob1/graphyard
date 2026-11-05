@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/environments.js';
+import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/runtime-prompt.js';
 // Time-bomb allowance (GY-1694): the 2026-09-26 and 2026-10-03 instants are the fixed now handed to detectRuntimeExhaustion and the resets it parses from notices.
 
 // GY-421: mid-session exhaustion is recognized only from the runtime's own provider-authored
