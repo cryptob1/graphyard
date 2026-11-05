@@ -55,18 +55,21 @@ export function itemFailures(item: Work, actions: DaemonState['actions']): Failu
   return failures;
 }
 
+const handedIn = (item: Work) => item.pipeline?.resubmittedAt ?? item.pipeline?.submittedAt ?? null;
+/** The item's own markers at a failure, so a later change is read without comparing clocks. */
+const marks = (item: Work) => ({ rework: item.lastRework?.at ?? null, handedIn: handedIn(item) });
+
 /** A success of the run's own kind, or the master's rework decision, since the run's last failure. */
 function runEnded(item: Work, run: FailureRun): boolean {
-  const since = Date.parse(run.at);
   const rework = item.lastRework;
-  if (rework && !rework.binding && Date.parse(rework.at) > since) return true;
-  if (run.kind === 'launch') { const handedIn = item.pipeline?.resubmittedAt ?? item.pipeline?.submittedAt; return !!handedIn && Date.parse(handedIn) > since; }
+  if (rework && !rework.binding && rework.at !== run.rework) return true;
+  if (run.kind === 'launch') return handedIn(item) !== run.handedIn;
   if (run.kind === 'trial') return item.mergeLedger?.state === 'pushed' || item.mergeLedger?.state === 'reconciled';
   return !!item.gates.find(gate => gate.name === 'review')?.passed;
 }
 
 /** Folds every item's current failures into its run; a done or vanished item drops its run. */
-export function advanceFailureRuns(state: DaemonState, work: readonly Work[], accounts: readonly string[], now: string) {
+export function advanceFailureRuns(state: DaemonState, work: readonly Work[], accounts: readonly string[]) {
   const open = new Map(work.filter(item => item.stage !== 'done').map(item => [item.id, item]));
   for (const id of Object.keys(state.failureRuns)) if (!open.has(id)) delete state.failureRuns[id];
   for (const item of open.values()) {
@@ -77,11 +80,11 @@ export function advanceFailureRuns(state: DaemonState, work: readonly Work[], ac
       if (seen.includes(failure.id)) continue;
       seen = [...seen, failure.id].slice(-20);
       const signature = failureSignature(failure.kind, failure.reason, accounts), reason = failure.reason.slice(0, 1000);
-      run = run?.signature === signature ? { ...run, reasons: [...run.reasons, reason].slice(-2), count: run.count + 1, at: now }
-        : { key: item.key, kind: failure.kind, signature, reasons: [reason], count: 1, at: now, seen };
+      run = run?.signature === signature ? { ...run, ...marks(item), reasons: [...run.reasons, reason].slice(-2), count: run.count + 1 }
+        : { key: item.key, kind: failure.kind, signature, reasons: [reason], count: 1, ...marks(item), seen };
     }
     if (run) state.failureRuns[item.id] = { ...run, seen };
-    else if (seen.length) state.failureRuns[item.id] = { key: item.key, kind: 'launch', signature: '', reasons: [], count: 0, at: now, seen };
+    else if (seen.length) state.failureRuns[item.id] = { key: item.key, kind: 'launch', signature: '', reasons: [], count: 0, ...marks(item), seen };
     else delete state.failureRuns[item.id];
   }
 }

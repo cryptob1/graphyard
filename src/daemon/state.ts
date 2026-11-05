@@ -165,7 +165,7 @@ export function masterSummary(master: MasterSessionState, now: number, agent?: {
 /** GY-3104: one item's current run of equal-signature failures (daemon/repeated-failure.ts) and the failure occurrences already counted. */
 const failureRunSchema = z.object({
   key: z.string().max(100), kind: z.enum(['launch', 'trial', 'review']), signature: z.string().max(100),
-  reasons: z.array(z.string().max(1000)).max(2), count: z.number().int().min(0), at: z.string(), seen: z.array(z.string().max(300)).max(20),
+  reasons: z.array(z.string().max(1000)).max(2), count: z.number().int().min(0), rework: z.string().nullable(), handedIn: z.string().nullable(), seen: z.array(z.string().max(300)).max(20),
 }).strict();
 export type FailureRun = z.infer<typeof failureRunSchema>;
 

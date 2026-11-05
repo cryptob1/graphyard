@@ -480,7 +480,7 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
   if (effects.release) await releaseBacklog(cycle);
-  advanceFailureRuns(state, snapshot.work, accountNames(config.workers), snapshot.now);
+  advanceFailureRuns(state, snapshot.work, accountNames(config.workers));
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
@@ -705,7 +705,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
   if (!recoveryFailed && await masterPaneFailover(cycle, handle, open)) return;
-  const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
+  const changed = causes.filter(cause => !cause.quiet && state.master.subjects[cause.key] !== cause.digest);
   const target = handle.pane_id ?? state.master.pane ?? handle.name;
   const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);
   const heartbeat = !changed.length && open.length > 0 && cycle.now() - since >= (config.run.masterHeartbeatMinutes ?? 30) * 60_000;
@@ -758,7 +758,7 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
       const failures = recoveryError ? [...recoveryFailures, { at: new Date(cycle.now()).toISOString(), error: recoveryError, master: oldMaster }] : recoveryFailures;
       const previous = recoveryError ? null : state.master.continuity;
       const recoveryHandoff = recoveryError ? `Previous native history is unreadable and has NOT been recovered. Recovery error: ${recoveryError}. Its history and original session provenance are retained in master.recoveryFailures; retry recovery from those references when readable. Continue current authoritative work without waiting for human approval.` : '';
-      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(recoveryError ? [recoveryHandoff] : []), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'), previous);
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(recoveryError ? [recoveryHandoff] : []), ...(causes.some(cause => !cause.quiet) ? [masterCausePrompt(causes.filter(cause => !cause.quiet))] : [])].join('\n'), previous);
       const at = new Date(cycle.now()).toISOString();
       state.master = { ...emptyMasterSession(), ...launched, continuity: launched.continuity ?? previous, recoveryFailures: failures, startedAt: at,
         subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),
