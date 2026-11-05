@@ -65,16 +65,16 @@ export function run(c: Ctx) {
 }
 
 export function delivered({ work, actor, data }: Ctx) {
-// Ending a session handle an item still carries is the other thing a delivered item accepts,
-// and only that: a review or proof session is often still running when its candidate merges,
-// and the liveness sweep must be able to close its record (GY-113). A closure is a record of
-// a runtime fact, never a decision — it decides no gate, ends no lease and binds no
-// candidate — and this one may only finish a handle the item already carries, so nothing new
-// is recorded on a delivered item and nothing it holds is reopened.
-// The loop's observation of a session still open on it is the same kind of runtime fact
-// (GY-172): a session that outlives its item's delivery is still observed, or every reader
-// would show a live session as unseen until it closed. It keeps the handle open, never reopens one.
-return work.stage === 'done'
-  && (work.sessions ?? []).some(handle => handle.id === data.id
-    && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
+  // Ending a session handle an item still carries is the other thing a delivered item accepts,
+  // and only that: a review or proof session is often still running when its candidate merges,
+  // and the liveness sweep must be able to close its record (GY-113). A closure is a record of
+  // a runtime fact, never a decision — it decides no gate, ends no lease and binds no
+  // candidate — and this one may only finish a handle the item already carries, so nothing new
+  // is recorded on a delivered item and nothing it holds is reopened.
+  // The loop's observation of a session still open on it is the same kind of runtime fact
+  // (GY-172): a session that outlives its item's delivery is still observed, or every reader
+  // would show a live session as unseen until it closed. It keeps the handle open, never reopens one.
+  return work.stage === 'done'
+    && (work.sessions ?? []).some(handle => handle.id === data.id
+      && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
 }
