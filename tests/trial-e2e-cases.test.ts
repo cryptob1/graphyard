@@ -262,3 +262,18 @@ test('unit:trial-serves-head-and-runs-bound-cases — the repository runs e2e:fi
   const expected = JSON.parse(readFileSync(join(worktree, 'e2e/cases/fixture-static-home.json'), 'utf8')).steps.find((step: { action: string }) => step.action === 'expectText').text;
   assert.ok(readFileSync(join(worktree, 'fixtures/static-site/index.html'), 'utf8').includes(expected));
 });
+
+test('unit:trial-skips-unbound-preview-cases — the trial leaves out, naming them, the unbound cases that need an item preview; bound and other cases still run', async () => {
+  // GY-3128: preview-isolation-cleanup and its siblings need the loop's item previews, which e2e.serve never runs in a trial.
+  const worktree = process.cwd();
+  const groups: { target: unknown; proofs: readonly string[] }[] = [], log: string[] = [];
+  const previews = ['e2e:preview-isolation-cleanup', 'e2e:preview-serves-change', 'e2e:previews-for-declared-apps'];
+  const cases = await runTrialE2eCases({
+    worktree, mergeSha: 'a'.repeat(40), proofs: [...previews, 'e2e:fixture-compose-app', 'e2e:create-work-item'], env: {}, scratch: worktree, budgetMs: 1_000,
+    holds: async path => existsSync(join(worktree, path)), log: line => log.push(line),
+    runGroup: async (target, proofs) => { groups.push({ target, proofs }); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); },
+  });
+  assert.deepEqual(cases.map(entry => entry.proof).sort(), ['e2e:create-work-item', 'e2e:fixture-compose-app'], 'no left-out case is reported, so none fails');
+  assert.deepEqual(groups.map(group => group.proofs), [['e2e:fixture-compose-app'], ['e2e:create-work-item']]);
+  for (const proof of previews) assert.ok(log.some(line => line.startsWith(`left out ${proof}:`)), `${proof} is named as left out`);
+});
