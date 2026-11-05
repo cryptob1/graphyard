@@ -307,7 +307,9 @@ test('integration:trial-step-timings — parallel test shards report their own d
   const repo = await fixtureRepo();
   await mkdir(join(repo.root, 'scripts'));
   await writeFile(join(repo.root, 'scripts/ci-tests.mjs'), '// fixture selection\n');
-  gitIn(repo.root, 'add', 'scripts/ci-tests.mjs');
+  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'node tests/helpers/run-tests.ts',
+    selection: { command: 'node scripts/ci-tests.mjs affected', pattern: '^tests/[\\w./-]+\\.test\\.ts$' } }], perCandidate: [] } } }));
+  gitIn(repo.root, 'add', 'scripts/ci-tests.mjs', 'graphyard.json');
   gitIn(repo.root, 'commit', '-q', '-m', 'test selector');
   const mergeSha = gitIn(repo.root, 'rev-parse', 'HEAD');
   const scratch = await temporaryDirectory('timed-shards');
