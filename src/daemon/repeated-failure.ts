@@ -1,6 +1,6 @@
 // Concern: GY-3104 — an item whose attempts keep ending with the same failure is not relaunched blind.
 //
-// Each failure the loop can see on an item — a launch (a failed dispatch or an early worker exit), a
+// Each failure the loop can see on an item — a launch (a worker that exited early, unsuccessfully), a
 // trial refusal (the merge ledger's refusal starting `trialFailurePrefix`) or a review refusal (the
 // loop's rework of a standing verdict) — gets a signature: its kind plus a sha256 of its reason with
 // commit SHAs, hex ids, numbers, timestamps and the fleet's account names removed. The loop keeps
@@ -15,7 +15,6 @@ import type { WorkerProfile } from '../master/profiles.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import type { DaemonState, FailureRun } from './state.js';
 import { earlyExitKey } from './worker-launch-health.js';
-import { dispatchKey } from './reconcile.js';
 
 export type FailureKind = FailureRun['kind'];
 export interface Failure { id: string; kind: FailureKind; reason: string }
@@ -38,11 +37,12 @@ export function normalizeFailureReason(reason: string, accounts: readonly string
 export const failureSignature = (kind: FailureKind, reason: string, accounts: readonly string[] = []) =>
   `${kind}:${createHash('sha256').update(normalizeFailureReason(reason, accounts)).digest('hex')}`;
 
-/** The failures the item's records show now, each under an id that names that one occurrence. */
+/**
+ * The failures the item's records show now, each under an id that names that one occurrence. A failed
+ * dispatch is not one: it is the host's (a slot, an account, Herdr) and is retried every cycle.
+ */
 export function itemFailures(item: Work, actions: DaemonState['actions']): Failure[] {
   const failures: Failure[] = [];
-  const dispatch = actions[dispatchKey(item)];
-  if (dispatch?.state === 'failed') failures.push({ id: `launch:dispatch:${item.epoch}:${dispatch.attempts}`, kind: 'launch', reason: dispatch.detail });
   const exit = actions[earlyExitKey(item)];
   if (exit?.state === 'failed') failures.push({ id: `launch:exit:${exit.epoch}`, kind: 'launch', reason: exit.detail });
   const ledger = item.mergeLedger;
