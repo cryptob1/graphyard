@@ -184,7 +184,7 @@ test('unit:registry-propose-dedupes-symlinked-homes — a login home that is a s
     for (const role of preview.proposal.roles) {
       for (const alias of ['claude', 'opencode']) assert.ok(!role.accounts.includes(alias), `role ${role.name} never names the symlink alias ${alias}`);
       // The master role names only the logins whose runtime it can run (GY-3093); every other role names each login once.
-      const expected = role.name === 'master' ? names.filter(name => name === 'claude-a') : names;
+      const expected: string[] = role.name === 'master' ? names.filter((name: string) => name === 'claude-a') : names;
       assert.deepEqual(role.accounts.filter((name: any) => names.includes(name)), expected, `role ${role.name} names each supported login once`);
     }
     assert.ok(!preview.discovered.some((login: any) => login.source === 'default-home'), 'a symlinked default home is not discovered as a second login');
