@@ -19,6 +19,7 @@ import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
+import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
 
 /** The merge writer's ports (merge-writer/executor.ts). */
@@ -176,10 +177,14 @@ export const mergeWriterActionKey = (key: string, head: string) => `merge-writer
 /** The ledger states the snapshot carries, by item key: what `mergeQueue` and `reconcileIntents` read. */
 export const snapshotLedger = (work: readonly Work[]): Record<string, MergeLedgerState> => Object.fromEntries(work.flatMap(item => item.mergeLedger ? [[item.key, item.mergeLedger] as const] : []));
 /** The rework a failed trial grounds (AC-3): its binding names the head and the ground, as every loop rework does, so the server's lane rework finds it. */
-export const trialFailureRework = (work: Work, head: string, reason: string) => ({
-  reason: `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: ${reason}. Nothing but a new head can pass the trial, so the item returns to a worker.`,
-  input: { previousWorkerStopped: true as const, binding: `${head}:${mergeWriterTrialGround}` },
-});
+export const trialFailureRework = (work: Work, head: string, reason: string) => {
+  // GY-3150: the refusal may fill its 2,000 characters with the failing tests and log tail; the rework cuts the tail's oldest lines to fit the engine's bound.
+  const lead = `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: `, tail = '. Nothing but a new head can pass the trial, so the item returns to a worker.';
+  const room = reworkReasonMax - lead.length - tail.length, marker = '\nlog tail:\n', at = reason.indexOf(marker) + marker.length;
+  const fitted = reason.length <= room ? reason : at >= marker.length && at < room ? `${reason.slice(0, at)}${reason.slice(at - room)}` : reason.slice(0, room);
+  return { reason: `${lead}${fitted}${tail}`,
+    input: { previousWorkerStopped: true as const, binding: `${head}:${mergeWriterTrialGround}` } };
+};
 
 // ---- Trial timeouts yield the queue turn (GY-2079) ------------------------------------------------
 
