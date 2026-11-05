@@ -4,7 +4,8 @@
 //   node scripts/e2e-seed-plain-status.mjs
 //
 // Run from the checkout scripts/e2e-serve.mjs serves: it reads the database URL that serve wrote to
-// .graphyard/e2e-serve.json and writes .graphyard/served.json beside it. Re-running is a no-op.
+// .graphyard/e2e-serve.json and writes .graphyard/served.json beside it. Re-running re-dates the
+// live item's merge, so a retry after other cases merged still finds it the newest merge.
 import { readFile, writeFile } from 'node:fs/promises';
 import pg from 'pg';
 
@@ -38,7 +39,7 @@ const live = item('2988a000-0000-4000-8000-000000000002', 'GY-LIVE', 'A change t
 
 const pool = new pg.Pool({ connectionString: databaseUrl });
 try {
-  for (const work of [review, live]) await pool.query('INSERT INTO work_items(id, document) VALUES($1, $2) ON CONFLICT (id) DO NOTHING', [work.id, JSON.stringify(work)]);
+  for (const work of [review, live]) await pool.query('INSERT INTO work_items(id, document) VALUES($1, $2) ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document', [work.id, JSON.stringify(work)]);
 } finally { await pool.end(); }
 // The record the serve pass writes once the served commit's required cases pass (GY-2983): the live item's own merge.
 await writeFile('.graphyard/served.json', JSON.stringify({ commit: sha, url: 'http://127.0.0.1:4399', failed: null, reason: null, pid: null, check: { verified: true, case: null, step: null, reason: null }, at }) + '\n');
