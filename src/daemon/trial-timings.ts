@@ -4,7 +4,7 @@ import type { MergeWriterState } from './merge-writer-state.js';
 
 type Trial = NonNullable<MergeWriterState['trials']>[number];
 
-/** One record per trial invocation, including batch fallbacks and rejected-push retrials. */
+/** One record per trial invocation, one per head in flight. */
 export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, persist: () => Promise<void>): MergePorts {
   const trials = new Map<string, Trial>();
   const save = () => { void persist().catch(() => {}); };

@@ -39,7 +39,7 @@ const legacyReconciled = (payload: unknown): MergeReconciled | null => {
 
 /**
  * Fold the ledger, oldest first, into each item's latest state. An intent opens the item's state
- * under its key; a push or a reconciliation finds its item by merge commit, a refusal by head —
+ * under its key (keeping the trial of the same head, GY-3120); a push or a reconciliation finds its item by merge commit, a refusal by head —
  * or, when the row was written under an item (`work`), by that key. A row that names no open
  * state, or whose payload does not parse, folds into nothing: the ledger is append-only and
  * the fold never throws on what an older release wrote.
@@ -57,7 +57,9 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       if (!intent) continue;
       const previous = states[intent.key];
       states[intent.key] = { key: intent.key, state: 'intent', head: intent.head, baseTip: intent.baseTip, mergeSha: intent.mergeSha, risk: intent.risk, intentAt: intent.at, pushedAt: null, observedTip: null, refusal: null, events: (previous?.events ?? 0) + 1,
-        ...(previous?.flakes?.length ? { flakes: previous.flakes } : {}) };
+        ...(previous?.flakes?.length ? { flakes: previous.flakes } : {}),
+        // GY-3120: a head re-merged onto a moved tip after its trial passed keeps that trial: it lands without another.
+        ...(previous?.trial && previous.head === intent.head ? { trial: previous.trial } : {}) };
       byMerge.set(intent.mergeSha, intent.key); byHead.set(intent.head, intent.key);
     } else if (event.kind === mergeLedgerKinds.pushed) {
       const pushed = parsed(mergePushedSchema, event.payload);

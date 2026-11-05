@@ -9,23 +9,20 @@ export const trialTimeoutMinutes = 20;
 
 // ---- The merge executor's settings (GY-1524) -------------------------------------------------------
 
-/** How many times a push the base tip moved under is re-trialled on the new tip before the head is refused `base moved N times` and left queued. */
-export const defaultMergeWriterRetrials = 3;
-/** The most re-trials an install may ask for: every one is a full build and test run on a fresh merge commit. */
-export const maxMergeWriterRetrials = 10;
-/** How many queue positions the writer trials at once, each stacked on the merge commit of the one before it, and the most an install may ask for. */
+/** How many queued heads the writer trials at once, each alone on the current tip (GY-3120), and the most an install may ask for. */
 export const defaultMergeWriterParallel = 3, maxMergeWriterParallel = 6;
 /** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
 export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
- * its re-trial bound and its stacked trials. Unset, the key is the install's default, the bound
- * `defaultMergeWriterRetrials` and the stack `defaultMergeWriterParallel`.
+ * how many heads it trials at once. Unset, the key is the install's default and the trials
+ * `defaultMergeWriterParallel`. `retrials` is retired (GY-3120: a passing head lands without
+ * another trial); it is still parsed so an older master.json loads, and ignored.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
-  retrials: z.number().int().min(0).max(maxMergeWriterRetrials).optional(),
+  retrials: z.number().int().min(0).optional(),
   parallel: z.number().int().min(1).max(maxMergeWriterParallel).optional(),
 }).strict();
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
@@ -36,7 +33,6 @@ const expandHome = (path: string, home: string) => path === '~' ? home : path.st
 /** The settings with their defaults applied, for the install `installId` (install/types.ts `installIdFor`). */
 export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string) => ({
   deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home ?? homedir()),
-  retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
   parallel: run.mergeWriter?.parallel ?? defaultMergeWriterParallel,
 });
 
