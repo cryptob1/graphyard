@@ -10,6 +10,7 @@ import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, dis
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
 import { atomicPrivateWrite, readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
+import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
 import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
@@ -203,8 +204,8 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   const fleet = await readFleet(config, role, probe);
   if (!fleet.managed) return null;
   const host = config.hostId ?? 'unknown-host', { registry, client } = fleet;
-  const named = registry.roles.find(entry => entry.name === role)!.accounts;
-  const local = registry.accounts.filter(account => named.includes(account.name) && account.enabled && account.credential.host === host);
+  // Every enabled account on this host is observed, not only the role's own: any of them may serve a failover (GY-3092).
+  const local = registry.accounts.filter(account => account.enabled && account.credential.host === host);
   const ceiling = probe.ceilingPercent ?? config.run?.quotaCeilingPercent;
   const observed = await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
@@ -261,7 +262,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
@@ -273,8 +274,13 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
-  const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
+  // With none of its own accounts healthy, the role still launches when another registry account can serve it (GY-3092).
+  const failover = definition.accounts.length && !accounts.some(account => account.healthy) ? fleetOrder(fleet.registry, definition, null).find(name => {
+    const account = fleet.registry.accounts.find(entry => entry.name === name)!;
+    return !accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) && !roleUnsupported(fleet.registry, definition, name);
+  }) : undefined;
+  const usable = !full && (accounts.some(account => account.healthy) || !!failover);
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running, failover: failover ?? null };
 }
 
 // ---------------------------------------------------------------------------

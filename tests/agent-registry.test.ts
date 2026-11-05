@@ -17,7 +17,7 @@ import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { NoHealthyAccountError, atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
+import { atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
@@ -289,11 +289,12 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const selectedEvent = (await ok('agent-registry/history', auditor)).find((entry: any) => entry.kind === 'selected');
   assert.equal(selectedEvent.actor, 'master'); assert.equal(selectedEvent.change.session.reason, session.reason);
 
-  // Under its limits: the account's session limit, then the role's concurrency limit, each refused with its reason and recorded.
-  await assert.rejects(dispatch(root, config, 'worker-b', probe), (error: any) => error instanceof NoHealthyAccountError && /claude-fresh is at its session limit \(1 of 1 live\)/.test(error.message));
+  // Under its limits: the account's session limit is passed over for the fleet's next usable account, which serves the launch (GY-3092); the role's concurrency limit is then refused, with its reason and recorded.
+  const failed = await dispatch(root, config, 'worker-b', probe);
+  assert.equal(failed.account!.environment, 'muse-a');
   await ok('agent-registry/accounts', operator, { account: { name: 'claude-fresh', runtime: 'claude', model: 'opus', credential: { host: HOST, home: fresh }, maxSessions: 5 }, reason: 'Raise the limit' });
-  assert.equal((await dispatch(root, config, 'worker-b', probe)).account!.environment, 'claude-fresh');
-  await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, claude-fresh on GY-\d+\)/);
+  await assert.rejects(dispatch(root, config, 'worker-b', probe), /role worker is at its concurrency limit \(2 of 2 live/);
+  await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, muse-a on GY-\d+\)/);
   const refused: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
   assert.match(refused.refusals.at(-1)!.reason, /concurrency limit/); assert.equal(refused.refusals.at(-1)!.work, 'GY-777');
   assert.equal(refused.roles.find(role => role.role === 'worker')!.live, 2); assert.match(refused.roles.find(role => role.role === 'worker')!.blocked!, /concurrency limit/);
@@ -420,6 +421,46 @@ test('integration:registry-live-capacity — capacity is a registry change with 
 
   assert.equal(await readFile(file, 'utf8'), bytes, 'not one byte of the executor\'s file changed during the run');
   assert.doesNotMatch(bytes, /claude-a|claude-b|codex-a/, 'and it never named an account');
+});
+
+test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer, producer and master all on one exhausted account run on the second usable account with no registry change, and the first account leads again once its hold ends', async () => {
+  await reset();
+  const homes = await temporaryDirectory('homes', scratch);
+  const homeA = await login(homes, 'claude-one', 'claude'), homeB = await login(homes, 'claude-two', 'claude');
+  await ok('agent-registry/apply', operator, { runtimes: [runtimeNamed('claude')], models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-one', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeA } }, { name: 'claude-two', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeB } }],
+    roles: fleetRoles.map(name => ({ name, accounts: ['claude-one'], concurrency: 5 })), reason: 'Every role on one account; a second account in no role' });
+  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
+  const before: Registry = await ok('agent-registry/document', operator);
+  const spent = network({ 'claude-one-oauth-token': { five: 10, seven: 100 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
+
+  // The worker launch runs on the second account; with what it observed folded in, the loop's gate reads every role launchable through the fleet.
+  const calls: string[][] = [];
+  const worker = await dispatch(root, config, 'worker-a', spent, calls);
+  assert.equal(worker.account!.environment, 'claude-two'); assert.equal(tabEnvironment(calls.find(call => call[0] === 'tab')!).CLAUDE_CONFIG_DIR, homeB);
+  for (const role of fleetRoles) {
+    const health = (await fleetRoleHealth(config, role, spent))!;
+    assert.deepEqual([health.available, health.failover], [true, 'claude-two'], `${role}: the role is launchable through the fleet`);
+  }
+  for (const [role, work] of [['reviewer', 'GY-3201'], ['producer', 'GY-3202'], ['master', undefined]] as const) {
+    const chosen = await selectAccount(config, role, { name: `${role}-a` }, { ...spent, work });
+    assert.equal(chosen.account!.name, 'claude-two', `${role} fails over`);
+    assert.ok(chosen.account && 'fleet' in chosen.account);
+    assert.match(chosen.account.fleet.reason, /failing over: none of the role's own 1 accounts can serve it;.*claude-one quota is exhausted/);
+  }
+  const history = (await ok('agent-registry/history', auditor)).filter((entry: any) => entry.kind === 'failover' && entry.change.failover.account === 'claude-two');
+  assert.deepEqual(history.map((entry: any) => [entry.change.failover.role, entry.change.failover.account]).sort(), fleetRoles.map(role => [role, 'claude-two']).sort());
+  for (const entry of history) assert.match(entry.change.failover.reason, /claude-one quota is exhausted/);
+
+  // No registry change was made for any of it: the roles still name only the first account.
+  const after: Registry = await ok('agent-registry/document', operator);
+  assert.deepEqual(after.roles, before.roles); assert.deepEqual(after.accounts.map(account => [account.name, account.enabled]), before.accounts.map(account => [account.name, account.enabled]));
+
+  // The hold ends (the provider's window resets): the very next launch of each role prefers the first account again.
+  const renewed = network({ 'claude-one-oauth-token': { five: 1, seven: 1 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
+  assert.equal((await dispatch(root, config, 'worker-a', renewed)).account!.environment, 'claude-one');
+  for (const [role, work] of [['reviewer', 'GY-3203'], ['producer', 'GY-3204']] as const)
+    assert.equal((await selectAccount(config, role, { name: `${role}-a` }, { ...renewed, work })).account!.name, 'claude-one', `${role} returns to its own account`);
 });
 
 // ---------------------------------------------------------------------------

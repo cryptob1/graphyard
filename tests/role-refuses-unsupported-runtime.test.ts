@@ -90,12 +90,12 @@ test('unit:selection-skips-unsupported-runtime — selection passes over an unsu
   assert.match(choice.reason, /passed over/);
 });
 
-test('unit:selection-skips-unsupported-runtime — with only an unsupported account stored, selection refuses naming it, launching nothing', () => {
+test('unit:selection-skips-unsupported-runtime — with only an unsupported account stored, the fleet failover (GY-3092) passes it over too and lands on a runtime the role can run', () => {
   const fleet = setRole(registry(), ['claude-a']);
   fleet.roles.find(role => role.name === 'master')!.accounts = ['opencode-a'];
   const choice = chooseSession(fleet, { role: 'master', host: HOST }, clock);
-  assert.equal(choice.account, null);
-  assert.match(choice.reason, /opencode/);
-  assert.match(choice.reason, /claude and codex/);
-  assert.deepEqual(choice.skipped.map(entry => entry.account), ['opencode-a']);
+  assert.equal(choice.account?.name, 'claude-a', choice.reason);
+  const skip = choice.skipped.find(entry => entry.account === 'opencode-a');
+  assert.ok(skip, 'the unsupported account is recorded as skipped');
+  assert.match(skip!.reason, /claude and codex/);
 });

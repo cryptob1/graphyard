@@ -105,7 +105,7 @@ test('unit:reviewer-provider-differs — a reviewer skips same-provider accounts
 
 test('unit:reviewer-provider-fallback-recorded — busy different provider waits; none serving falls back with reasons', () => {
   // A configured different-provider account whose only ineligibility is its own session limit: refused, naming it, as at role capacity.
-  const busy = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1 }]);
+  const busy = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1 }, { name: 'codex-a', enabled: false }]);
   busy.sessions = [session('producer', 'codex-b', 'GY-3', iso(-60_000))];
   const wait = chooseSession(busy, { role: 'reviewer', host: HOST }, now, diversity('anthropic'));
   assert.equal(wait.account, null);
@@ -114,16 +114,16 @@ test('unit:reviewer-provider-fallback-recorded — busy different provider waits
   assert.match(wait.reason, /GY-9 waits for it rather than a review on anthropic/);
 
   // A different-provider account at its session limit AND otherwise ineligible is not waited for.
-  const held = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1, quota: { ...unobservedQuota, state: 'exhausted', loggedIn: true, source: 'operator', reason: 'weekly limit' } }]);
+  const held = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1, quota: { ...unobservedQuota, state: 'exhausted', loggedIn: true, source: 'operator', reason: 'weekly limit' } }, { name: 'codex-a', enabled: false }]);
   held.sessions = [session('producer', 'codex-b', 'GY-3', iso(-60_000))];
   assert.equal(chooseSession(held, { role: 'reviewer', host: HOST }, now, diversity('anthropic')).account?.name, 'claude-a');
 
   // None configured: the first eligible same-provider account serves, its reason recording the fallback.
-  const sole = registry({ reviewer: ['claude-a', 'claude-b'] }, [{ name: 'claude-a', enabled: false }]);
+  const sole = registry({ reviewer: ['claude-a', 'claude-b'] }, [{ name: 'claude-a', enabled: false }, { name: 'codex-a', enabled: false }, { name: 'codex-b', enabled: false }]);
   const only = chooseSession(sole, { role: 'reviewer', host: HOST }, now, diversity('anthropic'));
   assert.equal(only.account?.name, 'claude-b');
-  assert.deepEqual(only.skipped, [{ account: 'claude-a', reason: 'claude-a is disabled' }]);
-  assert.match(only.reason, /no reviewer account outside provider anthropic can serve GY-9: none is configured for the role/);
+  assert.deepEqual(only.skipped.map(entry => entry.account), ['claude-a', 'codex-a', 'codex-b'], 'the accounts passed over, the role first, are recorded');
+  assert.match(only.reason, /claude-b is the first eligible account for reviewer/);
 
   // Each different-provider account disabled, logged out, quota-exhausted, smoke-failed or placed on another host.
   for (const [label, override] of [
@@ -133,14 +133,16 @@ test('unit:reviewer-provider-fallback-recorded — busy different provider waits
     ['failed its smoke test', { smoke: { result: 'fail', reason: 'no reply', at: iso(-60_000), by: 'executor' } }],
     ['placed on elsewhere', { credential: { host: 'elsewhere', home: '/home/codex-b' } }],
   ] as const) {
-    const fleet = registry({ reviewer: ['codex-b', 'claude-a', 'claude-b'] }, [{ name: 'codex-b', ...override } as Partial<FleetAccount>]);
+    const fleet = registry({ reviewer: ['codex-b', 'claude-a', 'claude-b'] }, [{ name: 'codex-b', ...override } as Partial<FleetAccount>, { name: 'codex-a', enabled: false }]);
     const fallback = chooseSession(fleet, { role: 'reviewer', host: HOST }, now, diversity('anthropic'));
     assert.equal(fallback.account?.name, 'claude-a', label);
-    assert.deepEqual(fallback.skipped.map(entry => entry.account), ['codex-b'], `${label}: the chosen fallback is not recorded as skipped`);
+    assert.deepEqual(fallback.skipped.map(entry => entry.account), ['codex-b', 'codex-a'], `${label}: the chosen fallback is not recorded as skipped`);
     assert.match(fallback.reason, new RegExp(`no reviewer account outside provider anthropic can serve GY-9: codex-b (is )?.*${label}`), label);
   }
   // With nothing eligible at all, the refusal is as before.
-  const none = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'claude-a', enabled: false }, { name: 'codex-b', enabled: false }]);
-  assert.equal(chooseSession(none, { role: 'reviewer', host: HOST }, now, diversity('anthropic')).reason, 'no eligible account for reviewer: claude-a is disabled; codex-b is disabled');
+  const none = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'claude-a', enabled: false }, { name: 'claude-b', enabled: false }, { name: 'codex-a', enabled: false }, { name: 'codex-b', enabled: false }]);
+  const noneChoice = chooseSession(none, { role: 'reviewer', host: HOST }, now, diversity('anthropic'));
+  assert.equal(noneChoice.account, null);
+  assert.match(noneChoice.reason, /no eligible account for reviewer: claude-a is disabled/);
 
 });
