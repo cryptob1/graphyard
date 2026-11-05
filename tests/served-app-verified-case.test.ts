@@ -2,7 +2,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -33,6 +33,8 @@ test('unit:served-app-verified-case — the release line names the served commit
   git(['init', '-q', '-b', 'main'], root);
   await writeFile(join(root, 'served.txt'), 'the fixture app the record claims is served\n');
   git(['add', '.'], root); git(['commit', '-q', '-m', 'the fixture app'], root);
+  // The case's command steps write the records with this script, which with no e2e serve writes into its own checkout.
+  await mkdir(join(root, 'scripts')); await copyFile(join(process.cwd(), 'scripts', 'e2e-serve-record.mjs'), join(root, 'scripts', 'e2e-serve-record.mjs'));
   const written = join(root, '.graphyard', 'served.json');
   let http: ReturnType<typeof server> | null = null, store: Store | null = null;
   process.env.GRAPHYARD_REPOSITORY_ROOT = root;

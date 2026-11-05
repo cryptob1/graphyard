@@ -10,7 +10,7 @@
     {
       "kind": "command",
       "name": "no leftover serve record, so the head reads as declaring nothing",
-      "run": "rm -f .graphyard/served.json",
+      "run": "node scripts/e2e-serve-record.mjs clear",
       "timeoutSeconds": 30
     },
     {
@@ -26,7 +26,7 @@
     {
       "kind": "command",
       "name": "the record the pass writes after the served fixture's required case passed",
-      "run": "mkdir -p .graphyard && printf '{\"commit\":\"%s\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":true,\"case\":null,\"step\":null,\"reason\":null},\"at\":\"2026-01-01T00:00:00.000Z\"}\\n' 1234567890abcdef1234567890abcdef12345678 > .graphyard/served.json",
+      "run": "node scripts/e2e-serve-record.mjs '{\"commit\":\"1234567890abcdef1234567890abcdef12345678\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":true,\"case\":null,\"step\":null,\"reason\":null},\"at\":\"2026-01-01T00:00:00.000Z\"}'",
       "timeoutSeconds": 30
     },
     {
@@ -70,7 +70,7 @@
     {
       "kind": "command",
       "name": "the record the pass writes once that fixture case is broken",
-      "run": "printf '{\"commit\":\"%s\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":false,\"case\":\"fixture-home\",\"step\":\"step 2 expect text \\\\\"the change\\\\\"\",\"reason\":\"expected status 200, got 404\"},\"at\":\"2026-01-01T00:00:01.000Z\"}\\n' 1234567890abcdef1234567890abcdef12345678 > .graphyard/served.json",
+      "run": "node scripts/e2e-serve-record.mjs '{\"commit\":\"1234567890abcdef1234567890abcdef12345678\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":false,\"case\":\"fixture-home\",\"step\":\"step 2 expect text \\\"the change\\\"\",\"reason\":\"expected status 200, got 404\"},\"at\":\"2026-01-01T00:00:01.000Z\"}'",
       "timeoutSeconds": 30
     },
     {

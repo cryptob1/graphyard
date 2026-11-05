@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
 import { projectCaseSuite, buildStaticSite, groupBuildShell } from '../release-project.js';
-import type { E2eReport } from '../e2e/runner.js';
+import { exercisesApplications, type E2eReport } from '../e2e/runner.js';
 import { confinedSession } from '../e2e/steps.js';
 import { serveStaticSite } from './preview.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
@@ -95,6 +95,11 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
   }
 }
 
+/** Whether the head's case `name` exercises an item preview: its `preview` tag (GY-2217). A case that does not parse runs, and its run names why. */
+async function needsItemPreview(worktree: string, name: string) {
+  try { return exercisesApplications(parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8'))); } catch { return false; }
+}
+
 /**
  * Every bound case of `proofs` run against the head served in `worktree`: the case file each
  * `e2e:NAME` proof names must exist on the head (`e2e/cases/NAME.json`), each case runs against the
@@ -137,6 +142,13 @@ export async function runTrialE2eCases(input: {
     const application = bound ?? fallback;
     const id = application ? `application:${application.id}` : declared.serve && !declared.bindings[name] ? 'serve' : null;
     const target = application ?? (id ? declared.serve : null);
+    // GY-3128: an unbound case needing an item preview (tagged `preview`) has nothing to run against on
+    // e2e.serve: only a loop brings up item previews, and the trial withholds Docker from the head's
+    // code (GY-2997). It is left out, named in the log, and proven against the served install instead.
+    if (id === 'serve' && await needsItemPreview(input.worktree, name)) {
+      input.log(`left out ${proof}: it needs an item preview, which only the served install's loop runs`);
+      continue;
+    }
     if (!target) {
       cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: `case "${name}" is bound to no declared application: bind it in delivery.cases to one of ${declared.applications.map(application => application.id).join(', ')}` });
       continue;
