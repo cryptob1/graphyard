@@ -17,7 +17,22 @@ import { specCheckCurrent } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import { stoppedRoles } from '../master/stopped-roles.js';
+import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import type { FleetView } from '../model/registry.js';
+
+/** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
+export async function itemLedger(masterApi: (path: string) => Promise<any>, id: string): Promise<SpeedEvent[] | null> {
+  const events: SpeedEvent[] = [];
+  let cursor: string | null = null;
+  try {
+    do {
+      const page: { events: SpeedEvent[]; page: { nextCursor: string | null } } = await masterApi(`events?work=${id}&order=asc&limit=1000&view=page${cursor ? `&cursor=${cursor}` : ''}`);
+      events.push(...page.events);
+      cursor = page.page.nextCursor;
+    } while (cursor);
+  } catch { return null; }
+  return events;
+}
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
@@ -76,6 +91,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
+  // GY-3105: delivery speed from the event ledger for the last merged items, computed now.
+  const merged: MergedItem[] = unreachable ? [] : await Promise.all(snapshot.work.filter(item => item.stage === 'done' && (item.delivery?.mergedAt ?? item.observation?.mergedAt))
+    .sort((a, b) => Date.parse(b.delivery?.mergedAt ?? b.observation!.mergedAt!) - Date.parse(a.delivery?.mergedAt ?? a.observation!.mergedAt!)).slice(0, 50)
+    .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
+      events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
@@ -89,6 +109,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen),
     delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
       : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
+    deliverySpeed: deliverySpeed(merged, open, now),
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
     mergeWriter: (({ queue, inFlight, inFlights, lastMergeAt, refusals, serveRevert, trials, stepMedians }) => ({ queue, inFlight, ...(inFlights ? { inFlights } : {}), lastMergeAt, trials: trials ?? [], stepMedians: stepMedians ?? {}, lastRefusal: refusals.at(-1) ?? null,
