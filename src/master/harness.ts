@@ -394,7 +394,7 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * fetched (`--force-with-lease=refs/heads/BRANCH:TIP`), so it replaces only what it saw.
  */
 /** Submission guidance shared by every worker request; merge trials judge trial-only tests. */
-export const submissionPolicyRule = "The full test suite is CI's gate: run the build, then npm run test:affected -- with your bound proof test files (the tests your change affects plus those, not npm test), and the tests for your own criteria (graphyard verify GY-N). Submit with complete when they pass. For sandbox-only test failures, including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture: record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides. Fix or block assertion failures, build errors and refusals of your own writes. ";
+export const submissionPolicyRule = "The full test suite is CI's gate: run the build and npm run test:affected -- BOUND_PROOF_TEST_FILES, not npm test. Submit with complete when they pass. For sandbox-only test failures, including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture: record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides. Fix or block assertion failures, build errors and refusals of your own writes. ";
 /** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
 /**

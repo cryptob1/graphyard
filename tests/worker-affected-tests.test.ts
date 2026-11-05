@@ -59,6 +59,6 @@ test('unit:worker-affected-tests — the npm script, AGENTS.md, the guide and th
   const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /`npm run test:affected -- <your bound proof test files>` for domain\/API changes/);
   assert.match(guideText('proof'), /npm run test:affected -- with the bound proof test files/);
-  assert.match(submissionPolicyRule, /npm run test:affected -- with your bound proof test files \(the tests your change affects plus those, not npm test\)/);
+  assert.match(submissionPolicyRule, /run the build and npm run test:affected -- BOUND_PROOF_TEST_FILES, not npm test\./);
   assert.match(masterInstructions.replace(/\s+/g, ' '), /Workers check their change with `npm run test:affected` and their bound proof test files, not npm test/);
 });
