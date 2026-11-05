@@ -1,7 +1,7 @@
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
 import { supervisingUnit } from './master/loop-restart.js';
-import { loopStopTimeoutSeconds } from './supervisor.js';
+import { loopStopTimeoutSeconds } from './install/loop-unit.js';
 import { defaultChildRun } from './child-runner.js';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
@@ -16,7 +16,7 @@ import { sshOrigin } from './merger-mode.js';
 import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
-import { redactString } from './evidence-replay.js';
+import { redactString } from './redaction.js';
 import { recordSupervision } from './master/config.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';

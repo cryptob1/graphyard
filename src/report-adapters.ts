@@ -26,7 +26,7 @@ export type ParsedArtifact = {
 
 /**
  * What one adapter is, in terms an operator can hold it to. Every field here is part of
- * the adapter's published contract (`graphyard runner adapters`), so a format is never
+ * the adapter's published contract (adapterContracts), so a format is never
  * supported by implication: it states what it proves, what was independently observed
  * rather than reported, which producers and versions its fixtures cover, and how each
  * failure is classified.
@@ -310,7 +310,7 @@ export function reportAdapter(format: unknown): ReportAdapter {
   if (typeof format !== 'string' || !(format in reportAdapters)) throw new Error(`Unsupported report format ${JSON.stringify(format)}; supported formats: ${reportFormats.join(', ')}`);
   return reportAdapters[format as ReportFormat];
 }
-/** The published contract of every adapter, for `graphyard runner adapters` and the docs. */
+/** The published contract of every adapter, for integrations and the docs. */
 export const adapterContracts = () => reportFormats.map(format => {
   const { parse, verify, ...contract } = reportAdapters[format]; void parse; void verify; return contract;
 });

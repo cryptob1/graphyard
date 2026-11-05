@@ -9,7 +9,7 @@ import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, 
 import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
-import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from './loop-supervisor.js';
+import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from '../install/loop-unit.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state.js';

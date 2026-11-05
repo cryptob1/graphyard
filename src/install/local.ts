@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyObservation, httpHealth, tool, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
-import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from '../supervisor.js';
+import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from './loop-unit.js';
 import type { EnvValue, PreflightItem } from './types.js';
 import { buildTrialImage, trialImagePlan } from './trial-image.js';
 

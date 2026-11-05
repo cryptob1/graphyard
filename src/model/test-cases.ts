@@ -100,7 +100,7 @@ const testProof = (proof: string) => /^(unit|integration):/.test(proof) || !!sce
  * independent, bound to this candidate and policy, the pinned revision) — and, separately, never
  * a gate, the registered cases whose test file the pull request changes.
  */
-export function linkedCases(work: Work, definitions: readonly CaseDefinition[] | null, now = new Date()): { linked: LinkedCase[]; touched: TouchedCase[] } {
+export function linkedCases(work: Work, definitions: readonly CaseDefinition[] | null, now: Date): { linked: LinkedCase[]; touched: TouchedCase[] } {
   // The registry read lists every revision, newest first per case; the newest names the case.
   const latest = new Map<string, CaseDefinition>();
   for (const definition of definitions ?? []) if (!latest.has(definition.id)) latest.set(definition.id, definition);

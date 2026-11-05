@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
-import { schemaGenerations, schemaVersion } from '../src/release.js';
+import { schemaGenerations, schemaVersion } from '../src/store/schema-lineage.js';
 import { currentSchemaCode, runStartupMigration, schemaGenerationDigest, type SchemaCode } from '../src/store/migration-locks.js';
+import { retiredTables } from '../src/store/schema.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1961: the schema generation follows the table definitions, so a release whose definitions are
@@ -39,7 +40,7 @@ const snapshot = async (store: Store) => (await store.pool.query(`SELECT json_bu
 
 test('unit:schema-generation-guard — a release whose table definitions are older than the database\'s refuses, naming both generations, and changes nothing; the same or newer definitions start as today', async () => {
   // The lineage records the code's own definitions as its newest generation: a DDL change must append its digest.
-  assert.equal(schemaGenerations[schemaVersion], schemaGenerationDigest(), `the table definitions changed: append '${schemaGenerationDigest()}' to schemaGenerations in src/release.ts`);
+  assert.equal(schemaGenerations[schemaVersion], schemaGenerationDigest(), `the table definitions changed: append '${schemaGenerationDigest()}' to schemaGenerations in src/store/schema-lineage.ts`);
   assert.equal(new Set(schemaGenerations.filter(Boolean)).size, schemaGenerations.filter(Boolean).length, 'each generation records distinct definitions');
   const current = currentSchemaCode(), newer = later(current, '9.9.9', 'gy1961_newer'), newest = later(newer, '10.0.0', 'gy1961_newest');
   assert.notEqual(schemaGenerationDigest(newer), schemaGenerationDigest(current), 'a changed definition is a different generation');
@@ -47,7 +48,11 @@ test('unit:schema-generation-guard — a release whose table definitions are old
   const store = new Store(url('guard'));
   try {
     // Same definitions start as today, again and again.
+    // An upgraded install removes the retired protocol tables in the same generation.
+    const retired = retiredTables.filter(name => name.startsWith('validation_') || name.startsWith('attribution_'));
+    for (const name of retired) await store.pool.query(`CREATE TABLE ${name} (id uuid PRIMARY KEY)`);
     await store.init(); await store.init();
+    for (const name of retired) assert.equal((await store.pool.query('SELECT to_regclass($1) AS relation', [name])).rows[0].relation, null, name);
     assert.equal(await store.schema(), schemaVersion);
     // Code with a newer definition migrates forward over it and records its generation and release.
     await runStartupMigration(store.pool, { code: newer });

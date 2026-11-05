@@ -113,7 +113,7 @@ export interface PiRunnerOptions {
  * How a headless run is detached from the process that launched it (GY-453), so a restart of the
  * loop or an executor never takes the run with it. Every run leads its own session and process
  * group (setsid), so no signal sent to the launcher's group reaches it. `systemd`: the run also gets
- * its own transient user scope, like a `watch` worker (supervisor.ts systemdContainment), because a
+ * its own transient user scope, like a `watch` worker (session-watch.ts systemdContainment), because a
  * process started from a systemd service is in that service's cgroup, and stopping or restarting
  * the service kills every process in it, setsid or not.
  */

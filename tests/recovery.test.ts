@@ -1,19 +1,16 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
-import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { Validation, type ValidationCandidate, type ValidationRequest } from '../src/validation.js';
+import { Validation } from '../src/validation.js';
 import { Delivery, type EnvironmentDelivery, type Release, type RollbackRequest } from '../src/delivery.js';
-import { S3ArtifactBackend } from '../src/artifacts.js';
-import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
@@ -39,290 +36,24 @@ const executor: Principal = { id: 'executor', role: 'producer' };
 const secondExecutor: Principal = { id: 'second-executor', role: 'producer' };
 const reader: Principal = { id: 'auditor', role: 'reader' };
 const principals = [operator, worker, runner, ...runners, idleRunner, collector, builder, observer, promoter, executor, secondExecutor, reader];
-const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
-const head = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
+const head = 'a'.repeat(40), inputs = `sha256:${'d'.repeat(64)}`;
 const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
 const manifests = { one: { api: digestOf('1'), web: digestOf('2') }, two: { api: digestOf('3'), web: digestOf('4') }, three: { api: digestOf('5'), web: digestOf('6') } };
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
 let serial = 0;
 
 /** An S3-compatible object store: path-style, SigV4-authenticated, MD5 ETags, and switches to fail or corrupt the next write. */
-class ObjectStore {
-  objects = new Map<string, { bytes: Buffer; type: string }>();
-  requests: { method: string; path: string }[] = [];
-  failNextPut = false; corruptNextPut = false;
-  http!: Server; endpoint = '';
-  async start() {
-    this.http = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on('data', chunk => chunks.push(chunk));
-      req.on('end', () => {
-        const body = Buffer.concat(chunks), path = decodeURIComponent(req.url ?? '/');
-        this.requests.push({ method: req.method!, path });
-        const authorization = String(req.headers.authorization ?? '');
-        if (!/^AWS4-HMAC-SHA256 Credential=test-access-key\/\d{8}\/us-east-1\/s3\/aws4_request, SignedHeaders=[a-z0-9;-]+, Signature=[a-f0-9]{64}$/.test(authorization) || req.headers['x-amz-content-sha256'] !== createHash('sha256').update(body).digest('hex')) { res.writeHead(403); return res.end('<Error><Code>SignatureDoesNotMatch</Code></Error>'); }
-        if (req.method === 'PUT') {
-          if (this.failNextPut) { this.failNextPut = false; res.writeHead(500); return res.end('<Error><Code>InternalError</Code></Error>'); }
-          const stored = this.corruptNextPut ? Buffer.from('corrupted bytes that fail their digest') : body; this.corruptNextPut = false;
-          this.objects.set(path, { bytes: stored, type: String(req.headers['content-type'] ?? 'application/octet-stream') });
-          res.writeHead(200, { ETag: `"${createHash('md5').update(body).digest('hex')}"` }); return res.end();
-        }
-        const object = this.objects.get(path);
-        if (req.method === 'DELETE') { this.objects.delete(path); res.writeHead(204); return res.end(); }
-        if (!object) { res.writeHead(404); return res.end(req.method === 'HEAD' ? undefined : '<Error><Code>NoSuchKey</Code></Error>'); }
-        res.writeHead(200, { 'Content-Type': object.type, 'Content-Length': object.bytes.length, ETag: `"${createHash('md5').update(object.bytes).digest('hex')}"` });
-        res.end(req.method === 'HEAD' ? undefined : object.bytes);
-      });
-    });
-    await new Promise<void>(resolve => this.http.listen(0, '127.0.0.1', resolve));
-    this.endpoint = `http://127.0.0.1:${(this.http.address() as any).port}`;
-  }
-  async stop() { await new Promise<void>(resolve => this.http.close(() => resolve())); }
-  backend() { return new S3ArtifactBackend({ endpoint: this.endpoint, bucket: 'graphyard-artifacts', region: 'us-east-1', accessKeyId: 'test-access-key', secretAccessKey: 'test-secret', prefix: 'private' }); }
-}
-const objects = new ObjectStore();
-
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 5);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
   engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
-  await objects.start();
 });
-after(async () => { await objects.stop(); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 const at = (offsetSeconds: number, from = Date.now()) => new Date(from + offsetSeconds * 1000).toISOString();
-async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
-async function request(requestId: string): Promise<ValidationRequest> { return (await store.pool.query('SELECT document FROM validation_requests WHERE id=$1', [requestId])).rows[0].document; }
-async function reserved(resource: string) { return (await store.pool.query('SELECT request_id FROM validation_resources WHERE resource=$1', [resource])).rows.map(r => r.request_id as string); }
 async function events(kind: string) { return (await store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq', [kind])).rows.map(r => r.payload); }
-
-// ---- validation fixtures: an environment with runner/collector/builder registrations and one pinned request ----
-type Fixture = { n: number; runner: Principal; w: Work; c: ValidationCandidate; r: ValidationRequest; proof: string; environment: { id: string; revision: number }; runnerRef: { id: string; revision: number }; collectorRef: { id: string; revision: number }; builderRef: { id: string; revision: number }; bundle: { id: string; revision: number }; scenario: { id: string; revision: number; hash: string } };
-/** `share` reuses another fixture's environment, registrations, scenario and bundle for a second work item in the same queue. */
-async function fixture(options: { artifactStorage?: 'external' | 'postgres'; runner?: Principal; runnerAuthority?: Record<string, unknown>; share?: Fixture } = {}): Promise<Fixture> {
-  const n = ++serial, runnerPrincipal = options.runner ?? runner;
-  const shared = options.share;
-  const environment = shared?.environment ?? { id: `preview-${n}`, revision: 1 }, runnerRef = shared?.runnerRef ?? { id: `runner-${n}`, revision: 1 }, collectorRef = shared?.collectorRef ?? { id: `collector-${n}`, revision: 1 }, builderRef = shared?.builderRef ?? { id: `builder-${n}`, revision: 1 }, bundle = shared?.bundle ?? { id: `bundle-${n}`, revision: 1 }, proof = shared?.proof ?? `e2e:scenario-${n}`;
-  let scenario = shared?.scenario;
-  if (!shared) {
-    collector.proofs!.push(proof);
-    scenario = await defineScenario(store, operator, { id: `scenario-${n}`, title: 'Behavior', purpose: 'Prove behavior', steps: ['Execute'], expected: ['Correct'], environment: environment.id, runner: 'playwright', testPath: 'tests/behavior.spec.ts' }, id());
-    await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
-    for (const [ref, actor, role] of [[runnerRef, runnerPrincipal, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...options.runnerAuthority } : {}) }, id());
-    await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario!.id, scenarioRevision: scenario!.revision, scenarioHash: scenario!.hash, digest, runnerImageDigest: inputs }, id());
-  }
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Recovery fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof, 'e2e:fixture'] }] }, id());
-  w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
-  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/recovery-${n}`, branch: `graphyard/recovery-${n}` }, id());
-  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());
-  w = await engine.observe(w.id, w.revision, { candidate: { sha: head, baseSha: base, pr: n, branch: `graphyard/recovery-${n}`, author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha: head, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
-  const build: any = await validation.attestBuild(builder, { registration: builderRef, workId: w.id, expectedWorkRevision: w.revision, sourceSha: head, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id());
-  const c = await validation.createCandidate(operator, { workId: w.id, expectedWorkRevision: w.revision, proof, environment, bundle, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage: options.artifactStorage ?? 'external' }, id()) as ValidationCandidate;
-  const r = await validation.createRequest(operator, { candidateId: c.id, expectedWorkRevision: (await current(w.id)).revision, runner: runnerRef, collector: collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, id()) as ValidationRequest;
-  return { n, runner: shared?.runner ?? runnerPrincipal, w, c, r, proof, environment, runnerRef, collectorRef, builderRef, bundle, scenario: scenario! };
-}
-async function dispatch(f: Fixture, instance: Validation = validation) {
-  const d: any = await instance.dispatch(f.runner, { registration: f.runnerRef }, id()); assert.equal(d.request?.id, f.r.id, d.reason);
-  return { requestId: f.r.id, attemptId: d.attempt.id as string, epoch: d.attempt.epoch as number };
-}
-async function start(f: Fixture) {
-  const command = await dispatch(f);
-  await validation.runnerCommand(f.runner, 'ack', command, id());
-  await validation.collectionAuthority(collector, command); return command;
-}
-function report(f: Fixture, command: { requestId: string; attemptId: string; epoch: number }, artifacts: { name: string; digest: string; url: string }[] = [{ name: 'report', digest, url: 'https://private.example.test/report' }]) {
-  return { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts, artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } };
-}
-async function expireAttempt(f: Fixture) {
-  await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{attempts,0,expiresAt}',to_jsonb('2000-01-01T00:00:00Z'::text)) WHERE id=$1", [f.r.id]); await validation.reconcile();
-}
-async function cleanup(...fixtures: Fixture[]) {
-  for (const f of fixtures) {
-    const r = await request(f.r.id);
-    if (['queued', 'dispatched', 'running', 'collecting'].includes(r.state)) await validation.operatorCommand(operator, 'cancel', { requestId: r.id, epoch: r.attempts.at(-1)?.epoch ?? 0, reason: 'Test process never launched' }, id());
-    const a = (await request(f.r.id)).attempts.at(-1); if (a && !a.settled) await validation.operatorCommand(operator, 'settle', { requestId: r.id, epoch: a.epoch, reason: 'Fixture has no external process', settlementEvidence: 'https://tests.example.test/no-process' }, id());
-  }
-}
-const upload = (command: { requestId: string; attemptId: string; epoch: number }, bytes: Buffer, name = 'report') => ({ ...command, name, mediaType: 'application/json', bytes: bytes.toString('base64'), capturePolicy: 'approved-test-data-only' });
-
-test('D4-1 queue starvation, unacknowledged dispatch and missing runner heartbeat have distinct next steps', async () => {
-  const starved = await fixture({ runner: idleRunner });
-  const unacknowledged = await fixture({ runner: runners[0] }); await dispatch(unacknowledged);
-  const stalled = await fixture({ runner: runners[1] }); const stalledCommand = await dispatch(stalled); await validation.runnerCommand(stalled.runner, 'ack', stalledCommand, id());
-  await validation.runnerCommand(stalled.runner, 'heartbeat', stalledCommand, id());
-  // The runner renewed once, 30 seconds ago by the record: longer than the renewal interval, inside the lease.
-  await store.pool.query("UPDATE validation_requests SET document=jsonb_set(document,'{attempts,0,lastHeartbeatAt}',to_jsonb($2::text)) WHERE id=$1", [stalled.r.id, at(-30)]);
-  const healthy = await fixture({ runner: runners[2] }); const healthyCommand = await dispatch(healthy); await validation.runnerCommand(healthy.runner, 'ack', healthyCommand, id()); await validation.runnerCommand(healthy.runner, 'heartbeat', healthyCommand, id());
-  // Contention for the runner slot: a second request in the healthy fixture's queue, after the runner polled.
-  const waiting = await fixture({ share: healthy });
-  const nothing: any = await validation.dispatch(healthy.runner, { registration: healthy.runnerRef }, id()); assert.equal(nothing.request, null);
-  // A lost lease that keeps the barrier closed, and a request behind it.
-  const lost = await fixture({ runner: runners[3] }); const lostCommand = await dispatch(lost); await validation.runnerCommand(lost.runner, 'ack', lostCommand, id()); await expireAttempt(lost);
-  const behind = await fixture({ share: lost });
-  await validation.dispatch(lost.runner, { registration: lost.runnerRef }, id());
-  const capacity = await validation.capacity();
-  const diagnosis = (f: Fixture) => capacity.requests.find(d => d.requestId === f.r.id)!;
-  assert.equal(diagnosis(starved).condition, 'queued-starved'); assert.match(diagnosis(starved).nextStep, /No dispatch poll from runner .* ever; the queue is starved\. Start or repair the runner process/);
-  assert.equal(diagnosis(unacknowledged).condition, 'unacknowledged'); assert.match(diagnosis(unacknowledged).nextStep, /not acknowledged; the ACK window ends .*No execution was authorized/);
-  assert.equal(diagnosis(stalled).condition, 'heartbeat-missing'); assert.match(diagnosis(stalled).nextStep, /last renewed at .* longer ago than the 20s renewal interval.*leave its reserved resources alone/);
-  assert.equal(diagnosis(healthy).condition, 'running'); assert.match(diagnosis(healthy).nextStep, /nothing to do/);
-  assert.equal(diagnosis(waiting).condition, 'queued-waiting-for-slot'); assert.match(diagnosis(waiting).nextStep, new RegExp(`is in use by request ${healthy.r.id} \\(running\\) under a live lease`));
-  assert.equal(diagnosis(lost).condition, 'awaiting-settlement'); assert.match(diagnosis(lost).nextStep, /never verified settled.*validation settle with settlement evidence/);
-  assert.equal(diagnosis(behind).condition, 'queued-resource-held'); assert.match(diagnosis(behind).nextStep, new RegExp(`reserved by request ${lost.r.id} \\(expired, settlement not verified\\)`));
-  const conditions = [starved, unacknowledged, stalled, waiting, lost, behind].map(f => diagnosis(f));
-  assert.equal(new Set(conditions.map(d => d.condition)).size, conditions.length, 'every condition is distinct'); assert.equal(new Set(conditions.map(d => d.nextStep)).size, conditions.length, 'every next step is distinct');
-  assert.ok(diagnosis(waiting).dwellSeconds >= 0 && diagnosis(behind).attempt === null);
-  // Capacity reporting: the idle runner never polled, the busy runner has queue dwell, and every reserved resource is attributed.
-  const idle = capacity.runners.find(r => r.registration.id === starved.runnerRef.id)!, busy = capacity.runners.find(r => r.registration.id === healthy.runnerRef.id)!;
-  assert.equal(idle.lastPollAt, null); assert.equal(idle.queued, 1); assert.equal(idle.executing, null); assert.equal(idle.queueLimit, 20);
-  assert.ok(busy.lastPollAt && busy.executing === healthy.r.id && busy.queued === 1 && busy.oldestQueuedSeconds !== null);
-  assert.ok(capacity.resources.some(r => r.resource === `runner:${healthy.runner.id}` && r.requestId === healthy.r.id && r.live) && capacity.resources.some(r => r.requestId === lost.r.id && !r.live));
-  // Retryable and settled are their own states once the barrier opens.
-  await validation.operatorCommand(operator, 'settle', { requestId: lost.r.id, epoch: 1, reason: 'Verified no process', settlementEvidence: 'https://tests.example.test/settlement' }, id());
-  assert.equal((await validation.capacity()).requests.find(d => d.requestId === lost.r.id)?.condition, 'retryable');
-  await cleanup(starved, unacknowledged, stalled, healthy, waiting, lost, behind);
-  const after = await validation.capacity();
-  assert.equal(after.requests.find(d => d.requestId === healthy.r.id)?.condition, 'retryable', 'a cancelled, settled attempt with budget left is retryable');
-  assert.ok(after.resources.length === 0 && after.runners.every(r => r.executing === null), 'settlement released every reservation');
-});
-
-test('D4-1 a runner queue applies backpressure at its registered limit', async () => {
-  const f = await fixture({ runnerAuthority: { queueLimit: 1 } });
-  await assert.rejects(fixture({ share: f }), /already has 1 queued requests, its queue limit/);
-  await assert.rejects(validation.define(operator, { kind: 'registration', id: `builder-limit-${f.n}`, expectedRevision: 0, principalId: builder.id, role: 'builder', environment: f.environment, adapterVersion: 'test-v1', proofs: [], enabled: true, queueLimit: 5 }, id()), /queue limit/);
-  await cleanup(f);
-});
-
-test('D4-2 network partition recovery cannot grant two authoritative attempts the same protected execution resource', async () => {
-  const f = await fixture(), command = await dispatch(f); await validation.runnerCommand(f.runner, 'ack', command, id());
-  const environmentResource = `environment:${f.environment.id}`, account = `external:test-account-${f.n}`;
-  assert.deepEqual(await reserved(environmentResource), [f.r.id]);
-  // The runner is partitioned: its lease lapses while its container may still be mutating the test account.
-  await expireAttempt(f);
-  assert.equal((await request(f.r.id)).state, 'expired'); assert.deepEqual(await reserved(account), [f.r.id]);
-  // A second request for the same environment, polled from another replica, gets nothing while the barrier stands.
-  const g = await fixture({ share: f });
-  const replica = new Store(store.pool.options.connectionString!);
-  try {
-    const other = new Validation(new Engine(replica), principals, 'test/repository');
-    const races: any[] = await Promise.all(Array.from({ length: 8 }, (_, i) => (i % 2 ? validation : other).dispatch(runner, { registration: f.runnerRef }, id())));
-    assert.ok(races.every(r => r.request === null && /still reserved/.test(r.reason)));
-    // The partition heals: the old runner and its collector resume against epoch 1 and are refused everywhere.
-    await assert.rejects(other.runnerCommand(f.runner, 'heartbeat', command, id()), /expired|superseded/);
-    await assert.rejects(other.collectionAuthority(collector, command), /expired|superseded/);
-    const late: any = await other.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
-    await assert.rejects(other.operatorCommand(operator, 'retry', { requestId: f.r.id, epoch: 1, reason: 'Try again' }, id()), /settled/);
-    assert.deepEqual(await reserved(environmentResource), [f.r.id]);
-    // Only independently verified settlement opens the barrier; then exactly one attempt wins it.
-    await validation.operatorCommand(operator, 'settle', { requestId: f.r.id, epoch: 1, reason: 'Container removed and absence confirmed', settlementEvidence: 'https://tests.example.test/settlement' }, id());
-    assert.deepEqual(await reserved(environmentResource), []);
-    const grants: any[] = await Promise.all(Array.from({ length: 8 }, (_, i) => (i % 2 ? validation : other).dispatch(runner, { registration: f.runnerRef }, id())));
-    assert.equal(grants.filter(r => r.request).length, 1); assert.equal(grants.find(r => r.request).request.id, g.r.id);
-    assert.deepEqual(await reserved(environmentResource), [g.r.id]); assert.deepEqual(await reserved(account), [g.r.id]);
-    await assert.rejects(other.runnerCommand(f.runner, 'ack', command, id()), /expired|superseded/);
-    assert.equal((await store.pool.query('SELECT count(*) FROM validation_resources WHERE resource=$1', [account])).rows[0].count, '1');
-  } finally { await replica.close(); await cleanup(f, g); }
-});
-
-test('D4-3 artifact upload failure and expired artifact retention are visible proof states; the S3 backend verifies bytes, deletion and migration', async () => {
-  validation.artifactBackend = objects.backend();
-  try {
-    const f = await fixture({ artifactStorage: 'postgres' }), command = await start(f);
-    const bytes = Buffer.from(JSON.stringify({ tests: 2, outcome: 'passed', marker: 'private-s3-marker' })), key = id();
-    // A failed move to the store is recorded, refused to the collector, and resumed by the same key.
-    objects.failNextPut = true;
-    await assert.rejects(validation.uploadArtifact(collector, upload(command, bytes), key), /upload to s3 .* failed.*Retry with the same idempotency key/);
-    let row = (await store.pool.query('SELECT state,backend,location,bytes FROM validation_artifacts WHERE request_id=$1', [f.r.id])).rows[0];
-    assert.equal(row.state, 'upload-failed'); assert.equal(row.backend, 's3'); assert.equal(row.bytes, null);
-    assert.equal((await validation.capacity()).artifacts.uploadFailed, 1);
-    await assert.rejects(validation.readArtifact(operator, f.r.id, (await store.pool.query('SELECT id FROM validation_artifacts WHERE request_id=$1', [f.r.id])).rows[0].id), /upload failed/);
-    await assert.rejects(validation.uploadArtifact(collector, upload(command, Buffer.from('{"different":true}')), key), /resumed with the same bytes/);
-    const failedArtifactId = (await store.pool.query('SELECT id FROM validation_artifacts WHERE request_id=$1', [f.r.id])).rows[0].id;
-    const failed: any = await validation.result(collector, report(f, command, [{ name: 'report', digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, url: `graphyard-artifact://test/repository/${f.r.id}/${failedArtifactId}` }]), id());
-    assert.equal(failed.accepted, true); assert.equal(failed.passed, false); assert.match(failed.reasons.join('\n'), /Private artifact report upload failed/);
-    assert.equal((await current(f.w.id)).evidence.at(-1)?.artifacts?.[0].availability, 'upload-failed');
-    await cleanup(f);
-    // The same collector retries after the transport failure and the artifact publishes with verified bytes.
-    const g = await fixture({ artifactStorage: 'postgres' }), gCommand = await start(g), gKey = id();
-    objects.failNextPut = true;
-    await assert.rejects(validation.uploadArtifact(collector, upload(gCommand, bytes), gKey), /upload-failed/);
-    const artifact: any = await validation.uploadArtifact(collector, upload(gCommand, bytes), gKey);
-    assert.equal(artifact.backend, 's3'); assert.deepEqual(await validation.uploadArtifact(collector, upload(gCommand, bytes), gKey), artifact);
-    row = (await store.pool.query('SELECT state,backend,location,bytes,size FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0];
-    assert.equal(row.state, 'stored'); assert.equal(row.bytes, null); assert.equal(Number(row.size), bytes.length); assert.match(row.location, new RegExp(`^test_repository/${g.r.id}/${gCommand.attemptId}/${artifact.id}$`));
-    assert.ok(objects.objects.has(`/graphyard-artifacts/private/${row.location}`), 'the object lives under the configured bucket and prefix');
-    assert.equal((await validation.readArtifact(reader, g.r.id, artifact.id)).bytes.toString(), bytes.toString());
-    await assert.rejects(validation.readArtifact({ id: 'unassigned-worker', role: 'worker' }, g.r.id, artifact.id), /not authorized/);
-    assert.ok(!JSON.stringify(await events('validation.artifact-stored')).includes('private-s3-marker'), 'bytes never enter the ledger');
-    const passing: any = await validation.result(collector, report(g, gCommand, [{ name: 'report', digest: artifact.digest, url: artifact.url }]), id());
-    assert.equal(passing.passed, true, passing.reasons.join());
-    assert.equal((await current(g.w.id)).evidence.at(-1)?.artifacts?.[0].availability, 'available');
-    // Substituted bytes at the store fail the digest on read; the row is never trusted over the hash.
-    const stored = objects.objects.get(`/graphyard-artifacts/private/${row.location}`)!; objects.objects.set(`/graphyard-artifacts/private/${row.location}`, { ...stored, bytes: Buffer.from('{"tampered":true}') });
-    await assert.rejects(validation.readArtifact(operator, g.r.id, artifact.id), /integrity/);
-    objects.objects.set(`/graphyard-artifacts/private/${row.location}`, stored);
-    // Retention: expiry refuses reads at once; the object is deleted, its absence verified, and the evidence expires with it.
-    await store.pool.query("UPDATE validation_artifacts SET expires_at='2000-01-01' WHERE id=$1", [artifact.id]);
-    await assert.rejects(validation.readArtifact(operator, g.r.id, artifact.id), /retention expired/);
-    assert.equal(await validation.expireArtifacts(), 1); assert.equal(await validation.expireArtifacts(), 0);
-    assert.ok(!objects.objects.has(`/graphyard-artifacts/private/${row.location}`)); assert.ok(objects.requests.some(r => r.method === 'HEAD' && r.path === `/graphyard-artifacts/private/${row.location}`), 'deletion is verified with a read');
-    row = (await store.pool.query('SELECT state,deleted_at FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0];
-    assert.equal(row.state, 'expired'); assert.ok(row.deleted_at);
-    assert.equal((await events('validation.artifact-deleted')).filter(e => e.artifactId === artifact.id && e.verified).length, 1);
-    const expiredCapacity = (await validation.capacity()).artifacts; assert.equal(expiredCapacity.expired >= 1 && expiredCapacity.awaitingDeletion, 0);
-    await cleanup(g);
-    // An expired artifact reported at result time is its own refusal.
-    const h = await fixture({ artifactStorage: 'postgres' }), hCommand = await start(h);
-    const hArtifact: any = await validation.uploadArtifact(collector, upload(hCommand, bytes), id());
-    await store.pool.query("UPDATE validation_artifacts SET expires_at='2000-01-01' WHERE id=$1", [hArtifact.id]);
-    const expired: any = await validation.result(collector, report(h, hCommand, [{ name: 'report', digest: hArtifact.digest, url: hArtifact.url }]), id());
-    assert.equal(expired.passed, false); assert.match(expired.reasons.join('\n'), /Private artifact report retention expired/);
-    assert.equal((await current(h.w.id)).evidence.at(-1)?.artifacts?.[0].availability, 'expired');
-    await cleanup(h);
-    // Capacity is a visible state, not a silent drop.
-    const k = await fixture({ artifactStorage: 'postgres' }), kCommand = await start(k);
-    validation.artifactCapacityBytes = 16;
-    await assert.rejects(validation.uploadArtifact(collector, upload(kCommand, bytes), id()), /capacity exhausted/);
-    assert.equal((await store.pool.query('SELECT count(*) FROM validation_artifacts WHERE request_id=$1', [k.r.id])).rows[0].count, '0');
-    validation.artifactCapacityBytes = 2 * 1024 ** 3;
-    await cleanup(k);
-  } finally { validation.artifactBackend = null; validation.artifactCapacityBytes = 2 * 1024 ** 3; }
-});
-
-test('D4-3 backend migration preserves authorization and retention and verifies every artifact', async () => {
-  const f = await fixture({ artifactStorage: 'postgres' }), command = await start(f);
-  const bytes = Buffer.from('{"migrated":true}');
-  const artifact: any = await validation.uploadArtifact(collector, upload(command, bytes), id());
-  assert.equal(artifact.backend, 'postgres');
-  const passing: any = await validation.result(collector, report(f, command, [{ name: 'report', digest: artifact.digest, url: artifact.url }]), id()); assert.equal(passing.passed, true);
-  await assert.rejects(validation.migrateArtifacts(operator, { target: 's3' }), /No external artifact backend/);
-  validation.artifactBackend = objects.backend();
-  try {
-    await assert.rejects(validation.migrateArtifacts(collector, { target: 's3' }), /Operator/);
-    // A store that keeps different bytes than it acknowledged is caught by the read-back; the source stays.
-    objects.corruptNextPut = true;
-    const refused = await validation.migrateArtifacts(operator, { target: 's3' });
-    assert.deepEqual(refused.migrated, []); assert.equal(refused.refused.length, 1); assert.match(refused.refused[0].reason, /fail their digest on read-back/);
-    assert.equal((await store.pool.query('SELECT backend FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0].backend, 'postgres');
-    const moved = await validation.migrateArtifacts(operator, { target: 's3' });
-    assert.deepEqual(moved.migrated, [artifact.id]); assert.equal(moved.remaining, 0);
-    let row = (await store.pool.query('SELECT backend,location,bytes,expires_at,state FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0];
-    assert.equal(row.backend, 's3'); assert.equal(row.bytes, null); assert.equal(row.state, 'stored'); assert.equal(row.expires_at.toISOString(), artifact.expiresAt, 'retention is preserved');
-    assert.equal((await validation.readArtifact(worker, f.r.id, artifact.id)).bytes.toString(), bytes.toString(), 'the assigned worker still reads it');
-    await assert.rejects(validation.readArtifact({ id: 'unassigned-worker', role: 'worker' }, f.r.id, artifact.id), /not authorized/, 'authorization did not move with the bytes');
-    assert.equal((await current(f.w.id)).evidence.at(-1)?.artifacts?.[0].reference?.artifactId, artifact.id, 'evidence keeps its reference');
-    // And back: the copy in Postgres is verified before the S3 object is removed, with verified deletion.
-    const back = await validation.migrateArtifacts(operator, { target: 'postgres' });
-    assert.deepEqual(back.migrated, [artifact.id]); assert.equal(back.deleted, 1);
-    row = (await store.pool.query('SELECT backend,location,bytes,deleted_at FROM validation_artifacts WHERE id=$1', [artifact.id])).rows[0];
-    assert.equal(row.backend, 'postgres'); assert.equal(row.bytes.toString(), bytes.toString()); assert.equal(row.location, null);
-    assert.ok(![...objects.objects.keys()].some(k => k.includes(artifact.id)), 'no orphaned object remains');
-    assert.equal((await validation.readArtifact(operator, f.r.id, artifact.id)).bytes.toString(), bytes.toString());
-    assert.equal((await events('validation.artifact-migrated')).filter(e => e.artifactId === artifact.id).length, 2);
-  } finally { validation.artifactBackend = null; await cleanup(f); }
-});
 
 // ---- delivery fixtures: an environment with observer, promoter, builder and rollback executors ----
 type Env = { n: number; env: { id: string; revision: number }; registrations: Record<'builder' | 'observer' | 'promoter' | 'executor' | 'serialized' | 'unfenced' | 'second', { id: string; revision: number }>; epoch: number; executorEpoch: number };
@@ -415,7 +146,7 @@ test('D4-4 a requested rollback is not complete until the target deployment is o
 
 test('D4-5 recovery after server restart preserves the external operation identity and avoids duplicate side effects', async () => {
   const f = await environment(); const { one } = await degraded(f);
-  const rollback = await delivery.requestRollback(operator, rollbackRequest(f, one, 2, { repairWorkId: (await fixture()).w.id }), id());
+  const rollback = await delivery.requestRollback(operator, rollbackRequest(f, one, 2, { repairWorkId: (await engine.execute(operator, 'create', null, { type: 'chore', title: 'Rollback repair', criteria: [{ id: 'AC-1', text: 'Repair verified', proofs: ['unit:repair', 'e2e:fixture'] }] }, id())).id }), id());
   const key = id();
   const first = await delivery.claimRollback(executor, { rollbackId: rollback.id, registration: f.registrations.executor, epoch: f.executorEpoch }, key);
   // The server restarts: fresh pool, engine, validation and delivery over the same database.
@@ -559,17 +290,7 @@ test('rollback HTTP routes derive authority from the credential and appear in de
     const claimed = await call(executor, 'delivery/rollback-claim', { rollbackId: requested.body.id, registration: f.registrations.executor, epoch: f.executorEpoch }); assert.equal(claimed.status, 200);
     assert.equal((await call(executor, 'delivery/rollback-resolve', { rollbackId: requested.body.id, outcome: 'applied', reason: 'no', evidence: 'https://provider.example.test/ops/1' })).status, 403);
     assert.equal((await call(reader, 'delivery')).body.rollbacks.find((r: RollbackRequest) => r.id === requested.body.id).state, 'in-flight');
-    assert.equal((await call(worker, 'validation/capacity')).status, 200);
-    assert.equal((await call(worker, 'validation/artifacts/migrate', { target: 'postgres' })).status, 403);
+    assert.equal((await call(worker, 'validation/capacity')).status, 404);
+    assert.equal((await call(worker, 'validation/artifacts/migrate', { target: 'postgres' })).status, 404);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
-});
-
-test('S3 requests are signed with SigV4 over the payload hash and encoded path', async () => {
-  const backend = new S3ArtifactBackend({ endpoint: 'https://objects.example.test', bucket: 'bucket', region: 'eu-west-1', accessKeyId: 'AKIA', secretAccessKey: 'secret', prefix: 'p' }, fetch, () => new Date('2026-09-18T12:00:00Z'));
-  const signed = backend.sign('PUT', 'owner_repo/req/att/art name', Buffer.from('bytes'), 'application/json');
-  assert.equal(signed.url, 'https://objects.example.test/bucket/p/owner_repo/req/att/art%20name');
-  assert.equal(signed.headers['x-amz-content-sha256'], createHash('sha256').update('bytes').digest('hex')); assert.equal(signed.headers['x-amz-date'], '20260918T120000Z');
-  assert.match(signed.headers.Authorization, /^AWS4-HMAC-SHA256 Credential=AKIA\/20260918\/eu-west-1\/s3\/aws4_request, SignedHeaders=content-length;content-md5;content-type;host;x-amz-content-sha256;x-amz-date, Signature=[a-f0-9]{64}$/);
-  assert.notEqual(signed.headers.Authorization, backend.sign('PUT', 'owner_repo/req/att/art name', Buffer.from('other'), 'application/json').headers.Authorization, 'the signature binds the body');
-  await delay(0);
 });

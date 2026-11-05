@@ -24,7 +24,8 @@ import { capacityRefusal } from './fleet.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from './master/registry-slot.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
-import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
+import { reviewedBeforeMerge } from './model/risk-class.js';
+import { riskOf } from './model-boundary/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from './project-memory.js';
 import { agentToken } from './master/autonomy.js';
@@ -1194,7 +1195,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
-          const unexercised = unexercisedFindings(item, request.sha, request.proofs);
+          const unexercised = unexercisedFindings(item, new Date(now()), request.sha, request.proofs);
           if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through the loop's rework, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
@@ -1339,7 +1340,7 @@ async function boundedRead<T>(read: () => Promise<T>, timeoutMs: number): Promis
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; coordinatorRoot?: string; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
@@ -1379,13 +1380,13 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     },
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
-    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
+    launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
     // The product review (GY-2989): the same session machinery, with the product prompt and a product launch registration.
-    launchProductReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision }, product: true }).catch(error => { throw watch.classify(error); }); },
-    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
+    launchProductReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision }, product: true }).catch(error => { throw watch.classify(error); }); },
+    launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot }).catch(error => { throw watch.classify(error); }); },
     // Post-merge reviews (GY-1525): launched like a review of the delivered merge commit; the follow-ups
     // are filed as the master's operator-agent identity, the one that may create work, never the coordinator's.
-    launchPostMergeReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, postMerge: { mergeSha: request.sha, ...(request.baseSha !== unknownParent ? { baseTip: request.baseSha } : {}) } }).catch(error => { throw watch.classify(error); }); },
+    launchPostMergeReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, coordinatorRoot: deps.coordinatorRoot, requestId: request.id, postMerge: { mergeSha: request.sha, ...(request.baseSha !== unknownParent ? { baseTip: request.baseSha } : {}) } }).catch(error => { throw watch.classify(error); }); },
     createWork: async (body, requestId) => {
       const config = current();
       if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can file follow-up items');

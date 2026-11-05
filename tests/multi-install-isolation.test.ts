@@ -8,8 +8,8 @@ import { harnessDecision } from '../src/harness.js';
 import * as herdrModule from '../src/master/herdr.js';
 import { closeHerdrPane, listHerdrAgents, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
 import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster } from '../src/master.js';
-import * as supervisorModule from '../src/supervisor.js';
-import { installLoopSupervisor, loopUnitText } from '../src/supervisor.js';
+import * as supervisorModule from '../src/install/loop-unit.js';
+import { installLoopSupervisor, loopUnitText } from '../src/install/loop-unit.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**

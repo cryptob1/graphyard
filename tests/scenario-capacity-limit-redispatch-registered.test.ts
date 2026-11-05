@@ -21,7 +21,8 @@ import {
   shippedScenario,
 } from '../src/scenarios.js';
 
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
@@ -47,7 +48,7 @@ before(async () => {
   // The shipped scenarios are Graphyard's own repository's cases (GY-2964): this install manages
   // that repository, which is the one whose fresh install materializes them.
   engine = new Engine(store, 120, 'cryptob1/graphyard');
-  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], null);
+  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });

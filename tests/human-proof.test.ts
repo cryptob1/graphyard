@@ -9,13 +9,13 @@ import type { Principal, Work } from '../src/model.js';
 import { proofPreview } from '../src/coordination.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { mergeQueue } from '../src/merge-writer/executor.js';
-import { evaluate } from '../src/model/gates.js';
+import { evaluate } from '../src/model-boundary/gates.js';
 import { dueHumanProofs, humanProofRows, physicalCheckRefusal } from '../src/model/human-proof.js';
 import type { HumanRequestRow } from '../src/model/human-request.js';
-import { actionAccount, nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
 import { lockedWork } from '../src/store/locked-read.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // Every filed fixture owes an E2E proof and the serve declaration its trial needs.
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -107,7 +107,7 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   assert.equal(passed.status, 200, JSON.stringify(passed.body));
   const proven = await stored(work.id);
   assert.deepEqual(reasons(proven), [], 'the gate passes');
-  assert.equal(proofPreview(proven).find(entry => entry.proof === proof)?.status, 'passed');
+  assert.equal(proofPreview(proven, [], new Date()).find(entry => entry.proof === proof)?.status, 'passed');
   const [evidence] = proven.evidence;
   assert.deepEqual([evidence.sha, evidence.trusted, evidence.result, evidence.producer], [H, true, 'pass', human.id]);
   assert.equal(proven.humanProofs![0].answer!.note, answer.note);
@@ -122,7 +122,7 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   for (const read of [await stored(work.id), locked, snapshot]) {
     const judged = { ...read, ...evaluate(read, [read], new Date()) } as Work;
     assert.deepEqual(reasons(judged), [], 'the pass binds the commit, not the base tip');
-    assert.equal(proofPreview(read).find(entry => entry.proof === proof)?.status, 'passed');
+    assert.equal(proofPreview(read, [], new Date()).find(entry => entry.proof === proof)?.status, 'passed');
   }
 });
 

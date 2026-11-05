@@ -4,10 +4,10 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
+import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, supersededByRequest, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
 import { holdLimitNoticeAccount } from './model/account-quota.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, observationRequestSchema, selectionRequestSchema, settleSessions, supersededByRequest,
-  type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 
 /**
  * The agent registry as control-plane state.

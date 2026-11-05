@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { deriveAccountPlan } from '../src/provider-usage.js';
 
 // GY-2943: the role's order handed pi-a to five launches in a row, four more sessions ran

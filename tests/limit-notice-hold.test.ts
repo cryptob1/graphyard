@@ -50,12 +50,12 @@ test('unit:limit-notice-hold-persists — a session ended on its provider limit 
     roles: [{ name: 'worker', accounts: ['claude-c', 'claude-d'], concurrency: 10 }, { name: 'reviewer', accounts: ['claude-c', 'claude-d'], concurrency: 10 }], reason: 'Two subscriptions' });
   const loggedIn = ['claude-c', 'claude-d'].map(account => ({ account, quota: { loggedIn: true, state: 'available' } }));
   const select = (registry: AgentRegistry, role: 'worker' | 'reviewer', work: string) =>
-    registry.select(coordinator, { role, host: HOST, work, principal: worker.id, observations: loggedIn }, randomUUID()) as Promise<{ session: { account: string } | null; skipped: { account: string; reason: string }[] }>;
+    registry.select(coordinator, { role, host: HOST, work, principal: worker.id, observations: loggedIn }, randomUUID()) as Promise<{ session: { id: string; account: string } | null; skipped: { account: string; reason: string }[] }>;
 
   const filed = await ok(operator, 'work', { title: 'Spend an account', type: 'chore', criteria: [{ id: 'AC-1', text: 'Held', proofs: ['unit:limit-notice-hold-persists', 'e2e:create-work-item'] }] }) as Work;
   await ok(operator, `work/${filed.id}/ready`, {});
   // The loop that dispatched the attempt: the registry hands it claude-c.
-  const first = (await select(new AgentRegistry(store), 'worker', filed.key)).session as { id: string; account: string };
+  const first = (await select(new AgentRegistry(store), 'worker', filed.key)).session!;
   assert.equal(first.account, 'claude-c');
   await ok(worker, `work/${filed.id}/claim`, {});
 
@@ -76,6 +76,6 @@ test('unit:limit-notice-hold-persists — a session ended on its provider limit 
     const fresh = await select(new AgentRegistry(store), role, `GY-${role === 'worker' ? 9001 : 9002}`);
     assert.equal(fresh.session?.account, 'claude-d', `${role} selection skips the held account`);
     assert.match(fresh.skipped.find(entry => entry.account === 'claude-c')?.reason ?? '', /exhausted/);
-    await ok(coordinator, `agent-registry/sessions/${(fresh.session as { id: string }).id}/end`, { reason: 'fixture' });
+    await ok(coordinator, `agent-registry/sessions/${fresh.session!.id}/end`, { reason: 'fixture' });
   }
 });
