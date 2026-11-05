@@ -371,51 +371,51 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
 });
 
-test('unit:orphaned-registry-sessions — diag step 1', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-});
-
-test('unit:orphaned-registry-sessions — diag step 2', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-});
-
-test('unit:orphaned-registry-sessions — diag step 3', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-  const file = join(host.root, '.graphyard/master.json'); const c = JSON.parse(await readFile(file, 'utf8')); c.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp'); await writeFile(file, JSON.stringify(c), { mode: 0o600 });
-});
-
-test('unit:orphaned-registry-sessions — diag step 4', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-  const file = join(host.root, '.graphyard/master.json'); const c = JSON.parse(await readFile(file, 'utf8')); c.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp'); await writeFile(file, JSON.stringify(c), { mode: 0o600 });
-  const config = await loadMasterConfig(host.root);
-});
-
-test('unit:orphaned-registry-sessions — diag step 5', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-  const file = join(host.root, '.graphyard/master.json'); const c = JSON.parse(await readFile(file, 'utf8')); c.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp'); await writeFile(file, JSON.stringify(c), { mode: 0o600 });
-  const config = await loadMasterConfig(host.root);
-  const login = await claudeLogin('submitted-worker');
-});
-
-test('unit:orphaned-registry-sessions — diag step 6', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-  const file = join(host.root, '.graphyard/master.json'); const c = JSON.parse(await readFile(file, 'utf8')); c.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp'); await writeFile(file, JSON.stringify(c), { mode: 0o600 });
-  const config = await loadMasterConfig(host.root);
-  const login = await claudeLogin('submitted-worker');
-  memoryRegistry(config.hostId, login);
-});
-
-test('unit:orphaned-registry-sessions — diag step 7', async () => {
-  await temporaryDirectory('diag-var-tmp', '/var/tmp');
-  const host = await launchFleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
-  const file = join(host.root, '.graphyard/master.json'); const c = JSON.parse(await readFile(file, 'utf8')); c.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp'); await writeFile(file, JSON.stringify(c), { mode: 0o600 });
-  const config = await loadMasterConfig(host.root);
-  const login = await claudeLogin('submitted-worker');
-  memoryRegistry(config.hostId, login);
-  requested(12);
+test('unit:orphaned-registry-sessions — GY-3012 submitted epoch 4 frees its worker slot when the finished pane is gone', async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
+  try {
+    const config = await loadMasterConfig(host.root), registry = memoryRegistry(config.hostId, await claudeLogin('submitted-worker'));
+    const selectedAt = '2026-11-04T15:44:00.000Z', endedAt = '2026-11-04T15:46:59.000Z', clock = Date.parse('2026-11-04T15:47:00.000Z');
+    const item = requested(12);
+    item.key = 'GY-3012'; item.epoch = 4; item.submission!.epoch = 4; item.autoDispatch = undefined;
+    item.sessions = [{ id: 'worker:4', kind: 'implementation', principal: 'worker', epoch: 4, runtime: 'codex', host: config.hostId,
+      workspace: null, tab: null, pane: 'w4G:finished', agentName: 'worker', role: null, head: item.candidate!.sha,
+      attach: null, transcript: null, subject: item.title, startedAt: selectedAt, updatedAt: endedAt, endedAt, state: 'finished', outcome: 'submitted' }];
+    const reservation: FleetSession = { id: 'cadad93d-0335-4c72-b4b6-959eebb04aaf', role: 'worker', account: 'reviewer-account', runtime: 'claude', model: 'opus',
+      host: config.hostId, work: item.key, principal: 'worker', group: null, selectedAt, selectedBy: 'master', reason: 'worker launch', skipped: [], endedAt: null, endReason: null };
+    registry.registry.roles.push({ ...registry.registry.roles[0], name: 'worker', concurrency: 1 });
+    registry.registry.sessions.push(reservation);
+    const kept = structuredClone(item);
+    const orphans = (items = [item], agents: { pane_id?: string }[] | null = []) => orphanedRegistrySessions(registry.registry, config.hostId, agents, [], clock, items);
+    assert.deepEqual(orphans([item], null), [], 'unreadable inventory is a gap');
+    assert.deepEqual(orphans([item], [{ pane_id: 'w4G:finished' }]), [], 'a visible pane keeps the reservation');
+    const active = structuredClone(item); active.sessions![0].state = 'running';
+    assert.deepEqual(orphans([active]), [], 'a genuinely active implementation keeps its slot');
+    const leased = structuredClone(item); leased.lease = { owner: 'worker', epoch: 4, expiresAt: new Date(clock + 60_000).toISOString() };
+    assert.deepEqual(orphans([leased]), [], 'a live lease is preserved');
+    const otherEpoch = structuredClone(item); otherEpoch.sessions![0].epoch = 3;
+    assert.deepEqual(orphans([otherEpoch]), [], 'another attempt cannot end this reservation');
+    assert.equal(orphans()[0].id, reservation.id, 'finished submitted work releases even within launch grace');
+    const effects = tickEffects(host, config, registry, () => [item], 0, clock);
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => clock);
+    assert.deepEqual(tick.registryClosed, [{ work: item.key, id: reservation.id, role: 'worker', pane: 'w4G:finished' }]);
+    assert.match(reservation.endReason!, /submitted implementation is finished/);
+    // The next automatic worker dispatch takes the slot; no manual release or claim is needed.
+    const queued = requested(51);
+    Object.assign(queued, { key: 'GY-3051', type: 'chore', stage: 'ready', epoch: 17, submission: null, candidate: null, observation: null, autoDispatch: undefined });
+    config.workers = [workerProfileSchema.parse({ name: 'worker', principal: 'worker', agentName: 'worker', kind: 'claude', mode: 'launch', credentialFile: config.credentialFile })];
+    const dispatched: string[] = [];
+    await runCycle(config, emptyDaemonState(config), {
+      snapshot: async () => ({ work: [item, queued], now: new Date(clock).toISOString() }), agents: () => [],
+      credentials: async () => ({ worker: { available: true, reason: null } }), closeSession: async () => {}, persist: async () => {},
+      dispatch: async work => {
+        const next = await registry.client.select({ role: 'worker', host: config.hostId, group: null, work: work.key, principal: 'worker', observations: [] });
+        assert.equal(next.selected, true);
+        dispatched.push(work.key);
+        return { epoch: 18, pane: 'w4G:next-worker', runtime: 'claude' };
+      },
+    }, () => clock);
+    assert.deepEqual(dispatched, ['GY-3051']);
+    assert.deepEqual(item, kept, 'slot reconciliation preserves the submitted candidate and requirements');
+  } finally { await host.cleanup(); }
 });
