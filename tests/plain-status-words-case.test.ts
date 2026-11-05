@@ -1,9 +1,11 @@
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import pg from 'pg';
 import { databaseUrl } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -22,6 +24,9 @@ import type { E2eReport } from '../src/e2e/runner.js';
 // their own on the same control plane (delivery-pipeline does), so such a merge lands before each run.
 
 const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
+
+// The case signs in to the served dashboard: a fresh checkout (a worker's private verification) has none built yet.
+before(() => { if (!existsSync('dist/index.html')) execFileSync(process.execPath, [join(dirname(createRequire(import.meta.url).resolve('vite/package.json')), 'bin', 'vite.js'), 'build', '--configLoader', 'runner'], { stdio: 'ignore' }); });
 
 /** An earlier case's delivery: merged moments ago, of another commit than the one served. */
 function earlierMerge(n: number) {
