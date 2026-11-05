@@ -8,7 +8,10 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
-import { describeAttempts, dispatchFailureLimit, emptyDispatchCursor, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
+import { describeAttempts, instantExitReason, isUnactedProducerAttempt, unactedProducerAttempts } from '../src/dispatch/attempts.js';
+import { dispatchFailureLimit, emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 
 // GY-1153: Producer attempts that never started (runtime quota, trust prompt, busy profiles)
 // do not spend a request on a healthy account.
