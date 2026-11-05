@@ -30,13 +30,11 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
   // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
   'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
-  // GY-3018: retire validation runner and attribution tables after indexed decision peers.
-  'sha256:9d4a955464bdbf4edd43d938a964f4c6e7c3c3472748451dc9a3196f4ec2bede',
   // GY-3076: persist browser sign-in session digests across server restarts.
   'sha256:a0047ee2fd35c862cfd4e38f8bf33620933ea67ebe26f5092acca63f83eb9a5b',
   // GY-3088: the work index and work tables' session, queue and pane definitions.
   'sha256:661c3ea67aac115ddefbbbe929990108ae67c6a8f2bb22d34ce583be417b6274',
-  // GY-3023: combine retired protocol tables with sign-in sessions and the current work index.
+  // GY-3018: retire validation runner and attribution tables after sign-in and work-index updates.
   'sha256:a127cbeeb6417fece94948bf7e28c43443b9c1f66a39c2023d15779b9935e0d8',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */

@@ -107,3 +107,35 @@ test('unit:five-step-cycle — reconciliation never reads retired merge windows 
   assert.ok(queries.length > 0, 'the passes reached the database');
   assert.deepEqual(queries.filter(sql => sql.includes('direct-merge')), [], 'no merge-window ledger read');
 });
+
+test('unit:revert-survives-reinstall — coordinator revert outcomes append history transactionally without redelivering the item', async () => {
+  const { recordMergeEvent } = await import('../src/server/merge-record.js');
+  const { mergeRecordKey } = await import('../src/merge-writer/executor.js');
+  const created = await submitted();
+  let work = await engine.observe(created.id, created.revision, observation(created));
+  work = await mergeDelivered(engine, work);
+  const services = { engine } as unknown as import('../src/server/routes.js').Services;
+  const refused = { kind: 'serve-revert' as const, serve: head, mergeSha: work.delivery!.mergeSha,
+    outcome: 'refused' as const, revertSha: null, reason: 'revert trial failed', reland: null,
+    failingCase: 'fixture', failingStep: null, failingReason: '404', at: new Date().toISOString() };
+  await assert.rejects(recordMergeEvent(services, worker, work.id, refused, randomUUID()), /coordinator identity/);
+  await assert.rejects(recordMergeEvent(services, executor, work.id, { ...refused, mergeSha: base }, randomUUID()), /delivered merge/);
+  await recordMergeEvent(services, executor, work.id, refused, mergeRecordKey(work, refused));
+  assert.equal((await store.workItem(work.id))!.mergeLedger!.serveReverts![0]!.reason, refused.reason);
+  const reverted = { ...refused, outcome: 'reverted' as const, revertSha: 'c'.repeat(40), reason: null };
+  engine.gitRunner = async () => ({ status: 1, stdout: '', stderr: '' });
+  await assert.rejects(recordMergeEvent(services, executor, work.id, reverted, randomUUID()), /must hold/);
+  engine.gitRunner = async () => ({ status: 0, stdout: '', stderr: '' });
+  await recordMergeEvent(services, executor, work.id, reverted, mergeRecordKey(work, reverted));
+  await recordMergeEvent(services, executor, work.id, reverted, mergeRecordKey(work, reverted));
+  const reland = { ...reverted, reland: 'GY-9000' };
+  await recordMergeEvent(services, executor, work.id, reland, mergeRecordKey(work, reland));
+  const stored = (await store.workItem(work.id))!;
+  assert.equal(stored.stage, 'done');
+  assert.deepEqual(stored.delivery, work.delivery);
+  const { kind: _kind, ...expected } = reland;
+  assert.deepEqual(stored.mergeLedger!.serveReverts, [expected]);
+  const rows = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.serve-revert' ORDER BY seq", [work.id])).rows;
+  assert.equal(rows.length, 3, 'refusal, revert, re-land; receipt replay adds no row');
+  assert.equal(rows[0].payload.reason, 'revert trial failed');
+});

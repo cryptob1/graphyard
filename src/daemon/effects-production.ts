@@ -40,6 +40,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
+  /** Explicit confinement root for an embedded, non-CLI coordinator. */
+  coordinatorRoot?: string;
   fetcher?: typeof fetch;
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
@@ -160,14 +162,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const directory = installDirectory(installIdFor(current().repository));
       return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
     },
-    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
+    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot }),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
-    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run }),
+    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice.
     dispatchTick: snapshot => ticking ??= (async () => {
       cursor ??= await readDispatchCursor(root, current());
-      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
+      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, coordinatorRoot: deps.coordinatorRoot }));
     })().finally(() => { ticking = null; }),
     personalMasterSession: config => ({
       ...masterSessionEffects(root, () => config, run),

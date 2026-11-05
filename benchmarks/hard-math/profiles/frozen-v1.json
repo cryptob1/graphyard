@@ -1,0 +1,46 @@
+{
+  "version": "v1",
+  "profileDigest": "d3f66b87480cbc23131eedcf08a4f821b3ec5158e774ac42d4260a0306015bd0",
+  "generatorDigest": "c90f54c9c986fd582b096c18eb7af4cf1e032b59a5c7f433ee4faedc0de78f05",
+  "contractDigest": "15af56bf08afde6daee1941693f3988cbcefec13f4d7c31720e0cd9f479286d9",
+  "oracleDigest": "6f78471866e94ee6302417820951a607274820ff8aab054170806a12f0874ae5",
+  "calibration": {
+    "runs": 1,
+    "candidateProfiles": 2,
+    "seeds": [
+      1,
+      2,
+      3
+    ],
+    "polynomials": 24,
+    "maxCoefficientBits": 251,
+    "elapsedMs": 3696,
+    "distinctRoots": [
+      2,
+      2,
+      8,
+      3,
+      0,
+      3,
+      1,
+      0,
+      2,
+      2,
+      8,
+      3,
+      0,
+      3,
+      1,
+      0,
+      0,
+      2,
+      8,
+      3,
+      0,
+      3,
+      1,
+      0
+    ],
+    "purpose": "Exact oracle calibration only; no agent performance or collaboration claim."
+  }
+}

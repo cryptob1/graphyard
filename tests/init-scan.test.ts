@@ -391,7 +391,7 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     // While the control plane itself fails, next names the setup-from-zero step that installs it (GY-1412).
     assert.match(status.next, /^FAIL control-plane: not reachable: .*\(fix: docs\/setup-from-zero\.md step 3/);
     const preview = JSON.parse(await runCli(root, ['doctor', '--profile', 'preview-validation'], env));
-    assert.ok(preview.readiness.items.every((item: any) => item.id !== 'runner-registration'), 'the retired validation runner is not a readiness requirement');
+    assert.ok(!preview.readiness.items.some((item: any) => item.id === 'runner-registration'), 'the retired runner needs no registration');
     assert.equal(preview.readiness.items.find((item: any) => item.id === 'e2e-suite').status, 'missing');
     await assert.rejects(runCli(root, ['doctor', '--profile', 'done'], env), /Unknown completion profile/);
   } finally { await rm(root, { recursive: true, force: true }); }

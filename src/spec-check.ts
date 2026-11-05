@@ -83,7 +83,8 @@ export interface SpecCheckLaunchResult { launch: string; work: string; profile: 
  * reads named files from, and starts the reviewer session with the vendored EGM prompts.
  */
 export async function launchSpecCheck(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
-  run?: ChildRun; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  run?: ChildRun;
+  coordinatorRoot?: string; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   registerLaunch?: (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string; policyRevision: number }) => Promise<{ launch: string }>;
   /** How a headless check's one child runs (headless-session.ts); the host's by default. */
   headless?: HeadlessExec | null;
@@ -138,13 +139,13 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
       // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
       const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
-      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
+      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
       const own = withVerificationPath(harness.environment, launch.environment);
       const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const vendor = await readVendorPrompts();
       if (runHeadless) {
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-          contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
           holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
           answer: async output => postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath: config.cliPath, environment }) });
@@ -161,7 +162,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       pane = created.pane;
       await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
         specCheckPrompt(config, work, vendor, checkout.worktree, baseTip), run,
-        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
+        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask });
       return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.

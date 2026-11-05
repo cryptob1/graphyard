@@ -12,6 +12,8 @@ import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
+import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
+
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
  * (cli/verify.ts `countProofCases`, which this mirrors: the CLI module is not imported into the loop).
@@ -80,6 +82,7 @@ export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly 
   ({ files: flaked.files.slice(0, 100), tests: flaked.tests.slice(0, 100), at });
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
+  | ({ kind: 'serve-revert' } & MergeServeRevert)
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
     /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
@@ -106,7 +109,7 @@ export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview; sit
 export const previewRecordEvent = (preview: ItemPreview, site?: PreviewSiteFile[]) => ({ kind: 'preview', preview, ...(site ? { site } : {}) } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
 const previewEvent = (event: MergeRecordEvent): PreviewRecordEvent | null => (event as { kind: string }).kind === 'preview' ? event as unknown as PreviewRecordEvent : null;
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
-export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial', 'trial-step': 'merge.trial-step' } as const;
+export const mergeRecordKinds = { ...mergeLedgerKinds, 'serve-revert': mergeServeRevertKind, trial: 'merge.trial', 'trial-step': 'merge.trial-step' } as const;
 /**
  * GY-1852: the attempt a record belongs to: an id the loop persists before the attempt's first
  * write, and the write's place in it. A retry of that write replays its exact first input under the
@@ -123,6 +126,7 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
   // A preview's record is keyed by the preview and its state: a retry replays it, a later state is a new write.
   const preview = previewEvent(event);
   if (preview) return `preview-record:${work.id}:${preview.preview.id}:${preview.preview.state}`;
+  if (event.kind === 'serve-revert') return `merge-record:${work.id}:revert:${event.mergeSha}:${event.serve}:${event.outcome}:${event.reland ?? 'pending'}`;
   if (work.mergeAttempt) return `merge-record:${work.id}:${work.mergeAttempt.id}:${work.mergeAttempt.write}:${event.kind}`;
   if (event.kind === 'pushed' || event.kind === 'reconciled') return `merge-record:${work.id}:${event.kind}:${event.mergeSha}`;
   const attempt = work.mergeLedger?.events ? `#${work.mergeLedger.events}` : '';
