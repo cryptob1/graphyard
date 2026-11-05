@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempOwnerMarker, writeTempOwner } from '../../src/tmp-reclaim.js';
-import { liveServerIn, stopServerIn } from './postgres-stop.js';
+import { liveServersUnder, stopServersUnder } from './postgres-stop.js';
 
 // The one shared helper for a test that needs a temporary directory (GY-421): an embedded-Postgres
 // data dir, a worktree, a store, a home. Every test in the suite creates its directories here and
@@ -20,11 +20,11 @@ import { liveServerIn, stopServerIn } from './postgres-stop.js';
 // remove them once that process is gone.
 //
 // Node runs a file's top-level after hooks in the order they were registered, and this one is
-// registered on import, before the file's own: a directory an embedded Postgres still runs in —
-// its `postmaster.pid` names a live process — is therefore left to that file's own after hook to
-// stop, and removed when the process exits, after every hook has run. A server still running then
-// is stopped first (fast shutdown, awaited): removing its data under it made the checkpointer
-// PANIC on its shutdown checkpoint and dump core, hundreds of times an hour (GY-3112).
+// registered on import, before the file's own: a directory an embedded Postgres still runs in or
+// under — a live postmaster's `-D` lies inside it — is therefore left to that file's own after hook
+// to stop, and removed when the process exits, after every hook has run, stopping (fast shutdown,
+// awaited) any server still running there first. Removing a data directory under a running server
+// made its checkpointer PANIC on the shutdown checkpoint and dump core (GY-3112).
 
 const created = new Set<string>();
 
@@ -46,7 +46,7 @@ export async function temporaryDirectory(label: string, parent?: string): Promis
 export async function disposeTemporaryDirectories(options: { force?: boolean } = {}): Promise<string[]> {
   const removed: string[] = [];
   for (const directory of [...created]) {
-    if (!options.force && liveServerIn(directory) !== null) continue;
+    if (!options.force && liveServersUnder(directory).length) continue;
     created.delete(directory);
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); }
     catch { /* a directory another pass already took is no leak */ }
@@ -60,7 +60,7 @@ after(async () => { await disposeTemporaryDirectories(); });
 // What the hook left to a server's own teardown goes once every hook has run.
 process.on('exit', () => {
   for (const directory of created) {
-    if (!stopServerIn(directory)) continue;
+    if (!stopServersUnder(directory)) continue;
     try { rmSync(directory, { recursive: true, force: true }); rmSync(tempOwnerMarker(directory), { force: true }); } catch { /* the runner's sweep takes it */ }
   }
 });

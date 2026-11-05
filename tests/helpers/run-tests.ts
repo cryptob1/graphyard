@@ -9,7 +9,7 @@ import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type Re
 import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
-import { stopServerIn } from './postgres-stop.js';
+import { stopServersUnder } from './postgres-stop.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
 // needs nothing the session has to know about the host.
@@ -46,7 +46,7 @@ export async function sweepLeftoverTempDirectories(tmpRoot = tmpdir()) {
   const removed: string[] = [];
   for (const name of await readdir(tmpRoot).catch(() => [] as string[])) {
     const directory = join(tmpRoot, name), owner = name.startsWith('graphyard-') && !name.endsWith('.owner') ? await readTempOwner(directory) : null;
-    if (!owner || !tempOwnerGone(owner) || !stopServerIn(directory)) continue;
+    if (!owner || !tempOwnerGone(owner) || !stopServersUnder(directory)) continue;
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); } catch { /* the next sweep */ }
   }
   return removed;
