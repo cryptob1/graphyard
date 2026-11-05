@@ -53,7 +53,7 @@ table.flow-data tbody th{font-weight:500;color:var(--text)}
 .edit-menu{border:1px solid var(--border);border-radius:7px;padding:4px 14px 12px}.edit-menu button{margin:8px 8px 0 0;font-size:12px;padding:9px 13px}
 .criterion-text{color:var(--text)}.proof-markers{list-style:none;padding:0;margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11px}.marker-pass{color:var(--text-2)}.marker-fail{color:var(--blocked)}.marker-pending{color:var(--needs-you)}
 abbr.term{text-decoration:underline dotted var(--text-2);text-underline-offset:3px;cursor:help}
-.guide{max-width:640px}.guide-video{width:100%;border-radius:9px;margin:8px 0 16px}.guide ol{padding-left:20px;line-height:1.8;color:var(--text-2)}.guide h2{margin-top:26px}
+.guide{max-width:640px}.guide-video{width:100%;border-radius:9px;margin:8px 0 16px}.guide pre{overflow:auto;max-width:100%}.guide pre code{white-space:pre;overflow-wrap:normal}.guide :not(pre)>code{display:inline;padding:1px 4px;margin:0}.guide ol{padding-left:20px;line-height:1.8;color:var(--text-2)}.guide h2{margin-top:26px}
 .criteria-fields{border:1px solid var(--border);border-radius:7px;padding:12px 14px;display:grid;gap:12px}.criteria-fields legend{font-size:12px;color:var(--text);padding:0 6px}.criteria-fields code{display:inline;padding:1px 4px;margin:0}.criterion-row{display:grid;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--border)}
 .main .page-heading .eyebrow{display:none}
 /* GY-1979: the top bar lays the release line and the section's tabs out inside itself — a column
