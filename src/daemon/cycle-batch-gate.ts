@@ -80,7 +80,7 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  */
 export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'performed' | 'now'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
-  if (!reads?.git || !gate) return;
+  if (!reads?.git || !gate) return null;
   const file = gateRecordPath(gate.root);
   const live = flights.get(cycle.state) ?? { gate: null, diagnostics: null };
   flights.set(cycle.state, live);
@@ -120,4 +120,5 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.diagnostics = null; }
     })();
   }
+  return { gate: live.gate, diagnostics: live.diagnostics };
 }

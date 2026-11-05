@@ -106,8 +106,10 @@ export type GateOutcome =
 class GateTimeout extends Error {}
 
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
-export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'catalogMs'>, tip: string, landings: readonly ServeLanding[]): Promise<string[]> {
-  const bound = landings.flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
+export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'catalogMs' | 'merges'>, tip: string, landings: readonly ServeLanding[]): Promise<string[]> {
+  // A reverted item's own cases left main with it.
+  const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+  const bound = landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
   const cases = record.catalogMs !== null && record.catalogMs <= gateLimitMs ? await ports.catalog(tip) : [...bound, ...await ports.core(tip)];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
@@ -126,7 +128,8 @@ export async function runGate(ports: GatePorts, record: GateRecord): Promise<Gat
     const left = deadline - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
     let timer: NodeJS.Timeout | undefined;
-    return Promise.race([ports.run(commit, checks, files), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })]).finally(() => clearTimeout(timer));
+    return Promise.race([ports.run(commit, checks, files), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
+      .then(failed => { if (ports.now() > deadline) throw new GateTimeout(); return failed; }).finally(() => clearTimeout(timer));
   };
   const hold = (reason: string): GateOutcome => { record.held = { tip, reason, at: at() }; return { outcome: 'held', tip, reason }; };
   const landings = await ports.landings(verified, tip);
