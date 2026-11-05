@@ -1,7 +1,7 @@
 {
   "id": "create-work-item",
-  "title": "An operator creates a work item and finds it in the work list",
-  "description": "POST /api/work creates an item with its criteria, replaying the create under the same idempotency key returns the same item, and GET /api/work lists it.",
+  "title": "An operator creates a work item, finds it in the work list and releases it",
+  "description": "POST /api/work creates an item with its criteria, replaying the create under the same idempotency key returns the same item, GET /api/work lists it, and POST /api/work/:id/ready releases it from the backlog.",
   "tags": ["api", "work"],
   "target": "uat",
   "required": true,
@@ -19,6 +19,12 @@
       "expect": [{ "path": "title", "equals": "E2E case {{case}} run {{run}}" }, { "path": "stage", "equals": "backlog" }, { "path": "key", "type": "string" }],
       "save": { "id": "id", "key": "key" }
     },
-    { "kind": "http", "name": "list the work", "method": "GET", "path": "/api/work", "status": 200, "expect": [{ "path": "", "includes": { "id": "{{id}}", "key": "{{key}}" } }] }
+    { "kind": "http", "name": "list the work", "method": "GET", "path": "/api/work", "status": 200, "expect": [{ "path": "", "includes": { "id": "{{id}}", "key": "{{key}}" } }] },
+    {
+      "kind": "http", "name": "release the item", "method": "POST", "path": "/api/work/{{id}}/ready",
+      "body": { "reason": "Released by the create-work-item E2E case." },
+      "status": 200,
+      "expect": [{ "path": "key", "equals": "{{key}}" }, { "path": "ready", "equals": true }]
+    }
   ]
 }

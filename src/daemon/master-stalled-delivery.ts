@@ -6,6 +6,7 @@ import type { DispatchCursor } from '../auto-dispatch.js';
 import type { ServingReport } from '../deploy-watch.js';
 import type { Work } from '../model.js';
 import { parseBaseFailureReason } from '../merge-writer/executor.js';
+import { gateCauses, type GateRecord } from '../batch-gate.js';
 
 export const stalledDeliveryAction = 'Diagnose the shared base failure, file or advance its repair, and resume delivery with every test and merge requirement intact. Act as the operator-agent; no human review or approval is needed.';
 
@@ -70,5 +71,6 @@ export function dispatchCauses(work: readonly Work[], cursor: Pick<DispatchCurso
 export function deploymentCauses(failure: ServingReport['failedDeploy']): MasterCause[] {
   return failure ? [cause('deployment', `Deployment ${failure.tip ?? 'unknown'}: ${failure.reason ?? 'failed'}${failure.restoring ? `; restoring ${failure.restoring}` : ''}`)] : [];
 }
+export const batchGateCauses = (record: GateRecord | null): MasterCause[] => gateCauses(record).map(entry => cause(entry.key, entry.detail));
 export const masterCausePrompt = (causes: MasterCause[]) =>
   `Graphyard needs coordinator action:\n${causes.map(cause => cause.detail).join('\n')}\nNext agent action: Diagnose the named causes and affected work. Use typed master commands to clear resolved blockers, file or advance repairs, and retry failed launch/review/proof operations. Preserve every test and merge requirement. Act as the operator-agent; routine repair needs no human review or approval.`;

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { secretName, isAbsolute, capabilityTiers, quotaStates, registryRoles, type AgentRegistry, type RegistryMutation, type FleetAccount, type FleetRuntime, upsert, demandRegistry, registryLimits, type FleetModel, type FleetAccountInput, unobservedQuota, type FleetRole } from '../model/registry.js';
+import { secretName, isAbsolute, capabilityTiers, quotaStates, registryRoles, type AgentRegistry, type RegistryMutation, type FleetAccount, type FleetRuntime, upsert, demandRegistry, registryLimits, type FleetModel, type FleetAccountInput, unobservedQuota, type FleetRole, roleRuntimeRefusal } from '../model/registry.js';
 import { notSecret, secretPaths } from '../model/registry-keys.js';
 import { accountKeySchema, smokeObservationSchema } from './registry-keys.js';
 /**
@@ -192,6 +192,13 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     demandRegistry(!unknown.length, `Unknown account${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}; add an account before the role that names it`);
     const model = role.policy?.model;
     demandRegistry(!model || next.models.some(entry => entry.name === model), `Unknown model ${model}; add the model before the role policy that runs it`);
+    // A stored role refuses what it cannot launch, naming the runtime and the ones it supports; the registry stands unchanged.
+    const unsupported = role.accounts.flatMap(name => {
+      const account = next.accounts.find(entry => entry.name === name)!; // unknown accounts already refused above
+      const refusal = roleRuntimeRefusal(next, account, role.name);
+      return refusal ? [refusal] : [];
+    });
+    demandRegistry(!unsupported.length, unsupported.join('; '));
     upsert(next.roles, role.name === 'master' ? { ...role, concurrency: Math.min(role.concurrency, 1) } : role); // One master session per ownership scope; all scopes share one coordinator loop.
   };
   let reasonText: string;

@@ -8,6 +8,7 @@ import { profileHealth } from '../daemon/sessions.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';
+import { gateRecordPath, gateSummary, readGateRecord } from '../batch-gate.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage } from '../model/plain-stage.js';
@@ -83,6 +84,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
+    // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight, a held batch and the revert rate over the last 20 merges.
+    batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
     sessions,
     // GY-2994: a spec checker that ended without a report, named with its reason until the item's check reports.
     specChecksEnded: Object.entries(state?.actions ?? {}).filter(([key, action]) => key.startsWith('spec-check-ended:') && open.some(item => item.key === action.work && !specCheckCurrent(item)))
