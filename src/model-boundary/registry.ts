@@ -77,6 +77,8 @@ export const quotaObservationSchema = z.object({
   /** A session that ran out mid-work reported this exhaustion (GY-1581); it stands against later probes until its reset.
    * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account. */
   session: z.enum(['named', 'guessed']).optional(),
+  /** When the exhaustion reported was observed (GY-3117): one observed at or before an operator's latest quota decision on the account is not applied. */
+  since: z.string().datetime().optional(),
 }).strict();
 
 /**
@@ -184,7 +186,7 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     // Its identity is read again by the next probe (GY-1573): the operator may have logged the home in afresh.
     // The registry's copy of a session's exhaustion report is one (GY-1581); its reporting host re-reports its own until the reset.
     const { session: _held, ...kept } = existing?.quota ?? unobservedQuota;
-    upsert(next.accounts, { ...account, quota: sameLogin ? { ...kept, identity: null } : { ...unobservedQuota } });
+    upsert(next.accounts, { ...account, quota: sameLogin ? { ...kept, identity: null } : { ...unobservedQuota }, ...existing?.quotaDecision ? { quotaDecision: existing.quotaDecision } : {} });
     demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
   };
   const setRole = (role: FleetRole) => {
@@ -225,6 +227,7 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     // An operator marks the quota, not the login: the identity a probe read stays unless the mark names one, and a mark
     // naming null clears it, so an account whose login is now unknown is no longer anyone's twin (GY-1573).
     account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), identity: data.quota.identity !== undefined ? data.quota.identity : account.quota.identity ?? null, observedAt: context.at, observedBy: context.actor, source: 'operator' };
+    account.quotaDecision = { state: data.quota.state, at: context.at }; // GY-3117: what it overrides is never replayed onto it
   }
   else if (kind === 'role.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRole(data.role); }
   else if (kind === 'role.remove') {

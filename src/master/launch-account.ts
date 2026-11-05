@@ -113,7 +113,7 @@ export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'crede
   const launches = role === 'worker'
     ? `worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')})`
     : `${role} sessions (${repeated.records.map(entry => entry.requestId ?? entry.at).join(', ')})`;
-  const hold = await recordObservedExhaustion(config, repeated.account, { at: new Date(now).toISOString(), resetsAt: last.resetsAt, role, profile: last.profile, work: work.key,
+  const hold = await recordObservedExhaustion(config, repeated.account, { at: last.at, resetsAt: last.resetsAt, role, profile: last.profile, work: work.key,
     reason: `${work.key}'s last ${repeated.records.length} ${launches} each ended on ${repeated.account}'s limit notice: ${last.reason}` }, now, report);
   return { account: repeated.account, hold };
 }

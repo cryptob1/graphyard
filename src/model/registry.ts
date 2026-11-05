@@ -15,7 +15,9 @@ export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
 export interface ObservedQuota extends QuotaObservation { observedAt: string | null; observedBy: string | null; source: 'probe' | 'operator' | null }
 export const unobservedQuota: ObservedQuota = { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: null, observedAt: null, observedBy: null, source: null };
 export type FleetAccountInput = z.infer<typeof accountSchema>;
-export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
+/** An operator's latest quota decision on an account (GY-3117): kept through probes and account changes, so no exhaustion observed before it is applied again. */
+export interface QuotaDecision { state: QuotaObservation['state']; at: string }
+export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; quotaDecision?: QuotaDecision; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
 
 /** The roles a configured registry is expected to name. Setup proposes every one of them, master included (GY-2939); an operator re-names any role's accounts. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'master'] as const;
