@@ -3,7 +3,7 @@ import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, exhaustionEvidence, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
-import { workerOrder, planSpreadOrder, fleetOrder } from './worker-preference.js';
+import { workerOrder, planSpreadOrder, fleetOrder, roleUnsupported } from './worker-preference.js';
 import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from './provider-usage.js';
 
 /**
@@ -197,7 +197,9 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
   return changed;
 }
 
-export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
+/** A choice past the role's own accounts (GY-3092): the role, the fleet account that serves it, and why each of the role's own was passed over. */
+export interface RoleFailover { role: FleetRoleName; account: string; reason: string }
+export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[]; failover: RoleFailover | null }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
  * The session an action runs on: the first account of the role, in the role's own order, that is
@@ -207,13 +209,15 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
  * implementer provider (GY-1496) the first such account on another provider is chosen; one only at
  * its session limit is waited for, and with none the first same-provider account serves with the
  * fallback recorded. Pure: the registry passed in already carries the executor's fresh
- * observations and only live sessions; fails over to the fleet's other usable accounts (GY-3092).
+ * observations and only live sessions. With none of the role's own accounts usable, any other
+ * registry account the role can run on serves, the choice naming the failover (GY-3092); the role
+ * is refused only when no account in the registry can serve it.
  */
 export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
-  const running = liveSessions(registry).filter(session => session.role === role.name && (role.name !== 'master' || (session.group ?? null) === (request.group ?? null)));
+    const running = liveSessions(registry).filter(session => session.role === role.name && (role.name !== 'master' || (session.group ?? null) === (request.group ?? null)));
   if (running.length >= role.concurrency) return { account: null, skipped: [],
     reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${role.concurrency} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
   const skipped: SessionSkip[] = [], diverse = role.name === 'reviewer' ? diversity : null, others: SessionSkip[] = [], busy: SessionSkip[] = [], order = workerOrder(registry, role, request.prefer ?? null);
@@ -222,11 +226,13 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     // The role's policy names the model its sessions run, where it names one; else the account's own.
     const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account.runtime)!;
     const model = registry.models.find(entry => entry.name === (policy.model ?? account.model)) ?? registry.models.find(entry => entry.name === account.model)!;
-    return { account, runtime, model, policy, skipped: passed, reason: `${account.name} is the first eligible account for ${role.name} (${order.includes(account.name) ? `preference ${index + 1} of ${order.length}` : `the fleet's first usable account for ${role.name}`}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
+    const own = role.accounts.includes(account.name), passedOwn = passed.filter(entry => role.accounts.includes(entry.account));
+    const failover = own ? null : { role: role.name, account: account.name, reason: passedOwn.map(entry => entry.reason).join('; ') || `role ${role.name}'s own accounts cannot serve it` };
+    return { account, runtime, model, policy, skipped: passed, failover, reason: `${account.name} is the first eligible account for ${role.name} (${own ? `preference ${index + 1} of ${order.length}` : `failing over: none of the role's own ${role.accounts.length} accounts can serve it`}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
   }; // the spread trails plans already holding a live session (GY-2943); a diverse reviewer's trial keeps GY-1496's order, which records its shared-provider passes itself; past the role's own accounts the fleet's fallback takes any account the preference leaves standing (GY-3092)
   for (const [, name] of [...(diverse ? order : planSpreadOrder(registry, order)), ...fleetOrder(registry, role, request.prefer ?? null)].entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });

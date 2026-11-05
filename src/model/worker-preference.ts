@@ -28,17 +28,22 @@ export function planSpreadOrder(registry: AgentRegistry, order: readonly string[
   return [...order.filter(name => !busy.has(planOf(name))), ...order.filter(name => busy.has(planOf(name)))];
 }
 /**
- * The accounts a fleet-wide selection may fail over to once a role's own accounts are all spent
- * (GY-3092): the ones the preference leaves standing — Pi first for a `fast` item, the strong
- * runtimes for a `strong` one — that the registry holds beyond the role's own order, in the
- * preference's order. The role's account list is a preference, not a fence, so the failover climbs
- * the fleet past it; a preference is still a fence for the runtimes it arranges, so a `strong` item
- * never takes a Pi account beneath it (GY-1746).
+ * Why a role cannot run on an account's runtime, or null (GY-3092): a role that limits its sessions
+ * to a tool allowlist needs a runtime that names a tools flag, or the session would run every tool.
+ */
+export function roleUnsupported(registry: AgentRegistry, role: Pick<FleetRole, 'name' | 'policy'>, name: string): string | null {
+  const account = registry.accounts.find(entry => entry.name === name), runtime = registry.runtimes.find(entry => entry.name === account?.runtime);
+  if (!runtime || !role.policy?.tools?.length || runtime.launch.toolsFlag) return null;
+  return `${name} runs ${runtime.name}, which names no tools flag for role ${role.name}'s tool allowlist`;
+}
+/**
+ * The accounts a role fails over to once its own are all spent (GY-3092): every other registry
+ * account, in registry order. The role's list is a preference, not a fence; a `strong` worker
+ * preference still never takes a Pi account (GY-1746).
  */
 export function fleetOrder(registry: AgentRegistry, role: Pick<FleetRole, 'name' | 'accounts'>, prefer: 'fast' | 'strong' | null): string[] {
-  const tried = workerOrder(registry, role, prefer);
   const pi = (name: string) => { const account = registry.accounts.find(entry => entry.name === name); return registry.runtimes.find(entry => entry.name === account?.runtime)?.launch.kind === 'pi'; };
-  return registry.accounts.map(entry => entry.name).filter(name => !tried.includes(name) && (prefer !== 'strong' || !pi(name)));
+  return registry.accounts.map(entry => entry.name).filter(name => !role.accounts.includes(name) && !(role.name === 'worker' && prefer === 'strong' && pi(name)));
 }
 
 /** The attempts an item gets on Pi before the strong runtimes take it: its first two. */

@@ -134,6 +134,8 @@ export class AgentRegistry {
           selectedAt: at, selectedBy: actor.id, reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
         registry.sessions.push(session); registry.revision++; registry.updatedAt = at;
         await this.append(db, actor, 'selected', registry, { session });
+        // A role served past its own accounts says so in the registry history (GY-3092).
+        if (choice.failover) await this.append(db, actor, 'failover', registry, { failover: { ...choice.failover, session: session.id, work: request.work } });
         result = { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
       } else {
         const last = registry.refusals.at(-1);

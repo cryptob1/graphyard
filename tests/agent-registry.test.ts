@@ -17,7 +17,7 @@ import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { NoHealthyAccountError, atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
+import { atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
