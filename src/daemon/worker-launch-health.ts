@@ -6,9 +6,10 @@ import { resumeExitWindowMs } from '../master/session-resume.js';
 import { redactString } from '../redaction.js';
 import type { Cycle } from './cycle.js';
 import { record } from './effects.js';
-import { clearProfileFailure, recordProfileFailure } from './sessions.js';
+import { clearLaunchFailures, recordLaunchFailure } from './sessions.js';
 
-export const earlyExitKey = (item: Pick<Work, 'id'>) => `early-exit:${item.id}`;
+import { earlyExitKey } from './repeated-failure.js';
+export { earlyExitKey };
 
 /** Read before the pane closes. Only an unsuccessful supervisor exit is a launch incident. */
 export async function workerLaunchHealth(cycle: Cycle, item: Work, session: SessionHandle): Promise<string | null> {
@@ -23,7 +24,8 @@ export async function workerLaunchHealth(cycle: Cycle, item: Work, session: Sess
   const startedAt = session.runtimeStartedAt ?? session.startedAt;
   const age = Date.parse(ended ? end.endedAt! : new Date(clock).toISOString()) - Date.parse(startedAt);
   const key = earlyExitKey(item);
-  const recovered = () => { delete state.actions[key]; if (profile) clearProfileFailure(state, profile); return null; };
+  const runtime = session.runtime ?? null;
+  const recovered = () => { delete state.actions[key]; if (runtime) clearLaunchFailures(state, runtime, item); return null; };
   if (item.submission?.epoch === epoch || age >= resumeExitWindowMs) return recovered();
   const space = item.workspaces.find(space => space.epoch === epoch && space.host === config.hostId);
   const reading = space && session.initialHead ? await Promise.resolve().then(() => effects.worktreeState?.(space)).catch(() => null) : null;
@@ -41,7 +43,7 @@ export async function workerLaunchHealth(cycle: Cycle, item: Work, session: Sess
   }
   const tail = redactString(safe.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').slice(-20).join('\n')).trim();
   const reason = `${item.key} epoch ${epoch}: worker exited unsuccessfully (${exit[1]}) within ${resumeExitWindowMs / 1000}s without submitting or committing${tail ? `: ${tail}` : ''}`.slice(0, 500);
-  if (profile) recordProfileFailure(state, profile, reason, clock);
+  recordLaunchFailure(state, runtime, item, reason, clock);
   await record(state, key, { kind: 'dispatch', work: item.key, principal: session.principal, epoch, state: 'failed', detail: reason,
     attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, clock, effects.persist);
   return reason;

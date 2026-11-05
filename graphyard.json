@@ -127,6 +127,25 @@
       "project": null,
       "uat": null,
       "production": null
+    },
+    "applications": [
+      {
+        "id": "fixture-site",
+        "kind": "static",
+        "directory": "fixtures/static-site",
+        "build": null
+      },
+      {
+        "id": "fixture-app",
+        "kind": "compose",
+        "file": "fixtures/compose-app/compose.yml",
+        "service": "web",
+        "port": 8080
+      }
+    ],
+    "cases": {
+      "fixture-static-home": "fixture-site",
+      "fixture-compose-app": "fixture-app"
     }
   }
 }

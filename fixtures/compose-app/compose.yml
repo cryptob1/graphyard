@@ -1,0 +1,8 @@
+# The fixture Compose application the e2e:fixture-compose-app case runs against (GY-3125). It uses the
+# trial image the merge writer's host already holds, so nothing is pulled.
+services:
+  web:
+    image: graphyard-trial:local
+    command: ["node", "/app/serve.mjs"]
+    volumes:
+      - ./serve.mjs:/app/serve.mjs:ro

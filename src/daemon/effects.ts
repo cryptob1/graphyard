@@ -5,6 +5,7 @@ import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
 import type { ExhaustionSignal, PartialWork } from '../model/capacity.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
+import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
@@ -97,7 +98,17 @@ export interface DaemonEffects {
   reclaimDisk?: () => Promise<string[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
-  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /**
+   * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
+   * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
+   * result's `canary` names the one it ran, with its start failure if any); `exclude` names the
+   * accounts whose runtime backs off this item; `onRuntime` hears the runtime each launch chose.
+   */
+  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
+  /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
+  registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
+  /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
+  setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */
   launchSpecCheck?: (work: Work) => Promise<{ pane?: string | null; launch: string; settled?: Promise<string | null> } | void>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */

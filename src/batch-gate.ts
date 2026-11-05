@@ -5,7 +5,7 @@
 // the core cases graphyard.json names in gate.core (Graphyard's: create-work-item and the deploy
 // smoke, the `smoke` case: the built candidate serves and answers healthy), and the tests the
 // affected selection picks for the changed files — the whole E2E catalog in place of the subset
-// when the diagnostics measured it to fit the 45-minute limit. A passing gate records the tip as
+// only when its measured gate-run time fits half the 45-minute limit (GY-3144). A passing gate records the tip as
 // verified in .graphyard/main-gate.json; the deploy watch serves only that commit. A failing check
 // is re-run once (a pass is a filed flake), an affected test that also fails on the last verified
 // commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
@@ -17,7 +17,9 @@
 // The batch it cut is the batch it gates (GY-3135): a loop restart adopts the batch in flight —
 // the same candidate tip, files, checks and the steps already finished — and finishes it, so the
 // restart a deploy causes never recuts a batch onto a newer tip; merges that land meanwhile ride
-// the next batch, and only the gate's own failure or timeout recuts.
+// the next batch, and only the gate's own failure or timeout recuts. Each settled run is the
+// record's lastOutcome — tip, outcome, reason or failing check, end time — and the run in flight
+// names its current step; master status shows both (GY-3141).
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -28,11 +30,24 @@ import type { ServeLanding } from './merge-writer/serve-revert.js';
 export const gateLimitMs = 45 * 60_000;
 /** How often the full suite and the whole catalog run against the verified commit. */
 export const diagnosticsIntervalMs = 24 * 60 * 60_000;
+/** The gate runs the whole catalog only when its measured time fits this share of the limit. */
+export const catalogBudgetMs = gateLimitMs / 2;
+/** The whole-catalog gate runs the measure reads: the last few, within a week (older ones age out so the catalog is tried again). */
+export const gateRunsWindow = 5, gateRunsMaxAgeMs = 7 * 24 * 60 * 60_000;
 /** The merges the revert rate reads, and the rate above which the master is woken. */
 export const revertRateWindow = 20, revertRateLimit = 1 / 5;
 
 /** One merge the gate judged: its landing commit, its item, and whether the gate reverted it. */
 export interface GateMerge { sha: string; item: string; reverted: boolean }
+/** What the last settled gate run came to (GY-3141): why the verified commit has not moved, at a glance. */
+export interface GateLastOutcome {
+  /** The tip the run gated; null when the run failed before it cut a batch. */
+  tip: string | null;
+  outcome: 'verified' | 'reverted' | 'timeout' | 'retry' | 'held' | 'error';
+  /** The reason it came to that outcome — the failing check a revert names — or null on a plain pass. */
+  reason: string | null;
+  finishedAt: string;
+}
 /** The gate's persisted state, beside the deploy record. */
 export interface GateRecord {
   /** The repository whose main this gates (owner/name), so the deploy watch of another repository never reads it. */
@@ -46,7 +61,9 @@ export interface GateRecord {
    * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
    * `results` fields are optional only for records an older loop wrote.
    */
-  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]> } | null;
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string } | null;
+  /** The last settled run (GY-3141), so status names why nothing has verified instead of guessing. */
+  lastOutcome: GateLastOutcome | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
   attempt: { recuts: number; timeouts: number };
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
@@ -57,6 +74,12 @@ export interface GateRecord {
   merges: GateMerge[];
   /** How long the whole E2E catalog took when the diagnostics last ran it. */
   catalogMs: number | null;
+  /**
+   * The recent gate runs of the whole catalog, newest last: how long each batch run of the build,
+   * the whole catalog and the batch's affected tests took under real load, a timeout counting its
+   * elapsed time. Optional only for records an older loop wrote.
+   */
+  gateRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
   at: string;
 }
@@ -74,7 +97,7 @@ export async function writeGateRecord(file: string, record: GateRecord) {
 
 /** At rollout, the currently served commit is the first verified commit. */
 export const bootstrapGate = (repository: string | null, served: string): GateRecord => ({
-  repository, verified: served, verifiedAt: new Date().toISOString(), inFlight: null, attempt: { recuts: 0, timeouts: 0 }, held: null,
+  repository, verified: served, verifiedAt: new Date().toISOString(), inFlight: null, attempt: { recuts: 0, timeouts: 0 }, held: null, lastOutcome: null,
   results: {}, merges: [], catalogMs: null, diagnosticsAt: null, at: new Date().toISOString(),
 });
 
@@ -94,9 +117,9 @@ export interface GatePorts {
   /**
    * Runs checks on the commit in the private trial container — `build`, `e2e:<case>`, `affected`
    * (the selection over `files`) or `test:<file>` — and answers the failing ones, a failing
-   * affected test as `test:<file>`.
+   * affected test as `test:<file>`. The run is bounded by `timeoutMs`, what is left of the gate's own limit.
    */
-  run(commit: string, checks: readonly string[], files: readonly string[]): Promise<string[]>;
+  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]>;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`. */
@@ -119,13 +142,36 @@ export type GateOutcome =
 
 class GateTimeout extends Error {}
 
+/**
+ * The measured time of a gate run of the whole catalog: the slowest recent gate run of it (the
+ * build, the catalog and the batch's affected tests, under load); with none recent, the
+ * diagnostics' catalog time; null when nothing was measured.
+ */
+export function measuredCatalogMs(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, now: number): number | null {
+  const recent = (record.gateRuns ?? []).filter(run => now - Date.parse(run.at) < gateRunsMaxAgeMs).map(run => run.ms);
+  return recent.length ? Math.max(...recent) : record.catalogMs;
+}
+
+/** Whether the gate runs the whole catalog: only when its measured time fits half the gate's limit. */
+export function catalogFits(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, now: number) {
+  const measured = measuredCatalogMs(record, now);
+  return measured !== null && measured <= catalogBudgetMs;
+}
+
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
-export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'catalogMs' | 'merges'>, tip: string, landings: readonly ServeLanding[]): Promise<string[]> {
+export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
   // A reverted item's own cases left main with it.
   const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
   const bound = landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
-  const cases = record.catalogMs !== null && record.catalogMs <= gateLimitMs ? await ports.catalog(tip) : [...bound, ...await ports.core(tip)];
+  const cases = whole ? await ports.catalog(tip) : [...bound, ...await ports.core(tip)];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
+}
+
+/** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
+export function gateOutcomeReason(outcome: GateOutcome): string | null {
+  if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}`;
+  if (outcome.outcome === 'timeout') return `past ${gateLimitMs / 60_000} minutes`;
+  return 'reason' in outcome ? outcome.reason : null;
 }
 
 /**
@@ -137,7 +183,18 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
  */
 export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
   // A settled gate frees its batch; one that threw leaves it standing for the next loop to adopt.
-  return gateFlight(ports, record).then(outcome => { record.inFlight = null; return outcome; });
+  // Either way the run's outcome is the record's last (GY-3141), so status names why it ended.
+  const finishedAt = () => new Date(ports.now()).toISOString();
+  return gateFlight(ports, record).then(
+    outcome => {
+      record.inFlight = null;
+      if (outcome.outcome !== 'idle') record.lastOutcome = { tip: outcome.tip, outcome: outcome.outcome, reason: gateOutcomeReason(outcome), finishedAt: finishedAt() };
+      return outcome;
+    },
+    error => {
+      record.lastOutcome = { tip: record.inFlight?.tip ?? null, outcome: 'error', reason: error instanceof Error ? error.message : String(error), finishedAt: finishedAt() };
+      throw error;
+    });
 }
 
 async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
@@ -154,20 +211,27 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   // The cut is the cut: an adopted batch keeps the files and checks it was cut with, re-derived only
   // when an older loop recorded a batch without them.
   const files = adopted?.files?.length ? adopted.files : await ports.files(verified, tip);
-  const checks = adopted?.checks?.length ? adopted.checks : await gateChecks(ports, record, tip, landings);
+  const whole = adopted?.checks?.length ? adopted.whole ?? false : catalogFits(record, ports.now());
+  const checks = adopted?.checks?.length ? adopted.checks : await gateChecks(ports, record, tip, landings, whole);
   const results: Record<string, string[]> = adopted?.results ?? {};
-  record.inFlight = adopted ? { ...adopted, files, checks, results } : { tip, startedAt: at(), files, checks, results };
+  record.inFlight = adopted ? { ...adopted, files, checks, results, whole } : { tip, startedAt: at(), files, checks, results, whole };
   if (!adopted) await ports.checkpoint?.();
+  // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
+  const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
   // The clock is the batch's own, so a restart between steps never lengthens the gate.
   const deadline = Date.parse(record.inFlight.startedAt) + gateLimitMs;
   const finished = results;
+  const stepKey = (commit: string, runChecks: readonly string[]) => `${commit} ${[...runChecks].sort().join(' ')}`;
+  // A whole-catalog batch run measures the catalog's gate-run time, a timeout its elapsed time.
+  const mainKey = stepKey(tip, checks), mainCached = mainKey in finished, mainStarted = ports.now();
+  const measure = (ms: number) => { if (whole) record.gateRuns = [...record.gateRuns ?? [], { ms, at: at() }].slice(-gateRunsWindow); };
   const run = (commit: string, runChecks: readonly string[], runFiles: readonly string[]) => {
-    const key = `${commit} ${[...runChecks].sort().join(' ')}`;
+    const key = stepKey(commit, runChecks);
     if (key in finished) return Promise.resolve(finished[key]!); // a step the last loop finished
     const left = deadline - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
     let timer: NodeJS.Timeout | undefined;
-    return Promise.race([ports.run(commit, runChecks, runFiles), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
+    return Promise.race([ports.run(commit, runChecks, runFiles, left), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
       .then(async failed => {
         if (ports.now() > deadline) throw new GateTimeout();
         finished[key] = failed; // the finished step survives a restart
@@ -178,19 +242,22 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   };
   const hold = (reason: string): GateOutcome => { record.held = { tip, reason, at: at() }; return { outcome: 'held', tip, reason }; };
   try {
+    await step(`running ${checks.length} check(s) on ${tip.slice(0, 12)}`);
     const failed = await run(tip, checks, files);
+    if (!mainCached) measure(ports.now() - mainStarted);
     let confirmed: string[] = [], flakes: string[] = [];
     const knownRed: string[] = [];
     if (failed.length) {
       // A failing check runs once more before anything is blamed: a pass is a flake, filed for an owner.
+      await step(`re-running ${failed.join(', ')}`);
       const again = await run(tip, failed, files);
       flakes = failed.filter(check => !again.includes(check));
       for (const check of flakes) await ports.file({ key: `flake:${check}`, title: `Flaky check on main: ${check}`, description: `The batch gate's check ${check} failed on ${tip.slice(0, 12)} and passed on its re-run. Make it deterministic.` });
       for (const check of again) {
         // Only an affected test may be a known red: one that also fails on the last verified commit.
         if (check.startsWith('test:')) {
-          const cached = record.results[verified]?.[check];
-          const failsThere = cached ?? (await run(verified, [check], files)).includes(check);
+          let failsThere = record.results[verified]?.[check];
+          if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
           if (failsThere) {
             knownRed.push(check);
@@ -215,7 +282,9 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     const owned = landings.filter((landing): landing is ServeLanding & { item: Work } => !!landing.item && !record.merges.some(merge => merge.sha === landing.sha && merge.reverted));
     if (!owned.length) return hold(`${tip.slice(0, 12)} fails ${check} and no merged item in the batch is left to revert`);
     let culprit = owned[owned.length - 1]!;
+    await step(`bisecting ${check} over the batch's prefixes`);
     for (const landing of owned.slice(0, -1)) if ((await run(landing.sha, [check], files)).includes(check)) { culprit = landing; break; }
+    await step(`reverting ${culprit.item.key} for ${check}`);
     const reverted = await ports.revert(culprit, tip, check);
     if ('held' in reverted) return hold(reverted.held);
     // A push the moving main rejected blames nothing new: the next cycle gates again.
@@ -225,6 +294,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha };
   } catch (error) {
     if (!(error instanceof GateTimeout)) throw error;
+    if (!(mainKey in finished)) measure(ports.now() - Date.parse(record.inFlight.startedAt));
     // A timeout blames nobody: the batch is recut once, and a second timeout holds.
     record.attempt = { ...record.attempt, timeouts: record.attempt.timeouts + 1 };
     if (record.attempt.timeouts >= 2) return hold(`the batch gate timed out twice (past ${gateLimitMs / 60_000} minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`);
@@ -256,8 +326,11 @@ export function revertRate(record: Pick<GateRecord, 'merges'> | null) {
 export function gateSummary(record: GateRecord | null) {
   if (!record) return null;
   const rate = revertRate(record);
-  return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt, inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt } : null,
-    held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt };
+  return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt,
+    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null } : null,
+    // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
+    lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
+    held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()) };
 }
 
 /** The causes that wake the master: a held batch, and a revert rate above 1 in 5. */

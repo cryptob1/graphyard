@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bootstrapGate, gateCauses, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { bootstrapGate, catalogBudgetMs, catalogFits, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -87,8 +88,8 @@ function reads(coordinator: string, options: { gate?: { root: string; repository
   return { value, trials, filed };
 }
 
-const cycleWith = (mergeWriter: MergeWriterReads, work: Work[], state = emptyDaemonState({ url: 'http://127.0.0.1:1', repository } as any)) =>
-  ({ state, effects: { mergeWriter } as any, snapshot: { work, now: new Date().toISOString() } as any, performed: [], now: Date.now });
+const cycleWith = (mergeWriter: MergeWriterReads, work: Work[], state = emptyDaemonState({ url: 'http://127.0.0.1:1', repository } as any), log: (line: string) => void = () => {}) =>
+  ({ state, effects: { mergeWriter } as any, snapshot: { work, now: new Date().toISOString() } as any, performed: [], now: Date.now, log });
 
 test('integration:main-batch-gate — at rollout the served commit is the first verified commit; one gate at a time runs build, the bound and core cases and the affected tests on the main tip, records it verified, and the deploy watch serves only the verified commit', async () => {
   const { coordinator, verified, tip, merges, work } = await fixture('batch-gate-pass');
@@ -122,8 +123,8 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   // Graphyard's own graphyard.json names the core set.
   assert.deepEqual(checkoutRepositoryPolicy(process.cwd()).gate.core, ['create-work-item', 'smoke']);
 
-  // The whole catalog replaces the subset once the diagnostics measured it within the limit.
-  const fits = { ...bootstrapGate(repository, verified), catalogMs: gateLimitMs - 1 };
+  // The whole catalog replaces the subset once its measured time fits half the limit.
+  const fits = { ...bootstrapGate(repository, verified), catalogMs: catalogBudgetMs - 1 };
   const whole = reads(coordinator);
   const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
   assert.equal((await runGate(batchGatePorts({ ...whole.value, git: whole.value.git! }, work), fits)).outcome, 'verified');
@@ -210,8 +211,8 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
 });
 
 /** Pure gate ports: `fails(commit, check)` decides each check's result on each commit. */
-function gatePorts(landings: ServeLanding[], fails: (commit: string, check: string, call: number) => boolean, options: { slow?: boolean } = {}) {
-  let clock = 0, calls = 0;
+function gatePorts(landings: ServeLanding[], fails: (commit: string, check: string, call: number) => boolean, options: { slow?: boolean; clock?: number } = {}) {
+  let clock = options.clock ?? 0, calls = 0;
   const runs: { commit: string; checks: string[] }[] = [], filed: string[] = [], reverted: string[] = [];
   const tip = landings.at(-1)!.sha;
   const ports: GatePorts = {
@@ -362,4 +363,222 @@ test('integration:batch-gate-diagnostics-and-revert-rate — the scheduled full 
   assert.deepEqual(gateCauses(high).map(cause => cause.key), ['revert-rate']);
   assert.match(gateCauses(high)[0]!.detail, /5\/20/);
   assert.equal(gateSummary(high)!.revertRate, '5/20', 'master status shows the revert rate');
+});
+
+test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minute limit, not the 20-minute merge-trial deadline: a 25-minute run records its verdict, only a run past 45 minutes is a timeout, and the trial it runs carries the gate\'s remaining time', async () => {
+  const { trialTimeoutMinutes } = await import('../src/master/merge-writer-settings.js');
+  const { mergeWriterReads } = await import('../src/daemon/cycle-merge-writer.js');
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const verified = sha(1), batch = [landing(2), landing(3)], tip = sha(3);
+  assert.ok(gateLimitMs === 45 * 60_000 && gateLimitMs > trialTimeoutMinutes * 60_000);
+
+  // A run needing 25 minutes completes and records its verdict; the run was handed the gate's own time left.
+  {
+    const { ports } = gatePorts(batch, () => false);
+    let clock = 0;
+    const limits: number[] = [];
+    ports.now = () => clock;
+    ports.run = async (_commit, _checks, _files, timeoutMs) => { limits.push(timeoutMs); clock += 25 * 60_000; return []; };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(ports, record)).outcome, 'verified');
+    assert.equal(record.verified, tip);
+    assert.deepEqual(limits, [gateLimitMs], 'the trial is bounded by the gate\'s 45 minutes');
+  }
+  // Only a run past 45 minutes counts as a gate timeout.
+  {
+    const { ports } = gatePorts(batch, () => false);
+    let clock = 0;
+    ports.now = () => clock;
+    ports.run = async () => { clock += gateLimitMs + 1; return []; };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(ports, record)).outcome, 'timeout');
+    assert.equal(record.attempt.timeouts, 1);
+  }
+  // The gate's trial port passes that bound down to the trial, which otherwise keeps the merge-trial deadline.
+  {
+    const seen: (number | undefined)[] = [];
+    const base: MergeWriterReads = { ...reads('/unused').value, trial: async (...args) => { seen.push(args[9]); return { build: 'pass', tests: { passed: 0, failed: [], files: 0 }, e2e: [] } as unknown as MergeTrialRun; } };
+    await batchGatePorts({ ...base, git: base.git! }, []).run(tip, ['build', 'affected'], ['src/a.ts'], 30 * 60_000);
+    assert.deepEqual(seen, [30 * 60_000]);
+    const timeouts: number[] = [];
+    const writer = mergeWriterReads({ baseBranch: 'main', run: {}, repository } as never, '/unused', async () => '', { base: '/unused', record: async () => undefined,
+      trial: async input => { timeouts.push(input.timeoutMs); return {} as never; } });
+    const gateItem = { key: 'batch-gate', criteria: [] } as unknown as Work;
+    await writer.trial(tip, [], gateItem, undefined, undefined, undefined, undefined, undefined, undefined, gateLimitMs);
+    await writer.trial(tip, [], gateItem);
+    assert.deepEqual(timeouts, [gateLimitMs, trialTimeoutMinutes * 60_000]);
+  }
+});
+
+test('unit:batch-gate-catalog-by-measured-time — the gate runs the whole E2E catalog only when the catalog time measured from recent gate runs, batch tests included, fits half the 45-minute limit; otherwise smoke, the bound cases, gate.core and the affected tests; the full catalog still runs as the diagnostic', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3)];
+  const day = Date.parse('2026-11-05T12:00:00Z');
+  const catalog = ['create-work-item', 'smoke', 'case-2', 'case-3', 'other'];
+  const subset = ['build', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:smoke', 'affected'];
+  const whole = ['build', ...catalog.map(id => `e2e:${id}`), 'affected'];
+  const gate = (record: GateRecord, runMs: number, slow = false) => {
+    const { ports, runs } = gatePorts(batch, () => false);
+    let clock = day;
+    ports.now = () => clock;
+    ports.catalog = async () => catalog;
+    ports.run = async (commit, checks) => { runs.push({ commit, checks: [...checks] }); clock += slow ? gateLimitMs + 1 : runMs; return []; };
+    return runGate(ports, record).then(outcome => ({ outcome, checks: runs[0]!.checks }));
+  };
+  assert.equal(catalogBudgetMs, gateLimitMs / 2);
+
+  // Nothing measured: the subset. The quiet diagnostics' 9.5 minutes fit half the limit: the whole catalog.
+  assert.deepEqual((await gate(bootstrapGate(repository, verified), 60_000)).checks, subset);
+  const quiet = { ...bootstrapGate(repository, verified), catalogMs: 571_824 };
+  const first = await gate(quiet, 30 * 60_000);
+  assert.deepEqual(first.checks, whole, 'the whole catalog runs while its measured time fits');
+  assert.equal(first.outcome.outcome, 'verified', 'a run that does fit the limit still verifies');
+  // That gate run measured 30 minutes under load: the next batch runs the subset, whatever the diagnostics measured.
+  assert.deepEqual(quiet.gateRuns!.map(run => run.ms), [30 * 60_000], 'the gate run is measured, batch tests included');
+  quiet.verified = verified;
+  assert.deepEqual((await gate(quiet, 60_000)).checks, subset, 'the measured gate run does not fit half the limit');
+  assert.equal(quiet.gateRuns!.length, 1, 'a subset run measures nothing of the catalog');
+
+  // A whole-catalog run that times out counts its elapsed time.
+  const timed = { ...bootstrapGate(repository, verified), catalogMs: 5 * 60_000 };
+  assert.equal((await gate(timed, 0, true)).outcome.outcome, 'timeout');
+  assert.ok(timed.gateRuns![0]!.ms > gateLimitMs, 'the timeout is measured');
+
+  // A fast recent gate run fits; the slowest of the recent runs decides; old runs age out.
+  const fast = { ...bootstrapGate(repository, verified), catalogMs: 40 * 60_000, gateRuns: [{ ms: 12 * 60_000, at: new Date(day - 60_000).toISOString() }] };
+  assert.equal(measuredCatalogMs(fast, day), 12 * 60_000, 'recent gate runs, not the diagnostics');
+  assert.ok(catalogFits(fast, day));
+  assert.ok(!catalogFits({ ...fast, gateRuns: [...fast.gateRuns, { ms: catalogBudgetMs + 1, at: fast.gateRuns[0]!.at }] }, day), 'the slowest recent run decides');
+  assert.ok(!catalogFits(fast, day + gateRunsMaxAgeMs), 'aged-out runs leave the diagnostics\' measure');
+
+  // The full catalog still runs as the scheduled diagnostic, whatever the gate runs.
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const seen: string[][] = [];
+  const base: MergeWriterReads = { ...reads('/unused').value, git: async args => args[0] === 'ls-tree' ? catalog.map(id => `${id}.json`).join('\n') : '',
+    trial: async (_commit, _files, trialItem) => { seen.push(trialItem.criteria.flatMap(criterion => criterion.proofs)); return { build: 'pass', tests: { passed: 0, failed: [], files: 0 }, e2e: [] } as unknown as MergeTrialRun; } };
+  await batchGatePorts({ ...base, git: base.git! }, []).diagnose(verified);
+  assert.deepEqual(seen.at(-1)!.sort(), catalog.map(id => `e2e:${id}`).sort(), 'the diagnostic runs the whole catalog');
+});
+
+test('unit:batch-gate-outcome-visible — every settled run is the record\'s lastOutcome with its tip, outcome, reason or failing check and end time, the run in flight names its current step, and each outcome is one journal line (GY-3141)', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3)], tip = sha(3);
+  const at = '2026-11-05T10:00:00.000Z';
+
+  // A passing run records a plain verified outcome with no reason.
+  {
+    const { ports } = gatePorts(batch, () => false, { clock: Date.parse(at) });
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(ports, record)).outcome, 'verified');
+    assert.deepEqual(record.lastOutcome, { tip, outcome: 'verified', reason: null, finishedAt: at });
+  }
+  // A reverted run names its failing check and the culprit it reverted.
+  {
+    const { ports } = gatePorts(batch, (commit, check) => check === 'e2e:case-3' && commit !== sha(2), { clock: Date.parse(at) });
+    const record = bootstrapGate(repository, verified);
+    await runGate(ports, record);
+    assert.deepEqual([record.lastOutcome!.outcome, record.lastOutcome!.reason], ['reverted', 'reverted GY-3 for failing e2e:case-3']);
+    assert.ok(Date.parse(record.lastOutcome!.finishedAt!) > 0, 'the end time is recorded');
+  }
+  // A timeout names the limit, and the second timeout holds with its reason.
+  {
+    const { ports } = gatePorts(batch, () => false, { slow: true });
+    const record = bootstrapGate(repository, verified);
+    await runGate(ports, record);
+    assert.deepEqual([record.lastOutcome!.outcome, record.lastOutcome!.reason], ['timeout', 'past 45 minutes']);
+    await runGate(ports, record);
+    assert.equal(record.lastOutcome!.outcome, 'held');
+    assert.match(record.lastOutcome!.reason!, /timed out twice/);
+    // master status shows the last outcome with its tip cut to the summary's 12 characters.
+    assert.equal(gateSummary(record)!.lastOutcome!.tip, tip.slice(0, 12));
+    assert.equal(gateSummary(record)!.lastOutcome!.reason, record.lastOutcome!.reason);
+  }
+  // A run that throws records an error outcome with the message, and leaves its batch standing for adoption.
+  {
+    const { ports } = gatePorts(batch, () => false, { clock: Date.parse(at) });
+    ports.run = async () => { throw new Error('the trial container is gone'); };
+    const record = bootstrapGate(repository, verified);
+    await assert.rejects(runGate(ports, record), /the trial container is gone/);
+    assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome, record.lastOutcome!.reason, record.lastOutcome!.finishedAt], [tip, 'error', 'the trial container is gone', at]);
+    assert.equal(record.inFlight?.tip, tip, 'the thrown gate leaves its batch for the next loop to adopt');
+  }
+
+  // End to end on real git: the run in flight names its current step, and the settled outcome is one journal line.
+  {
+    const { coordinator, verified: realVerified, tip: realTip, work } = await fixture('batch-gate-outcome');
+    await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+    await writeFile(deployRecordPath(coordinator), JSON.stringify({ tip: realVerified, failed: null, reason: null, at: new Date().toISOString(), repository }));
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const loop = reads(coordinator, { gate: { root: coordinator, repository }, hold });
+    // The tip's own trial starting is the signal that the step label before it has landed on disk (the gate awaits that write before it runs).
+    let reached!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const realTrial = loop.value.trial!;
+    loop.value.trial = async (commit: string, files: readonly string[], trialItem: any) => { if (commit === realTip) reached(); await hold; return realTrial(commit, files, trialItem); };
+    const lines: string[] = [];
+    const first = await batchGateStep(cycleWith(loop.value, work, undefined, line => lines.push(line)));
+    await entered;
+    // While the whole batch's run is in flight, the record and master status name the current step.
+    const mid = readGateRecord(gateRecordPath(coordinator))!;
+    assert.equal(mid.inFlight!.tip, realTip);
+    assert.match(mid.inFlight!.step!, /^running \d+ check\(s\) on \w{12}$/);
+    assert.equal(gateSummary(mid)!.inFlight!.step, mid.inFlight!.step);
+    release();
+    await first!.gate;
+    await first!.diagnostics;
+    const done = readGateRecord(gateRecordPath(coordinator))!;
+    assert.equal(done.lastOutcome!.outcome, 'verified');
+    assert.equal(done.lastOutcome!.tip, realTip);
+    assert.ok(Date.parse(done.lastOutcome!.finishedAt!) > 0);
+    const outcomeLines = lines.filter(line => line.includes('Batch gate on'));
+    assert.equal(outcomeLines.length, 1, 'one journal line names the outcome');
+    assert.match(outcomeLines[0]!, new RegExp(`^\\[graphyard-master\\] cycle \\d+ merge done: Batch gate on ${realTip.slice(0, 12)}: verified$`));
+  }
+
+  // A failing run end to end: the error outcome reaches the record on disk and the journal in one line.
+  {
+    const { coordinator, verified: realVerified, tip: realTip, work } = await fixture('batch-gate-error');
+    await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+    await writeFile(deployRecordPath(coordinator), JSON.stringify({ tip: realVerified, failed: null, reason: null, at: new Date().toISOString(), repository }));
+    const loop = reads(coordinator, { gate: { root: coordinator, repository } });
+    const realTrial = loop.value.trial!;
+    loop.value.trial = async (commit, files, trialItem) => {
+      if (commit !== realVerified) throw new Error('the trial container is gone');
+      return realTrial(commit, files, trialItem);
+    };
+    const lines: string[] = [];
+    const gate = await batchGateStep(cycleWith(loop.value, work, undefined, line => lines.push(line)));
+    await gate!.gate;
+    await gate!.diagnostics;
+    const record = readGateRecord(gateRecordPath(coordinator))!;
+    assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome], [realTip, 'error']);
+    assert.match(record.lastOutcome!.reason!, /the trial container is gone/);
+    assert.equal(record.inFlight?.tip, realTip, 'the failed run leaves its batch standing for the next loop to adopt');
+    assert.ok(lines.some(line => line.includes('The batch gate failed and runs again next cycle') && line.includes('the trial container is gone')), 'the journal names the error outcome');
+  }
+});
+
+test('unit:verified-batch-release-note — a verified batch appends a release note of its items with their summaries and bound cases, the reverted listed apart, the latest 20 kept', async () => {
+  const { coordinator, verified, tip, work } = await fixture('batch-gate-release-note', 'GY-2');
+  await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+  await writeFile(deployRecordPath(coordinator), JSON.stringify({ tip: verified, failed: null, reason: null, at: new Date().toISOString(), repository }));
+  work[0]!.summary = 'GY-1 summary';
+  work[0]!.description = 'First sentence. Second sentence.';
+  work[2]!.criteria = [{ id: 'AC-1', text: 'works', proofs: ['unit:y'] }] as Work['criteria'];
+  const loop = reads(coordinator, { gate: { root: coordinator, repository }, failing: commit => (commit === tip ? ['e2e:case-2'] : []) });
+  const first = await batchGateStep(cycleWith(loop.value, work));
+  await first!.gate; await first!.diagnostics;
+  assert.equal(readGateRecord(gateRecordPath(coordinator))!.lastOutcome?.outcome, 'reverted');
+  await (await batchGateStep(cycleWith(loop.value, work)))!.gate; // the recut batch verifies
+  const notes = readReleaseNotes(releaseNotesPath(coordinator));
+  const note = notes.at(-1)!;
+  assert.equal(note.commit, readGateRecord(gateRecordPath(coordinator))!.verified);
+  assert.ok(note.reverted.some(entry => entry.key === 'GY-2'));
+  assert.equal(note.items.find(entry => entry.key === 'GY-1')?.summary, 'GY-1 summary');
+  assert.deepEqual(note.items.find(entry => entry.key === 'GY-1')?.cases, ['e2e:case-1']);
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: work[0]! }], new Set()).items.length, 1);
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: { ...work[0]!, summary: '' } }], new Set()).items[0]!.summary, 'First sentence.');
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: work[2]! }], new Set()).items[0]!.cases.length, 0);
+  for (let n = 0; n < 25; n++) await appendReleaseNote(releaseNotesPath(coordinator), note);
+  assert.equal(readReleaseNotes(releaseNotesPath(coordinator)).length, 20);
+  assert.match(latestReleaseNote(releaseNotesPath(coordinator))!.items.join('\n'), /GY-3.*no E2E case/);
 });

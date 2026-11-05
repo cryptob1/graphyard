@@ -43,7 +43,7 @@ test('integration:deploy-watch-runs-deployed-code — a watch that deploys a com
   // The repository the watch serves: this source as a fixture checkout whose origin is local but
   // configured as github.com/owner/project, so the record and the gate name the repository.
   await mkdir(checkout);
-  for (const name of ['src', 'bin', 'scripts', 'docs']) await cp(join(source, name), join(checkout, name), { recursive: true });
+  for (const name of ['src', 'bin', 'scripts', 'docs', 'e2e', 'fixtures']) await cp(join(source, name), join(checkout, name), { recursive: true });
   for (const name of ['package.json', 'package-lock.json', 'graphyard.json', 'README.md']) await cp(join(source, name), join(checkout, name));
   await writeFile(join(checkout, '.gitignore'), 'node_modules/\n.graphyard/\n');
   git(checkout, 'init', '-q', '-b', 'main', '.'); git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'A');
