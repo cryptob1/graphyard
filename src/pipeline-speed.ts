@@ -125,7 +125,8 @@ export function recordIntervention(work: Work, kind: keyof PipelineTimeline['int
 export const deliverySpeedStages = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'] as const;
 export const deliverySpeedWindow = 50;
 export interface SpeedEvent { kind: string; created_at: string; payload?: { work?: { stage?: string } } }
-export interface MergedItem { key: string; mergedAt: string; attempts: number; events: SpeedEvent[] }
+/** `events` is the item's whole ledger, or null when it could not be read. */
+export interface MergedItem { key: string; mergedAt: string; attempts: number; events: SpeedEvent[] | null }
 export interface Spread { median: number; p90: number; samples: number }
 
 const nearestRank = (sorted: number[], fraction: number) => sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
@@ -139,6 +140,7 @@ export function spread(values: number[]): Spread | null {
 
 /** The item's time from its first `ready` event to its merge, and the time it spent in each stage, from the stage each event's snapshot records. */
 export function itemSpeed(item: MergedItem) {
+  if (!item.events) return null;
   const merged = Date.parse(item.mergedAt);
   const events = item.events.map(event => ({ at: Date.parse(event.created_at), stage: event.payload?.work?.stage })).sort((a, b) => a.at - b.at);
   const start = item.events.map(event => ({ kind: event.kind, at: Date.parse(event.created_at) })).filter(event => event.kind === 'ready').map(event => event.at).sort((a, b) => a - b)[0];
@@ -158,11 +160,14 @@ export function deliverySpeed(merged: MergedItem[], open: Pick<Work, 'key' | 'st
   const items = [...merged].sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)).slice(0, deliverySpeedWindow);
   const speeds = items.map(item => ({ item, speed: itemSpeed(item) }));
   const measured = speeds.flatMap(entry => entry.speed ? [entry.speed] : []);
+  // Items whose ledger could not be read, or holds no release, are left out of the spreads and named.
+  const unmeasured = speeds.filter(entry => !entry.speed).map(entry => entry.item.key);
   const longest = open.filter(item => Number.isFinite(Date.parse(item.stageEnteredAt))).sort((a, b) => Date.parse(a.stageEnteredAt) - Date.parse(b.stageEnteredAt))[0];
   return {
     items: items.length,
     readyToMerge: spread(measured.map(speed => speed.releaseToMerge)),
     stages: Object.fromEntries(deliverySpeedStages.map(stage => [stage, spread(measured.flatMap(speed => stage in speed.stages ? [speed.stages[stage]] : []))])),
+    unmeasured,
     attempts: Object.fromEntries(items.map(item => [item.key, item.attempts])),
     longestWait: longest ? { key: longest.key, stage: longest.stage, minutes: minutes(now - Date.parse(longest.stageEnteredAt)) } : null,
   };
