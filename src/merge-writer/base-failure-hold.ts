@@ -28,7 +28,8 @@ export async function baseFailureScope(git: Git, tip: string, tests: readonly st
     for (let at = 1; at < parts.length; at++) { const directory = parts.slice(0, at).join('/'); directories.set(directory, [...(directories.get(directory) ?? []), file]); }
   }
   const seen = new Set(tests.filter(test => files.has(test))), queue = [...seen];
-  const edges = await import('../../scripts/ci-tests.mjs').then(module => module.fileEdges, () => null);
+  // The selection script lives outside src (as units.ts names scripts/graphyard-executor.mjs), so it is loaded by its URL.
+  const edges = await import(new URL('../../scripts/ci-tests.mjs', import.meta.url).href).then((module: typeof import('../../scripts/ci-tests.mjs')) => module.fileEdges, () => null);
   if (!edges) return seen;
   while (queue.length) {
     const file = queue.pop()!;
