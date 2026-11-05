@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { applyRegistryMutation, emptyRegistry, fleetView, foldObservation, proposedRuntimes, type AgentRegistry } from '../src/model/registry';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, proposedRuntimes, type AgentRegistry } from '../src/model/registry';
 import { NOW, boardApi } from './ui-board';
 
 // GY-978 AC-3: the Agents, Settings and Operator automation pages are built from the shared layout

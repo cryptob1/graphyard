@@ -12,7 +12,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { watchPorts, deployHealth } from '../src/cli/upgrade.js';
 import { deployOnce, deployRecordPath, readDeployRecord } from '../src/deploy-watch.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { alignLoopUnit, deployUnitText, loopUnitText } from '../src/supervisor.js';
+import { alignLoopUnit, deployUnitText, loopUnitText } from '../src/install/loop-unit.js';
 import { perInstallUnits, deployUnitOf } from '../src/install/units.js';
 import { masterConfigSchema } from '../src/master.js';
 import { restartCause } from '../src/daemon/run.js';

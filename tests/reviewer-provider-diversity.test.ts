@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseSession, emptyRegistry, runtimeSchema, modelSchema, accountSchema, roleSchema, unobservedQuota, type AgentRegistry, type FleetAccount, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, unobservedQuota, type AgentRegistry, type FleetAccount, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
+import { runtimeSchema, modelSchema, accountSchema, roleSchema } from '../src/model-boundary/registry.js';
 import type { ReviewDiversity } from '../src/model/review-diversity.js';
 
 /**
@@ -113,7 +114,7 @@ test('unit:reviewer-provider-fallback-recorded — busy different provider waits
   assert.match(wait.reason, /GY-9 waits for it rather than a review on anthropic/);
 
   // A different-provider account at its session limit AND otherwise ineligible is not waited for.
-  const held = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1, quota: { ...unobservedQuota, state: 'exhausted', loggedIn: true } }]);
+  const held = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'codex-b', maxSessions: 1, quota: { ...unobservedQuota, state: 'exhausted', loggedIn: true, source: 'operator', reason: 'weekly limit' } }]);
   held.sessions = [session('producer', 'codex-b', 'GY-3', iso(-60_000))];
   assert.equal(chooseSession(held, { role: 'reviewer', host: HOST }, now, diversity('anthropic')).account?.name, 'claude-a');
 
@@ -128,7 +129,7 @@ test('unit:reviewer-provider-fallback-recorded — busy different provider waits
   for (const [label, override] of [
     ['disabled', { enabled: false }],
     ['not logged in', { quota: { ...unobservedQuota, loggedIn: false } }],
-    ['quota is exhausted', { quota: { ...unobservedQuota, loggedIn: true, state: 'exhausted' } }],
+    ['quota is exhausted', { quota: { ...unobservedQuota, loggedIn: true, state: 'exhausted', source: 'operator', reason: 'weekly limit' } }],
     ['failed its smoke test', { smoke: { result: 'fail', reason: 'no reply', at: iso(-60_000), by: 'executor' } }],
     ['placed on elsewhere', { credential: { host: 'elsewhere', home: '/home/codex-b' } }],
   ] as const) {

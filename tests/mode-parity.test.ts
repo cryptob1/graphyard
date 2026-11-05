@@ -10,13 +10,14 @@ import { Engine } from '../src/engine.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { evaluateLandability } from '../src/model/landability.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
+import { evaluateLandability } from '../src/model-boundary/landability.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
+import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
+import { mergeTrialKind } from '../src/model/merge-ledger.js';
 import type { Observation, Work } from '../src/model/work.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1528: mode parity. One fixture item runs through evaluate (the landability verdict, and the

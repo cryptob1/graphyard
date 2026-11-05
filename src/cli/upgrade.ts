@@ -112,12 +112,20 @@ const git = (cwd: string, ...args: string[]) => {
 /** Tracked files with uncommitted changes in the CLI checkout. */
 export const cliChangesOf = (cliRoot: string) => git(cliRoot, 'diff', '--name-only', 'HEAD').split('\n').filter(Boolean);
 
-/** The schema generation a revision's code expects, read from its release.ts; null when it names none. */
+/** The schema generation a revision's code expects, read from its lineage source; null when it names none. */
 export function schemaAt(source: string): number | null {
   const lineage = /schemaGenerations:[^=]*=\s*\[([\s\S]*?)\];/.exec(source);
   if (lineage) return (lineage[1].match(/null|'sha256:[0-9a-f]+'/g) ?? []).length - 1;
   const fixed = /export const schemaVersion\s*=\s*(\d+)/.exec(source);
   return fixed ? Number(fixed[1]) : null;
+}
+
+/** Read today's store lineage or the release source carried by older revisions. */
+function revisionSchema(cliRoot: string, revision: string): number | null {
+  for (const file of ['src/store/schema-lineage.ts', 'src/release.ts']) {
+    try { return schemaAt(git(cliRoot, 'show', `${revision}:${file}`)); } catch { /* the older layout may not have this file */ }
+  }
+  return null;
 }
 
 /** The dated release `--to` names, or without one Graphyard's fetched origin/main tip, from the CLI checkout's refs. */
@@ -128,9 +136,7 @@ export function resolveTarget(cliRoot: string, to?: string): UpgradeTarget {
   try { revision = git(cliRoot, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); }
   catch { throw new Error(`The CLI checkout has no ${ref}; run git -C ${JSON.stringify(cliRoot)} fetch --tags origin ${graphyardBaseBranch} (upgrade without --plan fetches it)`); }
   const version = to ?? releaseOfCommit(cliRoot, revision).version;
-  let source = '';
-  try { source = git(cliRoot, 'show', `${revision}:src/release.ts`); } catch {}
-  return { version, revision, schema: schemaAt(source) };
+  return { version, revision, schema: revisionSchema(cliRoot, revision) };
 }
 
 async function databaseSchemaOf(url: string | null): Promise<number | null> {
@@ -449,7 +455,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     health: deployHealth(cliRoot, url),
     prune: keep => pruneImages(input.run, keep),
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
-    schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
+    schema: async commit => revisionSchema(cliRoot, commit),
     database: () => databaseSchemaOf(url),
   };
 }

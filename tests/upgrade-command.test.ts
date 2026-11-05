@@ -59,7 +59,14 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   await writeFile(join(cli, 'src/release.ts'), 'export const schemaVersion = 3;\n'); git(cli, 'add', '.'); git(cli, 'commit', '--quiet', '-m', 'old'); git(cli, 'tag', '2026.9.1');
   await writeFile(join(cli, 'src/release.ts'), releaseSource(['null', 'null', 'null', 'null', "'sha256:59c9'"])); git(cli, 'commit', '--quiet', '-am', 'new');
   git(cli, 'tag', '2026.10.17'); git(cli, 'tag', '2026.10.17.1');
-  const head = git(cli, 'rev-parse', 'HEAD'); git(cli, 'checkout', '--quiet', '--detach', '2026.9.1');
+  const head = git(cli, 'rev-parse', 'HEAD');
+  await mkdir(join(cli, 'src/store'));
+  await writeFile(join(cli, 'src/store/schema-lineage.ts'), releaseSource(['null', 'null', 'null', 'null', "'sha256:59c9'", "'sha256:abcd'"]));
+  await writeFile(join(cli, 'src/release.ts'), "export { schemaVersion } from './store/schema-lineage.js';\n");
+  git(cli, 'add', '.'); git(cli, 'commit', '--quiet', '-m', 'store lineage'); git(cli, 'tag', '2026.10.18');
+  const movedHead = git(cli, 'rev-parse', 'HEAD');
+  git(cli, 'checkout', '--quiet', '--detach', '2026.9.1');
+  assert.deepEqual(resolveTarget(cli, '2026.10.18'), { version: '2026.10.18', revision: movedHead, schema: 5 });
   assert.deepEqual(resolveTarget(cli, '2026.10.17.1'), { version: '2026.10.17.1', revision: head, schema: 4 });
   const old = resolveTarget(cli, '2026.9.1');
   assert.equal(old.schema, 3);

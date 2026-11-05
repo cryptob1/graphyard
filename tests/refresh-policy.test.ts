@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { baseRefreshNeeded, pendingBaseRefresh } from '../src/model/base-refresh.js';
-import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
 import { checkStates, prSteps } from '../src/model/pr-steps.js';
 
@@ -104,5 +105,5 @@ test('unit:queue-validation-is-merge-substate — a candidate the merge writer h
   const failed = evaluated(work('GY-1', commit('c1'), {}, 'refused'), []);
   assert.equal(failed.stage, 'test');
   assert.deepEqual(gate(failed, 'test').reasons, [`merge writer has not trialled ${commit('c1').slice(0, 12)} on ${main.slice(0, 12)}`]);
-  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0]), 'merge', 'the merge writer answers it: its refused trial requests the rework itself');
+  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0], undefined, new Date()), 'merge', 'the merge writer answers it: its refused trial requests the rework itself');
 });

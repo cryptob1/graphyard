@@ -13,13 +13,13 @@ test('overlap includes actual diffs and directory scopes, excludes siblings and 
   b.stage = 'done'; b.observation!.files = ['src/api/create.ts']; assert.deepEqual(fileConflicts(a, [a, b]), []);
 });
 test('proof preview refuses stale, untrusted, skipped and later failed evidence', () => {
-  const w = work('A'); assert.equal(proofPreview(w)[0].status, 'unmeasured');
+  const w = work('A'); assert.equal(proofPreview(w, [], new Date())[0].status, 'unmeasured');
   const proof = { proof: 'integration:result', sha: 'a', baseSha: 'b', policyRevision: 2, trusted: true, result: 'pass', executed: 1, skipped: 0 } as const;
-  w.evidence.push({ ...proof, trusted: false } as any); assert.equal(proofPreview(w)[0].status, 'unmeasured');
-  w.evidence.push({ ...proof, policyRevision: 1 } as any); assert.equal(proofPreview(w)[0].status, 'unmeasured');
-  w.evidence.push(proof as any); assert.equal(proofPreview(w)[0].status, 'passed');
-  w.evidence.push({ ...proof, skipped: 1 } as any); assert.equal(proofPreview(w)[0].status, 'incomplete');
-  w.evidence.push({ ...proof, result: 'fail' } as any); assert.equal(proofPreview(w)[0].status, 'failed');
+  w.evidence.push({ ...proof, trusted: false } as any); assert.equal(proofPreview(w, [], new Date())[0].status, 'unmeasured');
+  w.evidence.push({ ...proof, policyRevision: 1 } as any); assert.equal(proofPreview(w, [], new Date())[0].status, 'unmeasured');
+  w.evidence.push(proof as any); assert.equal(proofPreview(w, [], new Date())[0].status, 'passed');
+  w.evidence.push({ ...proof, skipped: 1 } as any); assert.equal(proofPreview(w, [], new Date())[0].status, 'incomplete');
+  w.evidence.push({ ...proof, result: 'fail' } as any); assert.equal(proofPreview(w, [], new Date())[0].status, 'failed');
 });
 test('diagnostics distinguish expired ownership, resource waits and a stalled integration', () => {
   const a = work('A'), b = work('B'); a.lastAssignment = { owner: 'old', epoch: 1 }; a.exclusiveResources = b.exclusiveResources = ['staging'];

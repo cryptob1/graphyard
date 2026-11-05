@@ -24,7 +24,8 @@ import { capacityRefusal } from './fleet.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from './master/registry-slot.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
-import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
+import { reviewedBeforeMerge } from './model/risk-class.js';
+import { riskOf } from './model-boundary/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from './project-memory.js';
 import { agentToken } from './master/autonomy.js';
@@ -1194,7 +1195,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
-          const unexercised = unexercisedFindings(item, request.sha, request.proofs);
+          const unexercised = unexercisedFindings(item, new Date(now()), request.sha, request.proofs);
           if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through the loop's rework, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }

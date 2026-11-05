@@ -1,4 +1,4 @@
-import { resourceConflicts } from '../coordination.js';
+import { resourceConflicts } from './coordination.js';
 import { actionJudgment, type NextAction, type NextActionKind } from './action-kinds.js';
 import { isFilingRefusal } from './user-facing.js';
 import type { Work } from './work.js';

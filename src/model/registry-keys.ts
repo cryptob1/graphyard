@@ -1,5 +1,5 @@
-import { z } from 'zod';
-
+import type { z } from 'zod';
+import type { accountKeySchema, smokeObservationSchema } from '../model-boundary/registry-keys.js';
 /**
  * What the agent registry keeps about credentials, which is only ever where they are (GY-446):
  * the check that refuses a pasted credential in any registry write, an API-key account's key
@@ -40,18 +40,6 @@ export function secretPaths(value: unknown, path = 'input'): string[] {
   if (value && typeof value === 'object') return Object.entries(value).flatMap(([key, entry]) => secretPaths(entry, `${path}.${key}`));
   return [];
 }
-
-/**
- * Where an API-key runtime's provider key lives and how the runtime reads it: a file inside the
- * account's login home (mode 0600) and the environment variable the runtime reads the key from. A
- * headless launch reads the file when it starts and passes the variable to that run alone; the
- * registry holds only this reference, so a key never enters a registry document or the ledger.
- */
-export const accountKeySchema = z.object({
-  file: z.string().trim().min(1).max(200).refine(value => !/^(\/|[A-Za-z]:[\\/])/.test(value) && !value.split('/').includes('..'), 'A key file is a path inside the account home').refine(notSecret, 'Name the key file, never the key'),
-  variable: z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'An environment variable name: capitals, digits and underscores').max(100)
-    .refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher'),
-}).strict();
 export type AccountKey = z.infer<typeof accountKeySchema>;
 
 /**
@@ -61,8 +49,6 @@ export type AccountKey = z.infer<typeof accountKeySchema>;
  * passes the retest its executor runs once `smokeRetestMs` has passed.
  */
 export interface AccountSmoke { result: 'pass' | 'fail'; reason: string | null; at: string; by: string }
-/** An executor's smoke test of an account it holds the login of: the runtime's own error when it failed. */
-export const smokeObservationSchema = z.object({ result: z.enum(['pass', 'fail']), reason: z.string().trim().min(1).max(500).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed').nullable().default(null) }).strict();
 export type SmokeObservation = z.infer<typeof smokeObservationSchema>;
 
 /** How a headless run of a narrow role ended, reported with its session's end: with a result, or without one. */
