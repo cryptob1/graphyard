@@ -70,7 +70,7 @@ exec sh -c "$1"
   chmodSync(join(bin, 'ssh'), 0o755);
 
   const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(config, 'coordinator.token'), cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: key, retrials: 0 } } });
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: key } } });
   const environment = { PATH: `${bin}:${process.env.PATH}`, HOME: host, GRAPHYARD_CONFIG_HOME: config };
   // git's own reads get an identity; every other child runs as the trial hands it over.
   const run: ChildRun = (command, args, options) => defaultChildRun(command, args, command === 'git' ? { ...options, env: { ...identity, ...(options?.env ?? process.env) } } : options);

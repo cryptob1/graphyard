@@ -39,7 +39,7 @@ const worker: Principal = { id: 'implementer', role: 'worker' };
 const config = masterConfigSchema.parse({
   version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [],
-  run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } },
+  run: { mergeWriter: { deployKeyFile: '/keys/deploy' } },
 });
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`called GitHub (${String(name)})`); } });
@@ -122,7 +122,7 @@ test('integration:control-plane-local-head-trial — a head present only in the 
     trials.push(input);
     return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
-  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
+  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key') } } });
   const records: { kind: string }[] = [];
   const reads = mergeWriterReads(fixtureConfig, checkout, writerRun, {
     base: worktreeBase,  trial,
