@@ -156,7 +156,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: reads, rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
-  let failedCycles = 0;
+  let failedCycles = 0, sawStandingRefusal = false;
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs; world.cycle = cycle;
     // A reworked item comes back on a new head half an hour after its rework was confirmed.
@@ -164,6 +164,11 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     const result = await runCycle(config, state, effects, () => now);
     for (const action of result.actions) if (action.kind === 'merge' && action.state === 'failed' && /failed before it was recorded|timed out/.test(action.detail) && !/route down|killed between the|timed out (in|its) /.test(action.detail)) { failedCycles += 1; console.error(action.detail); }
     await mergeWriterIdle(state);
+    const summary = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).mergeWriter;
+    for (const refusal of summary.refusals) {
+      sawStandingRefusal = true;
+      assert.ok(world.recorded.get(Number(refusal.key.slice(3)))?.some(event => event.kind === 'refused' && event.head === refusal.head && event.reason === refusal.reason), `cycle ${cycle}: ${refusal.key}'s displayed refusal is on the ledger`);
+    }
     assert.ok(state.mergeWriter.queue.length <= mergeWriterKeptQueue && state.mergeWriter.refusals.length <= mergeWriterKeptRefusals && state.mergeWriter.reworks.length <= mergeWriterKeptReworks, `cycle ${cycle}: the state is bounded`);
     assert.ok(world.widest <= 1, `cycle ${cycle}: one merge in flight`);
   }
@@ -211,7 +216,8 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);
   const summary = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).mergeWriter;
   assert.deepEqual([summary.queue, summary.inFlight, summary.reworks], [[], null, []]);
-  assert.ok(summary.refusals.length <= mergeWriterKeptRefusals && summary.refusals.length > 0);
+  assert.ok(sawStandingRefusal, 'the summary showed standing refusals while the failed heads awaited recovery');
+  assert.deepEqual(summary.refusals, [], 'once every item lands, no standing refusal remains; historical refusals stay on the ledger');
 });
 
 test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with heads queued faster than one trial each, merged four at a time: every head is delivered exactly once at its own merge commit on main, no commit is pushed twice, one merge is in flight at a time, failed and timed-out trials are reworked exactly once after the batch falls back to single heads, crashes and record outages recover, and fewer pushes than heads land the day', { timeout: 300_000 }, async () => {

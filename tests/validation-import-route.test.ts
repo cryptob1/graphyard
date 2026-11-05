@@ -51,14 +51,14 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('validation_import_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_import_test`); await store.init();
   const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = github.run;
-  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
-async function call(path: string, actor: Principal, data?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
+async function call(path: string, actor: Principal, data?: unknown, key = randomUUID()) {
+  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: data === undefined ? undefined : JSON.stringify(data) });
   return { status: response.status, body: await response.json() as any };
 }
 const imported = async (data: unknown, actor = producer) => { const result = await call('validation/import', actor, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
@@ -67,7 +67,7 @@ const run = (sha: string, runId: string, cases: readonly Record<string, unknown>
   ({ format: 'graphyard-external-run-v1', producer: 'huck-engineer', runId, sha, cases, ...over });
 const trace = 'https://huck.example/runs/r-1/checkout-guest/trace';
 
-test('unit:validation-import-route-binds-by-sha — POST /api/validation/import refuses a non-producer credential, a producer without external-runs:import, and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
+test('unit:validation-import-route — binds-by-sha: POST /api/validation/import refuses a non-producer credential, a producer without external-runs:import, and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
   const handIn = run(boundSha, 'huck-run-1', [
     { id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 4310, required: true, result: 'PASS', evidence: [trace] },
     { id: 'search-facet', verdict: 'skipped', attempts: 0, durationMs: 0, result: 'SKIPPED_BY_TAG' },
@@ -146,7 +146,7 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
 
 });
 
-test('unit:validation-import-feeds-hold — a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
+test('unit:validation-import-route — feeds-hold: a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
   const passing = (id: string) => ({ id, verdict: 'passed', attempts: 1, durationMs: 100, required: true });
   assert.equal((await hold(holdSha)).held, false, 'no import, no hold');
 
@@ -197,7 +197,7 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.match(late.body.error, /sealed for promotion/);
 });
 
-test('unit:validation-import-case-version-not-inferred — catalogCommitSha is stored as provenance only and never read into a case version', async () => {
+test('unit:validation-import-route — case-version-not-inferred: catalogCommitSha is stored as provenance only and never read into a case version', async () => {
   const catalog = 'e'.repeat(40);
   const result = await imported(run(versionSha, 'version-1', [
     { id: 'login', verdict: 'passed', attempts: 1, durationMs: 100, required: true },
@@ -211,7 +211,7 @@ test('unit:validation-import-case-version-not-inferred — catalogCommitSha is s
   }
 });
 
-test('unit:validation-import-unknown-duration-attempts — omitted or null durationMs and attempts are stored as null, never 0, and a report-row count stays apart from attempts', async () => {
+test('unit:validation-import-route — unknown-duration-attempts: omitted or null durationMs and attempts are stored as null, never 0, and a report-row count stays apart from attempts', async () => {
   const result = await imported(run(unknownSha, 'unknown-1', [
     { id: 'login', verdict: 'passed', required: true },
     { id: 'pay', verdict: 'failed', attempts: null, durationMs: null, required: true, reportRows: 3 },
@@ -230,7 +230,7 @@ test('unit:validation-import-unknown-duration-attempts — omitted or null durat
   assert.equal((await hold(unknownSha)).held, true);
 });
 
-test('unit:validation-import-opaque-evidence — opaque evidence pointers and absent evidence are stored as given and never reported as public links', async () => {
+test('unit:validation-import-route — opaque-evidence: opaque evidence pointers and absent evidence are stored as given and never reported as public links', async () => {
   const pointer = { evidenceId: 'ev-41', storageKey: 'huck/runs/r-41/checkout/trace.zip' };
   const actionsRun = 'https://github.com/owner/project/actions/runs/123456';
   const result = await imported(run(pointerSha, 'pointer-1', [
@@ -255,7 +255,7 @@ test('unit:validation-import-opaque-evidence — opaque evidence pointers and ab
   assert.equal((await call('validation/import', producer, run(pointerSha, 'pointer-bad', [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: [{}] }]))).status, 400, 'a pointer naming nothing is refused');
 });
 
-test('unit:validation-import-bound-producer — the first import binds the candidate to its producer principal; another producer is refused 409, and only the bound producer passing a case clears it', async () => {
+test('unit:validation-import-route — bound-producer: the first import binds the candidate to its producer principal; another producer is refused 409, and only the bound producer passing a case clears it', async () => {
   const first = await imported(run(producerSha, 'bound-1', [
     { id: 'login', verdict: 'passed', attempts: 1, durationMs: 1, required: true },
     { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 1, required: true },
@@ -278,4 +278,49 @@ test('unit:validation-import-bound-producer — the first import binds the candi
   assert.deepEqual(omitted.hold.cases.map((entry: any) => [entry.id, entry.runId]), [['pay', 'bound-1']], 'an omitted case stays held by the run that last reported it');
   const passed = await imported(run(producerSha, 'bound-3', [{ id: 'pay', verdict: 'passed', attempts: 1, durationMs: 1, required: true }]));
   assert.deepEqual(passed.hold, { held: false, cases: [], runs: 3 });
+});
+
+test('unit:validation-import-route — retired runner and attestor routes return 404 while import routes remain available', async () => {
+  for (const path of ['validation', 'validation/capacity', 'validation/definitions', 'validation/attempt/retired', 'validation/candidate/retired', 'validation/artifacts/retired/retired', 'validation/reuse', 'validation/replays', 'validation/analytics']) {
+    assert.equal((await call(path, operator)).status, 404, path);
+  }
+  for (const command of ['build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry', 'artifacts', 'artifacts/migrate', 'reuse', 'replay']) {
+    assert.equal((await call(`validation/${command}`, operator, {})).status, 404, command);
+  }
+});
+
+
+test('unit:validation-import-route — admins create and revise deployment definitions over HTTP after runner retirement', async () => {
+  const environment = { kind: 'environment', id: 'delivery-target', expectedRevision: 0, repository: 'owner/project', url: 'https://delivery.example', instance: 'production', immutable: false, services: ['api'], resources: ['production'] };
+  for (const actor of [worker, reader, producer, ungrantedProducer]) {
+    assert.equal((await call('validation/define', actor, environment)).status, 403, actor.id);
+  }
+  const key = randomUUID();
+  const created = await call('validation/define', operator, environment, key);
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.revision, 1);
+  assert.equal(created.body.createdBy, operator.id);
+  assert.deepEqual(await call('validation/define', operator, environment, key), created, 'retry replays the same definition');
+  assert.equal((await call('validation/define', operator, environment)).status, 409, 'stale revision is refused');
+  for (const role of ['builder', 'observer', 'promoter', 'rollback']) {
+    const registration = { kind: 'registration', id: `delivery-${role}`, expectedRevision: 0, principalId: ungrantedProducer.id, role, environment: { id: environment.id, revision: 1 }, adapterVersion: 'v1', proofs: [], enabled: true,
+      ...(role === 'builder' ? {} : { services: ['api'] }), ...(role === 'rollback' ? { rollback: { fencing: 'provider', automatic: false } } : {}) };
+    const registered = await call('validation/define', operator, registration);
+    assert.equal(registered.status, 200, JSON.stringify(registered.body));
+    assert.equal(registered.body.revision, 1);
+    const revoked = await call('validation/define', operator, { ...registration, expectedRevision: 1, enabled: false });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    assert.equal(revoked.body.revision, 2);
+    assert.equal(revoked.body.enabled, false);
+  }
+  const revised = await call('validation/define', operator, { ...environment, expectedRevision: 1, url: 'https://replacement.example' });
+  assert.equal(revised.status, 200, JSON.stringify(revised.body));
+  assert.equal(revised.body.revision, 2);
+  const history = await store.pool.query("SELECT actor, payload FROM events WHERE kind='validation.defined' ORDER BY seq");
+  assert.equal(history.rows.length, 10, 'creation, revisions and revocations append history; refused requests and retries do not');
+  assert.ok(history.rows.every(row => row.actor === operator.id));
+  assert.deepEqual(history.rows.at(-1).payload.definition, revised.body);
+  for (const kind of ['runner', 'suite', 'attestor']) {
+    assert.equal((await call('validation/define', operator, { ...environment, kind })).status, 400, kind);
+  }
 });

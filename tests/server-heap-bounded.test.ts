@@ -42,7 +42,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('heap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  http = server(engine, credentials, null);
+  http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });

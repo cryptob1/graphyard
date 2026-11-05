@@ -71,12 +71,12 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
  * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
  * count against a profile's limit is exactly what they started.
  */
-async function fleet(profiles: { reviewers: unknown[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
+async function fleet(profiles: { reviewers: Record<string, unknown>[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
   const root = await temporaryDirectory('concurrency'), credentialDirectory = await temporaryDirectory('concurrency-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  for (const profile of profiles.reviewers) await saveReviewerProfile(root, profile);
+  for (const profile of profiles.reviewers) await saveReviewerProfile(root, { agentArgs: ['--setting-sources', 'user'], ...profile });
   for (const profile of profiles.producers) {
     const credentialFile = join(credentialDirectory, `${profile.name}.token`); await writeFile(credentialFile, `${profile.principal}-token-`.padEnd(40, 'x'), { mode: 0o600 });
     await saveProducerProfile(root, { ...profile, kind: 'claude', credentialFile }, async () => ({ actor: { id: profile.principal, role: 'producer', proofs: ['unit:*', 'integration:*', 'manual:*'] } }));
