@@ -9,7 +9,6 @@ import { emptyDaemonState } from '../src/daemon/state.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
-import { diskHeadroomKey, reclaimGraphyardLeftovers } from '../src/daemon/disk-headroom.js';
 import { processPidNamespace, processStartTicks } from '../src/tmp-reclaim.js';
 import type { MergePorts } from '../src/merge-writer/executor.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
@@ -23,7 +22,10 @@ const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const tip = sha('main-tip');
 const worker = { name: 'w1', principal: 'w1-principal', agentName: 'agent-w1', mode: 'launch', kind: 'claude', credentialFile: '/outside/w1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
-const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+// Built lazily, and the headroom module imported in each test, so a base without them fails each case rather than the file.
+const headroom = () => import('../src/daemon/disk-headroom.js');
+const diskHeadroomKey = 'disk-headroom';
+const makeConfig = () => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [worker], run: { diskFloorGb: 30, mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
 const gates = (passed: string[]) => ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: passed.includes(name), reasons: passed.includes(name) ? [] : [`${name} refused`] }));
 const item = (fields: Record<string, unknown>) => ({
@@ -62,6 +64,9 @@ function fixture(free: number[], reclaimed: string[] = []) {
   };
   return { work, effects, seen };
 }
+
+let config: ReturnType<typeof makeConfig>;
+test.beforeEach(() => { config = makeConfig(); });
 
 test('unit:disk-headroom-floor — above the floor the cycle changes nothing: no reclaim, no shortage, the worker dispatched and the head trialled', async () => {
   const { effects, seen } = fixture([200]);
@@ -132,6 +137,7 @@ test('unit:disk-headroom-floor — the reclaim removes only Graphyard-created le
       if (args[0] === 'images') return 'graphyard-trial:local\ngraphyard-trial:old\n';
       return '';
     };
+    const { reclaimGraphyardLeftovers } = await headroom();
     const removed = await reclaimGraphyardLeftovers(run, { temporary: [temporary], checkouts: [checkouts] });
     assert.ok(!existsSync(join(temporary, 'gy-tdead')) && !existsSync(join(temporary, 'gy-hdead')) && !existsSync(join(checkouts, 'gy-cdead')), 'a dead trial\'s scratch goes');
     assert.ok(existsSync(join(temporary, 'gy-tlive')), 'a live trial\'s scratch stays');
