@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { Store } from '../src/store.js';
 import { Engine, RenewalFault, renewalFaultEvent, renewalFaultOf } from '../src/engine.js';
 import { Refusal } from '../src/model/refusal.js';
-import { renewalGraceMs } from '../src/supervisor.js';
+import { renewalGraceMs } from '../src/session-watch.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

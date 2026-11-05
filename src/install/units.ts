@@ -67,7 +67,7 @@ export const userUnitDirectory = (env: NodeJS.ProcessEnv = process.env) =>
 /**
  * The legacy-named loop and executor units in UNIT_DIRECTORY, read synchronously. Under the test
  * runner only a directory under the system temporary directory is read, as `testSuiteHomeGuard`
- * (supervisor.ts) only writes one: the operator's real units belong to no checkout a test made.
+ * (loop-unit.ts) only writes one: the operator's real units belong to no checkout a test made.
  */
 export function legacyUnitFiles(unitDirectory = userUnitDirectory()): LegacyUnitFile[] {
   const temporary = canonical(tmpdir());

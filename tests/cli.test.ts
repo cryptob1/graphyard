@@ -13,7 +13,7 @@ import { realpath } from 'node:fs/promises';
 import { executionAttestationPayload } from '../src/runner-collector.js';
 import { ancestryRefusal, attestable } from './helpers/attestor-ancestry.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
-import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
+import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/session-watch.js';
 import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 leases are judged against the snapshot's own 2030 now or a monotonic stub; the 2026 snapshot nows and deadline are stub fixtures; Date.now() builds relative expiries.

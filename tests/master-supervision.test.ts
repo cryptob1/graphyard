@@ -11,7 +11,7 @@ import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runDaemon } from '../src/daemon/run.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
-import { alignLoopUnit, installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
+import { alignLoopUnit, installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/install/loop-unit.js';
 import { deployUnitOf, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): Date.now() only measures how long the bounded runs took.
@@ -397,7 +397,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
     const bare = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'NODE_TEST_CONTEXT' && key !== 'npm_lifecycle_event' && !key.startsWith('NODE_OPTIONS')));
     const outside = execFileSync(process.execPath, ['--import', 'tsx', '-e',
-      "import('./src/supervisor.ts').then(m => { m.testSuiteHomeGuard(process.env.GUARDED_DIRECTORY); console.log(JSON.stringify({ underTestRunner: m.underTestRunner() })); })"],
+      "import('./src/install/loop-unit.ts').then(m => { m.testSuiteHomeGuard(process.env.GUARDED_DIRECTORY); console.log(JSON.stringify({ underTestRunner: m.underTestRunner() })); })"],
       { cwd: repositoryRoot, encoding: 'utf8', env: { ...bare, GUARDED_DIRECTORY: realDirectory }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
     assert.deepEqual(JSON.parse(outside.trim().split(/\r?\n/).at(-1)!), { underTestRunner: false }, 'without the marks the real home is not refused');
 
@@ -419,8 +419,8 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     assert.ok(init.includes("'replace-supervisor': { type: 'boolean' }") && init.includes("replaceSupervisor: !!values['replace-supervisor']"), 'and --replace-supervisor is the explicit replace flag');
     assert.match(source('cli/master.ts'), /if \(id === 'init'\) return masterInit\(context, root\);/, 'master init reaches the handler and nothing else in the command file passes the option');
     const callers = sources.filter(file => /(?<![.\w])installLoopSupervisor\(/.test(readFileSync(file, 'utf8'))).map(file => file.slice(file.indexOf('/src/') + 5));
-    assert.deepEqual(callers.sort(), ['master/config.ts', 'supervisor.ts'], 'no other source reaches the installer');
-    const supervisor_ts = source('supervisor.ts');
+    assert.deepEqual(callers.sort(), ['install/loop-unit.ts', 'master/config.ts'], 'no other source reaches the installer');
+    const supervisor_ts = source('install/loop-unit.ts');
     const installer = supervisor_ts.slice(supervisor_ts.indexOf('export async function installLoopSupervisor('));
     assert.ok(installer.indexOf('testSuiteHomeGuard(unitDirectory);') > 0 && installer.indexOf('testSuiteHomeGuard(unitDirectory);') < installer.indexOf('await mkdir('), 'the guard runs before the installer writes, given the directory and nothing the caller built');
     assert.match(supervisor_ts, /^export function testSuiteHomeGuard\(unitDirectory: string\) \{$/m, 'the guard takes no env or argv override');

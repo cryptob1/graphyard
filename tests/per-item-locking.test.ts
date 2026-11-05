@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store, StaleWrite, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { definiteRenewalRefusal } from '../src/supervisor.js';
+import { definiteRenewalRefusal } from '../src/session-watch.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { Refusal, unknownWorkCode } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
