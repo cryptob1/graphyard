@@ -4,7 +4,6 @@ import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { liveMasterSessions } from '../src/master/registry-slot.js';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
 import { masterProfile } from '../src/master/master-session.js';
 import { heldAwareProbe } from '../src/master/environments.js';
@@ -70,7 +69,8 @@ function effectsFor(master: MasterConfig, registry: ReturnType<typeof registryFi
         return { agentName: MASTER, pane: 'pNew', runtime: selected.account.kind, account: selected.account.name, session: selected.account.fleet.session };
       },
       end: async (session, reason) => { ended.push({ session, reason }); await registry.client.end(session, reason); },
-      live: () => liveMasterSessions(master, registry.client),
+      // Imported when called, so the test fails as a test case on a base that lacks the listing.
+      live: async () => (await import('../src/master/registry-slot.js')).liveMasterSessions(master, registry.client),
     },
     persist: async () => undefined,
   };
