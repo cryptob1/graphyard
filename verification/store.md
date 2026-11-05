@@ -10,7 +10,7 @@ Paths: src/store/**, src/store.ts, src/engine.ts, src/engine/**, src/reconcile/*
 
 ## Drive
 
-Run one file: `node --import tsx tests/helpers/run-tests.ts tests/store-locks.test.ts`. The runner owns one shared Postgres for the run; never point a test at production data. Set `TMPDIR` to scratch if `/tmp` is short of quota.
+Run: `node --import tsx tests/helpers/run-tests.ts tests/store-locks.test.ts`. The runner owns one shared Postgres; never point a test at production data. Set `TMPDIR` to scratch if `/tmp` is short of quota.
 
 ## Invariants
 
