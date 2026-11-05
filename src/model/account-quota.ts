@@ -48,3 +48,25 @@ export function exhaustedTwin(registry: Pick<AgentRegistry, 'accounts'>, account
   return registry.accounts.find(other => other.name !== account.name && (other.quota.identity ?? null) === identity && other.quota.state === 'exhausted'
     && !!other.quota.resetsAt && Date.parse(other.quota.resetsAt) > now) ?? null;
 }
+
+/** How long a limit notice that named no reset holds its account: the hour a host holds it (unknownResetHoldMs). */
+const unnamedResetHoldMs = 3_600_000;
+/**
+ * Hold the account a session spent on its provider's limit notice (GY-3096), as the registry's own
+ * quota reading: exhausted until the notice's reset (an hour when it named none), with the notice as
+ * the reason. The account is the one the report names when the registry knows it, else the one the
+ * registry's newest session of that role for the item (and its principal) ran on. Kept in the
+ * registry, the hold binds every selection, whichever loop process asks next. Returns the account
+ * held, or null when none is known or nothing changed.
+ */
+export function holdLimitNoticeAccount(registry: AgentRegistry, notice: { role: string; work: string; principal: string | null; account: string | null; reason: string; resetsAt: string | null }, context: { actor: string; at: string }) {
+  const session = registry.sessions.filter(entry => entry.role === notice.role && entry.work === notice.work && (!notice.principal || entry.principal === notice.principal))
+    .sort((a, b) => Date.parse(b.selectedAt) - Date.parse(a.selectedAt))[0];
+  const account = registry.accounts.find(entry => entry.name === notice.account) ?? registry.accounts.find(entry => entry.name === session?.account);
+  if (!account) return null;
+  const now = Date.parse(context.at), named = !!notice.resetsAt && Date.parse(notice.resetsAt) > now;
+  const resetsAt = named ? notice.resetsAt! : new Date(now + unnamedResetHoldMs).toISOString();
+  const observed: QuotaObservation = { loggedIn: account.quota.loggedIn, state: 'exhausted', usage: account.quota.usage, resetsAt, session: named ? 'named' : 'guessed',
+    reason: `${account.name} stopped a ${notice.role} session on ${notice.work} on its provider's limit notice: ${notice.reason}`.slice(0, 500) };
+  return foldObservation(account, observed, context) ? account.name : null;
+}
