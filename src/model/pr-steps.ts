@@ -163,7 +163,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * names what it waits on. Work closed without merging has no current state, and nobody acts.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
-  const plain = plainStage(work, release, serve, now);
+  const plain = plainStage(work, now, release, serve);
   const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
     label: current && current !== 'done' ? `${plain} · ${detail}` : detail, detail, who,
