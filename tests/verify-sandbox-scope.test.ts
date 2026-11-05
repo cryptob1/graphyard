@@ -105,7 +105,7 @@ test('unit:worker-submits-sandbox-failures-to-ci — every worker runtime\'s lau
   for (const kind of environmentKinds) {
     const prompt = workerPrompt(config, work, { principal: `graphyard-${kind}-worker` }, 6);
     assert.match(prompt, /full test suite is CI's gate/, `${kind}: the prompt states the full suite is CI's gate`);
-    assert.match(prompt, /run the build and the tests for your own criteria/, `${kind}: the prompt names what the worker runs`);
+    assert.match(prompt, /run the build, then npm run test:affected -- with your bound proof test files.*and the tests for your own criteria/, `${kind}: the prompt names what the worker runs`);
     assert.match(prompt, /[Ss]ubmit with complete/, `${kind}: the prompt says to submit when its own criteria pass`);
     assert.match(prompt, /For sandbox-only test failures.*record command and environment error in the commit message/, `${kind}: the prompt says to record sandbox-only failures in the commit`);
     assert.match(prompt, /instead of recording a blocker/, `${kind}: the prompt rules out a blocker for sandbox-only failures`);
