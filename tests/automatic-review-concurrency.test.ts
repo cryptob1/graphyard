@@ -6,10 +6,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, sessionAgentName, withReviewerDefaults } from '../src/master.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { selectReviewerProfile } from '../src/dispatch/launch-failover.js';
 import { fleet as reviewFleet, requested, requestId, starts } from './helpers/review-fleet.js';
 import { registryFixture } from './helpers/registry-fixture.js';
-import type { DispatchEffects } from '../src/auto-dispatch.js';
+import type { DispatchEffects } from '../src/dispatch/effects.js';
 import { hostname } from 'node:os';
 
 /**
