@@ -82,7 +82,9 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
     return { work: (await response.json() as { work: Work[] }).work, now: new Date(now).toISOString() };
   };
   const effects: DaemonEffects = {
-    snapshot, credentials: async () => ({}), agents: () => [{ name: config.masterAgentName, pane_id: 'master-live-pane', agent_status: 'working' }],
+    snapshot, credentials: async () => ({}),
+    // GY-3103: the loop reads the registry to back a failed runtime off its item.
+    registry: () => api(coordinator, 'agent-registry/document'), agents: () => [{ name: config.masterAgentName, pane_id: 'master-live-pane', agent_status: 'working' }],
     persist: async () => {}, closeSession: pane => { closed.push(pane); },
     recordSession: (item, handle) => api(coordinator, `work/${item.id}/session`, handle),
     sessionScreen: session => { if (mode === 'unreadable' && session.pane !== 'master-live-pane') throw new Error('pane vanished'); return screens.get(session.pane!) ?? null; },
@@ -157,9 +159,13 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.match(failed.sessions![0].outcome!, /controlled startup failure/); assert.ok(closed.includes(`${target.key}-pane-1`));
   assert.equal(state.actions[`close:${target.id}:${launched.id}`]?.state, 'done');
   assert.equal(state.launchBackoff[`codex:${target.id}`].failures, 1, 'the failed runtime backs off for this item');
-  assert.ok(launchedProfiles.includes('claude-1'), 'healthy fallback profile still advances work');
+  assert.equal(launchedProfiles.length, 2, 'other work still launches while the failed runtime holds this item; no profile cools off');
   assert.equal(prompts.length, 1); assert.match(prompts[0], /controlled startup failure/);
   assert.equal((await store.coordinationSnapshot()).work.find(item => item.id === target.id)?.pipeline, undefined, 'test reads the actual compact snapshot');
+  // GY-3103: the failed runtime holds the item for its first minute of back-off.
+  const beforeHold = (await reload()).epoch;
+  await Promise.all(runs); await cycle(); assert.equal((await reload()).epoch, beforeHold, 'no profile relaunches the item inside its back-off');
+  now += 61_000;
   await Promise.all(runs); await cycle(); await Promise.all(runs); await cycle();
   state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
   // GY-3104: the second equal exit replaces the per-failure cause with the run's one wake, carrying both reasons.
