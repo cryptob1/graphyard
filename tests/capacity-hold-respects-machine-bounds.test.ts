@@ -16,6 +16,7 @@ import {
   reclaimableAgent, selectAccount, type HerdrAgent, type MasterConfig, type WorkerProfile,
 } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
+import { proposedRuntimes } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Fixture filings obey the same E2E contract as real work.
@@ -93,6 +94,14 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
       { name: 'env-b', kind: 'codex', home: join(home, 'env-b') },
     ],
   }) as MasterConfig;
+  // GY-3030: the control-plane registry is the only authority for accounts and their exhaustion,
+  // so the executor's two accounts are this control plane's registry, read with its coordinator token.
+  await writeFile(config.credentialFile, token(coordinator), { mode: 0o600 });
+  await ok(operator, 'POST', 'agent-registry/apply', {
+    runtimes: proposedRuntimes.filter(runtime => ['claude', 'codex'].includes(runtime.name)), models: [{ name: 'default', id: null }],
+    accounts: [{ name: 'env-a', runtime: 'claude', model: 'default', credential: { host: 'loop-host', home: join(home, 'env-a') } }, { name: 'env-b', runtime: 'codex', model: 'default', credential: { host: 'loop-host', home: join(home, 'env-b') } }],
+    roles: [{ name: 'worker', accounts: ['env-a', 'env-b'], concurrency: 4 }], reason: 'The executor\'s two accounts',
+  });
 
   await recordObservedExhaustion(config, 'env-a', {
     at: new Date(now).toISOString(), resetsAt, reason: "You've hit your weekly limit",

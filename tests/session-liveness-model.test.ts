@@ -62,7 +62,9 @@ function dispatcher(items: () => Promise<Work[]>, runtime: () => RuntimeSession[
     mutate: async (path: string, body: unknown) => { const [, id, command] = path.split('/'); return engine.execute(coordinator, command as any, id, body, randomUUID()); },
     run: () => { throw new Error('nothing is launched here'); },
   });
-  return { ...production, agents: () => runtime() as any, credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
+  // GY-3030: the tick reads its session inventory (session-inventory.ts) before Herdr alone; the test's listing is that inventory, null an unreadable one.
+  const inventory = async () => { const listed = runtime(); return { available: !!listed, sessions: (listed ?? []).map(entry => ({ name: entry.name ?? null, runtime: entry.agent ?? null, state: entry.agent_status ?? null, pane: entry.pane_id ?? null, workspace: null })) }; };
+  return { ...production, inventory, agents: () => runtime() as any, credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
     launchReview: async () => { throw new Error('no launch'); }, launchProducer: async () => { throw new Error('no launch'); }, persist: async () => {} };
 }
 

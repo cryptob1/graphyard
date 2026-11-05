@@ -3,9 +3,40 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
-import { accountHeldForRole, providerLimit } from '../src/model/capacity.js';
-import { masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { providerLimit } from '../src/model/capacity.js';
+import { masterConfigSchema, recordObservedExhaustion, selectAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import type { FleetClient } from '../src/fleet.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+/**
+ * GY-3030: the control-plane registry is the only authority for exhaustion. An in-memory registry
+ * on the test's fixed clock that folds an executor's observations as the control plane does, so a
+ * reported hold is what the next selection reads.
+ */
+function memoryRegistry(host: string, at: number, accounts: { name: string; runtime: string; home: string }[], worker: string[]) {
+  const context = { actor: 'master', at: new Date(at).toISOString() };
+  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => accounts.some(account => account.runtime === runtime.name)), models: [{ name: 'default', id: null }],
+    accounts: accounts.map(account => ({ name: account.name, runtime: account.runtime, model: 'default', credential: { host, home: account.home } })),
+    roles: [{ name: 'worker', accounts: worker, concurrency: 4 }], reason: 'fixture',
+  }, context).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    observe: async request => { foldObservations(registry, request, context); return { revision: registry.revision }; },
+    select: async request => {
+      foldObservations(registry, request, context);
+      const choice = chooseSession(registry, request, at);
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host,
+        work: request.work, principal: request.principal, group: request.group, selectedAt: context.at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry.sessions.push(session);
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async id => { registry.sessions = registry.sessions.map(session => session.id === id ? { ...session, endedAt: context.at, endReason: 'ended' } : session); },
+  };
+  return { client, workerAccounts: (names: string[]) => { registry = applyRegistryMutation(registry, 'role.set', { role: { name: 'worker', accounts: names, concurrency: 4 }, reason: 'fixture' }, context).registry; } };
+}
 
 // GY-2962: Claude sessions stopped on the newer limit wordings and sat idle under live leases,
 // because the loop's limit handling knew neither phrasing's hold: `You've hit your session limit ·
@@ -66,12 +97,17 @@ test('unit:claude-limit-wordings-recognised — Claude\'s session, usage and Fab
     githubAppId: 1, hostId: 'machine-a', masterAgentName: 'gy-master', workers: [worker(['claude-a', 'claude-b'])],
     environments: [{ name: 'claude-a', kind: 'claude', home: join(root, 'claude-a') }, { name: 'claude-b', kind: 'claude', home: join(root, 'claude-b') }],
   }) as MasterConfig;
-  await recordObservedExhaustion(config, 'claude-a', { at: new Date(now).toISOString(), resetsAt: fableSignal.resetsAt, reason: fableSignal.reason, role: 'worker', profile: 'builder', work: 'GY-48' }, now);
-  const held = await observedExhaustions(config, now);
-  assert.equal(accountHeldForRole(held, 'claude-a', now), true, 'the account is held while its reset is ahead');
-  assert.equal(accountHeldForRole(held, 'claude-b', now), false);
-  const chosen = await selectAccount(config, 'worker', config.workers[0], { quota: false, now: () => now, cacheMs: 0, work: 'GY-48' });
+  const fleet = memoryRegistry('machine-a', now, ['claude-a', 'claude-b'].map(name => ({ name, runtime: 'claude', home: join(root, name) })), ['claude-a', 'claude-b']);
+  await recordObservedExhaustion(config, 'claude-a', { at: new Date(now).toISOString(), resetsAt: fableSignal.resetsAt, reason: fableSignal.reason, role: 'worker', profile: 'builder', work: 'GY-48' }, now, { registry: fleet.client });
+  const document = await fleet.client.document();
+  const quota = (name: string) => document.accounts.find(account => account.name === name)!.quota;
+  assert.deepEqual([quota('claude-a').state, quota('claude-a').resetsAt], ['exhausted', fableSignal.resetsAt], 'the registry holds the account until the Fable reset');
+  assert.notEqual(quota('claude-b').state, 'exhausted');
+  const probe = { quota: false, now: () => now, cacheMs: 0, work: 'GY-48', registry: fleet.client } as const;
+  const chosen = await selectAccount(config, 'worker', config.workers[0], probe);
   assert.equal(chosen.account?.name, 'claude-b', "the fleet's next selection fails over to the healthy account");
+  await chosen.release?.('fixture');
   const solo = masterConfigSchema.parse({ ...config, workers: [worker(['claude-a'])] }) as MasterConfig;
-  await assert.rejects(selectAccount(solo, 'worker', solo.workers[0], { quota: false, now: () => now, cacheMs: 0, work: 'GY-48' }), /exhausted its quota mid-session/, 'a profile with only the held account waits for its reset');
+  fleet.workerAccounts(['claude-a']);
+  await assert.rejects(selectAccount(solo, 'worker', solo.workers[0], probe), /exhausted its quota mid-session/, 'a role with only the held account waits for its reset');
 });

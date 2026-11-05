@@ -19,6 +19,7 @@ import { postSpecCheck } from '../src/spec-check-post.js';
 import type { Work } from '../src/model.js';
 import { fleet } from './helpers/review-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 
 test('integration:spec-check-live-launch-binding — stale panes cannot replace a registered live checker; ended, reported and expired current launches still close', async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 196;
@@ -62,7 +63,8 @@ test('integration:spec-check-live-launch-binding — stale panes cannot replace 
     const returnedRegistrations = new Map<string, string>();
     const run = (command: string, args: string[]) => command === 'git' ? execFileSync(command, args, { encoding: 'utf8' }) : host.run(command, args);
     const launch = async (work: Work, observedAt = new Date().toISOString()) => {
-      const launched = await launchSpecCheck(host.root, work, 'checker', [], observedAt, { run });
+      // GY-3030: the registry grants every checker launch; each launch takes a fresh fixture, as each one's session ends with it.
+      const launched = await launchSpecCheck(host.root, work, 'checker', [], observedAt, { run, probe: registryFixture(master.hostId!, ['claude'], ['reviewer']).probe });
       // Read the authoritative registration too, so base reaches the original invalid-token failure.
       const registration = (await read()).specCheckLaunch!.id;
       returnedRegistrations.set(registration, launched.launch);

@@ -13,6 +13,8 @@ import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
@@ -74,7 +76,7 @@ test('unit:overlap-detection — dispatch never holds an overlapping item, exclu
     const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} });
     const prepare = async () => ({ epoch: 2, path: join(root, 'assigned'), base: 'c'.repeat(40) });
-    const result = await dispatchWork(root, item, profile, [], herdr, [item, live], prepare, async () => {}, 1, iso(0));
+    const result = await dispatchWork(root, item, profile, [], herdr, [item, live], prepare, async () => {}, 1, iso(0), { probe: registryFixture(hostname(), ['codex']).probe });
     assert.match(result.ownership, /supervising/);
     assert.deepEqual(result.overlap?.concurrent.map(entry => entry.key), ['GY-2']); assert.match(result.overlap?.note ?? '', /lands second/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }

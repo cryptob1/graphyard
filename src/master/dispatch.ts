@@ -19,7 +19,8 @@ import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
-import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import type { FleetProbe } from '../fleet.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, type HerdrAgent } from './herdr.js';
@@ -53,7 +54,7 @@ type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
   /** Closes, bounded, the pane of a finished session a launch takes its profile's name back from (GY-1322); closeHerdrPane by default. */
@@ -202,7 +203,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // without it could hand the same spent account back, and the loop's retry takes it from there.
       // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
       const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
-      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+      await holdRepeatedLimitAccount(config, work, holdAt, { registry: options.probe?.registry }).catch((error: unknown) => {
         throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
       });
       let startError: unknown = null;

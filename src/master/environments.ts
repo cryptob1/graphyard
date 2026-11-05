@@ -245,9 +245,10 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   return entry;
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */
-export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> {
-  if (!config.url) return {};
-  const document = await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).document();
+export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now(), registry?: Pick<FleetClient, 'document'>): Promise<Record<string, ObservedExhaustion>> {
+  const client = registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }) : null);
+  if (!client) return {};
+  const document = await client.document();
   return Object.fromEntries(document.accounts.filter(account => account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)).map(account => [account.name, {
     at: account.quota.observedAt ?? new Date(now).toISOString(), until: account.quota.resetsAt ?? new Date(now + unknownResetHoldMs).toISOString(),
     resetsAt: account.quota.resetsAt, reason: account.quota.reason ?? 'quota exhausted', role: 'worker', profile: '', work: null,

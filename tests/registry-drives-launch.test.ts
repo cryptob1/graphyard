@@ -21,7 +21,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * registry revision it was chosen in. The registry here is the control plane's, in memory: the same
  * pure mutation and choice the server runs. A policy change between two launches changes the second
  * launch's command line with nothing restarted and no file edited; a role the registry does not
- * define still launches from the local profile.
+ * define is refused (GY-3030: the registry is the only authority, the local profile no fallback).
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -106,18 +106,16 @@ function item(key: string): Work {
     submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: [], observation: null, autoDispatch: { review: null, producers: [], history: [] } } as unknown as Work;
 }
 
-test('integration:registry-drives-launch — the local profile is used only for roles the registry does not define', async () => {
+test('integration:registry-drives-launch — a role the registry does not define is refused, never launched from the local profile', async () => {
   const { config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);
   fleet(registry, config.hostId, home);
   const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
   const profile = { name: 'worker-a', principal: 'implementer', kind: 'claude' as const, approvals: 'auto' as const, agentArgs: ['--profile-flag'], environment: { PROFILE_ONLY: '1' } };
   const cfg = config as MasterConfig;
 
-  // The worker role is not in the registry: the profile's own arguments and environment launch it.
-  const local = await selectAccount(cfg, 'worker', profile, probe);
-  assert.equal(local.account, null);
-  const fromProfile = accountLaunch(profile, local.account);
-  assert.ok(fromProfile.args.includes('--profile-flag')); assert.equal(fromProfile.environment.PROFILE_ONLY, '1');
+  // GY-3030: the worker role is not in the registry, so nothing launches: the local profile is no fallback.
+  await assert.rejects(selectAccount(cfg, 'worker', profile, probe), /Role worker must be configured in the control-plane registry/);
+  assert.equal(registry.current().sessions.length, 0, 'no session was taken for a role the registry does not define');
 
   // Once the registry defines it, the registry alone decides: the profile's arguments and environment are not used.
   registry.mutate('role.set', { role: { name: 'worker', accounts: ['claude-b'], concurrency: 2, policy: { args: ['--verbose'], tools: [], model: 'sonnet' } }, reason: 'Workers from the registry' });

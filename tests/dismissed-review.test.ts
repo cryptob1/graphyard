@@ -11,6 +11,7 @@ import { launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveRe
 import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 clock is the explicit now handed to reconcileReviews, runDispatchTick and sessionRetry; Date.now()-stamped ledger records are judged by attempt counts, not age.
 
 // Each test is named for the proof it produces: integration:dismissed-review-relaunches and
@@ -47,6 +48,10 @@ function stubs(reviews: () => unknown[]) {
   };
   return { calls, run, registerLaunch: async () => ({ launch: 'fixture-launch' }) };
 }
+/** GY-3030: the registry grants every reviewer launch; each launch takes a fresh fixture, as each attempt's session ends with its settlement. */
+function reviewerProbe(host: string | undefined) {
+  return registryFixture(host!, ['claude'], ['reviewer']).probe;
+}
 
 async function reviewerRoot() {
   const root = await temporaryDirectory('dismissed'), credentialDirectory = await temporaryDirectory('dismissed-credentials');
@@ -79,7 +84,7 @@ test('integration:dismissed-review-relaunches — a dismissed approval is record
     const item = work({}, new Date().toISOString());
     reconcileAutoDispatch(item, [item], new Date());
     const first = item.autoDispatch!.review!;
-    const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: first.id });
+    const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: first.id, probe: reviewerProbe(config.hostId) });
     assert.equal(launched.requestId, first.id);
     // The reviewer approves that head; the worker pushes a new one, and GitHub dismisses the approval with it.
     const moved = work({ candidate: { sha: H2, baseSha: B, pr: 84, branch: 'graphyard/gy-84-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }, new Date().toISOString()), autoDispatch: item.autoDispatch }, new Date().toISOString());
@@ -116,7 +121,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     const request = item.autoDispatch!.review!;
     // Every automatic attempt is spent: the request stands, and nothing will launch for it again.
     for (let attempt = 1; attempt <= sessionRetryLimit; attempt++) {
-      await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: request.id });
+      await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: request.id, probe: reviewerProbe(config.hostId) });
       await reconcileReviews(root, config, { run, observe: () => ({ state: 'DISMISSED', reviewer, reviewId: 10 + attempt, submittedAt: iso(attempt * 1000) }), work: [item], now: () => new Date(clock + attempt * 1000) });
     }
     const spent = (await readReviewLedger(root)).reviews;
@@ -129,7 +134,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     // `master review GY-84 claude-reviewer` answers that same request as its next attempt, rather
     // than recording a session the control plane's request knows nothing about.
     assert.equal(liveReviewRequest(item)!.id, request.id);
-    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { run, registerLaunch });
+    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { run, registerLaunch, probe: reviewerProbe(config.hostId) });
     assert.equal(forced.requestId, request.id);
     const ledger = (await readReviewLedger(root)).reviews;
     assert.equal(ledger.length, sessionRetryLimit + 1, 'every earlier session is retained in the ledger');

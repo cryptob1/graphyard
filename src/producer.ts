@@ -411,7 +411,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // relaunch for that group replaces its own predecessor instead of being refused by it.
   // GY-1705: re-hold a producer account this item's last two sessions each spent, before registry /
   // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
-  await holdRepeatedLimitAccount(config, work, now().getTime(), {}, 'producer').catch((error: unknown) => {
+  await holdRepeatedLimitAccount(config, work, now().getTime(), { registry: dependencies.probe?.registry }, 'producer').catch((error: unknown) => {
     throw new Error(`${work.key}'s last producer sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500), { cause: error });
   });
   // GY-170: when the registry defines the producer role its choice decides the runtime: a unit-group

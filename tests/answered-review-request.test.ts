@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -12,6 +13,7 @@ import { launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger
 import { emptyDispatchCursor, runDispatchTick, verdictIngestGraceMs, type DispatchEffects } from '../src/auto-dispatch.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01 verdict timestamps are the recorded GY-1083 instances and only order replayed verdicts; observedAt, closedAt, requestedAt and expiry are built relative to Date.now().
 
 // GY-1083: eleven review-convergence faults in 24 hours, every one a review-conflict: the reviewer
@@ -150,13 +152,13 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     // A dismissed approval is no answer: reconciliation records it failed, and the request is relaunched.
     const dismissed: ReviewRecord = { ...answered(instance, 60_000), state: 'failed', verdict: { ...answered(instance, 60_000).verdict!, state: 'DISMISSED' } };
     await updateReviewLedger(master.root, ledger => { ledger.reviews = [dismissed]; });
-    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId });
+    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId, probe: registryFixture(hostname(), ['claude'], ['reviewer']).probe });
     assert.equal(master.tabs.length, 1, 'the withdrawn answer is reviewed again');
     // The fresh request a conflict opens on the same head is a different request: it is launched.
     await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
     const fresh = 'f'.repeat(32);
     work.autoDispatch!.review = { ...work.autoDispatch!.review!, id: fresh };
-    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: fresh });
+    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: fresh, probe: registryFixture(hostname(), ['claude'], ['reviewer']).probe });
     assert.equal(master.tabs.length, 2, 'the fresh request is launched');
     // A verdict the control plane observed withdrawn after the loop settled it answers nothing either:
     // GitHub listed it dismissed, or recorded it in dismissedReviewIds, so the request is reviewed again.
@@ -167,7 +169,7 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     ]) {
       await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
       withdrawn.observation = { ...withdrawn.observation!, ...obs };
-      await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId });
+      await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId, probe: registryFixture(hostname(), ['claude'], ['reviewer']).probe });
     }
     assert.equal(master.tabs.length, 4, 'each withdrawn answer is reviewed again');
   } finally { await master.cleanup(); }

@@ -21,6 +21,10 @@ import { launchProducer, producerPrompt, readProducerLedger, reconcileProducers,
 import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
+/** The control-plane registry each launch takes its slot from (GY-3030): a fresh one per launch. */
+const fleet = (role: 'producer' | 'reviewer') => registryFixture(hostname(), ['codex'], [role]).probe;
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
 // integration:ephemeral-checkout-reclaim, integration:worktree-root-preflight and
@@ -100,14 +104,14 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // starts, is the only path beside the Git directory a sandboxed runtime may write, and is the
     // path its prompt names for the worktree and for every evidence file.
     const asked = request(), produceCalls: string[][] = [];
-    const produced = await launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), filesystem: durable });
+    const produced = await launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: herdr(produceCalls), filesystem: durable, probe: fleet('producer') });
     assert.equal(dirname(produced.checkout), managed);
     assert.match(produced.checkout, /\/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}$/);
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = launchOf(produceCalls).args;
     assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
-    assert.equal(launchOf(produceCalls).stem, join(produced.checkout, '.graphyard/launch/produce-a'), 'the request file lives in the session\'s own checkout');
+    assert.equal(launchOf(produceCalls).stem, join(produced.checkout, `.graphyard/launch/${produced.agentName}`), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
     assert.ok(producerText.includes(join(produced.checkout, 'integration-managed-worktree-root.evidence.json')));
@@ -116,7 +120,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // A reviewer session: the same root, the same rule, and a harness that lets it check the head
     // out at that one path only.
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable });
+    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') });
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
@@ -209,7 +213,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const launchedAt = Date.now();
     const produce = async (key: string) => {
       const asked = request();
-      const launched = await launchProducer(root, producing(key, asked), asked, { ...config.producers[0], agentName: `produce-${key.toLowerCase()}` }, [], new Date().toISOString(), { run: herdr(), filesystem: durable });
+      const launched = await launchProducer(root, producing(key, asked), asked, { ...config.producers[0], agentName: `produce-${key.toLowerCase()}` }, [], new Date().toISOString(), { run: herdr(), filesystem: durable, probe: fleet('producer') });
       await occupy(git, launched.checkout);
       assert.ok(registered(git).includes(join(launched.checkout, 'checkout')) && existsSync(join(launched.checkout, 'checkout/node_modules/left-pad/index.js')));
       return { asked, checkout: launched.checkout };
@@ -240,7 +244,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     // Reviewer sessions, the same four ways.
     const registerLaunch = async () => ({ launch: 'fixture-launch' });
     const review = async (key: string) => {
-      const launched = await launchReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), registerLaunch, filesystem: durable });
+      const launched = await launchReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
       await occupy(git, launched.checkout);
       return launched.checkout;
     };
@@ -261,8 +265,8 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     // A launch that never became a session leaves nothing behind either.
     const broken = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw new Error('herdr pane run failed'); return herdr()(_command, args); };
     const unlucky = request();
-    await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable }), /herdr pane run failed/);
-    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, registerLaunch, filesystem: durable }), /herdr pane run failed/);
+    await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable, probe: fleet('producer') }), /herdr pane run failed/);
+    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, registerLaunch, filesystem: durable, probe: fleet('reviewer') }), /herdr pane run failed/);
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
 
     // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
@@ -409,11 +413,11 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
   try {
     const config = await loadMasterConfig(root), asked = request();
     const exhausted = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw Object.assign(new Error('Command failed: herdr pane run'), { stderr: 'write error: No space left on device\n' }); return herdr()(_command, args); };
-    await assert.rejects(launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: exhausted, filesystem: durable }), (error: Error) => {
+    await assert.rejects(launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: exhausted, filesystem: durable, probe: fleet('producer') }), (error: Error) => {
       assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run; its Herdr pane pane-1 was closed\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
-    await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable }),
+    await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') }),
       new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*free space on the volume`));
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
   } finally { await cleanup(); }

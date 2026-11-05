@@ -6,11 +6,42 @@ import {
   headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit,
 } from '../src/model/capacity.js';
 import {
-  holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
+  holdRepeatedLimitAccount, masterConfigSchema, recordEnvironmentLog,
   repeatedLimitAccount, selectAccount, selectionKey, sessionAccount, type MasterConfig,
 } from '../src/master.js';
 import type { RunEvent } from '../src/runner/types.js';
+import type { FleetClient } from '../src/fleet.js';
+import { applyRegistryMutation, chooseSession, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+/**
+ * GY-3030: the control-plane registry is the only authority for exhaustion. An in-memory registry
+ * on a fixed clock that folds an executor's observations as the control plane does, so a reported
+ * hold is what the next selection reads.
+ */
+function memoryRegistry(host: string, at: number, accounts: { name: string; runtime: string; home: string }[], role: FleetRoleName) {
+  const context = { actor: 'master', at: new Date(at).toISOString() };
+  const registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => accounts.some(account => account.runtime === runtime.name)), models: [{ name: 'default', id: null }],
+    accounts: accounts.map(account => ({ name: account.name, runtime: account.runtime, model: 'default', credential: { host, home: account.home } })),
+    roles: [{ name: role, accounts: accounts.map(account => account.name), concurrency: 4 }], reason: 'fixture',
+  }, context).registry;
+  const client: FleetClient = {
+    document: async () => structuredClone(registry),
+    observe: async request => { foldObservations(registry, request, context); return { revision: registry.revision }; },
+    select: async request => {
+      foldObservations(registry, request, context);
+      const choice = chooseSession(registry, request, at);
+      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
+      const session: FleetSession = { id: `session-${registry.sessions.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host,
+        work: request.work, principal: request.principal, group: request.group, selectedAt: context.at, selectedBy: 'master', reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
+      registry.sessions.push(session);
+      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
+    },
+    end: async () => {},
+  };
+  return client;
+}
 
 // GY-1705: a pane-role session that ends silent (Herdr `done`, never working, no outcome or notice
 // past its start bound, still untouched screen) and a headless round stopped at its bound with a
@@ -87,11 +118,14 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
   const reviewWork = { key: 'GY-1701', epoch: 2, capacity: { spent: [], exhaustions: [exhaustion('reviewer', 0), exhaustion('reviewer', 90_000)] } };
   assert.equal(repeatedLimitAccount(reviewWork, base + 90_000, 'reviewer')?.account, 'env-a');
   const at = base + 90_000;
-  const reviewHold = await holdRepeatedLimitAccount(config, reviewWork, at, {}, 'reviewer');
+  const registry = memoryRegistry('machine-a', at, ['env-a', 'env-b'].map(name => ({ name, runtime: 'claude', home: join(dir, name) })), 'reviewer');
+  // holdRepeatedLimitAccount reads current holds through observedExhaustions, which only asks the
+  // control plane over HTTP; with no URL it reads none and reports the hold to the injected registry.
+  const reviewHold = await holdRepeatedLimitAccount({ ...config, url: undefined }, reviewWork, at, { registry }, 'reviewer');
   assert.equal(reviewHold?.account, 'env-a');
-  assert.ok((await observedExhaustions(config, at))['env-a']);
+  assert.equal((await registry.document()).accounts.find(account => account.name === 'env-a')!.quota.state, 'exhausted', 'the hold is reported to the registry');
   const reviewProfile = config.reviewers[0]!;
-  const reviewChosen = await selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => at, work: reviewWork.key });
+  const reviewChosen = await selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => at, work: reviewWork.key, registry });
   assert.equal(reviewChosen.account?.name, 'env-b', 'launchReview\'s selectAccount path skips the repeatedly held reviewer account');
 });
 

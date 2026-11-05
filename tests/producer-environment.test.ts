@@ -15,6 +15,8 @@ import type { RunOptions, Runner } from '../src/runner/types.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 // Time-bomb allowance (GY-1694): the 2026-10-02 `clock` is the explicit tick clock handed to runDispatchTick and its snapshot; new Date() only stamps request/observation records that no clock compares to it.
 
 // GY-1071: the producer's .env secrets (GY-73) — which names leave .env, how a value is read, that
@@ -26,6 +28,8 @@ const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id
 const H = 'e'.repeat(40), B = 'f'.repeat(40);
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const token = "hc-to'ken $HOME `x` #1";
+/** GY-3030: the registry is the only authority for a producer's slot, so each launch takes one from an in-memory registry. */
+const fleet = (runtime = 'codex') => registryFixture(hostname(), [runtime], ['producer']).probe;
 
 async function scratch() {
   const directory = await realpath(await temporaryDirectory('producer-env'));
@@ -160,7 +164,7 @@ test('integration:producer-environment a Herdr producer gets the .env secrets fr
   try {
     await writeFile(join(root, '.env'), `HCLOUD_TOKEN='${token.replaceAll("'", '')}'\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nGITHUB_TOKEN=ghp_never\n`);
     const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [];
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() });
     const secret = token.replaceAll("'", '');
     assert.ok(!calls.flat().some(word => word.includes(secret) || word.includes('ghp_never') || /^(HCLOUD_TOKEN|HETZNER_SPEND_CAP_USD_MONTHLY)=/.test(word)), 'no Herdr argument carries a secret');
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
@@ -178,7 +182,7 @@ test('integration:producer-environment a launch whose proofs need no secret neit
   try {
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN="unpaired\nHETZNER_SPEND_CAP_USD_MONTHLY=25\n');
     const item = work('GY-75', 'manual', ['manual:install-railway-live']), calls: string[][] = [];
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.ok(!typed.words.includes('set -a; . "$1"; set +a; shift 2; exec "$@"'), 'no secrets wrapper');
     assert.ok(!calls.flat().some(word => word.includes('HETZNER_SPEND_CAP_USD_MONTHLY')));
@@ -191,7 +195,7 @@ test('integration:producer-environment a live-install launch on a host without i
   try {
     await writeFile(join(root, '.env'), 'HETZNER_SPEND_CAP_USD_MONTHLY=25\n');
     const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [];
-    await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }),
+    await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() }),
       /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN is not set in .*\.env.*docs\/install\.md/);
     assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
     assert.deepEqual((await readProducerLedger(root)).producers, []);
@@ -204,7 +208,7 @@ test('integration:producer-environment a live-install proof a closed question de
     const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [], config = (await loadMasterConfig(root)).producers[0];
     (item as any).closedQuestions = [{ criterion: 'AC-1', proof: 'manual:install-hetzner-live', question: 'Installed?', criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'criterion' }] }];
     const launch = (verdict: 'decided' | 'escalated') => launchProducer(root, item, item.autoDispatch!.producers[0] as any, config, [], new Date().toISOString(),
-      { run: herdr(calls), filesystem: durable, judge: async () => ({ verdict }) });
+      { run: herdr(calls), filesystem: durable, probe: fleet(), judge: async () => ({ verdict }) });
     // No .env on this host: a decided proof launches no session, so it is not refused for want of a credential.
     await assert.rejects(launch('decided'), (error: Error) => error instanceof ClosedQuestionsDecided && !/HCLOUD_TOKEN/.test(error.message));
     await assert.rejects(launch('escalated'), /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are not set/);
@@ -223,7 +227,7 @@ test('integration:producer-environment a headless unit producer gets no .env sec
       return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: 'test' }, payloads: [] }) };
     } };
     const item = work('GY-74', 'unit', ['unit:install-plan']);
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { runner, filesystem: durable }) as any;
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { runner, filesystem: durable, probe: fleet('pi') }) as any;
     await launched.settled.catch(() => {});
     assert.equal(seen.length, 1, 'the run started');
     assert.equal(seen[0].env?.HCLOUD_TOKEN, undefined);
@@ -242,7 +246,7 @@ test('integration:producer-environment the dispatcher records a missing-credenti
       snapshot: async () => ({ work: [item], now: new Date(clock).toISOString() }), agents: () => [],
       credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchReview: async () => {},
-      launchProducer: (work, request, profile, agents, observedAt) => { launches++; return launchProducer(root, work, request, profile, agents, observedAt, { run: herdr(calls), filesystem: durable }); },
+      launchProducer: (work, request, profile, agents, observedAt) => { launches++; return launchProducer(root, work, request, profile, agents, observedAt, { run: herdr(calls), filesystem: durable, probe: fleet() }); },
       persist: async () => {},
     };
     const cursor = emptyDispatchCursor(config), requestId = item.autoDispatch!.producers[0].id;
@@ -299,7 +303,7 @@ test('unit:host-install-live-receives-producer-env a manual:host-install-live se
   try {
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc123\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nGITHUB_TOKEN=ghp_never\n');
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     producerPrefix(typed, launched.checkout);
     assert.equal(await readFile(join(launched.checkout, 'producer.env'), 'utf8'), `HCLOUD_TOKEN='abc123'\nHETZNER_SPEND_CAP_USD_MONTHLY='25'\n`);
@@ -316,7 +320,7 @@ test('unit:host-install-live-receives-producer-env a manual:host-install-live la
   try {
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc123\n');
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
-    await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }),
+    await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() }),
       /refuses to launch the GY-717 manual proofs \(manual:host-install-live\): HETZNER_SPEND_CAP_USD_MONTHLY is not set in .*\.env.*docs\/install\.md/);
     assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
     assert.deepEqual((await readProducerLedger(root)).producers, []);
@@ -329,7 +333,7 @@ test('unit:live-install-ssh-key-available HETZNER_SSH_KEY in .env reaches the li
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc123\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nHETZNER_SSH_KEY="operator key"\n');
     assert.deepEqual(await readProducerEnvironment(root), { HCLOUD_TOKEN: 'abc123', HETZNER_SPEND_CAP_USD_MONTHLY: '25', HETZNER_SSH_KEY: 'operator key' });
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() });
     const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     const prefix = producerPrefix(typed, launched.checkout);
     const printed = execFileSync(prefix[0], [...prefix.slice(1), process.execPath, '-e', 'process.stdout.write(process.env.HETZNER_SSH_KEY ?? "")'], { encoding: 'utf8' });
@@ -345,7 +349,7 @@ test('unit:live-install-ssh-key-available without HETZNER_SSH_KEY the launch is 
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc123\nHETZNER_SPEND_CAP_USD_MONTHLY=25\n');
     assert.deepEqual(missingProducerEnv(['manual:host-install-live'], { HCLOUD_TOKEN: 'x', HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), [], 'the key name is never required');
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
-    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() });
     const prompt = producerPrompt({ repository: 'owner/project', cliPath: launcher }, { ...item.autoDispatch!.producers[0] as any, key: 'GY-717', checkout: launched.checkout }, { principal: 'proof-runner' });
     const name = `graphyard-gy-717-${H.slice(0, 8)}`;
     assert.ok(prompt.includes(`ssh-keygen -t ed25519 -N '' -C ${name} -f ${join(launched.checkout, 'hetzner-ssh-key')}`), 'the key is generated inside the session directory');

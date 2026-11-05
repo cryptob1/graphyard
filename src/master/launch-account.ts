@@ -104,7 +104,7 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
  */
 export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
   const repeated = repeatedLimitAccount(work, now, role);
-  if (!repeated || (await observedExhaustions(config, now))[repeated.account]) return null;
+  if (!repeated || (await observedExhaustions(config, now, report?.registry?.document ? { document: report.registry.document } : undefined))[repeated.account]) return null;
   const last = repeated.records.at(-1)!;
   const launches = role === 'worker'
     ? `worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')})`

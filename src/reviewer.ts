@@ -945,7 +945,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   try {
     // GY-1705: re-hold a reviewer account this item's last two sessions each spent, before
     // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
-    await holdRepeatedLimitAccount(config, work, now().getTime(), {}, 'reviewer').catch((error: unknown) => {
+    await holdRepeatedLimitAccount(config, work, now().getTime(), { registry: dependencies.probe?.registry }, 'reviewer').catch((error: unknown) => {
       throw new Error(`${work.key}'s last reviewer sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500), { cause: error });
     });
     // Before a token is minted: an exhausted or logged-out account is skipped for the profile's next.
