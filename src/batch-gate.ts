@@ -13,6 +13,11 @@
 // path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
 // commit served and wakes the master. The full suite and catalog run daily against the verified
 // commit as diagnostics that file items and never block.
+//
+// The batch it cut is the batch it gates (GY-3135): a loop restart adopts the batch in flight —
+// the same candidate tip, files, checks and the steps already finished — and finishes it, so the
+// restart a deploy causes never recuts a batch onto a newer tip; merges that land meanwhile ride
+// the next batch, and only the gate's own failure or timeout recuts.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -35,8 +40,13 @@ export interface GateRecord {
   /** The latest verified commit: the one the deploy watch serves. */
   verified: string | null;
   verifiedAt: string | null;
-  /** The gate running now, for status. */
-  inFlight: { tip: string; startedAt: string } | null;
+  /**
+   * The gate running now, for status: the batch as it was cut — its candidate tip and start, the
+   * files and checks it was cut with, and each finished step's result — so the next loop adopts and
+   * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
+   * `results` fields are optional only for records an older loop wrote.
+   */
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]> } | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
   attempt: { recuts: number; timeouts: number };
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
@@ -91,8 +101,11 @@ export interface GatePorts {
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`. */
   file(input: { title: string; description: string; key: string }): Promise<void>;
-  /** Called once the gate is in flight, so the record can say so. */
-  started?(): Promise<void>;
+  /**
+   * Called whenever the record changed mid-flight — the cut, and each step a run finished — so a
+   * loop restart adopts the batch as it stood, its finished steps with it.
+   */
+  checkpoint?(): Promise<void>;
 }
 
 /** What one gate came to. */
@@ -117,28 +130,54 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
 
 /**
  * One gate of the batch from the last verified commit to the main tip, updating `record` in place.
- * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle.
+ * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle. A batch a
+ * previous gate cut and never settled is adopted as it was cut — the same candidate tip, files and
+ * checks, its finished steps' results with it — so a loop restart never recuts a batch onto a newer
+ * tip: merges that landed meanwhile ride the next batch.
  */
-export async function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
-  const tip = (await ports.fetch()).toLowerCase(), verified = record.verified;
-  if (!verified || tip === verified || record.held?.tip === tip) return { outcome: 'idle' };
+export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
+  // A settled gate frees its batch; one that threw leaves it standing for the next loop to adopt.
+  return gateFlight(ports, record).then(outcome => { record.inFlight = null; return outcome; });
+}
+
+async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
+  const verified = record.verified;
+  if (!verified) return { outcome: 'idle' };
+  // An adopted batch keeps its candidate tip: the main tip is not fetched, so merges that landed
+  // since the cut stay outside the batch and wait for the next one.
+  const adopted = record.inFlight && record.inFlight.tip !== verified ? record.inFlight : null;
+  const tip = adopted?.tip ?? (await ports.fetch()).toLowerCase();
+  if (tip === verified || record.held?.tip === tip) return { outcome: 'idle' };
   if (record.held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
   const at = () => new Date(ports.now()).toISOString();
-  const deadline = ports.now() + gateLimitMs;
-  const run = (commit: string, checks: readonly string[], files: readonly string[]) => {
+  const landings = await ports.landings(verified, tip);
+  // The cut is the cut: an adopted batch keeps the files and checks it was cut with, re-derived only
+  // when an older loop recorded a batch without them.
+  const files = adopted?.files?.length ? adopted.files : await ports.files(verified, tip);
+  const checks = adopted?.checks?.length ? adopted.checks : await gateChecks(ports, record, tip, landings);
+  const results: Record<string, string[]> = adopted?.results ?? {};
+  record.inFlight = adopted ? { ...adopted, files, checks, results } : { tip, startedAt: at(), files, checks, results };
+  if (!adopted) await ports.checkpoint?.();
+  // The clock is the batch's own, so a restart between steps never lengthens the gate.
+  const deadline = Date.parse(record.inFlight.startedAt) + gateLimitMs;
+  const finished = results;
+  const run = (commit: string, runChecks: readonly string[], runFiles: readonly string[]) => {
+    const key = `${commit} ${[...runChecks].sort().join(' ')}`;
+    if (key in finished) return Promise.resolve(finished[key]!); // a step the last loop finished
     const left = deadline - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
     let timer: NodeJS.Timeout | undefined;
-    return Promise.race([ports.run(commit, checks, files), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
-      .then(failed => { if (ports.now() > deadline) throw new GateTimeout(); return failed; }).finally(() => clearTimeout(timer));
+    return Promise.race([ports.run(commit, runChecks, runFiles), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
+      .then(async failed => {
+        if (ports.now() > deadline) throw new GateTimeout();
+        finished[key] = failed; // the finished step survives a restart
+        await ports.checkpoint?.();
+        return failed;
+      })
+      .finally(() => clearTimeout(timer));
   };
   const hold = (reason: string): GateOutcome => { record.held = { tip, reason, at: at() }; return { outcome: 'held', tip, reason }; };
-  const landings = await ports.landings(verified, tip);
-  const files = await ports.files(verified, tip);
-  const checks = await gateChecks(ports, record, tip, landings);
-  record.inFlight = { tip, startedAt: at() };
   try {
-    await ports.started?.();
     const failed = await run(tip, checks, files);
     let confirmed: string[] = [], flakes: string[] = [];
     const knownRed: string[] = [];
@@ -190,8 +229,6 @@ export async function runGate(ports: GatePorts, record: GateRecord): Promise<Gat
     record.attempt = { ...record.attempt, timeouts: record.attempt.timeouts + 1 };
     if (record.attempt.timeouts >= 2) return hold(`the batch gate timed out twice (past ${gateLimitMs / 60_000} minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`);
     return { outcome: 'timeout', tip };
-  } finally {
-    record.inFlight = null;
   }
 }
 
