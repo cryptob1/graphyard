@@ -1,7 +1,9 @@
 // Concern: `graphyard master run` — wiring the durable loop to its effects.
 import { parseArgs } from 'node:util';
 import { liveMasterConfig } from '../../master.js';
-import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
+import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
+import { readDaemonState } from '../../daemon/state.js';
+import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
 import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/loop-presence.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';

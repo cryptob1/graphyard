@@ -11,7 +11,7 @@ A worker submits its commit, Graphyard checks gates, the merge writer trials and
 
 ## Merge writer
 
-`run.mergeWriter.parallel` (3) batches of ≤4 oldest heads trial concurrently on stacked commits, pushing in order. Conflicts wait for predecessor settlement and retry on a changed base; batch conflicts retry individually after the remaining heads settle. Failed batches retry individually, re-trialling those above. Ledger: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Leased pushes retrial moved tips. Lost replies replay idempotently. Superseded intents are refused; current heads requeue. Status: `mergeWriter.queue`, `inFlights`.
+`run.mergeWriter.parallel` (3) batches of ≤4 oldest heads trial concurrently on stacked commits, pushing in order. Conflicts wait for predecessor settlement and retry on a changed base; batch conflicts retry individually after the remaining heads settle. Failed batches retry individually, re-trialling those above. Ledger: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Leased pushes retrial moved tips. Lost replies replay idempotently. Superseded intents are refused; current heads requeue. Status: `mergeWriter.queue`, `inFlights`. Master status also shows `mergeWriter.trials`: the last 20 completed trials, their covered item/head pairs and step durations in milliseconds (including scan, bound E2E cases (`tests: e2e`, also on failure), test shards, preview and push when run). Batch fallbacks and retrials have separate records. `mergeWriter.stepMedians` reports each step’s median milliseconds across those records; older state starts with no timings. Timings are diagnostic, not gate evidence.
 
 ## The merger
 
