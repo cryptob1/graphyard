@@ -777,3 +777,14 @@ test('unit:board-api — unused reads return 404 and still require authenticatio
     assert.equal((await localRequest(url, path, { headers: { Host: 'graphyard.example' } })).status, 401, path);
   }
 });
+
+test('unit:action-queue — dispatch is split by concern under src/dispatch/ and no dispatch module exceeds 600 lines (GY-3029)', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const directory = new URL('../src/dispatch/', import.meta.url);
+  const modules = (await readdir(directory)).filter(name => name.endsWith('.ts')).sort();
+  assert.deepEqual(modules, ['attempts.ts', 'cursor.ts', 'effects.ts', 'launch-failover.ts', 'post-merge.ts', 'session-sweep.ts', 'tick.ts', 'worker-pull.ts']);
+  for (const name of modules) {
+    const lines = (await readFile(new URL(name, directory), 'utf8')).split('\n').length;
+    assert.ok(lines <= 600, `src/dispatch/${name} is ${lines} lines`);
+  }
+});

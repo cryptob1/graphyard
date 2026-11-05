@@ -48,7 +48,7 @@ async function launchedOnce() {
   return { host, config, registry, effects, item: withReviewHandle(base, config.hostId!, pane, name, startedAt), pane, name };
 }
 
-test('unit:vanished-reviewer-slot-freed — a reviewer whose session vanished and whose record settled no longer holds the profile\'s slot, and the loop launches a replacement review', async () => {
+test('unit:vanished-reviewer-slot — a reviewer whose session vanished and whose record settled no longer holds the profile\'s slot, and the loop launches a replacement review', async () => {
   const { host, config, registry, effects, item, pane, name } = await launchedOnce();
   try {
     // The session leaves Herdr without posting a verdict.
@@ -81,7 +81,7 @@ test('unit:vanished-reviewer-slot-freed — a reviewer whose session vanished an
   } finally { await host.cleanup(); }
 });
 
-test('unit:live-reviewer-slot-kept — a reviewer session Herdr still lists keeps the profile\'s slot, and no second review launches beside it', async () => {
+test('unit:vanished-reviewer-slot — a live one is kept: a reviewer session Herdr still lists keeps the profile\'s slot, and no second review launches beside it', async () => {
   const { host, config, effects, item, name } = await launchedOnce();
   try {
     // Another request for a second item waits for the one slot the live session holds.
