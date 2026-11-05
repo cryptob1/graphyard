@@ -11,7 +11,7 @@ The control plane always merges passing heads; Delivery names it as the merge wr
 
 `master init` installs loop and deploy user units; the loop restores a missing deploy unit. New names include the repository; legacy names are `graphyard-master.service` and `graphyard-deploy.service`.
 
-The deploy unit runs `graphyard upgrade --watch --checkout <install>/deploy/src`: fetch, build, restart and verify health at the expected commit. It retains serving/previous images. Failed deploys restore when safe; migrations may require roll-forward. `.graphyard/deploy.json` names the serving tip and repository; the loop reloads newly served code. For managed apps, see [serve configuration and live checks](deployment.md#serving-the-managed-repositorys-app).
+The deploy unit runs `graphyard upgrade --watch --checkout <install>/deploy/src`: fetch, build, restart and verify health at the expected commit. It retains serving/previous images. Failed deploys restore when safe; migrations may require roll-forward. `.graphyard/deploy.json` names the serving tip and repository; the loop reloads newly served code. Having served a commit, the watch hands itself over to it — its invocation ends with the release handover and the launcher restarts it on the code its checkout published — so the running watch is always the code it serves, never a process that predates the rule it enforces. A watch still running older code than the commit it served (one that predates the handover) is restarted by the loop through systemd once, between passes. For managed apps, see [serve configuration and live checks](deployment.md#serving-the-managed-repositorys-app).
 
 ### Batch gate on main
 

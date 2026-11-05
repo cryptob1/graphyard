@@ -33,7 +33,7 @@ export const describeObservedExhaustion = (environment: string, held: ObservedEx
  * this host's guess, so that report names no login and holds no other account (GY-1581: nor its plan).
  */
 export const heldObservation = (environment: string, held: ObservedExhaustion, read: QuotaObservation = { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }): QuotaObservation =>
-  ({ ...read, state: 'exhausted', session: held.resetsAt ? 'named' : 'guessed', resetsAt: held.until, reason: describeObservedExhaustion(environment, held).slice(0, 500), identity: !held.resetsAt ? null : held.identity !== undefined ? held.identity : read.identity });
+  ({ ...read, state: 'exhausted', session: held.resetsAt ? 'named' : 'guessed', resetsAt: held.until, reason: describeObservedExhaustion(environment, held).slice(0, 500), identity: !held.resetsAt ? null : held.identity !== undefined ? held.identity : read.identity, since: held.at });
 /**
  * A hold as the agent registry is told of it, with the login it was spent on (GY-1573). A hold saved
  * before identities were recorded is given one, kept on the hold once reported so a source home logged
@@ -115,7 +115,7 @@ export function registryHoldObservations(registry: Pick<AgentRegistry, 'accounts
   if (!registry || login && spentHere(held, login, launched) || !login && registryAccount(registry, host, name)) return [{ account: name, quota: heldObservation(name, held) }];
   if (!held.resetsAt || !held.identity) return [];
   const twins = registry.accounts.filter(account => account.credential.host === host && account.quota.identity === held.identity);
-  return twins.length ? twins.map(({ name: account, quota: { loggedIn, usage } }) => ({ account, quota: { loggedIn, usage, state: 'exhausted' as const, resetsAt: held.until, reason: twinReason(account, name, held), identity: held.identity } })) : null;
+  return twins.length ? twins.map(({ name: account, quota: { loggedIn, usage } }) => ({ account, quota: { loggedIn, usage, state: 'exhausted' as const, resetsAt: held.until, reason: twinReason(account, name, held), identity: held.identity, since: held.at } })) : null;
 }
 /**
  * What this host tells the registry of an account it probed (GY-1574): one a session here saw spent
@@ -133,5 +133,5 @@ export function heldOverlay(held: Record<string, ObservedExhaustion>, account: s
   const ownHere = login ? spentHere(own, login, launched) : !!own && !(own.home && own.identity && quota.identity && own.identity !== quota.identity);
   if (ownHere) return heldObservation(account, own, quota);
   const twin = quota.identity ? Object.entries(held).find(([, entry]) => entry.resetsAt && entry.identity === quota.identity) : undefined;
-  return twin ? { ...quota, state: 'exhausted', resetsAt: twin[1].until, reason: twinReason(account, twin[0], twin[1]) } : quota;
+  return twin ? { ...quota, state: 'exhausted', resetsAt: twin[1].until, reason: twinReason(account, twin[0], twin[1]), since: twin[1].at } : quota;
 }
