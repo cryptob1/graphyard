@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -247,4 +247,18 @@ test('unit:trial-serves-head-and-runs-bound-cases — each case runs against the
   assert.match(by('unbound').failingStep!, /bind it in delivery\.cases to one of site, api/);
 });
 
+});
+
+test('unit:trial-serves-head-and-runs-bound-cases — the repository runs e2e:fixture-static-home against its declared static site, whose home carries the expected text', async () => {
+  // GY-3126: the scheduled full run failed this case because main declared no fixture site, so it ran against e2e.serve.
+  const worktree = process.cwd();
+  const targets: unknown[] = [];
+  await runTrialE2eCases({
+    worktree, mergeSha: 'a'.repeat(40), proofs: ['e2e:fixture-static-home'], env: {}, scratch: worktree, budgetMs: 1_000,
+    holds: async path => existsSync(join(worktree, path)), log: () => {},
+    runGroup: async (target, proofs) => { targets.push(target); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); },
+  });
+  assert.deepEqual(targets, [{ id: 'fixture-site', kind: 'static', directory: 'fixtures/static-site', build: null }]);
+  const expected = JSON.parse(readFileSync(join(worktree, 'e2e/cases/fixture-static-home.json'), 'utf8')).steps.find((step: { action: string }) => step.action === 'expectText').text;
+  assert.ok(readFileSync(join(worktree, 'fixtures/static-site/index.html'), 'utf8').includes(expected));
 });
