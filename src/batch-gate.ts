@@ -91,6 +91,8 @@ export interface GatePorts {
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string }>;
   /** Files an item owning a failure, once per `key`. */
   file(input: { title: string; description: string; key: string }): Promise<void>;
+  /** Called once the gate is in flight, so the record can say so. */
+  started?(): Promise<void>;
 }
 
 /** What one gate came to. */
@@ -132,6 +134,7 @@ export async function runGate(ports: GatePorts, record: GateRecord): Promise<Gat
   const checks = await gateChecks(ports, record, tip, landings);
   record.inFlight = { tip, startedAt: at() };
   try {
+    await ports.started?.();
     const failed = await run(tip, checks, files);
     let confirmed: string[] = [], flakes: string[] = [];
     const knownRed: string[] = [];

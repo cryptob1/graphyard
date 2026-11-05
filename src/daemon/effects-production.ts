@@ -206,6 +206,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        gate: { root, repository: config.repository },
       };
     },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
