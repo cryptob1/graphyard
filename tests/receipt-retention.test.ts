@@ -66,7 +66,7 @@ test('unit:heartbeat-receipt-compact — a renewal answers the whole document on
   const claim = (await store.pool.query("SELECT pg_column_size(result) AS bytes FROM receipts WHERE actor=$1 AND result->>'stage' IS NOT NULL AND result ? 'criteria' ORDER BY created_at DESC LIMIT 1", [worker.id])).rows[0];
   assert.ok(stored.bytes * 4 < claim.bytes, `the renewal receipt (${stored.bytes} B) is a fraction of a full one (${claim.bytes} B)`);
   const replay = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, key);
-  // What the supervisor reads from a renewal (src/supervisor.ts heartbeat()).
+  // What the supervisor reads from a renewal (src/session-watch.ts heartbeat()).
   assert.equal(replay.lease!.epoch, 1);
   assert.equal(replay.lease!.expiresAt, renewed.lease!.expiresAt);
   assert.equal(replay.updatedAt, renewed.updatedAt);

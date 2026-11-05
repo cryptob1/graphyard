@@ -180,3 +180,12 @@ test('unit:deploy-prunes-old-images — one upgrade --watch pass whose health ch
   assert.equal(readDeployRecord(file)?.failed, failing);
   assert.deepEqual(removed, [], 'nothing is removed when the health check fails');
 });
+
+test('unit:deploy-unit — src/install/loop-unit.ts writes graphyard-deploy.service running upgrade --watch on the install\'s deploy checkout, restarting always', async () => {
+  const { deployUnitText, deployCheckoutOf } = await import('../src/install/loop-unit.js');
+  const text = deployUnitText({ root: '/home/op/repo', cliPath: '/home/op/repo/bin/graphyard.mjs', repository: 'owner/repo', execPath: '/usr/bin/node', installDir: '/home/op/.config/graphyard/owner-repo' });
+  assert.match(text, /^WorkingDirectory=\/home\/op\/repo$/m);
+  assert.ok(text.includes(`ExecStart=/usr/bin/node /home/op/repo/bin/graphyard.mjs upgrade --watch --checkout ${deployCheckoutOf('/home/op/.config/graphyard/owner-repo')}`));
+  assert.match(text, /^Restart=always$/m);
+  assert.match(text, /Description=Graphyard continuous deploy \(owner\/repo\)/);
+});

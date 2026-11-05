@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import { dispatchedFile } from '../src/master/dispatch-reservation.js';
 import { itemLine } from '../src/cli/master-status.js';
-import { supervise } from '../src/supervisor.js';
+import { supervise } from '../src/session-watch.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';

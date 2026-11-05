@@ -300,7 +300,7 @@ export const planeStallMs = 60_000;
 /**
  * How long past a recorded stall's end a lease the stall kept may stand (GY-1801): the window a
  * still-retrying supervisor needs to land the renewal the stall ate. A supervisor's renewals wait
- * under its lease window and retry within a doubling backoff capped at ten seconds (`supervisor.ts`),
+ * under its lease window and retry within a doubling backoff capped at ten seconds (`session-watch.ts`),
  * so one that was mid-renewal when the plane stopped answering lands a fresh one well inside thirty
  * seconds of its recovery — a full lease period keeps a lease nobody renews standing instead, and a
  * pane closed under a lease only the stall keeps is exactly the live-lease close the soak's

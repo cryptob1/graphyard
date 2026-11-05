@@ -26,7 +26,7 @@ import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master
 import { localTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
-import { durableCheckoutPreflight } from '../supervisor.js';
+import { durableCheckoutPreflight } from './loop-unit.js';
 import { underTestRunner } from '../runtime-environment.js';
 import { deployUnitOf, perInstallUnits, proposedInstallUnits, userUnitDirectory } from './units.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PreflightItem, type Provider } from './types.js';
