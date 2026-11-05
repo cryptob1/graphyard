@@ -618,7 +618,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           action('done', outcome.outcome === 'merged' ? `Merged ${itemKey} head ${head} as ${outcome.mergeSha} onto ${outcome.baseTip} with ${outcome.pushes} push(es); ${reads.baseBranch} observed at ${outcome.observedTip} and the item delivered`
             : `Reconciled ${itemKey} head ${head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
         } else {
-          writer.refusals = [...writer.refusals, { key: itemKey, head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
+          writer.refusals = [...writer.refusals.filter(entry => entry.key !== itemKey || entry.head !== head), { key: itemKey, head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
           action('failed', outcome.outcome === 'requeued' ? `Merge of ${itemKey} head ${head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
             : `Merge of ${itemKey} head ${head} refused: ${outcome.reason}; the refusal is recorded on the ledger and the rework it grounds is requested`);
           // The trial failed the head (AC-3): the rework is owed until the server confirms it, and asked for below.
@@ -667,7 +667,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       try { await record(item, { kind: 'refused', head: counted.head, reason: counted.reason }); }
       catch { continue; }
       const key = mergeWriterActionKey(counted.key, counted.head);
-      writer.refusals = [...writer.refusals, { key: counted.key, head: counted.head, reason: counted.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
+      writer.refusals = [...writer.refusals.filter(entry => entry.key !== counted.key || entry.head !== counted.head), { key: counted.key, head: counted.head, reason: counted.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
       if (!writer.reworks.some(entry => entry.key === counted.key && entry.head === counted.head)) {
         writer.reworks = [...writer.reworks, { key: counted.key, id: counted.id, head: counted.head, reason: counted.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
       }
