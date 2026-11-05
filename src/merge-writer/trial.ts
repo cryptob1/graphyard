@@ -16,7 +16,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
 import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
-import type { GateCheck } from '../model/delivery-policy.js';
+import { mergeGateSchema, type GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -508,6 +508,25 @@ export const checkCommandArgv = (command: string): string[] | null => {
   const parts = command.trim().split(/\s+/).filter(Boolean);
   return parts.length ? parts : null;
 };
+/**
+ * The pre-merge checks a head's graphyard.json declares, or why the head's declaration is unusable:
+ * malformed JSON, a check the delivery schema refuses, an empty selection command or a pattern that
+ * is no regular expression. The trial refuses such a head naming the policy, never retries it.
+ */
+export function declaredPreMerge(text: string): { preMerge: TrialCheckDeclaration[] | null } | { refusal: string } {
+  let config: { delivery?: { mergeGate?: { preMerge?: unknown } } };
+  try { config = JSON.parse(text); } catch (error) { return { refusal: `graphyard.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` }; }
+  const declared = config?.delivery?.mergeGate?.preMerge;
+  if (declared === undefined || declared === null) return { preMerge: null };
+  const parsed = mergeGateSchema.shape.preMerge.safeParse(declared);
+  if (!parsed.success) return { refusal: `graphyard.json delivery.mergeGate.preMerge is invalid: ${parsed.error.issues.slice(0, 3).map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}` };
+  for (const entry of parsed.data) {
+    if (!entry.selection) continue;
+    if (!checkCommandArgv(entry.selection.command)) return { refusal: `graphyard.json check ${entry.check} declares an empty selection command` };
+    try { new RegExp(entry.selection.pattern); } catch { return { refusal: `graphyard.json check ${entry.check} declares selection pattern ${JSON.stringify(entry.selection.pattern)}, which is no regular expression` }; }
+  }
+  return { preMerge: parsed.data };
+}
 /** Declared checks, with conventional npm scripts as the fallback. Build runs in its own phase. */
 export function repositoryTrialChecks(input: {
   preMerge?: readonly TrialCheckDeclaration[] | null;
@@ -1047,8 +1066,12 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       if (built) return built;
       let preMerge: TrialCheckDeclaration[] | null = null;
       if (await holds('graphyard.json')) {
-        const config = JSON.parse(await readFile(join(worktree, 'graphyard.json'), 'utf8'));
-        preMerge = config.delivery?.mergeGate?.preMerge ?? null;
+        const declared = declaredPreMerge(await readFile(join(worktree, 'graphyard.json'), 'utf8'));
+        if ('refusal' in declared) {
+          log.push(declared.refusal);
+          return finish('pass', { passed: 0, failed: ['graphyard.json'], files: 0 }, null, undefined, undefined, { failingCase: declared.refusal });
+        }
+        preMerge = declared.preMerge;
       }
       return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts }));
     } catch (error) {

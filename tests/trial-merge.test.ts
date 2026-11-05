@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, declaredPreMerge, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { listTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -18,6 +18,7 @@ import { evaluate, type Work } from '../src/model.js';
 import { actionAccount } from '../src/model/next-action.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { trialFailureRework } from '../src/daemon/cycle-merge-writer.js';
+import { trialFailureReason } from '../src/merge-writer/executor.js';
 
 // GY-1522: the merge writer's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
@@ -823,4 +824,18 @@ test('unit:trial-merge — a failed trial grounds a rework for the candidate and
   assert.equal(account.action, null, 'the merge writer answers the refused trial; no executor row asks for a new head yet');
   assert.deepEqual(account.wait, { kind: 'session', on: 'merge-writer', detail: `GY-3008 is queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}` });
   assert.notEqual(account.wait?.on, 'graphyard', 'no base-break wait stands in for the rework');
+});
+
+test('unit:trial-declared-policy-refusal — a head whose graphyard.json is malformed, fails the delivery schema, declares an empty selection command or a selection pattern that is no regular expression is refused naming graphyard.json, never retried as a host failure', () => {
+  const policy = (check: Record<string, unknown>) => JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm test', source: 'script', reason: 'r', ...check }], perCandidate: [] } } });
+  const refusal = (text: string) => { const declared = declaredPreMerge(text); return 'refusal' in declared ? declared.refusal : null; };
+  assert.match(refusal('{ not json')!, /graphyard\.json is not valid JSON/);
+  assert.match(refusal(policy({ source: 'elsewhere' }))!, /preMerge is invalid: 0\.source/);
+  assert.match(refusal(policy({ selection: { command: '   ', pattern: '.' } }))!, /empty selection command/);
+  assert.match(refusal(policy({ selection: { command: 'node select.mjs', pattern: '(' } }))!, /no regular expression/);
+  assert.deepEqual(declaredPreMerge('{}'), { preMerge: null });
+  assert.equal(refusal(readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8')), null, "Graphyard's own declarations are valid");
+  // The refusal is a failing verdict naming the policy, so the merge writer sends the head back instead of re-trialling it.
+  const reason = 'graphyard.json is not valid JSON: x';
+  assert.equal(trialFailureReason({ run: { build: 'pass', tests: { passed: 0, failed: ['graphyard.json'], files: 0 }, failingCase: reason } }), `${trialFailurePrefix}: tests graphyard.json: ${reason}`);
 });
