@@ -286,9 +286,7 @@ export const failureIsBase = (run: Pick<MergeTrialRun, 'build' | 'tests' | 'base
   run.build === 'pass' && run.tests.failed.length > 0 && !!run.base && run.tests.failed.every(file => run.base!.files.includes(file))
   && run.base.cases.length > 0 && run.base.cases.every(test => run.base!.tests.includes(test));
 
-/** The refusal of a head whose push the base tip moved under `times` times (AC-3); it leaves the head queued. */
-export const baseMovedReason = (times: number) => `base moved ${times} times`;
-/** The refusal of a push the remote rejected while the base tip stood still: not a moved tip, so no re-trial; the head stays queued for a later cycle. */
+/** The refusal of a push the remote rejected while the base tip stood still: not a moved tip, so no re-merge; the head stays queued for a later cycle. */
 export const unmovedTipReason = (base: string, baseTip: string) => `push rejected though ${base} still stood at ${baseTip.slice(0, 12)}`;
 /** The refusal of an intent a crash left open whose merge commit the base does not hold: the head is queued again (AC-5). */
 export const unpushedIntentReason = (mergeSha: string, base: string) => `intent ${mergeSha.slice(0, 12)} was never pushed: ${base} does not hold it, so the head is queued again`;
@@ -633,8 +631,6 @@ export type MergeOutcomeOfTrial = { mergeSha: string; files: string[] } | { conf
 /** Everything `mergeOne` and `reconcileIntents` touch outside the process: git in the coordinator checkout, the deploy-key push, and the coordinator's ledger. */
 export interface MergePorts {
   baseBranch: string;
-  /** How many times a rejected push is re-trialled on the new tip (`run.mergeWriter.retrials`). */
-  retrials: number;
   now(): number;
   /** Fetches the base branch into the checkout (the head is already in its object store, GY-1523); answers the base tip. */
   fetch(): Promise<string>;
@@ -642,7 +638,7 @@ export interface MergePorts {
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
   /**
    * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
-   * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
+   * `share` is how many trials run at once (`mergeHeads`): each takes that share of the host's cores.
    * Aborting `signal` stops the trial's children (GY-3099).
    */
   trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal): Promise<MergeTrialRun>;
@@ -652,13 +648,6 @@ export interface MergePorts {
    * Absent, nothing is previewed.
    */
   preview?(mergeSha: string, files: readonly string[], item: Pick<Work, 'key'>): Promise<PreviewVerdict | null>;
-  /**
-   * Whether the tip a trial ran on is the tip it would land on (batch.ts `mergeStack`): answered once
-   * every queue position before this one has finished. False discards the verdict, which is the
-   * stacked positions' as much as this head's, and the head is trialled again on the tip as it stands.
-   * Absent, every trial lands where it ran.
-   */
-  lands?(baseTip: string): Promise<boolean>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -682,15 +671,18 @@ export type MergeOutcome =
  * pushed, or an open intent whose merge commit the base holds, is only fetched and reconciled,
  * never pushed again. Otherwise the head is trial-merged onto the fetched tip, the intent is
  * recorded before anything runs, the trial runs on the exact merge commit with the proof files
- * included, a passing trial is previewed (GY-1718: its required and uat cases run against the merge
- * commit served, the verdict recorded with the trial), and the merge commit is pushed with a lease
- * on the tip it was tested on. A rejected push
- * re-reads the tip: one that moved is re-trialled on the new tip, at most `retrials` times (AC-3);
- * one that stood still was rejected for another cause and is refused `unmovedTipReason`, queued
- * for a later cycle rather than re-trialled. A failed trial, a failing required case on the preview
- * or a conflict is refused naming what failed, and the rework that refusal grounds is the loop's to
- * request; a preview that timed out or could not run is refused leaving the head queued, as a trial
- * timeout does.
+ * included (the affected selection plus the proofs, GY-3120), a passing trial is previewed
+ * (GY-1718: its required and uat cases run against the merge commit served, the verdict recorded
+ * with the trial), and the merge commit is pushed with a lease on the tip it was tested on.
+ *
+ * GY-3120: a head whose trial passed lands without another trial. A push rejected because the tip
+ * moved re-merges the same reviewed head onto the new tip (`trialMerge`: a `Merge GY-N` commit or a
+ * fast-forward, the head unchanged), records that intent and pushes it; a conflict there is refused
+ * and returned for rework. Main is verified afterwards by the batch gate (GY-3119). A push rejected
+ * while the tip stood still was rejected for another cause and is refused `unmovedTipReason`, queued
+ * for a later cycle. A failed trial, a failing required case on the preview or a conflict is refused
+ * naming what failed, and the rework that refusal grounds is the loop's to request; a preview that
+ * timed out or could not run is refused leaving the head queued, as a trial timeout does.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
@@ -713,74 +705,98 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   }
   // Already-pushed reconciliation above retains its original intent and proof bindings.
   const held = async () => ports.hold ? ports.hold(item) : null;
-  let pushes = 0, baseTip = await ports.fetch();
-  for (let attempt = 0; attempt <= ports.retrials; attempt++) {
-    const opening = await held();
-    if (opening) return { outcome: 'requeued', reason: opening, pushes };
-
-    const merged = await ports.merge(head, baseTip, item);
-    if ('conflict' in merged) {
-      if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
-      const reason = trialFailureReason({ conflict: merged.conflict })!;
-      await ports.record(item, { kind: 'refused', head, reason });
-      return { outcome: 'refused', reason, trial: null, conflict: merged.conflict };
-    }
-    // The head itself when it fast-forwards the tip (trial.ts `trialMerge`): the ledger then names the head as the merge commit.
-    const { mergeSha } = merged;
-    // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
-    await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
-    let run: MergeTrialRun;
-    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
-    catch (error) {
-      // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
-      const attempts = trialAttempts(error), last = attempts.at(-1)!;
-      await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts,
-        durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
-      throw error;
-    }
-    if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
-    // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
-    const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
-    const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
-    // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
-    const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
-      ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
-    // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
-    const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
+  const conflicted = async (conflict: string[]): Promise<MergeOutcome> => {
+    const reason = trialFailureReason({ conflict })!;
+    await ports.record(item, { kind: 'refused', head, reason });
+    return { outcome: 'refused', reason, trial: null, conflict };
+  };
+  let baseTip = await ports.fetch();
+  const opening = await held();
+  if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
+  const merged = await ports.merge(head, baseTip, item);
+  if ('conflict' in merged) return conflicted(merged.conflict);
+  // The head itself when it fast-forwards the tip (trial.ts `trialMerge`): the ledger then names the head as the merge commit.
+  let { mergeSha } = merged;
+  // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
+  await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
+  let run: MergeTrialRun;
+  try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
+  catch (error) {
+    // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
+    const attempts = trialAttempts(error), last = attempts.at(-1)!;
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts,
+      durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
+    throw error;
+  }
+  // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
+  const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
+  const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
+  // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
+  const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
+    ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
+  // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
+  const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
+  await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+    ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
+  const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
+  let pushes = 0;
+  for (;;) {
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
     const landing = await held();
     if (landing) {
       await ports.record(item, { kind: 'refused', head, reason: landing });
       return { outcome: 'requeued', reason: landing, pushes };
     }
-    const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
       if (baseHeld || preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
       return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
     }
     pushes += 1;
-    const pushed = await ports.push(mergeSha, baseTip);
-    if (pushed === 'pushed') {
+    if (await ports.push(mergeSha, baseTip) === 'pushed') {
       await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: at() });
       const observedTip = await ports.fetch();
       await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
       return { outcome: 'merged', mergeSha, baseTip, observedTip, pushes };
     }
-    // Rejected: the re-trial path is only for a tip that moved (AC-3), confirmed by re-reading it, never for a remote's refusal of the same tip.
+    // Rejected: only a tip that moved (confirmed by re-reading it) re-merges, never a remote's refusal of the same tip.
     const movedTo = await ports.fetch();
     if (movedTo === baseTip) {
       const reason = unmovedTipReason(ports.baseBranch, baseTip);
       await ports.record(item, { kind: 'refused', head, reason });
       return { outcome: 'requeued', reason, pushes };
     }
-    baseTip = movedTo;
+    // GY-3120: the passing head lands on the moved tip without a new trial; only a conflict returns it for rework.
+    const remerged = await ports.merge(head, movedTo, item);
+    if ('conflict' in remerged) return conflicted(remerged.conflict);
+    baseTip = movedTo; mergeSha = remerged.mergeSha;
+    await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
   }
-  const reason = baseMovedReason(pushes);
-  await ports.record(item, { kind: 'refused', head, reason });
-  return { outcome: 'requeued', reason, pushes };
+}
+
+/** What one queued head came to: its merge outcome, or the error that left it queued. */
+export type HeadResult = { work: Work; outcome: MergeOutcome } | { work: Work; error: unknown };
+
+/**
+ * GY-3120: the queued heads, each trialled alone on the current tip (`mergeOne`), all at once with
+ * the host's cores shared among them. A head never waits on or cancels another head's trial: one
+ * whose trial passes lands as soon as it passes, re-merged onto whatever tip the heads before it
+ * left. The base reads and writes (fetch, merge, push) take turns, so two heads never write the
+ * checkout's refs at once. `onStep` names each head's trial step.
+ */
+export async function mergeHeads(ports: MergePorts, items: readonly Work[], onStep?: (index: number, step: string) => void): Promise<HeadResult[]> {
+  let turn: Promise<unknown> = Promise.resolve();
+  const serial = <A extends unknown[], T>(call: (...args: A) => Promise<T>) => (...args: A): Promise<T> => {
+    const next = turn.then(() => call(...args));
+    turn = next.catch(() => {});
+    return next;
+  };
+  const shared: MergePorts = { ...ports, fetch: serial(ports.fetch), merge: serial(ports.merge), push: serial(ports.push),
+    trial: (mergeSha, files, item, baseTip, step, onTiming, heads, _share, signal) => ports.trial(mergeSha, files, item, baseTip, step, onTiming, heads, items.length, signal) };
+  return Promise.all(items.map(async (work, index): Promise<HeadResult> => {
+    try { return { work, outcome: await mergeOne({ ...shared, ...(onStep ? { onStep: (step: string) => onStep(index, step) } : {}) }, work) }; }
+    catch (error) { return { work, error }; }
+  }));
 }
 
 /** Only the orphan-intent refusal can be reconsidered after a concurrent trial actually pushed. */

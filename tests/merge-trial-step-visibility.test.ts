@@ -82,7 +82,7 @@ function harness(): StepHarness {
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   let clock = start, settle: (() => void) | null = null;
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => clock,
+    baseBranch: 'main', now: () => clock,
     fetch: async () => base,
     merge: async () => ({ mergeSha: sha('merge'), files: ['src/app.ts'] }),
     trial: async (_mergeSha, _files, _picked, _baseTip, onStep, onTiming) => {
@@ -216,7 +216,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => Date.now(),
+    baseBranch: 'main', now: () => Date.now(),
     fetch: async () => repo.baseTip,
     merge: (mergeHead, mergeBase) => trialMerge(repo.git, { head: mergeHead, baseTip: mergeBase }).then(merged => ('conflict' in merged ? merged : { mergeSha: merged.mergeSha, files: ['src.ts'] })),
     trial: async (mergeSha, files, picked, _baseTip, onStep, onTiming) => {
@@ -284,8 +284,8 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.deepEqual(first.steps, [{ step: 'install', durationMs: 100 }, { step: 'build', durationMs: 300 }, { step: 'push', durationMs: 0 }]);
 
   let clock = start, duration = 0;
-  const ports = timedMergePorts({ baseBranch: 'main', retrials: 0, fetch: async () => base,
-    merge: async () => ({ mergeSha: head, files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
+  const ports = timedMergePorts({ baseBranch: 'main', fetch: async () => base,
+    merge: async (mergeHead, baseTip) => ({ mergeSha: sha(`merge:${mergeHead}:${baseTip}`), files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
     step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
     return {} as never;
   }, push: async () => { clock += 20; return 'pushed'; }, preview: async () => { clock += 30; return null; } } as MergePorts,
@@ -301,6 +301,15 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.equal(summary.trials![0]!.mergeSha, sha('1'));
   assert.deepEqual(summary.trials![0]!.heads, heads);
   assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, preview: 30, push: 20 });
+
+  // GY-3120: a landing that re-merges onto a moved tip still records its push on the head's own trial record.
+  const remergeHead = sha('ninth');
+  await ports.trial(sha('nine'), [], item(), base, undefined, undefined, [{ key: 'GY-9', head: remergeHead }]);
+  const landing = await ports.merge(remergeHead, sha('moved'));
+  if (!('mergeSha' in landing)) throw new Error('the re-merge conflicts with its own base');
+  await ports.push(landing.mergeSha, sha('moved'));
+  const record = mergeWriterSummary(made.state.mergeWriter).trials!.find(entry => entry.mergeSha === sha('nine'))!;
+  assert.deepEqual(record.steps.at(-1), { step: 'push', durationMs: 20 });
 });
 
 test('integration:trial-step-timings — parallel test shards report their own durations', async () => {

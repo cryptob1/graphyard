@@ -20,7 +20,7 @@ const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const tip = sha('main-tip');
 const reused = 'Idempotency key reused with different input';
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const gates = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: name !== 'merge', reasons: name !== 'merge' ? [] : ['merge refused'] }));
 const candidate = { sha: sha('head1'), baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' };
 const submitted = () => ({
@@ -63,7 +63,7 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
   };
   // Every call reads a later clock, so a write rebuilt on a retry would carry new input.
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 3, now: () => (clock += 1000),
+    baseBranch: 'main', now: () => (clock += 1000),
     fetch: async () => tip,
     merge: async (head, baseTip) => ({ mergeSha: sha(`merge:${head}:${baseTip}`), files: ['src/app.ts'] }),
     trial: async mergeSha => ({ build: options.failTrial ? 'fail' : 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),

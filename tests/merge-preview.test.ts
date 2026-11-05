@@ -64,7 +64,7 @@ const passingTrial: MergeTrialRun = { build: 'pass', tests: { passed: 3, failed:
 function ports(preview?: MergePorts['preview']) {
   const events: MergeRecordEvent[] = [], pushes: string[] = [];
   const value: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => fixedNow,
+    baseBranch: 'main', now: () => fixedNow,
     fetch: async () => pushes.length ? mergeSha : tip,
     merge: async () => ({ mergeSha, files: ['src/game.ts'] }),
     trial: async () => passingTrial,
@@ -498,7 +498,7 @@ test('unit:preview-timeout-retried — a head whose preview timed out is merged 
   let commits = 0, previews = 0, landed: string | null = null;
   const verdictFor = (merged: string, result: PreviewVerdict['result']): PreviewVerdict => ({ result, mergeSha: merged, cases: [], failed: [], detail: result, durationMs: 5 });
   const value: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => fixedNow + commits * 60_000,
+    baseBranch: 'main', now: () => fixedNow + commits * 60_000,
     fetch: async () => landed ?? tip,
     // commit-tree stamps the time, so each trial of the same head on the same tip is a fresh merge commit.
     merge: async () => ({ mergeSha: sha(`merge-${++commits}`), files: ['src/game.ts'] }),

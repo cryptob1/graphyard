@@ -21,7 +21,6 @@ import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
 import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
-import { defaultMergeBatch } from '../src/merge-writer/batch.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 import { linkedCases } from '../src/model/test-cases.js';
 
@@ -217,8 +216,8 @@ test('unit:trial-serves-head-and-runs-bound-cases — a host loopback listener c
   } finally { await new Promise<void>(resolve => other.close(() => resolve())); }
 });
 
-test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries every e2e result a full batch of valid items can owe', () => {
-  const results = Array.from({ length: defaultMergeBatch * 50 * 20 }, (_, index) => ({ proof: `e2e:case-${index}`, case: `case-${index}`, executed: 1, failed: 0 }));
+test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries every e2e result a valid item can owe', () => {
+  const results = Array.from({ length: 50 * 20 }, (_, index) => ({ proof: `e2e:case-${index}`, case: `case-${index}`, executed: 1, failed: 0 }));
   const sha = 'a'.repeat(40);
   const parsed = mergeRecordBodySchema.safeParse({ kind: 'trial', head: sha, baseTip: sha, mergeSha: sha, outcome: 'verdict', build: 'pass',
     tests: { passed: 0, failed: [], files: 0 }, files: [], proofs: {}, durationMs: 1, attempts: [], e2e: results });

@@ -133,7 +133,7 @@ after(async () => {
 });
 
 const config = () => masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234,
-  hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: managed, mergeWriter: { deployKeyFile: deployKey, retrials: 2 } } });
+  hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: managed, mergeWriter: { deployKeyFile: deployKey } } });
 const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
   agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
   snapshot: async () => ({ work: await work(), now: new Date(at()).toISOString() }),
