@@ -250,7 +250,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     // The registry is the only authority for which account a launch runs on (GY-3030): each role
     // names its accounts in order, and this host reports each login's health before it chooses.
     const registry = (roles: Partial<Record<FleetRoleName, string[]>>): FleetProbe => ({ ...probe, registry: homeRegistry(config.environments!, roles) });
-    const workers = registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }), spentWorkers = registry({ worker: ['claude-a', 'claude-b'] });
+    // A fleet holding only the spent accounts, so GY-3092's fleet failover has nowhere to go.
+    const spentFleet = (roles: Partial<Record<FleetRoleName, string[]>>): FleetProbe => ({ ...probe, registry: homeRegistry(config.environments!.filter(entry => ['claude-a', 'claude-b'].includes(entry.name)), roles) });
+    const workers = registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }), spentWorkers = spentFleet({ worker: ['claude-a', 'claude-b'] });
     const selected = await selectAccount(config, 'worker', config.workers[0], { ...workers, work: 'GY-68' });
     assert.equal(selected.account!.name, 'claude-c');
     assert.deepEqual(selected.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
@@ -288,7 +290,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     // a token; the automatic loop fails over to the next reviewer profile and says why.
     const registerLaunch = async () => ({ launch: 'fixture-launch' });
     let minted = 0;
-    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe: registry({ reviewer: ['claude-a', 'claude-b'] }) }), (error: any) => error.accountsExhausted === true);
+    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe: spentFleet({ reviewer: ['claude-a', 'claude-b'] }) }), (error: any) => error.accountsExhausted === true);
     assert.equal(minted, 0); assert.deepEqual((await readReviewLedger(root)).reviews, []);
     const reviewCalls: string[][] = [];
     const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch, probe: registry({ reviewer: ['claude-c'] }) });
