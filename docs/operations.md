@@ -10,6 +10,7 @@ Check `/healthz` for the expected commit, `/api/status` for job errors and `mast
 Run `diagnose GY-N`; fix the named cause with requirements intact. Use lease recovery for expired workers and rework for failed implementations or producer-runnable manual proofs. The master handles routine recovery.
 
 CLI requests wait out connection failures during a deploy restart, retrying every second for up to 60 seconds with the same idempotency key and body. HTTP errors fail immediately. If the plane stays unreachable, the error names the requested URL.
+Worker verification in `verify` and `complete` waits up to 60 minutes, including the response body, without Node fetch's five-minute header limit. An expired verification wait reports “timed out”; exhausted connection retries report “unreachable”.
 
 ## Recovery recipes
 

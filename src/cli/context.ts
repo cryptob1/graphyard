@@ -9,6 +9,7 @@ import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../private-file.js';
 import { cliRelease } from '../release.js';
 import { cliCommit } from '../protocol-version.js';
+import { verificationRequest } from './verification-request.js';
 
 /** How long one CLI request waits (2026-09-27: the full work snapshot reached 19 MB and ~31 s, so a 30 s bound failed every read of it, including workers' sync and complete; GY-864 bounds those reads). */
 export const cliRequestTimeoutMs = 120_000;
@@ -142,13 +143,15 @@ export async function createContext(command: string, id: string | undefined, arg
     let retrying = false;
     for (;;) {
       try {
-        response = await fetch(url, { ...request, signal: AbortSignal.timeout(path.endsWith('/worker-verification') ? 60 * 60_000 : retrying ? Math.max(1, deadline - Date.now()) : cliRequestTimeoutMs) });
+        response = path.endsWith('/worker-verification')
+          ? await verificationRequest(url, request)
+          : await fetch(url, { ...request, signal: AbortSignal.timeout(retrying ? Math.max(1, deadline - Date.now()) : cliRequestTimeoutMs) });
         break;
       } catch (error) {
         // Only a failed connection is replayed, with the original body and idempotency key.
         // HTTP responses and body-reading failures never enter this retry loop.
         if (!(error instanceof TypeError && error.message === 'fetch failed')) {
-          if (retrying && Date.now() >= deadline) throw new Error(`Control plane unreachable at ${url} after 60 seconds`, { cause: error });
+          if (retrying && Date.now() >= deadline && !path.endsWith('/worker-verification')) throw new Error(`Control plane unreachable at ${url} after 60 seconds`, { cause: error });
           throw error;
         }
         const remaining = deadline - Date.now();
