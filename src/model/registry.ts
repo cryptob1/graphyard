@@ -164,6 +164,7 @@ export interface FleetSession {
   /** For a headless run, whether it ended with a result (GY-446); recorded once. */
   outcome?: RunOutcome;
 }
+/** One refusal of a request; identical refusals of it after this one are counted in registry_refusal_repeats (GY-3095). */
 export interface FleetRefusal { at: string; role: string; host: string; work: string | null; by: string; reason: string; skipped: SessionSkip[] }
 
 export interface AgentRegistry {
