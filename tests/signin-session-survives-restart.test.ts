@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { HumanSignIn, maxSignInLinks, maxSignInSessions, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
 import { signInDatabase } from './helpers/sign-in-database.js';
 import { signInProcess } from './helpers/sign-in-process.js';
+import { runTests } from './helpers/run-tests.js';
 
 test('integration:signin-session-survives-restart — persisted digests authenticate after process restart, until expiry or sign-out', async () => {
   const database = await signInDatabase();
@@ -72,4 +73,13 @@ test('integration:signin-session-survives-restart — persisted digests authenti
     assert.deepEqual(await table.authenticate(fresh.token), fresh.actor);
     assert.equal((await database.store.pool.query('SELECT * FROM human_sign_in_sessions')).rowCount, 1);
   } finally { await http.close(); await database.close(); }
+});
+
+test('integration:signin-session-survives-restart-stable — the case runs five times in a row and every run passes', async () => {
+  // The batch gate's flaky failure (GY-3134): the browser case passed or failed on the same commit.
+  // The case's own machinery — the dashboard polling across a deliberately restarted control plane —
+  // is what had to become deterministic, so this proof runs the case itself, one worker, five
+  // consecutive times; any failing run fails the command.
+  const finished = await runTests({ browser: true, args: ['--repeat-each=5', '--workers=1', 'browser-tests/signin-session-survives-restart.spec.ts'], stdio: 'pipe' });
+  assert.equal(finished.code, 0, `a run of the case failed; five in a row must each pass:\n${finished.stderr.slice(-4_000)}\n${finished.stdout.slice(-4_000)}`);
 });
