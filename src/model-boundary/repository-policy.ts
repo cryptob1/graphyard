@@ -40,6 +40,8 @@ export const repositoryPolicySchema = z.object({
   // later one only when nothing here changed between them. A repository that declares none reviews
   // every new head afresh.
   product: z.object({ ui: z.array(glob).min(1).max(200) }).strict().optional(),
+  // GY-3119: the E2E cases every batch gate on main runs, whatever the batch merged.
+  gate: z.object({ core: z.array(z.string().trim().regex(/^[a-z0-9][a-z0-9-]*$/)).max(50) }).strict().optional(),
 }).strict();
 
 /** The policy in force for a declaration: each section it declares, every other section's default. */
@@ -56,6 +58,7 @@ export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
       revertUnmatched: declared.release?.revertUnmatched ?? defaultRepositoryPolicy.release.revertUnmatched,
     },
     product: declared.product ?? null,
+    gate: { core: declared.gate?.core ?? [] },
   };
 }
 let inForce: { policy: RepositoryPolicy; source: Source } | null = null;

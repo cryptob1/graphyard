@@ -32,6 +32,7 @@ import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attemp
 import { profileHealth, recordProfileFailure } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
+import { batchGateStep } from './cycle-batch-gate.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
@@ -153,7 +154,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       await dispatchStep({ ...cycle, config: scopedConfig, state: scopedState, effects: { ...effects, release: undefined, dispatchTick: undefined, masterSession: effects.personalMasterSession?.(scopedConfig), persist: () => effects.persist(state) } });
     }
   });
-  if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle));
+  // GY-3119: the batch gate on main starts beside the cycle once the merge writer's step ran.
+  if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle).then(() => batchGateStep(cycle)));
   if (own) { await launches.idle(); performed.push(...launches.drain()); }
   await step('persist', async () => {
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
