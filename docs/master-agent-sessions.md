@@ -57,6 +57,10 @@ Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches sp
 
 Each cycle reads the master's recent output with the worker limit-notice judge. A provider limit holds the account until reset, closes the pane and launches the next account in the same cycle. Exited panes relaunch without a hold. Status is working, idle, limited until T or absent; none proves delivery.
 
+### A stopped pipeline is named under attention (GY-3095)
+
+`master status` lists under `attention` each role with no usable account, or whose launches the registry refused for a full cycle: the refusal, how long it has lasted and the next command. Identical consecutive refusals of one request are one `master registry history` entry with `count` and `lastSeenAt`.
+
 ### A closed Herdr workspace is replaced
 
 Missing `herdrWorkspace` is replaced with the master's workspace or first listed. The loop records the config change and clears dispatch blockers caused by it. `workspace_not_found` triggers the same check.
