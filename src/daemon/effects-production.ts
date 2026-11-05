@@ -1,5 +1,6 @@
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { workerVerificationPump } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -70,9 +71,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
+  const verifyWorkers = workerVerificationPump(root, () => current().hostId, mutate);
   let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
-    snapshot: deps.snapshot,
+    snapshot: async () => {
+      const snapshot = await deps.snapshot();
+      // Never holds up or fails the cycle; a missed take is retried on the next snapshot.
+      void verifyWorkers().catch(() => {});
+      return snapshot;
+    },
     sessionHistory: deps.sessionHistory,
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },

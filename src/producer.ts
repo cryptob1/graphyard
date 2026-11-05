@@ -8,12 +8,12 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, neverStarted, readSessionScreen, repromptText, settlementDue, settlementReason, startAgentSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, neverStarted, readSessionScreen, repromptText, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, onSelectedSession, registrySessionOf, selectAccount, selectRegistryAccount } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, readProducerCredential } from './master/config.js';
 import { autonomousSession, destructivePromptGuidance } from './master/dispatch.js';
-import { closeHerdrPane, createdHerdrTab, herdrJson, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
+import { closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
@@ -453,13 +453,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
       const prefix = await producerSecretsPrefix(checkout.directory, producerEnv);
-      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
-        '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
-      pane = created.pane; tabId = created.tab;
+
       const memory = await readProjectMemory(root).catch(() => null);
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, prefix, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask }));
+      ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: producerPrompt(config, binding, profile, checkout, memory), workspace: config.herdrWorkspace, label: `${binding.key} ${binding.group} proofs · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, prefix, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});

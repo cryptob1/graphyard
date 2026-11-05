@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { MasterConfig } from '../master.js';
-import { discoverHostLogins, proposeFleet } from '../fleet.js';
+import { discoverHostLogins, installDirectory, proposeFleet } from '../fleet.js';
 import { emptyRolePolicy, quotaStates, registryRoles, rolePolicy, type AgentRegistry } from '../model/registry.js';
 
 export const registryHelp = [
@@ -39,7 +39,7 @@ const number = (value: string | undefined, flag: string) => { if (value === unde
  * holds the coordinator credential. A `set` names the entry and only what changes; the rest of an
  * existing entry stands. Every change carries a reason and appends to the registry's history.
  */
-export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args: string[], api: RegistryCommandApi, options: { directory?: string; home?: string; executables?: (name: string) => boolean } = {}) {
+export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args: string[], api: RegistryCommandApi, options: { directory?: string; home?: string; executables?: (name: string) => boolean; install?: (program: string) => string | null } = {}) {
   const [collection, action, ...rest] = args;
   if (!collection) return api.read(`agent-registry?host=${encodeURIComponent(master.hostId)}`);
   if (collection === 'history') {
@@ -50,7 +50,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     const { values } = parseArgs({ args: args.slice(1), options: { directory: { type: 'string' }, apply: { type: 'boolean' }, reason: { type: 'string' } }, allowPositionals: false });
     const current: AgentRegistry = await api.read('agent-registry/document');
     const logins = await discoverHostLogins({ directory: values.directory ?? options.directory, home: options.home, executables: options.executables });
-    const proposal = proposeFleet(logins, master.hostId, current);
+    const proposal = proposeFleet(logins, master.hostId, current, options.install ?? installDirectory);
     const empty = !proposal.runtimes.length && !proposal.models.length && !proposal.accounts.length && !proposal.roles.length;
     const loggedOut = logins.filter(login => login.loggedIn === false);
     const report = { host: master.hostId, discovered: logins, proposal, applied: false,
@@ -144,7 +144,7 @@ export async function initialFleetProposal(master: Pick<MasterConfig, 'url' | 'h
   try {
     const response = await fetcher(`${master.url}/api/agent-registry/document`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return { proposal: null, next: `The control plane at ${master.url} does not serve an agent registry (status ${response.status}); deploy a release that does, then run graphyard master registry propose` };
-    const logins = await discoverHostLogins(), proposal = proposeFleet(logins, master.hostId, await response.json());
+    const logins = await discoverHostLogins(), proposal = proposeFleet(logins, master.hostId, await response.json(), installDirectory);
     return { discovered: logins.map(login => ({ account: login.name, runtime: login.runtime, home: login.home, loggedIn: login.loggedIn, login: login.login })), proposal,
       next: proposal.accounts.length ? 'graphyard master registry propose --apply stores this fleet in the control plane' : logins.length ? 'Every login found on this host is already registered (or logged out); graphyard master registry shows the fleet' : 'No agent CLI login was found on this host; log one in, then run graphyard master registry propose --apply' };
   } catch (error) { return { proposal: null, next: `The fleet proposal could not be prepared (${error instanceof Error ? error.message : 'unknown reason'}); run graphyard master registry propose once the control plane answers` }; }

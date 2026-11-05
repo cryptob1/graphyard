@@ -1,0 +1,9 @@
+{
+  "id": "worker-verification-placement",
+  "title": "Worker verification runs exact HEAD in a private trial",
+  "description": "A real trial runs the committed tests with working mount namespaces, excludes the Docker socket, ignores uncommitted edits and returns failing counts for a failing committed head.",
+  "tags": ["workers", "verification"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Run private worker verification", "run": "node --import tsx --test tests/worker-verification-placement.test.ts", "timeoutSeconds": 180 }]
+}

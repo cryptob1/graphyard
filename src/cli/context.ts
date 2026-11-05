@@ -142,7 +142,7 @@ export async function createContext(command: string, id: string | undefined, arg
     let retrying = false;
     for (;;) {
       try {
-        response = await fetch(url, { ...request, signal: AbortSignal.timeout(retrying ? Math.max(1, deadline - Date.now()) : cliRequestTimeoutMs) });
+        response = await fetch(url, { ...request, signal: AbortSignal.timeout(path.endsWith('/worker-verification') ? 60 * 60_000 : retrying ? Math.max(1, deadline - Date.now()) : cliRequestTimeoutMs) });
         break;
       } catch (error) {
         // Only a failed connection is replayed, with the original body and idempotency key.

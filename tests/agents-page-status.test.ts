@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { applyRegistryMutation, emptyRegistry, fleetView, foldObservation, recordRunOutcome, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, recordRunOutcome, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { accountStatus, countdown, localTime, roleLaunch, whenText } from '../web/agent-status.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 
@@ -116,7 +117,7 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   assert.equal(workers.nextAt, held, 'the earliest time any account frees up: the hold ends before any quota resets');
   // Once the hold is over and cursor-a is spent too, the earliest reset is next.
   recordRunOutcome(document, { account: 'cursor-a', role: 'worker' }, 'result', 'judged', iso(0));
-  foldObservation(find(document, 'cursor-a'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt: late, reason: null }, { actor: 'coordinator', at: iso(0) });
+  foldObservation(find(document, 'cursor-a'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt: late, reason: 'weekly limit' }, { actor: 'coordinator', at: iso(0) });
   const spent = roleLaunch(fleetView(document, now).roles.find(entry => entry.role === 'worker')!, fleetView(document, now), now);
   assert.equal(spent.nextAt, early);
   assert.match(spent.text, new RegExp(`next: opencode-b ${whenText(early, now).replace(/[()]/g, '\\$&')}$`));

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { assertOutsideWorktrees, autonomousSession, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
@@ -122,7 +122,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   const { root, credentials, token, cleanup } = await installed();
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
@@ -428,7 +428,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const { root, token, cleanup } = await installed({ reviewer: true });
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const master = await loadMasterConfig(root);
     const item = requested();
     await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]) });
@@ -439,7 +439,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     assert.equal(producer.state, 'failed');
     assert.match(producer.resolution!, /ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
 
-    await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), registerLaunch, requestId: 'review-request' });
     const reviewStart = Date.parse((await readReviewLedger(root)).reviews[0].requestedAt);
     const reviewAgents = [{ name: 'review-claude-1', pane_id: 'pane-1', agent_status: 'blocked' }];

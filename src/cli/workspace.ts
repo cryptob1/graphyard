@@ -5,7 +5,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../session-watch.js';
 import { resumeExitWindowMs, resumeLaunchVariable } from '../master/session-resume.js';
 import { attributeConflicts, hasConflictMarkers, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';

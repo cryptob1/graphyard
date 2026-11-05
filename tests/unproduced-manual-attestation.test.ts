@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, type Work } from '../src/model.js';
-import { actionAccount, humanNeededActions } from '../src/model/next-action.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Work } from '../src/model.js';
+import { actionAccount } from '../src/model-boundary/next-action.js';
+import { humanNeededActions } from '../src/model/next-action.js';
 import { unproducedManualProofs } from '../src/model/unproduced-attestation.js';
-import { stalledItems } from '../src/model/action-account.js';
+import { stalledItems } from '../src/model-boundary/action-account.js';
 
 // GY-521, 2026-09-26: GY-374 (manual:fault-class-configuration) and GY-393 sat in acceptance for over
 // two hours with an approved review and passing CI. No producer session may run their proof, so only

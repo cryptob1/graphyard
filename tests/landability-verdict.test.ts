@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate } from '../src/model/gates.js';
-import {
-  LANDABILITY_VERSION, evaluateLandability, landabilityRefusals,
-} from '../src/model/landability.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { LANDABILITY_VERSION, landabilityRefusals } from '../src/model/landability.js';
+import { evaluateLandability } from '../src/model-boundary/landability.js';
 import { stableJson } from '../src/model/stable-json.js';
 import type { Evidence, Observation, ScopeFile, Work } from '../src/model.js';
 

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { foldMergeLedger, ledgerMergeShas, mergeIntentSchema, mergeLedgerKinds, mergePushedSchema, mergeReconciledSchema, mergeRefusedSchema, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
+import { foldMergeLedger, mergeIntentSchema, mergePushedSchema, mergeReconciledSchema, mergeRefusedSchema } from '../src/model-boundary/merge-ledger.js';
+import { ledgerMergeShas, mergeLedgerKinds, type MergeLedgerEvent } from '../src/model/merge-ledger.js';
 
 // GY-1519 AC-1: the merge ledger's event kinds and payload schemas, and the fold that gives each
 // item's latest ledger state from the append-only rows, whatever older rows and strangers it holds.

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { symlink } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { importAt } from './helpers/base-tree.js';
-import { completeCommand, rerunBound } from '../src/cli/complete.js';
+import { completeCommand, completionRerun, rerunBound } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
 
 // GY-2980: complete's pre-submit rerun (GY-2517) is an optimization — the merge trial runs the
@@ -69,13 +69,10 @@ const context = (root: string, calls: { path: string; body: any }[]) => ({
 
 test('unit:complete-rerun-faults-submit-with-note — a rerun whose runner exits non-zero with Could not find and names no case submits, the note carrying the reason and the run\'s lines', async () => {
   const root = await worktree();
-  const calls: { path: string; body: any }[] = [];
-  await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/gone.test.ts') } as never);
-  assert.equal(calls.length, 1, 'the unjudged rerun refused the submission');
-  assert.equal(calls[0]!.path, 'work/id-1/submit');
-  assert.deepEqual(calls[0]!.body, {
-    epoch: 1, head,
-    rerunUnjudged: {
+  const result = await completionRerun(root, { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/gone.test.ts') } as never);
+  assert.deepEqual(result, {
+    flaked: [], baseFailures: [],
+    note: {
       note: 'pre-submit rerun could not judge: the rerun of tests/gone.test.ts failed without naming a failing case',
       output: "Could not find 'tests/gone.test.ts'.",
     },
@@ -84,15 +81,13 @@ test('unit:complete-rerun-faults-submit-with-note — a rerun whose runner exits
 
 test('unit:complete-rerun-faults-submit-with-note — a rerun that exceeds its bound is killed at the bound and submits with the note naming it', async () => {
   const root = await hangingWorktree();
-  const calls: { path: string; body: any }[] = [];
   const bound = rerunBound.ms;
+  let result: Awaited<ReturnType<typeof completionRerun>>;
   rerunBound.ms = 3_000;
   try {
-    await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/hang.test.ts') } as never);
+    result = await completionRerun(root, { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/hang.test.ts') } as never);
   } finally { rerunBound.ms = bound; }
-  assert.equal(calls.length, 1, 'the unjudged rerun refused the submission');
-  assert.equal(calls[0]!.path, 'work/id-1/submit');
-  assert.equal(calls[0]!.body.rerunUnjudged.note, 'pre-submit rerun could not judge: the rerun of tests/hang.test.ts exceeded 3 s and was killed');
+  assert.equal(result!.note?.note, 'pre-submit rerun could not judge: the rerun of tests/hang.test.ts exceeded 3 s and was killed');
 });
 
 test('unit:complete-rerun-faults-submit-with-note — on the base commit both faults refuse', async () => {

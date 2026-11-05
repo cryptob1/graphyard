@@ -15,7 +15,7 @@ import { masterConfigSchema, registeredReview, type MasterConfig } from '../src/
 import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer-binding fixture data nothing ages; the ticks run on a clock seeded from Date.now() and new Date() stamps snapshots and requests on that clock.
@@ -59,7 +59,8 @@ async function host() {
   return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };
 }
 
-test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
+test('unit:every-launch-registered', async t => {
+await t.test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
     let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered', 'e2e:fixture'] }] }, randomUUID());
@@ -122,4 +123,6 @@ test('integration:every-launch-registered — the loop\'s reviewer launches and 
     assert.equal(doomed.state, 'finished');
     assert.match(doomed.outcome!, /^the launch failed before the session started: the pane refused the runtime/);
   } finally { await cleanup(); }
+});
+
 });

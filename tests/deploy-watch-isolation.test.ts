@@ -63,7 +63,7 @@ test('unit:deploy-health-expects-deployed-commit — a checkout whose HEAD anoth
 });
 
 test('unit:deploy-unit-has-own-checkout — the deploy unit names a checkout under its install\'s own directory, never the operator\'s source checkout, and two installs on one host get two', async () => {
-  const { deployUnitText } = await import('../src/supervisor.js');
+  const { deployUnitText } = await import('../src/install/loop-unit.js');
   const home = await temporaryDirectory('deploy-unit-home'), source = await temporaryDirectory('deploy-unit-source');
   const previous = process.env.GRAPHYARD_CONFIG_HOME;
   process.env.GRAPHYARD_CONFIG_HOME = home;

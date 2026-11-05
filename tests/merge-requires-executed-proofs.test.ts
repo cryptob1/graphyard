@@ -17,7 +17,8 @@ import { mergeOne, runMergeTrial, type MergeRecordEvent } from '../src/merge-wri
 import { masterConfigSchema } from '../src/master.js';
 import { mergeBatch } from '../src/merge-writer/batch.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import type { Principal, Work } from '../src/model.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };

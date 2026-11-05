@@ -5,7 +5,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { guideText } from '../src/guide.js';
@@ -140,7 +140,8 @@ test('e2e:worker-request-trial-only-tests — dispatched worker receives the tri
   } finally { await cleanup(); }
 });
 
-test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
+test('unit:launch-prompt-delivery', async t => {
+await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
   // The request contracts: a positional prompt after the flags, or the runtime's own interactive
   // prompt flag; a runtime without one is refused at launch rather than pasted into (GY-184).
   for (const kind of ['claude', 'codex', 'cursor', 'opencode', 'muse', 'pi', 'gemini', 'qwen', 'copilot']) assert.equal(launchDelivery(kind), 'request');
@@ -151,7 +152,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
   try {
     const herdr = new FakeHerdr();
     // Reviewer on Claude Code: the request rides after the approval flag; no `agent prompt` follows.
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     assert.equal(reviewed.delivery, 'request');
     const reviewer = herdr.named('review-claude-1');
@@ -203,7 +204,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
   } finally { await cleanup(); }
 });
 
-test('integration:never-started-vs-failed — a session that ends without doing its work is recorded as never started, in its own words, and does not spend the retry budget a genuine failure does', async () => {
+await t.test('integration:never-started-vs-failed — a session that ends without doing its work is recorded as never started, in its own words, and does not spend the retry budget a genuine failure does', async () => {
   const words = 'I haven\'t started: no fetch, no worktree, no test runs, no evidence submitted. Your message was only a pasted block with no request of your own.';
   assert.equal(sessionWords(`────────\n❯ Produce trusted evidence\n● ${words}\n✻ Baked for 2s · done 1:53 PM\n────────\n❯ \n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n`), `● ${words}`, 'the runtime frame is stripped, the session\'s words kept');
   assert.equal(sessionWords(null), '');
@@ -211,7 +212,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const ackMs = acknowledgementMs(config);
     assert.equal(ackMs, defaultAcknowledgementSeconds * 1000);
@@ -300,7 +301,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
 
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request', now: () => new Date(clock) });
     const reviewPrompts: string[] = [];
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
@@ -388,7 +389,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
   } finally { await cleanup(); }
 });
 
-test('integration:unacknowledged-session-recovery — the loop detects a launched session with no activity within the configured interval, re-prompts it once and records that it did, and master status shows it awaiting acknowledgement rather than running', async () => {
+await t.test('integration:unacknowledged-session-recovery — the loop detects a launched session with no activity within the configured interval, re-prompts it once and records that it did, and master status shows it awaiting acknowledgement rather than running', async () => {
   // The judgement itself, on a record: quiet through the interval means one re-prompt; sustained
   // activity, or a result, means acknowledged; a second refusal after the re-prompt means neither.
   const record = { requestedAt: iso(0) } as { requestedAt: string; acknowledgedAt?: string; repromptedAt?: string; activeSince?: string; screen?: string };
@@ -420,7 +421,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     // The interval is the master's own setting, adopted like every other owned run field.
     assert.ok((masterOwnedRunFields as readonly string[]).includes('acknowledgementSeconds'));
     await saveMasterSettings(root, { acknowledgementSeconds: 120 });
@@ -464,7 +465,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
   } finally { await cleanup(); }
 });
 
-test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line, guide claim prints it, and docs/onboarding.md states what is generated and why', async () => {
+await t.test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line, guide claim prints it, and docs/onboarding.md states what is generated and why', async () => {
   for (const fragment of ['receives its instruction as the', 'session\'s own first request, on the runtime\'s command line, never as pasted text', 'no human\nsends "go"', 'The one message such a session may later receive as a paste comes from that\nsame launcher', 'act on it without waiting for confirmation', 'Nothing else pasted into a\nsession carries that authority']) assert.ok(launchAuthorization.includes(fragment), `the authorization states: ${fragment}`);
   // GY-2972: the generated AGENTS.md block stays short and names the guide topics; the
   // authorization's paste rule prints from guide claim, and the autonomy contract that ends it
@@ -496,10 +497,12 @@ test('manual:launch-authorization-onboarding-review — a Claude Code role sessi
     assert.deepEqual([codex.args, codex.role], [[], null], 'Codex reads AGENTS.md from the repository; no Claude flag rides its command line');
     // Launched under the role file, a Claude session loads the authorization from that file.
     const herdr = new FakeHerdr();
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     const launched = herdr.named('review-claude-1');
     assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
     assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');
   } finally { await cleanup(); }
+});
+
 });

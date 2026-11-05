@@ -13,12 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, settlementDue, settlementReason, startAgentSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
-import { profileAccount, recordObservedExhaustion, accountLaunch, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
+import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
-import { createdHerdrTab, herdrJson, closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
+import { closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
@@ -1018,12 +1018,7 @@ export async function launchReview(root: string, work: Work, profileName: string
               { run: (command, args) => (dependencies.run ?? defaultChildRun)(command, args, { cwd: root }) }) }));
         } else {
           startedTab = true;
-          const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
-            '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
-          pane = created.pane; tabId = created.tab;
-          // The request is the session's own first message, on the runtime's command line (GY-93), read
-          // from the request file in the session's checkout so the typed line stays short (GY-121).
-          ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], request(), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask }));
+          ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: request(), workspace: config.herdrWorkspace, label: `${binding.key} review · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } }));
         }
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.

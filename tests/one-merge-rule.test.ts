@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Work } from '../src/model.js';
 import { mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
-import { riskOf } from '../src/model/risk-class.js';
-import { resolveRepositoryPolicy } from '../src/model/repository-policy.js';
+import { riskOf } from '../src/model-boundary/risk-class.js';
+import { resolveRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import * as dispatch from '../src/model/dispatch.js';
 import * as policy from '../src/model/policy.js';
 

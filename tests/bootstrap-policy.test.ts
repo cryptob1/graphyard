@@ -6,12 +6,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
+import { bootstrapObligations, deliveredProof, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
+import { criterionSchema } from '../src/model-boundary/policy.js';
+import { evaluate } from '../src/model-boundary/gates.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -193,7 +196,7 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review an
   assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === work.id),
     [{ key: work.key, workId: work.id, criterionId: 'AC-1', proof: harnessProof, ...stamped }], 'the deferred proof is recorded as an obligation on the contract path');
   assert.ok(obligationLedger(await all()).some(entry => entry.workId === work.id && entry.proof === harnessProof));
-  assert.equal(proofPreview(proven, await all()).find(row => row.proof === harnessProof)!.status, 'deferred');
+  assert.equal(proofPreview(proven, await all(), new Date()).find(row => row.proof === harnessProof)!.status, 'deferred');
   assert.ok(diagnose(proven, await all(), Date.now()).some(entry => entry.kind === 'bootstrap-deferred'));
 
   const history = await store.events(work.id);
@@ -251,7 +254,7 @@ test('integration:bootstrap-policy-inheritance requires the deferred proof of th
   assert.deepEqual(requiredProofs(heir, await all()).slice().sort(), ['e2e:fixture', 'integration:inherit-harness', 'unit:heir'], 'the deferred proof is inherited as a required criterion');
   assert.deepEqual(inheritedObligations(heir, await all()).map(obligation => obligation.proof), ['integration:inherit-harness']);
   assert.ok(diagnose(heir, await all(), Date.now()).some(entry => entry.kind === 'bootstrap-obligation'));
-  assert.equal(proofPreview(heir, await all()).some(row => row.proof === 'integration:inherit-harness'), true, 'the inherited proof is previewed beside the item’s own');
+  assert.equal(proofPreview(heir, await all(), new Date()).some(row => row.proof === 'integration:inherit-harness'), true, 'the inherited proof is previewed beside the item’s own');
 
   const unrelated = await submitted({ type: 'chore',  title: 'Touch a different file',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:unrelated'] }] }, { files: ['src/unrelated.ts'] });
