@@ -31,7 +31,7 @@ test('unit:build-without-session-reads-waiting — an item at build with no leas
   const cases: [string, Work, string | null][] = [
     ['no reason known', item(), null],
     ['a recorded blocker', item({ blocker: 'npm test needs Docker' }), 'npm test needs Docker'],
-    ['its launch failed', item(dispatch([{ event: 'requested', reason: 'ready' }, { event: 'failed', reason: 'launch failed', result: refused }])), `its last launch failed: ${refused}`],
+    ['its launch failed', item(dispatch([{ event: 'requested', reason: 'ready' }, { event: 'failed', reason: refused, result: 'failed' }])), `its last launch failed: ${refused}`],
     ['a launch requested, not yet tried', item(dispatch([{ event: 'requested', reason: 'ready' }])), 'a launch is requested: GY-7 is ready and unassigned'],
     ['its lease expired and its session ended', item({ lease: { epoch: 1, owner: 'w', expiresAt: '2026-11-05T01:00:00Z' }, sessions: [{ id: 's', kind: 'implementation', state: 'ended' }] }), null],
   ];

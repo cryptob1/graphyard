@@ -59,7 +59,7 @@ export function waitingReason(work: Work): string | null {
   const dispatch = work.actionQueue?.actions.find(action => action.kind === 'dispatch');
   if (!dispatch) return null;
   const failed = dispatch.history.findLast(record => record.event === 'failed');
-  return failed ? `its last launch failed: ${failed.result ?? failed.reason}` : `a launch is requested: ${dispatch.reason}`;
+  return failed ? `its last launch failed: ${failed.reason}` : `a launch is requested: ${dispatch.reason}`;
 }
 
 /** The wait a dashboard shows: a recorded blocker is pointed at, never repeated, since the item page shows it once (GY-1739). */
