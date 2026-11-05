@@ -74,6 +74,10 @@ export interface DispatchOptions {
   renewIntervalMs?: number;
   /** Newer runtime versions this launch may run as their canary (GY-3103): a launch on one of these runtimes leads its PATH with the offer's entry, once per dispatch. */
   canaries?: CanaryOffer[];
+  /** Accounts whose runtime backs off this item (GY-3103), excluded from the selection. */
+  exclude?: string[];
+  /** Hears the runtime each launch of this dispatch chose, so a failure backs off that runtime (GY-3103). */
+  onRuntime?: (kind: string) => void;
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
 }
@@ -210,7 +214,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
           prefer = workerPreference(work, startFailures.length);
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: startFailures.map(failure => failure.account) });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: [...options.exclude ?? [], ...startFailures.map(failure => failure.account)] });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
@@ -248,6 +252,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           canary = { runtime: offer.runtime, failed: null };
         }
         launched = launch;
+        options.onRuntime?.(launch.kind ?? profile.kind ?? 'unknown');
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
         // then made once more from a fresh claim, rather than leaving an idle session holding the item.
         try {

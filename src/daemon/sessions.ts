@@ -3,7 +3,7 @@ import type { RuntimeSession } from '../model/sessions.js';
 // Concern: launched sessions — worker profile health, launch back-off and runtime canaries.
 import type { Work } from '../model.js';
 import type { CoordinationRounds } from '../server/work-view.js';
-import { newestVersion, pinnedInstall, versionEntry, versionName, type CanaryOffer, type FleetRuntime } from '../model/registry.js';
+import { newestVersion, pinnedInstall, versionEntry, versionName, type AgentRegistry, type CanaryOffer, type FleetRuntime } from '../model/registry.js';
 import { resumeExitWindowMs } from '../master/session-resume.js';
 import { agentAssignment, finishedAgentStates, reclaimableAgent } from '../master/dispatch-reservation.js';
 import { type WorkerProfile } from '../master/profiles.js';
@@ -53,26 +53,38 @@ export function readyToRetry(previous: DaemonAction | undefined, cycle: number, 
 
 /**
  * GY-3103: a worker launch failure backs off its runtime for that item — 1 minute, doubling with
- * each further failure to at most 30 minutes — however many profiles run the runtime. A launch of
- * the runtime that does useful work (it outlives the failed-launch window, commits or submits)
- * clears every back-off of that runtime.
+ * each further failure to at most 30 minutes — however many profiles or accounts run the runtime.
+ * A failure that names no runtime (it failed before one was chosen) backs off the item on every
+ * runtime. A launch of the runtime that does useful work (it outlives the failed-launch window,
+ * commits or submits) clears every back-off of that runtime.
  */
 export const launchBackoffMs = (failures: number) => Math.min(60_000 * 2 ** Math.max(0, failures - 1), 1_800_000);
+export const anyRuntime = 'any';
 const backoffKey = (runtime: string, item: Pick<Work, 'id'>) => `${runtime}:${item.id}`;
-export function recordLaunchFailure(state: DaemonState, runtime: string, item: Pick<Work, 'id'>, reason: string, now: number) {
-  const failures = (state.launchBackoff[backoffKey(runtime, item)]?.failures ?? 0) + 1;
-  state.launchBackoff[backoffKey(runtime, item)] = { failures, reason: reason.slice(0, 500), until: new Date(now + launchBackoffMs(failures)).toISOString() };
+export function recordLaunchFailure(state: DaemonState, runtime: string | null, item: Pick<Work, 'id'>, reason: string, now: number) {
+  const key = backoffKey(runtime ?? anyRuntime, item), failures = (state.launchBackoff[key]?.failures ?? 0) + 1;
+  state.launchBackoff[key] = { failures, reason: reason.slice(0, 500), until: new Date(now + launchBackoffMs(failures)).toISOString() };
 }
 export function clearLaunchFailures(state: DaemonState, runtime: string) {
-  for (const key of Object.keys(state.launchBackoff)) if (key.startsWith(`${runtime}:`)) delete state.launchBackoff[key];
+  for (const key of Object.keys(state.launchBackoff)) if (key.startsWith(`${runtime}:`) || key.startsWith(`${anyRuntime}:`)) delete state.launchBackoff[key];
 }
 /** The back-off holding `runtime` off `item`, or null when it may launch. */
 export function launchBackoff(state: DaemonState, runtime: string, item: Pick<Work, 'id'>, now: number) {
-  const entry = state.launchBackoff[backoffKey(runtime, item)];
-  return entry && Date.parse(entry.until) > now ? entry : null;
+  const live = (key: string) => { const entry = state.launchBackoff[key]; return entry && Date.parse(entry.until) > now ? entry : null; };
+  return live(backoffKey(runtime, item)) ?? live(backoffKey(anyRuntime, item));
 }
-/** The runtime a profile's launch runs, as a session handle names it. */
-export const profileRuntime = (profile: WorkerProfile) => profile.kind ?? profile.mode;
+/**
+ * The worker accounts whose runtime backs off `item`, which its launch excludes from selection, and
+ * whether that is every worker account — then the item waits. Without the registry, the profile's
+ * own runtime decides.
+ */
+export function backedOffAccounts(state: DaemonState, registry: Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'> | null, profile: WorkerProfile, item: Pick<Work, 'id'>, now: number) {
+  if (!registry?.accounts.length) return { exclude: [], all: !!launchBackoff(state, profile.kind ?? profile.mode, item, now) };
+  const kind = (runtime: string) => registry.runtimes.find(entry => entry.name === runtime)?.launch.kind ?? runtime;
+  const workers = registry.roles.find(role => role.name === 'worker')?.accounts ?? registry.accounts.map(account => account.name);
+  const exclude = workers.filter(name => { const account = registry.accounts.find(entry => entry.name === name); return !!account && !!launchBackoff(state, kind(account.runtime), item, now); });
+  return { exclude, all: exclude.length > 0 && exclude.length === workers.length };
+}
 
 /** The version directories installed under `root`. */
 export function installedVersions(root: string): string[] {

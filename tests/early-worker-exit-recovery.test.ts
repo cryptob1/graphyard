@@ -156,7 +156,7 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.match(incident.detail, /\[redacted\]/); assert.ok(incident.detail.length <= 500);
   assert.match(failed.sessions![0].outcome!, /controlled startup failure/); assert.ok(closed.includes(`${target.key}-pane-1`));
   assert.equal(state.actions[`close:${target.id}:${launched.id}`]?.state, 'done');
-  assert.equal(state.profiles['claude-0'].failures, 1);
+  assert.equal(state.launchBackoff[`codex:${target.id}`].failures, 1, 'the failed runtime backs off for this item');
   assert.ok(launchedProfiles.includes('claude-1'), 'healthy fallback profile still advances work');
   assert.equal(prompts.length, 1); assert.match(prompts[0], /controlled startup failure/);
   assert.equal((await store.coordinationSnapshot()).work.find(item => item.id === target.id)?.pipeline, undefined, 'test reads the actual compact snapshot');
@@ -167,19 +167,19 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
 
   // Retry the same exact failure on another epoch. Starting it does not erase health or incident.
   now += 11 * 60_000;
-  await cycle(); assert.ok(state.actions[key]); assert.ok(state.profiles['claude-0']); await Promise.all(runs);
+  await cycle(); assert.ok(state.actions[key]); assert.ok(state.launchBackoff[`codex:${target.id}`]); await Promise.all(runs);
   await cycle(); assert.equal(prompts.length, 1, 'unchanged failure across epochs does not spam');
   assert.ok(currentIncident().attempts >= 2, JSON.stringify(state.actions));
   diagnostic = 'runtime error: changed failure'; now += 11 * 60_000;
   await cycle(); await Promise.all(runs); await cycle();
   assert.equal(prompts.length, 2); assert.match(prompts[1], /changed failure/);
   const attempts = launchedProfiles.length;
-  for (const profile of Object.values(state.profiles)) profile.cooldownUntil = null;
+  for (const entry of Object.values(state.launchBackoff)) entry.until = new Date(0).toISOString();
   await cycle(); assert.equal(launchedProfiles.length, attempts, 'item backoff applies even with healthy profiles');
   now += actionStallDelay(currentIncident().attempts) + 1;
   mode = 'long'; await cycle(); assert.ok(state.actions[key], 'started pane retains incident');
   now += 61_000; await cycle();
-  assert.equal(state.actions[key], undefined); assert.deepEqual(state.profiles, {});
+  assert.equal(state.actions[key], undefined); assert.deepEqual(state.launchBackoff, {});
   assert.equal(masterCauses([await reload()], state.actions).filter(cause => cause.detail.includes('worker exited')).length, 0);
   const running = await reload();
   const session = running.sessions!.at(-1)!;

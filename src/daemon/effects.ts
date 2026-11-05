@@ -98,10 +98,14 @@ export interface DaemonEffects {
   reclaimDisk?: () => Promise<string[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
-  /** `canaries`: the newer runtime versions this launch may run as their canary (GY-3103); the result's `canary` names the one it ran, with its start failure if any. */
-  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, canaries?: CanaryOffer[]) => Promise<unknown>;
-  /** The agent registry, read for runtime canaries (GY-3103); absent, no canary runs. */
-  registry?: () => Promise<Pick<AgentRegistry, 'runtimes'>>;
+  /**
+   * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
+   * result's `canary` names the one it ran, with its start failure if any); `exclude` names the
+   * accounts whose runtime backs off this item; `onRuntime` hears the runtime each launch chose.
+   */
+  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
+  /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
+  registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
   setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */
