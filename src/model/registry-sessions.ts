@@ -1,5 +1,5 @@
 import type { Work } from './work.js';
-import { fleetRoles, rolePolicy } from './registry.js';
+import { fleetRoles, rolePolicy, roleRuntimeRefusal } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
@@ -200,7 +200,7 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
- * The session an action runs on: the first account of the role, in the role's own order, that is
+ * The session an action runs on: the first account of the role, in the role's own order, whose runtime the role can run, that is
  * placed on the asking host, logged in, within quota and under its session limit, provided the
  * role itself is under its concurrency limit. Concurrent launches spread across provider plans
  * before any plan takes a second live session (GY-2943). For role reviewer with a known
@@ -226,12 +226,13 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
   }; // the spread trails plans already holding a live session (GY-2943); a diverse reviewer's trial keeps GY-1496's order, which records its shared-provider passes itself
   for (const [, name] of (diverse ? order : planSpreadOrder(registry, order)).entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
+    // An unsupported runtime stored before the refusal existed is passed over with its reason, never launched.
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });
       if (differs) others.push({ account: name, reason: refusal });
-      if (differs && account!.maxSessions !== null && !accountIneligibility(registry, { ...account!, maxSessions: null }, now, request.host) && !roleIneligibility(account!, role.name, now)) busy.push({ account: name, reason: refusal });
+      if (differs && account!.maxSessions !== null && !accountIneligibility(registry, { ...account!, maxSessions: null }, now, request.host) && !roleIneligibility(account!, role.name, now) && !roleRuntimeRefusal(registry, account!, role.name)) busy.push({ account: name, reason: refusal });
       continue;
     }
     if (diverse && !differs) { const skip = sharedProviderSkip(name, diverse); skipped.push(skip); shared.add(skip); fallback ??= { account: account!, index: order.indexOf(name), skip }; continue; }
@@ -291,7 +292,9 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
   });
   const roles: FleetRoleView[] = registry.roles.map(role => {
     const choice = host ? chooseSession(registry, { role: role.name, host }, now) : null;
-    const first = host ? choice?.account?.name ?? null : role.accounts.find(name => accounts.find(account => account.name === name)?.eligible) ?? null;
+    // Without an asking host, judge the stored accounts the way selection would, runtimes included.
+    const servesHere = (name: string) => accounts.find(account => account.name === name)?.eligible && !roleRuntimeRefusal(registry, registry.accounts.find(account => account.name === name)!, role.name);
+    const first = host ? choice?.account?.name ?? null : role.accounts.find(servesHere) ?? null;
     const running = live.filter(session => session.role === role.name).length;
     const blocked = host ? (choice!.account ? null : choice!.reason) : running >= role.concurrency ? `role ${role.name} is at its concurrency limit (${running} of ${role.concurrency} live)` : first ? null : `no eligible account for ${role.name}`;
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
