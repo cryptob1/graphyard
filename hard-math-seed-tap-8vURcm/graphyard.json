@@ -1,1 +1,0 @@
-{"e2e":{"serve":{"command":"node src/server.mjs","url":"http://127.0.0.1:8080/","readySeconds":10}}}

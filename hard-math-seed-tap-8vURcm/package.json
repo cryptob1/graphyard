@@ -1,1 +1,0 @@
-{"name":"exact-roots-workbench-v1","private":true,"type":"module","scripts":{"build":"node --check src/cli.mjs && node --check src/server.mjs && node --check public/app.mjs","test":"node --test --test-reporter=tap tests/*.test.mjs"}}

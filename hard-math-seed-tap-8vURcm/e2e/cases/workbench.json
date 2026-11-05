@@ -1,1 +1,0 @@
-{"id":"workbench","title":"Workbench serves its browser and batch endpoint","target":"uat","steps":[{"kind":"http","method":"GET","path":"/","status":200},{"kind":"http","method":"POST","path":"/roots","body":{"jobs":[{"coefficients":["1"],"precisionBits":64}]},"status":200,"expect":[{"path":"results.0.roots","equals":[]}]}]}
