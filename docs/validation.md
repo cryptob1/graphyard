@@ -13,7 +13,7 @@ Declare `e2e.serve` in graphyard.json:
 {"e2e":{"serve":{"command":"node scripts/e2e-serve.mjs","url":"http://127.0.0.1:4391/healthz?ready","readySeconds":120}}}
 ```
 
-The trial starts command, waits for 2xx, supplies `GRAPHYARD_E2E_TOKEN`, runs cases and tears down descendants. Graphyard's script uses temporary Postgres. Beside a declared `e2e.serve`, a case `delivery.cases` binds still runs against its own application; every unbound case runs against the served head, or the sole app when no serve is declared. The routing runs from the merge writer's deployed code, never the head's own, so a change to it reaches trials only after its own merge is verified and deployed.
+The trial starts command, waits for 2xx, supplies `GRAPHYARD_E2E_TOKEN`, runs cases and tears down descendants. Graphyard's script uses temporary Postgres. Beside a declared `e2e.serve`, a case `delivery.cases` binds still runs against its own application; every unbound case runs against the served head, or the sole app when no serve is declared.
 
 `human:NAME` is limited to physical checks named by the criterion. Needs you asks once per head with steps/commit/preview; pass advances, fail reworks. It is not general approval.
 
