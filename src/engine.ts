@@ -2,14 +2,14 @@ import type { PoolClient } from 'pg';
 import type { Principal, Work, Observation } from './model.js';
 import type { GitRunner } from './merge-writer/local-observation.js';
 import { runCommand } from './engine/commands/run.js';
-import { renewalFaultOf, renewalFaultRefusal, recordPlaneLiveness, startPlaneBeat } from './engine/leases.js';
+import { renewalFaultOf, renewalFaultRefusal, recordPlaneLiveness, startPlaneBeat, yieldToRenewals } from './engine/leases.js';
 import type { Command } from './engine/commands/schemas.js';
 import { evaluateWork } from './engine/evaluate.js';
 import { observe, observeControlPlaneCandidate } from './engine/observe.js';
 import { observationJob, pullAssignment, resyncWork } from './engine/actions.js';
-import { reconcile, reconcileItem } from './reconcile/scheduler.js';
+import { coordinationLockWithin, fullEvaluationIntervalMs, noteFaceMove, reconcileWrite, reconcile, reconcileItem, reconcileTick } from './reconcile/scheduler.js';
 import { EventLoopLag, configuredReconcileFullMs } from './reconcile/lag.js';
-import type { FaceMoveSides, OwnFaceMove, ReconcileEntry, ReconcileTick } from './reconcile/faces.js';
+import type { FaceMove, FaceMoveSides, OwnFaceMove, ReconcileEntry, ReconcilePass, ReconcilePlan, ReconcileTick } from './reconcile/faces.js';
 
 import type { Store } from './store.js';
 export { idempotencyMismatch, type Command } from './engine/commands/schemas.js';
@@ -75,6 +75,12 @@ export class Engine {
   recordPlaneLiveness(at?: Date) { return recordPlaneLiveness(this, at); }
   startPlaneBeat(intervalMs?: number) { return startPlaneBeat(this, intervalMs); }
   reconcile(): Promise<void> { return reconcile(this); }
+  fullEvaluationIntervalMs() { return fullEvaluationIntervalMs(this); }
+  noteFaceMove(move: FaceMove, before: string, after: Work | null) { return noteFaceMove(this, move, before, after); }
+  reconcileWrite(plan: ReconcilePlan, stale: boolean, pass: ReconcilePass) { return reconcileWrite(this, plan, stale, pass); }
+  yieldToRenewals() { return yieldToRenewals(this); }
+  reconcileTick() { return reconcileTick(this); }
+  coordinationLockWithin(db: PoolClient, ms: number) { return coordinationLockWithin(db, ms); }
   /** One item's reconciliation inside a batch (`reconcile/scheduler.ts`); a method so a test can wrap it. */
   reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, options: { dryRun?: boolean } = {}) { return reconcileItem(this, db, work, all, now, options); }
 

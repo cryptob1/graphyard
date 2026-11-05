@@ -11,7 +11,7 @@ import { endLapsedAttempt } from '../pipeline-speed.js';
 import { isSettledSummary, isStandIn, lockedRows, rememberSaved, savedVersions, warmLockedReads } from '../store/locked-read.js';
 import type { Engine } from '../engine.js';
 import { recordDispatch } from '../engine/evaluate.js';
-import { preserveAssignment, renewalGrace, recordPlaneLiveness, yieldToRenewals } from '../engine/leases.js';
+import { preserveAssignment, renewalGrace, recordPlaneLiveness } from '../engine/leases.js';
 import { describeFaceMoves, describeFull, faceDocument, faceFields, faceReach, fleetFace, mergeFaceMoves, readsFace, type FaceMove, type OwnFaceMove, type ReconcilePass, type ReconcilePlan, type ReconcileTick, type ReconcileFull, type ReconcileWritten } from './faces.js';
 
 /** A reconciliation batch that found the coordination lock held past its wait before it wrote (GY-727, GY-1290): it runs again. */
@@ -28,7 +28,7 @@ const reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind
  * An interval of 0 — unreachable through `GRAPHYARD_RECONCILE_FULL_MS`, which clamps to
  * 2000..300000 — keeps the meaning the stress suites give it: the clock brings every pass.
  */
-function fullEvaluationIntervalMs(engine: Engine) {
+export function fullEvaluationIntervalMs(engine: Engine) {
   return engine.reconcileFullEvaluationMs > 0 ? Math.max(engine.reconcileFullEvaluationMs, 3 * engine.reconcileFullMs) : 0;
 }
 
@@ -37,7 +37,7 @@ function fullEvaluationIntervalMs(engine: Engine) {
  * the first and the after document of the last (GY-1777, GY-1898). The documents in between are
  * kept too: a pass may have evaluated another item against one of them, so its readers are owed.
  */
-function noteFaceMove(engine: Engine, move: FaceMove, before: string, after: Work | null) {
+export function noteFaceMove(engine: Engine, move: FaceMove, before: string, after: Work | null) {
   const known = engine.reconcileFaceMoves.get(move.id);
   const noted = { move, before: faceDocument(before), after };
   engine.reconcileFaceMoves.set(move.id, known ? { move: mergeFaceMoves([known.move, move])[0], before: known.before ?? noted.before, after: noted.after ?? known.after,
@@ -63,7 +63,7 @@ function noteOwnMove(engine: Engine, own: OwnFaceMove) {
  */
 export function reconcile(engine: Engine): Promise<void> {
   if (!engine.reconcileRunning) {
-    const run: Promise<void> = reconcileTick(engine).finally(() => { if (engine.reconcileRunning === run) engine.reconcileRunning = null; });
+    const run: Promise<void> = engine.reconcileTick().finally(() => { if (engine.reconcileRunning === run) engine.reconcileRunning = null; });
     return engine.reconcileRunning = run;
   }
   return engine.reconcileTrailing ??= engine.reconcileRunning.catch(() => {}).then(() => { engine.reconcileTrailing = null; return reconcile(engine); });
@@ -114,7 +114,7 @@ export function reconcile(engine: Engine): Promise<void> {
  * `reconcileMaxAttempts` attempts defers the batch's unwritten items, and nothing else of it, to
  * the next pass. Between batches the event loop runs. Every batch evaluates at least one item.
  */
-async function reconcileTick(engine: Engine) {
+export async function reconcileTick(engine: Engine) {
   const tickStarted = performance.now();
   // The event-loop lag over the tick's window (GY-1777): a timer's overrun past its 10 ms
   // resolution, so a tick slowed by a starved loop is told apart from one waiting on I/O.
@@ -148,7 +148,7 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
     const moves: FaceMove[] = [];
     for (const row of rows) {
       const face = fleetFace(row.document), before = fleet.get(row.id)?.face ?? '';
-      if (before !== face) { const move = { id: row.id, key: row.document.key, fields: faceFields(before, face) }; moves.push(move); noteFaceMove(engine, move, before, row.document); }
+      if (before !== face) { const move = { id: row.id, key: row.document.key, fields: faceFields(before, face) }; moves.push(move); engine.noteFaceMove(move, before, row.document); }
       // The document moved, so whatever due its last evaluation read is stale; the item is a candidate
       // this pass (a moved row is changed), and its next evaluation records the fresh instant (GY-1873).
       fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face, due: null });
@@ -174,12 +174,12 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
           // GY-1867: the interval stretches past the last full pass, so the tick after a long full
           // pass is not full again at once; a face a writer moved no longer makes it full either
           // (GY-1898): the moved item and its readers are evaluated instead.
-          fullCause = !fleet.size ? 'view' : config !== engine.reconcileConfig ? 'configuration' : !(now.getTime() - engine.reconcileFullAt < fullEvaluationIntervalMs(engine)) ? 'interval' : null;
+          fullCause = !fleet.size ? 'view' : config !== engine.reconcileConfig ? 'configuration' : !(now.getTime() - engine.reconcileFullAt < engine.fullEvaluationIntervalMs()) ? 'interval' : null;
           full = fullCause !== null;
           openedAt = now.getTime();
           if (full) engine.reconcileFullAt = openedAt;
           const versions = new Map(listed.map(row => [row.id, row]));
-          for (const id of [...fleet.keys()]) if (!versions.has(id)) { const entry = fleet.get(id)!; noteFaceMove(engine, { id, key: entry.work.key, fields: ['gone'] }, entry.face, null); fleet.delete(id); }
+          for (const id of [...fleet.keys()]) if (!versions.has(id)) { const entry = fleet.get(id)!; engine.noteFaceMove({ id, key: entry.work.key, fields: ['gone'] }, entry.face, null); fleet.delete(id); }
           changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
           // Under the lock the pass reads no document whole (GY-1027): a row that moved is held as its
           // stand-in — a settled delivery's summary, an open item's projection, served from the
@@ -191,7 +191,7 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
             const settled = isSettledSummary(document);
             if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '', due: null }); continue; }
             const face = fleetFace(document);
-            if (entry?.face !== face) noteFaceMove(engine, { id: document.id, key: document.key, fields: faceFields(entry?.face ?? '', face) }, entry?.face ?? '', document);
+            if (entry?.face !== face) engine.noteFaceMove({ id: document.id, key: document.key, fields: faceFields(entry?.face ?? '', face) }, entry?.face ?? '', document);
             fleet.set(document.id, { number, work: document, version: row.version, settled, face, due: null });
           }
           view();
@@ -248,7 +248,7 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
         while (next < candidates.length) {
           if (next > batch && (plans.length >= engine.reconcileBatchWrites || performance.now() - started >= engine.reconcileBatchMs)) return false;
           // The dry run awaits no I/O: between evaluations a renewal runs first (`yieldToRenewals`).
-          await yieldToRenewals(engine);
+          await engine.yieldToRenewals();
           const id = candidates[next++];
           // Deleted since the pass opened, nothing is left to evaluate; a stand-in from the opening
           // read is read whole as the batch reaches it (GY-1027).
@@ -273,7 +273,7 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
       let stale = false, attempts = 0;
       for (let index = 0; index < plans.length;) {
         let written: ReconcileWritten;
-        try { written = await reconcileWrite(engine, plans[index], stale, pass); }
+        try { written = await engine.reconcileWrite(plans[index], stale, pass); }
         catch (error) {
           // Nothing was written: the coordination lock stayed held past the wait, so the write is tried again.
           if (!(error instanceof ReconcileContended)) throw error;
@@ -328,11 +328,11 @@ async function reconcilePass(engine: Engine, tickStarted: number) {
  * Committing per item means a renewal waits on reconciliation for at most its own item's write:
  * never on the batch's evaluation of other items, nor on a later write that waits for its turn.
  */
-async function reconcileWrite(engine: Engine, plan: ReconcilePlan, stale: boolean, pass: ReconcilePass): Promise<ReconcileWritten> {
+export async function reconcileWrite(engine: Engine, plan: ReconcilePlan, stale: boolean, pass: ReconcilePass): Promise<ReconcileWritten> {
   // Before its transaction, so the write holds no lock while a renewal runs.
-  await yieldToRenewals(engine);
+  await engine.yieldToRenewals();
   return engine.store.transaction(async (db, now) => {
-    const waitStarted = performance.now(), locked = await coordinationLockWithin(db, engine.reconcileCommitLockWaitMs);
+    const waitStarted = performance.now(), locked = await engine.coordinationLockWithin(db, engine.reconcileCommitLockWaitMs);
     pass.lockWait(performance.now() - waitStarted);
     if (!locked) throw new ReconcileContended();
     if ((await pass.reread(db, pass.moved(await pass.versionsOf(db)))).length) stale = true;
@@ -371,7 +371,7 @@ async function reconcileWrite(engine: Engine, plan: ReconcilePlan, stale: boolea
  * ever take a lock before it. A wait past `ms`, or a holder blocked on the write, is contention:
  * the write is tried again.
  */
-async function coordinationLockWithin(db: PoolClient, ms: number) {
+export async function coordinationLockWithin(db: PoolClient, ms: number) {
   const { blocking, deadlock_ms: deadlockMs } = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0];
   if (blocking) return false;
   await db.query(`SET LOCAL lock_timeout = '${commitLockWaitMs(ms, Number(deadlockMs))}ms'`);
