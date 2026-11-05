@@ -36,6 +36,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:661c3ea67aac115ddefbbbe929990108ae67c6a8f2bb22d34ce583be417b6274',
   // GY-3018: retire validation runner and attribution tables after sign-in and work-index updates.
   'sha256:a127cbeeb6417fece94948bf7e28c43443b9c1f66a39c2023d15779b9935e0d8',
+  // GY-3111: ledger compaction's saved cursor and the per-item delivery event index.
+  'sha256:f198773ac282787d881f57e84e5ebdd1696ac698f6ba688fa77ae623e56494dd',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
