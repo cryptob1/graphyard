@@ -451,7 +451,7 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
  * The serve declaration onboarding writes when nothing previewable serves a head: a server that
  * needs nothing but Node answering on a loopback port, so a trial can serve any checkout and run
  * its cases against it. A repository with a real application replaces it with the declaration that
- * serves that application (docs/validation.md).
+ * serves that application.
  */
 export const onboardingServe = {
   command: `node -e "require('http').createServer((request,response)=>{response.setHeader('content-type','application/json');response.end(require('fs').readFileSync('graphyard.json'))}).listen(43911,'127.0.0.1')"`,

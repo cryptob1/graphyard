@@ -9,8 +9,7 @@ import type { Work } from './work.js';
  * decider, so nothing waits on a master session noticing it, and the item is free for the next
  * assignment rather than held by a session sitting at a prompt.
  *
- * Every type names exactly one decider, from the three the project allows (see AGENTS.md and
- * docs/glossary.md#who-decides):
+ * Every type names exactly one decider, from the three the project allows (see AGENTS.md):
  *
  * - **rule** — a deterministic rule the control plane applies; no judgment is involved.
  * - **follow-up** — a tracked follow-up work item; the cause is outside this item.

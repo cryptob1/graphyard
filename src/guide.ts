@@ -33,7 +33,7 @@ For each proof write a JSON file of the form {"proof":"unit:x","sha":"<the exact
 
 A dedicated master coordinator keeps cycling: run master status and act on what it names, until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip.
 
-To set Graphyard up or find what its setup is missing, follow Graphyard's docs/setup-from-zero.md: \`doctor\` prints one PASS or FAIL line per prerequisite under \`setupFromZero\`, and each FAIL line names the checklist step that fixes it.`,
+To set Graphyard up or find what its setup is missing, follow the setup steps in Graphyard's README: \`doctor\` prints one PASS or FAIL line per prerequisite under \`setupFromZero\`, and each FAIL line names the checklist step that fixes it.`,
 } as const;
 
 export type GuideTopic = keyof typeof guideTopics;

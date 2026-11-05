@@ -26,7 +26,7 @@ import type { Work } from './work.js';
  * the list of paths the candidate changes, `criterion` the criterion text itself. The last two are
  * text an untrusted party may author — a pull request's body and its conversation — and the
  * responder configuration excludes them unless an operator deliberately admits them (see
- * `untrustedSourceKinds` and docs/onboarding.md).
+ * `untrustedSourceKinds`).
  */
 export const stateSourceKinds = ['file', 'changed-files', 'criterion', 'pull-request-body', 'comments'] as const;
 export type StateSourceKind = typeof stateSourceKinds[number];

@@ -49,7 +49,7 @@ export const unobservedCandidateRefusal = 'The merge writer has not observed the
 
 /**
  * The item's stage and gates, judged from the record alone. The merge writer merges each
- * candidate whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
+ * candidate whose gates pass; nothing here places it in a queue of Graphyard's own.
  */
 export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; gates: Gate[]; violations: string[]; postMergeReview?: PostMergeReviewState | null } {
   const gates: Gate[] = [];

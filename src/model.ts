@@ -1,5 +1,5 @@
 // The domain model, split by concern under src/model/. This barrel keeps every existing
-// import path working; see docs/development.md for where a new schema or rule goes.
+// import path working.
 export * from './model/refusal.js';
 export * from './model/proof.js';
 export * from './model/review.js';

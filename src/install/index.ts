@@ -314,7 +314,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   // A new install, or a retry of one whose record names the control-plane merger, proposes the local mode;
   // a committed policy is its own choice and ignores this.
   const merger = installMerger(record, !!rawInputs.observeOnly);
-  const delivery = await repositoryDelivery(root, merger).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it (docs/delivery.md#managed-repositories), then rerun`); });
+  const delivery = await repositoryDelivery(root, merger).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it, then rerun`); });
   let detectedBase = rawInputs.baseBranch;
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
@@ -606,7 +606,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
   // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
-  if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile} (docs/delivery.md), then rerun` });
+  if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile}, then rerun` });
   // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
   // another server is repointed only with --herdr-rebind (GY-1413).
   const herdr = await observeHerdr(session);
@@ -1108,7 +1108,7 @@ function observeOnlySteps(session: InstallSession, url: string, plan: InstallPla
 function nextSteps(session: InstallSession, url: string, profiles: ProfileRegistration) {
   const steps = [
     `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
-    'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it (docs/setup-from-zero.md step 12).',
+    'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it.',
   ];
   steps.push(`The merge writer trial-merges each submitted head and pushes ${session.inputs.baseBranch} with the deploy key alone; no GitHub App, webhook, pull request or branch protection is involved, and reviews run as control-plane reviewer sessions (graphyard master environments --apply writes their profiles).`);
   if (!profiles.workers.length) steps.push('No authenticated agent runtime was found on this machine; sign in to a supported runtime and rerun --apply, or add a worker profile with "graphyard master worker add".');

@@ -7,8 +7,7 @@ import { join } from 'node:path';
  * runs locally in seconds, and each is a check CI fails a whole rework round on when a worker
  * ships past it, so the worker request names them where its before-push discipline is stated:
  * after the sync instruction, before the complete instruction. One exported constant, so the
- * request (dispatch.ts workerPrompt), its tests (tests/worker-prompt-gates.test.ts) and the
- * documentation (docs/coordination.md) read the same
+ * request (dispatch.ts workerPrompt) and its tests (tests/worker-prompt-gates.test.ts) read the same
  * list; every entry is a test file or script this repository carries, and all of them run as one
  * command line, chained with `&&`, so the request names one. This module holds the list beside the
  * prompt rather than in dispatch.ts, which sits within a few lines of its own 800-line budget: the
