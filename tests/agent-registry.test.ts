@@ -685,7 +685,7 @@ for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wa
     await cycle();
     assert.equal(state.actions[dispatchKey(item)].state, 'waiting');
     assert.match(state.actions[dispatchKey(item)].detail, /worker slot.*role worker is at its concurrency limit/);
-    assert.deepEqual(state.profiles, {});
+    assert.deepEqual(state.launchBackoff, {});
     assert.equal(claims, 0);
     assert.equal(calls.length, 0);
     assert.deepEqual(prompts, []);
@@ -705,7 +705,7 @@ for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wa
   for (const failure of ['launcher', 'unreadable']) {
     mode = failure;
     delete state.actions[dispatchKey(item)];
-    delete state.profiles['queued-worker'];
+    state.launchBackoff = {};
     await cycle();
     assert.equal(state.actions[dispatchKey(item)].state, 'failed');
     assert.match(state.actions[dispatchKey(item)].detail, failure === 'launcher' ? /herdr refused the launch/ : /registry unreadable/);
