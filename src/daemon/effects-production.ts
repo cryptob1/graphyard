@@ -1,6 +1,6 @@
-import { workerVerificationPump } from './worker-verification.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { workerVerificationPump } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';

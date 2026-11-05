@@ -21,9 +21,11 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
   const remaining = () => Math.max(1, deadline - Date.now());
   try {
     await mkdir(home); await mkdir(temporary);
-    // A private Git directory: candidate tests cannot write the shared repository.
-    await defaultChildRun('git', ['clone', '--shared', '--no-checkout', root, tree], { timeoutMs: remaining() });
-    await defaultChildRun('git', ['checkout', '--detach', input.head], { cwd: tree, timeoutMs: remaining() });
+    // Objects borrowed through alternates: candidate tests cannot write the shared repository.
+    await defaultChildRun('git', ['init', '-q', tree], { timeoutMs: remaining() });
+    const objects = (await defaultChildRun('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim() + '/objects';
+    await writeFile(join(tree, '.git', 'objects', 'info', 'alternates'), objects + '\n');
+    await defaultChildRun('git', ['checkout', '-q', '--detach', input.head], { cwd: tree, timeoutMs: remaining() });
     const base = await defaultChildRun('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${baseBranch}`]).catch(() => '');
     if (base.trim()) await defaultChildRun('git', ['update-ref', `refs/remotes/origin/${baseBranch}`, base.trim()], { cwd: tree });
     const env: Record<string, string> = { ...trialEnvironment(), ...trialHomeVariables(home, process.env, true), ...trialTemporaryVariables(temporary), PATH: '/usr/local/bin:/usr/bin:/bin' };
