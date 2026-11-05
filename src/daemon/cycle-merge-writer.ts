@@ -12,7 +12,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterRetrials, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../project-applications.js';
@@ -87,11 +87,11 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       if ('conflict' in merged) return merged;
       return { mergeSha: merged.mergeSha, files: (await git('diff', '--name-only', baseTip, merged.mergeSha)).split('\n').map(line => line.trim()).filter(Boolean) };
     },
-    trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share) => {
+    trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal) => {
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}),
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         // Trials running at once divide the host's cores, so their shards never oversubscribe it.
         ...(share && share > 1 ? { cores: Math.max(1, Math.floor(availableParallelism() / share)) } : {}) });
     },
@@ -118,8 +118,37 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
 export type RevertSettled = { ok: true } | { ok: false; reason: string; retry?: boolean };
 interface Flight { key: string; id: string; head: string; startedAt: string; settled: { results: BatchResult[] } | { error: unknown } | { revert: RevertSettled } | null;
   /** The serve-revert flight's context (GY-2990), as `state.mergeWriter.inFlight.revert` persists it. */
-  revert?: RevertFlight }
+  revert?: RevertFlight;
+  /** GY-3099: the trials running now, each with the heads it carries and how to cancel it. */
+  trials?: Set<RunningTrial> }
+interface RunningTrial { heads: { key: string; head: string }[]; controller: AbortController }
 const flights = new WeakMap<DaemonState, Flight>();
+
+/**
+ * GY-3099: the trial ports of a flight whose running trials the cycle can cancel. Each trial is
+ * registered with the heads it carries; a cancelled one rejects at once with its
+ * `TrialCancelledError`, without waiting for its children to die or its test step to finish, so
+ * every head it carried is settled as failed before it was recorded and stays queued.
+ */
+function cancellableTrials(ports: MergeWriterReads, trials: Set<RunningTrial>): MergeWriterReads {
+  return { ...ports, trial: (mergeSha, files, item, baseTip, onStep, onTiming, heads, share) => {
+    const running: RunningTrial = { heads: heads ?? [], controller: new AbortController() }, signal = running.controller.signal;
+    trials.add(running);
+    const cancelled = new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    const trial = Promise.resolve(ports.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal));
+    trial.catch(() => {});
+    return Promise.race([trial, cancelled]).finally(() => trials.delete(running));
+  } };
+}
+/** GY-3099: why a running trial carrying `key`'s `head` no longer counts: the item is gone, was returned for rework, or carries a new head. */
+export function carriedHeadStale(work: readonly Work[], key: string, head: string): string | null {
+  const item = work.find(entry => entry.key === key);
+  if (!item) return `${key} is no longer available`;
+  const current = item.candidate?.sha.toLowerCase() ?? null;
+  if (current !== head) return `${key}'s head ${head.slice(0, 12)} was replaced by ${current ? current.slice(0, 12) : 'no candidate'}`;
+  if (item.reworkRequested) return `${key}'s head ${head.slice(0, 12)} was returned for rework`;
+  return null;
+}
 /** Resolves once the merge in flight for `state` has settled; for the step's tests. */
 /** The item previews this loop process serves, by item key (GY-1902). */
 const itemPreviews = new WeakMap<DaemonState, Map<string, LivePreview>>();
@@ -583,6 +612,11 @@ export async function mergeWriterStep(cycle: Cycle) {
   const motionBoundMs = mergeWriterFlightBoundMs(cycle.config?.run ?? {});
   if (writer.motionBoundMs !== motionBoundMs) { writer.motionBoundMs = motionBoundMs; changed = true; }
   const flight = flights.get(state);
+  // GY-3099: a running trial carrying a head that was refused or replaced is cancelled now; its other heads stay queued for a fresh trial on the current base.
+  if (flight && !flight.settled) for (const running of flight.trials ?? []) {
+    const stale = running.heads.map(({ key, head }) => carriedHeadStale(snapshot.work, key, head)).find(Boolean);
+    if (stale && !running.controller.signal.aborted) running.controller.abort(new TrialCancelledError(stale));
+  }
   if (flight?.settled) {
     changed = true;
     if (flight.revert) {
@@ -607,7 +641,8 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads' trials passed (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head yields its turn and is tried after every other queued head`);
-          } else action('failed', keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
+          } else if (error instanceof TrialCancelledError) action('failed', `Merge of ${itemKey} head ${head} stopped: its trial was cancelled because ${error.reason}; the head is not refused to rework and, while it is still queued, is trialled again on the current base`);
+          else action('failed', keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
             : `Merge of ${itemKey} head ${head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
@@ -708,7 +743,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       }
       if (due?.candidate) {
         const head = due.candidate.sha.toLowerCase();
-        const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
+        const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null, trials: new Set() };
         // GY-1852: the attempt id is on the persisted state before the attempt's first write; the flight is published only once it is, so a failed persist leaves nothing in flight and a later cycle starts afresh.
         const attempt = randomUUID();
         // GY-2963: the flight's first step is its wait — the fetch, the trial merge and the intent
@@ -728,7 +763,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           void effects.persist(state).catch(() => {});
           void recorder(first, { kind: 'trial-step', head: position.head, step, at: at() }).catch(() => {});
         };
-        void mergeStack(timedMergePorts({ ...reads, record: recorder }, writer, () => effects.persist(state)), positions, onStep).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
+        void mergeStack(timedMergePorts({ ...cancellableTrials(reads, entry.trials!), record: recorder }, writer, () => effects.persist(state)), positions, onStep).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
       }
     }
   }
