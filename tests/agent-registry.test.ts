@@ -289,11 +289,12 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const selectedEvent = (await ok('agent-registry/history', auditor)).find((entry: any) => entry.kind === 'selected');
   assert.equal(selectedEvent.actor, 'master'); assert.equal(selectedEvent.change.session.reason, session.reason);
 
-  // Under its limits: the account's session limit, then the role's concurrency limit, each refused with its reason and recorded.
-  await assert.rejects(dispatch(root, config, 'worker-b', probe), (error: any) => error instanceof NoHealthyAccountError && /claude-fresh is at its session limit \(1 of 1 live\)/.test(error.message));
+  // Under its limits: the account's session limit is passed over for the fleet's next usable account, which serves the launch (GY-3092); the role's concurrency limit is then refused, with its reason and recorded.
+  const failed = await dispatch(root, config, 'worker-b', probe);
+  assert.equal(failed.account!.environment, 'muse-a');
   await ok('agent-registry/accounts', operator, { account: { name: 'claude-fresh', runtime: 'claude', model: 'opus', credential: { host: HOST, home: fresh }, maxSessions: 5 }, reason: 'Raise the limit' });
-  assert.equal((await dispatch(root, config, 'worker-b', probe)).account!.environment, 'claude-fresh');
-  await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, claude-fresh on GY-\d+\)/);
+  await assert.rejects(dispatch(root, config, 'worker-b', probe), /role worker is at its concurrency limit \(2 of 2 live/);
+  await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, muse-a on GY-\d+\)/);
   const refused: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
   assert.match(refused.refusals.at(-1)!.reason, /concurrency limit/); assert.equal(refused.refusals.at(-1)!.work, 'GY-777');
   assert.equal(refused.roles.find(role => role.role === 'worker')!.live, 2); assert.match(refused.roles.find(role => role.role === 'worker')!.blocked!, /concurrency limit/);

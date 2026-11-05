@@ -27,8 +27,19 @@ export function planSpreadOrder(registry: AgentRegistry, order: readonly string[
   const busy = new Set(liveSessions(registry).map(session => planOf(session.account)));
   return [...order.filter(name => !busy.has(planOf(name))), ...order.filter(name => busy.has(planOf(name)))];
 }
-/** Skips read in the role's own preference order, whatever the plan spread made of the trial order (GY-2943). */
-export const preferenceOrder = (order: readonly string[]) => (first: { account: string }, second: { account: string }) => order.indexOf(first.account) - order.indexOf(second.account);
+/**
+ * The accounts a fleet-wide selection may fail over to once a role's own accounts are all spent
+ * (GY-3092): the ones the preference leaves standing — Pi first for a `fast` item, the strong
+ * runtimes for a `strong` one — that the registry holds beyond the role's own order, in the
+ * preference's order. The role's account list is a preference, not a fence, so the failover climbs
+ * the fleet past it; a preference is still a fence for the runtimes it arranges, so a `strong` item
+ * never takes a Pi account beneath it (GY-1746).
+ */
+export function fleetOrder(registry: AgentRegistry, role: Pick<FleetRole, 'name' | 'accounts'>, prefer: 'fast' | 'strong' | null): string[] {
+  const tried = workerOrder(registry, role, prefer);
+  const pi = (name: string) => { const account = registry.accounts.find(entry => entry.name === name); return registry.runtimes.find(entry => entry.name === account?.runtime)?.launch.kind === 'pi'; };
+  return registry.accounts.map(entry => entry.name).filter(name => !tried.includes(name) && (prefer !== 'strong' || !pi(name)));
+}
 
 /** The attempts an item gets on Pi before the strong runtimes take it: its first two. */
 export const piAttempts = 2;
