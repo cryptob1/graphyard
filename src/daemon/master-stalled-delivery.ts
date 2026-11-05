@@ -7,6 +7,7 @@ import type { ServingReport } from '../deploy-watch.js';
 import type { Work } from '../model.js';
 import { parseBaseFailureReason } from '../merge-writer/executor.js';
 import { gateCauses, type GateRecord } from '../batch-gate.js';
+import { repeatedFailureCause, repeatingItems } from './repeated-failure.js';
 
 export const stalledDeliveryAction = 'Diagnose the shared base failure, file or advance its repair, and resume delivery with every test and merge requirement intact. Act as the operator-agent; no human review or approval is needed.';
 
@@ -27,19 +28,28 @@ export function stalledDelivery(work: readonly Work[]) {
   });
 }
 
-export type MasterCause = { key: string; detail: string; digest: string };
+/** `quiet`: a cause a run of repeated equal failures stands in for (GY-3104): it wakes nobody, but keeps its subject, so it does not wake once the run ends. */
+export type MasterCause = { key: string; detail: string; digest: string; quiet?: boolean };
 const cause = (key: string, detail: string): MasterCause => ({ key, detail, digest: createHash('sha1').update(detail).digest('hex') });
 const subject = (kind: string, id: string) => `${kind}:${createHash('sha1').update(id).digest('hex')}`;
 
-/** Current board/cursor refusals only: successful retries and resolved work drop their subjects. */
-export function masterCauses(work: readonly Work[], actions: DaemonState['actions'] = {}): MasterCause[] {
+/**
+ * Current board/cursor refusals only: successful retries and resolved work drop their subjects. An
+ * item in a run of repeated equal failures (GY-3104) wakes the master by its run's one cause; its
+ * per-failure causes are kept quiet.
+ */
+export function masterCauses(work: readonly Work[], actions: DaemonState['actions'] = {}, runs: DaemonState['failureRuns'] = {}): MasterCause[] {
   const open = work.filter(item => item.stage !== 'done');
   const causes = stalledDelivery(open);
+  const repeating = repeatingItems(runs);
+  const quiet = (item: Pick<Work, 'key'>, entry: MasterCause) => repeating.has(item.key) ? { ...entry, quiet: true } : entry;
   for (const item of open) {
     if (item.blocker) causes.push(cause(subject('blocker', item.id), `${item.key}: ${item.blocker}`));
+    const repeat = repeatedFailureCause(runs[item.id]);
+    if (repeat) causes.push(cause(repeat.key, repeat.detail));
     for (const action of item.actionQueue?.actions ?? []) {
       const last = action.history.at(-1);
-      if (last?.event === 'failed') causes.push(cause(subject('operation', action.id), `${item.key} ${action.kind}: ${last.reason}${last.result ? `; ${last.result}` : ''}`));
+      if (last?.event === 'failed') causes.push(quiet(item, cause(subject('operation', action.id), `${item.key} ${action.kind}: ${last.reason}${last.result ? `; ${last.result}` : ''}`)));
     }
   }
   for (const [key, action] of Object.entries(actions)) {
@@ -53,7 +63,7 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
       const entry = cause(subject('cursor', key), `${action.work} ${action.kind}: ${action.detail}`);
       // An unchanged crash on a new lease is the same incident; its prompt still names the exact epoch.
       if (earlyExit) entry.digest = cause(entry.key, action.detail.replace(/(?:epoch|attempt) \d+/g, 'attempt')).digest;
-      causes.push(entry);
+      causes.push(quiet(item, entry));
     }
   }
   return causes;

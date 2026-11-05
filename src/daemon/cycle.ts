@@ -17,6 +17,7 @@ import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
+import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { launchGraceMs } from '../model/registry-sessions.js';
@@ -481,6 +482,7 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
   if (effects.release) await releaseBacklog(cycle);
+  advanceFailureRuns(state, snapshot.work, accountNames(config.workers));
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
@@ -491,6 +493,8 @@ async function dispatchStep(cycle: Cycle) {
   if (!state.diskHeadroom) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
+    // GY-3104: a third equal failure holds the item for the master's decision.
+    if (failureHeld(state.failureRuns[item.id])) continue;
     const incident = state.actions[earlyExitKey(item)];
     if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
@@ -641,7 +645,7 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null } | undefined;
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, { diagnosis: diagnosisSection(state.failureRuns[item.id]) }) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null } | undefined;
     // The session's handle is what the close step reads to end it once its attempt does.
     const pane = launched?.pane ?? null, attach = pane ? `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` : null;
     await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
@@ -669,7 +673,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
-  const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
+  const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? [])];
   const current = new Set(causes.map(cause => cause.key));
   // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
   // while it runs, otherwise an unchanged failure would wake again after every retrial.
@@ -703,7 +707,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
   if (!recoveryFailed && await masterPaneFailover(cycle, handle, open)) return;
-  const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
+  const changed = causes.filter(cause => !cause.quiet && state.master.subjects[cause.key] !== cause.digest);
   const target = handle.pane_id ?? state.master.pane ?? handle.name;
   const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);
   const heartbeat = !changed.length && open.length > 0 && cycle.now() - since >= (config.run.masterHeartbeatMinutes ?? 30) * 60_000;
@@ -751,12 +755,12 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
   launcher.submit(launchKey, [], async sink => {
     try {
       await endPreviousMasterSessions(cycle, closedPane);
-      const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
+      const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? [])];
       const { recoveryFailures, ...oldMaster } = state.master;
       const failures = recoveryError ? [...recoveryFailures, { at: new Date(cycle.now()).toISOString(), error: recoveryError, master: oldMaster }] : recoveryFailures;
       const previous = recoveryError ? null : state.master.continuity;
       const recoveryHandoff = recoveryError ? `Previous native history is unreadable and has NOT been recovered. Recovery error: ${recoveryError}. Its history and original session provenance are retained in master.recoveryFailures; retry recovery from those references when readable. Continue current authoritative work without waiting for human approval.` : '';
-      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(recoveryError ? [recoveryHandoff] : []), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'), previous);
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(recoveryError ? [recoveryHandoff] : []), ...(causes.some(cause => !cause.quiet) ? [masterCausePrompt(causes.filter(cause => !cause.quiet))] : [])].join('\n'), previous);
       const at = new Date(cycle.now()).toISOString();
       state.master = { ...emptyMasterSession(), ...launched, continuity: launched.continuity ?? previous, recoveryFailures: failures, startedAt: at,
         subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),
