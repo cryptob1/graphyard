@@ -26,6 +26,30 @@ export const fleetRoles = ['worker', 'reviewer', 'producer', 'master'] as const;
  */
 export const registryRoles = [...fleetRoles, 'approver', 'escalation-handler', 'diagnostician', 'doctor', 'acceptance', 'planner'] as const;
 export type FleetRoleName = typeof registryRoles[number];
+/**
+ * Which launch kinds each role can run — the role's declared runtime capability. A role not
+ * declared here runs any registered runtime. The master resumes a durable native conversation
+ * with full read-only retention, which only Claude and Codex record (src/master/conversation.ts);
+ * every other role imposes no runtime constraint. The registry's role mutation refuses an account
+ * outside this list and selection passes it over, so a role never depends on a failed launch to
+ * learn what it can run.
+ */
+export const roleRuntimeKinds: Partial<Record<FleetRoleName, readonly string[]>> = { master: ['claude', 'codex'] };
+const runtimeList = (list: readonly string[]) => list.length < 2 ? (list[0] ?? '') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+/**
+ * Why `account`'s runtime cannot serve `role`, or null when it can: names the account's runtime
+ * and the ones the role supports, so the refusal says exactly what to change. An account naming
+ * an unregistered runtime is refused by the registry's own reference checks, not here.
+ */
+export function roleRuntimeRefusal(registry: Pick<AgentRegistry, 'runtimes'>, account: FleetAccount, role: FleetRoleName): string | null {
+  const supported = roleRuntimeKinds[role];
+  if (!supported) return null;
+  const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
+  if (!runtime) return null;
+  if (supported.includes(runtime.launch.kind)) return null;
+  const named = runtime.name === runtime.launch.kind ? `runtime ${runtime.name}` : `runtime ${runtime.name} (kind ${runtime.launch.kind})`;
+  return `${account.name} runs ${named}, which the ${role} role cannot run; the ${role} role supports ${runtimeList(supported)}`;
+}
 export type RolePolicy = z.infer<typeof rolePolicySchema>;
 export const emptyRolePolicy = (): RolePolicy => ({ args: [], tools: [], model: null });
 export type FleetRole = z.infer<typeof roleSchema>;
