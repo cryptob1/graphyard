@@ -168,6 +168,8 @@ test('unit:preview-capped-and-cleaned-up — at most two previews run at once; e
     return { ok: true, output: '' };
   };
   const runs = [0, 1, 2].map(() => runPreview({ root: fixture.repo, base: fixture.base, mergeSha: fixture.mergeSha, timeoutMs: 30_000, stepTimeoutMs: 5_000, shell: blockingShell, slots }));
+  // A run that rejects fails the test where it is awaited, never as an unhandled rejection.
+  for (const run of runs) run.catch(() => {});
   const until = async (done: () => boolean) => { for (let index = 0; index < 400 && !done(); index++) await new Promise(accept => setTimeout(accept, 25)); assert.ok(done()); };
   await until(() => gates.length === 2);
   await new Promise(accept => setTimeout(accept, 200));
