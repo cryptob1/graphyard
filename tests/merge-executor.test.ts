@@ -903,6 +903,21 @@ test('unit:oldest-item-first — among non-hotfix heads the item filed first mer
 });
 
 
+test('unit:merge-queue-priority-order — the writer trials heads in priority order (0 first), the oldest submission first among equal priorities, and a running trial is never interrupted', () => {
+  const p3old = submitted(1, 60, ['src/a.ts'], { priority: 3 }), p3new = submitted(2, 50, ['src/b.ts'], { priority: 3 }), p2 = submitted(3, 40, ['src/c.ts'], { priority: 2 });
+  const p0new = submitted(4, 10, ['src/d.ts'], { priority: 0 }), p0old = submitted(5, 20, ['src/e.ts'], { priority: 0 }), p1 = submitted(6, 30, ['src/f.ts'], { priority: 1 });
+  const all = [p3old, p3new, p2, p0new, p0old, p1];
+  const queue = mergeQueue(all, {}, start);
+  assert.deepEqual(queue.queue.map(entry => entry.key), ['GY-5', 'GY-4', 'GY-6', 'GY-3', 'GY-1', 'GY-2']);
+  assert.deepEqual(queue.due.map(work => work.key), ['GY-5', 'GY-4', 'GY-6', 'GY-3', 'GY-1', 'GY-2'], 'batches and parallel positions take from this order');
+  assert.equal(nextToMerge(all, {}, start)?.key, 'GY-5');
+  // A p3 trial already in flight (its open intent) holds the queue: a p0 head arriving waits for it, it does not displace it.
+  const running = mergeQueue(all, { 'GY-1': ledgerState('GY-1', 1, 'intent') }, start);
+  assert.equal(running.next, null);
+  assert.equal(running.blockedBy, 'GY-1');
+  assert.equal(running.queue[0]!.key, 'GY-5', 'the p0 head is next once the running trial settles');
+});
+
 for (const advanceBase of [false, true])
 test(`${advanceBase ? 'integration:refused-intent-base-advance' : 'integration:refused-intent-push-recovery'} — restart delivers the original proven push${advanceBase ? ' after later main and its observation advance' : ''}`, async () => {
   const n = advanceBase ? 41 : 11;
