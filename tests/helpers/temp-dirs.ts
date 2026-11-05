@@ -1,9 +1,10 @@
 import { after } from 'node:test';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempOwnerMarker, writeTempOwner } from '../../src/tmp-reclaim.js';
+import { livePostmasters, liveServersUnder, stopServersUnder } from '../../src/postgres-stop.js';
 
 // The one shared helper for a test that needs a temporary directory (GY-421): an embedded-Postgres
 // data dir, a worktree, a store, a home. Every test in the suite creates its directories here and
@@ -19,9 +20,11 @@ import { tempOwnerMarker, writeTempOwner } from '../../src/tmp-reclaim.js';
 // remove them once that process is gone.
 //
 // Node runs a file's top-level after hooks in the order they were registered, and this one is
-// registered on import, before the file's own: a directory an embedded Postgres still runs in —
-// its `postmaster.pid` names a live process — is therefore left to that file's own after hook to
-// stop, and removed when the process exits, after every hook has run.
+// registered on import, before the file's own: a directory an embedded Postgres still runs in or
+// under — a live postmaster's `-D` lies inside it — is therefore left to that file's own after hook
+// to stop, and removed when the process exits, after every hook has run, stopping (fast shutdown,
+// awaited) any server still running there first. Removing a data directory under a running server
+// made its checkpointer PANIC on the shutdown checkpoint and dump core (GY-3112).
 
 const created = new Set<string>();
 
@@ -36,23 +39,14 @@ export async function temporaryDirectory(label: string, parent?: string): Promis
   return directory;
 }
 
-/** Whether an embedded Postgres still runs in `directory`: its lock file names a live process. */
-function liveServerIn(directory: string) {
-  const lock = join(directory, 'postmaster.pid');
-  if (!existsSync(lock)) return false;
-  const pid = Number(readFileSync(lock, 'utf8').split('\n')[0]);
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
-}
-
 /**
  * Remove every directory still tracked, its marker with it, and return what went. A directory a
  * live server still runs in is kept for the exit pass unless `force` is set.
  */
 export async function disposeTemporaryDirectories(options: { force?: boolean } = {}): Promise<string[]> {
-  const removed: string[] = [];
+  const removed: string[] = [], postmasters = options.force ? [] : livePostmasters();
   for (const directory of [...created]) {
-    if (!options.force && liveServerIn(directory)) continue;
+    if (liveServersUnder(directory, postmasters).length) continue;
     created.delete(directory);
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); }
     catch { /* a directory another pass already took is no leak */ }
@@ -66,6 +60,7 @@ after(async () => { await disposeTemporaryDirectories(); });
 // What the hook left to a server's own teardown goes once every hook has run.
 process.on('exit', () => {
   for (const directory of created) {
+    if (!stopServersUnder(directory)) continue;
     try { rmSync(directory, { recursive: true, force: true }); rmSync(tempOwnerMarker(directory), { force: true }); } catch { /* the runner's sweep takes it */ }
   }
 });

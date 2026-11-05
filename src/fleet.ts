@@ -10,8 +10,9 @@ import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, dis
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
 import { atomicPrivateWrite, readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
+import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -186,12 +187,11 @@ const smokesInFlight = new Map<string, Promise<SmokeResult>>();
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
- * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
- * session that cannot start fails its launch — and the registry's launch contract names no
- * one-prompt headless mode for it, so it has no smoke test to run.
+ * runtime (Pi, the narrow roles' runner) or of agy, whose interactive session waits silently at a
+ * missing login (GY-3108), with no result since it last changed, or whose last test failed
+ * `smokeRetestMs` ago or more (GY-515). Any other interactive runtime's session is its own check.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => smokeTestedKinds.includes(runtime.launch.kind) && account.enabled
   && (!account.smoke || smokeFailureDue(account, now));
 
 /**
@@ -203,8 +203,8 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   const fleet = await readFleet(config, role, probe);
   if (!fleet.managed) return null;
   const host = config.hostId ?? 'unknown-host', { registry, client } = fleet;
-  const named = registry.roles.find(entry => entry.name === role)!.accounts;
-  const local = registry.accounts.filter(account => named.includes(account.name) && account.enabled && account.credential.host === host);
+  // Every enabled account on this host is observed, not only the role's own: any of them may serve a failover (GY-3092).
+  const local = registry.accounts.filter(account => account.enabled && account.credential.host === host);
   const ceiling = probe.ceilingPercent ?? config.run?.quotaCeilingPercent;
   const observed = await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
@@ -261,20 +261,25 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
-    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
+    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) ?? roleRuntimeRefusal(fleet.registry, account, role) : `${name} is not a registered account`;
     // A twin on a spent login (GY-1573) waits for that login's reset, which is the twin's, not its own last read.
     const twin = account && reason ? [exhaustedTwin(fleet.registry, account, now)].find(other => other && reason.includes(`same provider login as ${other.name},`)) ?? null : null;
     return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
-  const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
+  // With none of its own accounts healthy, the role still launches when another registry account can serve it (GY-3092).
+  const failover = definition.accounts.length && !accounts.some(account => account.healthy) ? fleetOrder(fleet.registry, definition, null).find(name => {
+    const account = fleet.registry.accounts.find(entry => entry.name === name)!;
+    return !accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) && !roleUnsupported(fleet.registry, definition, name);
+  }) : undefined;
+  const usable = !full && (accounts.some(account => account.healthy) || !!failover);
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running, failover: failover ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +414,13 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   }
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
-  const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
+  const kindOf = (name: string) => runtimes.find(runtime => runtime.name === name)?.launch.kind ?? current.runtimes.find(runtime => runtime.name === name)?.launch.kind ?? null;
+  const serves = (account: FleetAccountInput, role: FleetRoleName) => {
+    const capability = roleRuntimeKinds[role];
+    // A role that can run only some runtimes is proposed only those accounts (GY-3093), whatever the runtime.
+    if (capability) { const kind = kindOf(account.runtime); return !!kind && capability.includes(kind); }
+    return proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
+  };
   // The master role is proposed like the reviewer's (GY-2939): the same accounts in the same
   // preference order at concurrency 1, so a fresh install's loop can launch its master session
   // instead of failing every cycle until an operator names the account by hand.

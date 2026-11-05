@@ -15,7 +15,7 @@ import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import { baseFailureHoldMs } from '../src/merge-writer/executor.js';
 import { mergeWriterInFlight } from '../src/daemon/cycle-merge-writer.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
-import { createSchema } from '../src/model/work.js';
+import { createSchema } from '../src/model-boundary/work.js';
 import type { Work } from '../src/model.js';
 import { archiveDaemonCursor, writeDaemonState, readDaemonState } from '../src/daemon/state.js';
 import type { MergeLedgerEvent } from '../src/model/merge-ledger.js';

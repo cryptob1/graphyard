@@ -155,7 +155,7 @@ test('hard math snapshots read authoritative tracked documents for marked and ma
 test('hard math real API creates/releases the frozen plan with revisions, binds worker sessions and cleans active epochs',async()=>{
   const [{default:EmbeddedPostgres},{Store},{Engine},{server},{freePort},{createItems},{operator,credential},policy]=await Promise.all([
     import('embedded-postgres'),import('../src/store.js'),import('../src/engine.js'),import('../src/server.js'),import('../src/cli/test-isolation.js'),
-    import('../benchmarks/hard-math/runner.js'),import('../benchmarks/hard-math/isolation.js'),import('../src/model/repository-policy.js'),
+    import('../benchmarks/hard-math/runner.js'),import('../benchmarks/hard-math/isolation.js'),import('../src/model-boundary/repository-policy.js'),
   ]);
   const {randomUUID}=await import('node:crypto');
   const root=await temporaryDirectory('hard-math-api'),port=await freePort(),databaseDir=await temporaryDirectory('postgres',root);

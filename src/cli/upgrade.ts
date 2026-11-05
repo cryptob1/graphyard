@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, imageRepository, installationRoot, type Release } from '../release.js';
@@ -112,12 +113,20 @@ const git = (cwd: string, ...args: string[]) => {
 /** Tracked files with uncommitted changes in the CLI checkout. */
 export const cliChangesOf = (cliRoot: string) => git(cliRoot, 'diff', '--name-only', 'HEAD').split('\n').filter(Boolean);
 
-/** The schema generation a revision's code expects, read from its release.ts; null when it names none. */
+/** The schema generation a revision's code expects, read from its lineage source; null when it names none. */
 export function schemaAt(source: string): number | null {
   const lineage = /schemaGenerations:[^=]*=\s*\[([\s\S]*?)\];/.exec(source);
   if (lineage) return (lineage[1].match(/null|'sha256:[0-9a-f]+'/g) ?? []).length - 1;
   const fixed = /export const schemaVersion\s*=\s*(\d+)/.exec(source);
   return fixed ? Number(fixed[1]) : null;
+}
+
+/** Read today's store lineage or the release source carried by older revisions. */
+function revisionSchema(cliRoot: string, revision: string): number | null {
+  for (const file of ['src/store/schema-lineage.ts', 'src/release.ts']) {
+    try { return schemaAt(git(cliRoot, 'show', `${revision}:${file}`)); } catch { /* the older layout may not have this file */ }
+  }
+  return null;
 }
 
 /** The dated release `--to` names, or without one Graphyard's fetched origin/main tip, from the CLI checkout's refs. */
@@ -128,9 +137,7 @@ export function resolveTarget(cliRoot: string, to?: string): UpgradeTarget {
   try { revision = git(cliRoot, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); }
   catch { throw new Error(`The CLI checkout has no ${ref}; run git -C ${JSON.stringify(cliRoot)} fetch --tags origin ${graphyardBaseBranch} (upgrade without --plan fetches it)`); }
   const version = to ?? releaseOfCommit(cliRoot, revision).version;
-  let source = '';
-  try { source = git(cliRoot, 'show', `${revision}:src/release.ts`); } catch {}
-  return { version, revision, schema: schemaAt(source) };
+  return { version, revision, schema: revisionSchema(cliRoot, revision) };
 }
 
 async function databaseSchemaOf(url: string | null): Promise<number | null> {
@@ -376,11 +383,13 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
 
 /**
  * The repository the deploy watch serves (GY-2955): its checkout's origin's owner/name, null when it
- * names none. The deploy record keeps it, so a control-plane upgrade installed for one repository
- * cannot pass for another repository's deployment.
+ * names none. The configured URL is read raw — `git remote get-url` expands an insteadOf transport
+ * rewrite (a local mirror), and the record keeps the repository the checkout is configured to
+ * serve, never the mirror that moves it. The deploy record keeps it, so a control-plane upgrade
+ * installed for one repository cannot pass for another repository's deployment.
  */
 export const servedRepository = (cliRoot: string): string | null => {
-  try { return repositoryFromRemote(git(cliRoot, 'remote', 'get-url', 'origin')); } catch { return null; }
+  try { return repositoryFromRemote(git(cliRoot, 'config', '--get', 'remote.origin.url')); } catch { return null; }
 };
 
 /**
@@ -442,7 +451,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     health: deployHealth(cliRoot, url),
     prune: keep => pruneImages(input.run, keep),
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
-    schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
+    schema: async commit => revisionSchema(cliRoot, commit),
     database: () => databaseSchemaOf(url),
   };
 }
@@ -462,7 +471,8 @@ export const upgradeCommands = defineCommands([{
     '  upgrade --watch [--once] [--checkout DIR]',
     '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
     '                                each new base tip, build, restart, check /healthz, and roll back',
-    '                                to the previous tip on failure; DIR is the install\'s own checkout',
+    '                                to the previous tip on failure; the watch then restarts on the',
+    '                                code it served; DIR is the install\'s own checkout',
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
@@ -475,12 +485,26 @@ export const upgradeCommands = defineCommands([{
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());
+      // GY-3123: the watch runs the code it deploys. A pass that served a commit this process is
+      // not the code of ends with the release handover: the launcher restarts this command on the
+      // code the checkout published (a plain exit beside the launcher lets the unit's restart do
+      // the same), so a rule the new code enforces — the batch gate's serve-only-verified — is in
+      // force from the next pass, not from the next reboot. The deploy record was written before
+      // the handover, so the successor continues from it and nothing redeploys.
+      const runningRoot = fileURLToPath(new URL('../../', import.meta.url));
+      const handover = async (tip: string) => {
+        let running: string | null = null;
+        try { running = git(runningRoot, 'rev-parse', 'HEAD'); } catch { /* a tree with no git history names no running commit */ }
+        if (!tip || running === tip) return;
+        stopping.abort(); // the serve half stops after the pass it is in; nothing is torn mid-flight
+        throw Object.assign(new Error(`[graphyard-deploy] the watch hands itself over to ${tip.slice(0, 12)}: it serves code this process is not running, and the restart loads it`), { releaseHandover: true });
+      };
       // The managed repository's own serving (GY-2976): a main that declares .graphyard/serve.json is
       // checked out into the install's own serve checkout, built and served by the same unit's pass;
       // a repository that declares nothing gives the serve pass nothing to do.
       const intervalMs = master.run.intervalSeconds * 1000, once = flags.includes('--once');
       return Promise.all([
-        watchMain(deployRecordPath(repoRoot), ports, { intervalMs, once, signal: stopping.signal, repository: servedRepository(cliRoot) }),
+        watchMain(deployRecordPath(repoRoot), ports, { intervalMs, once, signal: stopping.signal, repository: servedRepository(cliRoot), handover }),
         watchServe(serveRecordPath(repoRoot), managedServePorts({ root: repoRoot, baseBranch: master.baseBranch, run: defaultChildRun }), { intervalMs, once, signal: stopping.signal }),
       ]).then(() => undefined);
     }

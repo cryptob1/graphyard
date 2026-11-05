@@ -19,7 +19,7 @@ import type { UpDependencies, UpRequest } from '../src/up.js';
  * path holds a space is the CLI's, which the unit's ExecStart quotes.
  */
 // Loaded inside the test, so a tree without them fails as a test case, not at load.
-const supervisor = () => import('../src/supervisor.js');
+const supervisor = () => import('../src/install/loop-unit.js');
 const repositorySetup = () => import('../src/repository-setup.js');
 
 const SERVER = 'http://127.0.0.1:4310';

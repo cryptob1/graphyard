@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { definiteRenewalRefusal, supervise } from '../src/supervisor.js';
+import { definiteRenewalRefusal, supervise } from '../src/session-watch.js';
 
 // GY-894 AC-1: when an implementation attempt ends (submitted, blocked, failed or otherwise
 // settled), the supervisor terminates the session runtime so the Herdr agent name and the worker

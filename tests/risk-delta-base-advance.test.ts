@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { gitRunnerFor, observeHead } from '../src/merge-writer/local-observation.js';
-import { riskDelta, riskOf } from '../src/model/risk-class.js';
+import { riskDelta } from '../src/model/risk-class.js';
+import { riskOf } from '../src/model-boundary/risk-class.js';
 import type { Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

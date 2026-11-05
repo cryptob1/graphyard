@@ -1,6 +1,7 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog, and the restart onto a newly served commit.
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { ConfigReload } from '../master/config.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { defaultChildRun } from '../child-runner.js';
@@ -9,12 +10,13 @@ import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, 
 import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
-import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from './loop-supervisor.js';
+import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from '../install/loop-unit.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { cliCommit } from '../protocol-version.js';
+import { deployUnitOf } from '../install/units.js';
 import { activeCliRoot } from '../install/cli-release.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { noteControlPlane } from './compose-recovery.js';
@@ -89,6 +91,43 @@ export async function restartThroughUnit() {
   catch (error) { if (!restartEndedBySupervisorStop(error)) throw error; }
 }
 
+/** What runs in the deploy unit (GY-3136): the commit its watch process loaded, and whether a deploy pass is in progress (any process besides the watch). */
+export interface DeployUnitProcess { unit: string; commit: string | null; busy: boolean }
+
+/**
+ * Reads the deploy unit beside this loop's unit from its cgroup: each process's command line, the
+ * watch's being `upgrade --watch`; the process running `<root>/src/cli.ts` loaded the commit `root`
+ * holds. Any other process (git, npm, docker, install) is a deploy pass at work. Null outside systemd.
+ */
+export function readDeployUnitProcess(read: (file: string) => string = file => readFileSync(file, 'utf8'), commitOf: (root: string) => string | null = cliCommit): DeployUnitProcess | null {
+  try {
+    const own = read('/proc/self/cgroup').match(/^0::(\/.*\/)(graphyard-master[^/\s]*\.service)(?:\/.*)?$/m);
+    if (!own) return null;
+    const unit = deployUnitOf({ master: own[2] });
+    let commit: string | null = null, busy = false;
+    for (const pid of read(`/sys/fs/cgroup${own[1]}${unit}/cgroup.procs`).split('\n').filter(Boolean)) {
+      let args: string[];
+      try { args = read(`/proc/${pid}/cmdline`).split('\0'); } catch { continue; }
+      if (!(args.includes('upgrade') && args.includes('--watch'))) { busy = true; continue; }
+      const cli = args.find(arg => arg.endsWith('/src/cli.ts'));
+      if (cli) commit = commitOf(dirname(dirname(cli)));
+    }
+    return { unit, commit, busy };
+  } catch { return null; }
+}
+
+/**
+ * Why the deploy unit should restart now, or null (GY-3136): its watch runs older code than the
+ * commit it last served and no deploy pass is in progress, so a restart loads the served code —
+ * the deploy-watch twin of restartCause. Once per served commit: `restarted` names the commits
+ * already restarted for, so a unit that still runs old code after its restart is not restarted again.
+ */
+export function deployRestartCause(root: string, running: DeployUnitProcess | null, restarted: (serving: string) => boolean): { serving: string; reason: string } | null {
+  const serving = readDeployRecord(deployRecordPath(root))?.tip ?? null;
+  if (!serving || !running?.commit || running.busy || running.commit === serving || restarted(serving)) return null;
+  return { serving, reason: `${running.unit} runs ${running.commit.slice(0, 12)}, older code than ${serving.slice(0, 12)} it serves` };
+}
+
 /**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe. A cycle that throws is recorded, logged and retried after a growing
@@ -102,6 +141,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The checkout whose deploy record names the serving commit; absent, the loop never restarts itself. */
   root?: string;
   restartLoop?: () => Promise<unknown>;
+  /** Reads what runs in the deploy unit (GY-3136); defaults to its cgroup. */
+  deployUnit?: () => DeployUnitProcess | null;
+  restartDeploy?: (unit: string) => Promise<unknown>;
   delay?: (ms: number, signal: AbortSignal) => Promise<void>;
   /**
    * The control plane's event ledger, newest first. Polled during the wait: an event another actor
@@ -179,6 +221,17 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           if (state.controlPlane) await effects.persist(state).catch(() => {});
         }
         await notify('alive');
+        const deploy = options.root && !stopping ? (options.deployUnit ?? readDeployUnitProcess)() : null;
+        const deployCause = deploy && deployRestartCause(options.root!, deploy, serving => state.actions[`deploy-unit-restart:${serving}`]?.state === 'done');
+        if (deploy && deployCause) {
+          const { serving, reason } = deployCause;
+          log(`[graphyard-master] restarting ${deploy.unit}: ${reason}`);
+          let detail = `Restarted ${deploy.unit} through systemd: ${reason}`, outcome: 'done' | 'failed' = 'done';
+          try { await (options.restartDeploy ?? (unit => defaultChildRun('systemctl', ['--user', '--no-block', 'restart', unit])))(deploy.unit); }
+          catch (error) { outcome = 'failed'; detail = `Could not restart ${deploy.unit} (${reason}): ${message(error)}`; log(`[graphyard-master] ${detail}`); }
+          storeAction(state, `deploy-unit-restart:${serving}`, { kind: 'deployment', work: null, principal: null, state: outcome, detail: detail.slice(0, 1000), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() });
+          await effects.persist(state).catch(() => {});
+        }
         // A restart would kill a merge trial in flight, so it waits for the trial to settle.
         const cause = options.root && !stopping && !mergeWriterInFlight(state) ? restartCause(config, options.root, state.release?.commit ?? null) : null;
         if (cause) {

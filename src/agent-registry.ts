@@ -4,9 +4,10 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
+import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, supersededByRequest, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, observationRequestSchema, selectionRequestSchema, settleSessions, supersededByRequest,
-  type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { holdLimitNoticeAccount } from './model/account-quota.js';
 
 /**
  * The agent registry as control-plane state.
@@ -30,12 +31,28 @@ export async function readRegistry(db: Pick<pg.PoolClient, 'query'>): Promise<Re
   return row?.registry ?? emptyRegistry();
 }
 
+const appendRegistry = async (db: Pick<pg.PoolClient, 'query'>, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) => {
+  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}${kind}`, JSON.stringify({ change, registry })]);
+};
+
+/**
+ * A session ended on its provider's limit notice (GY-3096): the account it spent is marked exhausted
+ * in the registry, with the notice and its reset, inside the caller's transaction that records the
+ * exhaustion on the item — so no selection by any loop, restarted or not, hands it out before the reset.
+ */
+export async function recordLimitNoticeHold(db: Pick<pg.PoolClient, 'query'>, actor: Principal, notice: Parameters<typeof holdLimitNoticeAccount>[1], now: Date) {
+  const registry = await readRegistry(db), at = now.toISOString();
+  const account = holdLimitNoticeAccount(registry, notice, { actor: actor.id, at });
+  if (!account) return null;
+  registry.revision++; registry.updatedAt = at;
+  await appendRegistry(db, actor, 'observed', registry, { limitNotice: { account, work: notice.work, role: notice.role, reason: notice.reason, resetsAt: notice.resetsAt } });
+  return account;
+}
+
 export class AgentRegistry {
   constructor(private store: Store) {}
 
-  private async append(db: pg.PoolClient, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) {
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}${kind}`, JSON.stringify({ change, registry })]);
-  }
+  private append(db: pg.PoolClient, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) { return appendRegistry(db, actor, kind, registry, change); }
   /** The work items live sessions were launched for: all that session liveness reads. */
   private async sessionWork(db: Pick<pg.PoolClient, 'query'>, registry: RegistryDocument) {
     const keys = [...new Set(liveSessions(registry).map(session => session.work).filter((key): key is string => !!key))];
@@ -83,8 +100,14 @@ export class AgentRegistry {
   async history(actor: Principal, limit = 100) {
     demand((readers as readonly string[]).includes(actor.role), 'Registry history is readable by admin, coordinator, slice-lead and reader identities', 403);
     const bounded = z.number().int().min(1).max(500).parse(limit);
-    return (await this.store.pool.query(`SELECT seq,actor,kind,payload->'change' AS change,(payload->'registry'->>'revision')::int AS revision,created_at FROM events WHERE work_id IS NULL AND kind LIKE '${registryEventPrefix}%' ORDER BY seq DESC LIMIT $1`, [bounded]))
-      .rows.map(row => ({ seq: String(row.seq), at: row.created_at.toISOString(), actor: row.actor, kind: String(row.kind).slice(registryEventPrefix.length), revision: row.revision, change: row.change }));
+    // A refusal carries how often it repeated and when it was last seen (GY-3095).
+    return (await this.store.pool.query(`SELECT e.seq,e.actor,e.kind,e.payload->'change' AS change,(e.payload->'registry'->>'revision')::int AS revision,e.created_at,r.count,r.last_at FROM events e
+      LEFT JOIN registry_refusal_repeats r ON r.seq = e.seq WHERE e.work_id IS NULL AND e.kind LIKE '${registryEventPrefix}%' ORDER BY e.seq DESC LIMIT $1`, [bounded]))
+      .rows.map(row => {
+        const kind = String(row.kind).slice(registryEventPrefix.length), at = row.created_at.toISOString();
+        return { seq: String(row.seq), at, actor: row.actor, kind, revision: row.revision, change: row.change,
+          ...(kind === 'refused' ? { count: row.count ?? 1, lastSeenAt: row.last_at?.toISOString() ?? at } : {}) };
+      });
   }
 
   /** One configuration change: validated, referentially whole, idempotent, appended with its reason. */
@@ -134,11 +157,20 @@ export class AgentRegistry {
           selectedAt: at, selectedBy: actor.id, reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
         registry.sessions.push(session); registry.revision++; registry.updatedAt = at;
         await this.append(db, actor, 'selected', registry, { session });
+        // A role served past its own accounts says so in the registry history (GY-3092).
+        if (choice.failover) await this.append(db, actor, 'failover', registry, { failover: { ...choice.failover, session: session.id, work: request.work } });
         result = { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
       } else {
-        const last = registry.refusals.at(-1);
-        const repeated = !!last && last.role === request.role && last.host === request.host && last.work === request.work && last.reason === choice.reason;
-        if (!repeated) registry.refusals = [...registry.refusals, { at, role: request.role, host: request.host, work: request.work, by: actor.id, reason: choice.reason, skipped: choice.skipped }].slice(-refusalHistoryLimit);
+        // The same request refused for the same reason as its own last refusal, with no session chosen
+        // for it since, is a repeat (GY-3095): it raises that entry's count and last-seen time, and only
+        // a different refusal appends a new entry, so loops asking for several requests in turn do not bury history.
+        const last = registry.refusals.findLast(entry => entry.role === request.role && entry.host === request.host && entry.work === request.work);
+        const repeated = !!last && last.reason === choice.reason
+          && !registry.sessions.some(session => session.role === request.role && session.host === request.host && session.work === request.work && session.selectedAt > last.at);
+        if (repeated) {
+          await db.query(`INSERT INTO registry_refusal_repeats(seq,count,last_at) SELECT seq,2,$2 FROM events WHERE kind = '${registryEventPrefix}refused' AND created_at >= $1::timestamptz AND payload->'change'->'refusal'->>'at' = $3
+            ORDER BY seq DESC LIMIT 1 ON CONFLICT (seq) DO UPDATE SET count = registry_refusal_repeats.count + 1, last_at = EXCLUDED.last_at`, [last.at, at, last.at]);
+        } else registry.refusals = [...registry.refusals, { at, role: request.role, host: request.host, work: request.work, by: actor.id, reason: choice.reason, skipped: choice.skipped }].slice(-refusalHistoryLimit);
         if (!repeated || changed) { registry.revision++; registry.updatedAt = at; await this.append(db, actor, repeated ? 'observed' : 'refused', registry, repeated ? { host: request.host } : { refusal: registry.refusals.at(-1) }); }
         result = { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
       }

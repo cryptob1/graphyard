@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-2605: an item whose own record reserves its release to the owner (GY-1857's 'Owner hold:') is

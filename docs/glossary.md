@@ -54,6 +54,7 @@ The master applies release, unblock, requirements, rework, close and attest unde
 The dashboard and `master status` show these labels. Graphyard derives the underlying stages from gates; no client sets them.
 
 Not started (backlog, ready) — nobody holds it yet.
+Waiting (build) — no worker holds it and no session runs; master status names why when the reason is known (GY-3095).
 Building (build) — a worker holds it and is writing the change.
 Testing (test, acceptance) — automated checks or proofs are running on the handed-in change.
 In review (review) — someone other than the builder is judging the change.

@@ -1,0 +1,15 @@
+{
+  "id": "exhausted-names-its-evidence",
+  "title": "An account is reported exhausted only with evidence, and the report names it",
+  "description": "Runs the registry regression: exhausted only on a usage window at the ceiling, an operator mark, a session report or a recorded hold, named with its reset; an exhausted reading with none, a failed or empty provider read, or a hold past its reset reads unknown and stays selectable.",
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "exhausted names its evidence regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/exhausted-names-its-evidence.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

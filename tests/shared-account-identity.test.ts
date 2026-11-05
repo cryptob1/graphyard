@@ -7,7 +7,8 @@ import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { masterConfigSchema, selectAccount, type MasterConfig } from '../src/master.js';
 import * as environments from '../src/master/environments.js';
 import { observedExhaustions, recordObservedExhaustion } from '../src/master/environments.js';
-import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession, type QuotaObservation } from '../src/model/registry.js';
+import { accountIneligibility, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession, type QuotaObservation } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**

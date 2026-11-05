@@ -48,7 +48,7 @@ test('integration:hard-math-smoke — non-CLI native launch denies oracle and au
     const headless = await startHeadlessSession({ name: 'benchmark-headless-review', work: 'GY-1', subject: 'boundary',
       kind: 'pi', args: [], environment: {}, directory: worktree, coordinatorRoot: root,
       credentialMask: credentialMaskFor(config, { credentialFile: null }, join(base, 'config-home')),
-      prompt: 'Boundary probe', answer: async output => output,
+      prompt: 'Boundary probe', answer: async output => output, root, route: 'review', context: {},
       exec: async (command, args) => {
         const end = args.indexOf('--');
         assert.ok(command.endsWith('bwrap') && end >= 0, 'headless launch carries the explicit-root wrapper');

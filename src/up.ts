@@ -1,7 +1,7 @@
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
 import { supervisingUnit } from './master/loop-restart.js';
-import { loopStopTimeoutSeconds } from './supervisor.js';
+import { loopStopTimeoutSeconds } from './install/loop-unit.js';
 import { defaultChildRun } from './child-runner.js';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';

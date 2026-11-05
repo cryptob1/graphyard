@@ -1,5 +1,5 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
-import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+import { freeModelNotice, exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
@@ -238,7 +238,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
   for (let index = lines.length - 1; index >= 0; index--) {
     // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
-    if (line.length > exhaustionNoticeMaxLength) continue;
+    if (line.length > exhaustionNoticeMaxLength || freeModelNotice.test(line)) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');

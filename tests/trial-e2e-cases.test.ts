@@ -12,13 +12,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { evaluateLandability } from '../src/model/landability.js';
+import { evaluateLandability } from '../src/model-boundary/landability.js';
 import { runMergeTrial, trialFailureReason } from '../src/merge-writer/executor.js';
 import { trialMerge } from '../src/merge-writer/trial.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal, Work } from '../src/model.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { defaultMergeBatch } from '../src/merge-writer/batch.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
@@ -161,7 +162,7 @@ test('unit:trial-serves-head-and-runs-bound-cases — a passing case makes the i
   work = (await store.list()).find(entry => entry.id === work.id)!;
   assert.equal(evaluateLandability(work, [work], new Date()).verdict, 'landable');
   // The item's Tests panel shows the case as the trial of the current head ran it.
-  const [shown] = linkedCases(work, null).linked;
+  const [shown] = linkedCases(work, null, new Date()).linked;
   assert.equal(shown.head, 'pass');
   assert.deepEqual(shown.trial, { executed: 1, failed: 0 });
 
@@ -199,7 +200,7 @@ test('unit:trial-serves-head-and-runs-bound-cases — a failing step refuses the
     tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, attempts: [], e2e: run.e2e });
   assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
   work = (await store.list()).find(entry => entry.id === work.id)!;
-  assert.equal(linkedCases(work, null).linked[0].head, 'fail', 'the Tests panel shows the failing case');
+  assert.equal(linkedCases(work, null, new Date()).linked[0].head, 'fail', 'the Tests panel shows the failing case');
 });
 
 test('unit:trial-serves-head-and-runs-bound-cases — a host loopback listener cannot answer for or collide with the privately served head', async () => {
