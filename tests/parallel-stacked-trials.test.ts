@@ -119,6 +119,9 @@ test('integration:parallel-stacked-trials — three passing heads trial at once 
   assert.deepEqual(world.trials.map(entry => entry.baseTip), [sha('base'), m1, m2], 'position 2 trialled on position 1\'s merge commit, position 3 on position 2\'s');
   assert.deepEqual(world.pushes, [sha(`merge:${world.head(1)}:${sha('base')}`), sha(`merge:${world.head(2)}:${m1}`), sha(`merge:${world.head(3)}:${m2}`)], 'pushed in queue order, each onto the tip it was trialled on');
   assert.deepEqual(world.main.slice(0, 3), [m3, m2, m1]);
+  assert.deepEqual(state.mergeWriter.trials!.map(trial => ({ mergeSha: trial.mergeSha, heads: trial.heads, steps: trial.steps.map(step => step.step) })).sort((a, b) => a.heads[0]!.key.localeCompare(b.heads[0]!.key)),
+    [m1, m2, m3].map((mergeSha, index) => ({ mergeSha, heads: [{ key: `GY-${index + 1}`, head: world.head(index + 1) }], steps: ['push'] })),
+    'parallel trials retain their own covered heads and push timings');
   for (const n of [1, 2, 3]) assert.deepEqual((world.recorded.get(n) ?? []).map(event => event.kind), ['intent', 'trial', 'pushed', 'reconciled'], `GY-${n} is delivered once`);
   await runCycle(config, state, effects, () => start + 60_000);
   assert.equal(state.mergeWriter.inFlights, undefined, 'a settled flight leaves no position in flight');

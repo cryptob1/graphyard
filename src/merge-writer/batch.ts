@@ -131,9 +131,9 @@ export async function mergeStack(ports: MergePorts, positions: readonly (readonl
   const portsOf = (index: number): MergePorts => ({
     ...ports,
     fetch: async () => { const tip = await until(() => standing(index)); return tip === 'remote' ? landed = await ports.fetch() : tip; },
-    trial: async (mergeSha, files, item, baseTip, step, timing, heads) => {
+    trial: async (mergeSha, files, item, baseTip, step, onTiming, heads) => {
       offer(index, mergeSha);
-      try { return await ports.trial(mergeSha, files, item, baseTip, step, timing, heads, positions.length); } finally { offer(index, null); }
+      try { return await ports.trial(mergeSha, files, item, baseTip, step, onTiming, heads, positions.length); } finally { offer(index, null); }
     },
     lands: async baseTip => { await until(() => done.slice(0, index).every(Boolean) || null); return baseTip === landed; },
     push: async (mergeSha, baseTip) => {

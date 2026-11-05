@@ -49,3 +49,17 @@ Passed, failed, flaky (one retry passes at same SHA), unrun, blocked or pending.
 Legacy `/api/validation/import` requires external-runs:import, is idempotent by producer/runId, accepts only rc-tagged commits and gates nothing. The release-filing operator agent can read `GET /api/validation/import/:sha` and seal released imports with `POST /api/validation/import/:sha/seal`; it cannot import runs. The seal-authority route is removed.
 
 The validation runner and host-attestor protocol, its CLI commands, artifact storage, reuse/replay endpoints and background reconciliation are retired. The Shipped section no longer has a Validation request-history page. External report imports and the repository e2e runner remain available. Deployment definitions remain for the delivery service: authenticated admins create or revise environments and builder/observer/promoter/rollback registrations through `POST /api/validation/define`, with an `Idempotency-Key` and `expectedRevision` (0 to create). Set a registration’s `enabled` to false to revoke it. Each change appends a revision and history; stale revisions are refused. Runner definition kinds are retired.
+
+## Host verification capacity
+
+Host verification reservations hold a kernel `flock` on their existing owner file.
+Lock acquisition uses the bounded asynchronous child runner so checks do not block
+the control-plane loop. The owning process retains the descriptor; exit or interruption releases it across
+PID namespaces, so a reused numeric PID cannot retain capacity. Budget reads reclaim
+unlocked reservations before subtracting declared files, including trial declarations.
+Ownership metadata stays immutable; declarations use a separate atomically replaced file,
+so interruption cannot erase reclamation evidence. Unreadable legacy ownership records
+remain reserved, without interrupting planning. Live locks stay reserved; slot limits and the memory floor remain unchanged. Legacy
+PID-only records lack this evidence and remain reserved until explicitly cleared.
+`tests/verification-owner-identity.test.ts` covers host release and interrupted
+private-root ownership; `e2e/cases/verification-owner-identity.json` binds the regression.

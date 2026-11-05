@@ -114,7 +114,7 @@ test('unit:master-session-limit-fails-over — a master pane showing its provide
   assert.equal(`${hour}:${minute}`, '1:30', 'the reset is a 1:30 wall clock in the notice\'s zone');
   assert.ok(Date.parse(observed.exhausted[0]!.resetsAt!) > clock, 'the reset stands after the notice');
   assert.deepEqual(observed.closed, ['pM'], 'the pane is closed');
-  assert.deepEqual(observed.ended, [{ session: 'session-claude-c', reason: 'the master session it recorded is gone from Herdr; the loop launches its replacement' }], 'the registry session the pane ran under is ended, freeing the role\'s one slot');
+  assert.deepEqual(observed.ended, [{ session: 'session-claude-c', reason: "the master session's pane pM is absent from Herdr's inventory; the loop launches its replacement" }], 'the registry session the pane ran under is ended, freeing the role\'s one slot');
   assert.equal(observed.launched.length, 1, 'the master launches in the same cycle');
   assert.match(observed.launched[0]!.handover, /continue from node \/bin\/graphyard master status/, 'the launch carries the handover');
   assert.deepEqual(registry.live(), ['codex'], 'the registry now counts only the next account\'s session');
