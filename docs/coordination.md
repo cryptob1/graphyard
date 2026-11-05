@@ -39,6 +39,8 @@ Workers commit, then run `graphyard verify GY-N`: the host coordinator trials ex
 
 ## Decision reads
 
+`src/engine.ts` delegates commands to `engine/commands/index.ts`, with shared authorization, receipts and saves in `commands/run.ts`. Lease handling, actions and observation live in separate `engine/` modules; `reconcile/scheduler.ts` owns incremental passes, using `faces.ts` and `lag.ts`.
+
 Single-item lifecycle decisions use `store/decision-read.ts` inside the existing fleet/item transaction. They load the focus, transitive prerequisites, post-deployment parent, bootstrap declarations and deliveries carrying those deferred proofs. Resource conflicts read only `work_index.peers` (lease and resource names); submission also selects any existing owner of its PR. The index trigger updates selectors atomically with the document, including raw writes and restores. No cache warm-up is needed. The peer-column migration records a new schema generation and adds the column only when absent, so rerunning unchanged DDL does not wait on live coordination writes. Creation and requirement revision still inspect the dependency graph; workspace registration still checks all reservations.
 
 The reader audit for GY-3035 distinguishes decision inputs from board presentation:
