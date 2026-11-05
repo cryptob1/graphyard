@@ -98,3 +98,36 @@ export * from './registry-sessions.js';
 export * from './account-quota.js';
 export * from './registry-proposal.js';
 export * from './provider-usage.js';
+
+/** GY-3103: a version directory's name, as mise and similar installers write it: 2.2.5, v1.10.0, 1.0.0-beta.1. */
+export const versionName = /^v?\d+(?:\.\d+)*(?:[-+][\w.]+)?$/;
+const versionParts = (name: string) => { const [core, pre] = name.replace(/^v/, '').split(/[-+](.*)/s); return { core: core.split('.').map(Number), pre: pre ?? null }; };
+/** Orders version names: by their numeric parts, then a release above its prereleases. */
+export function compareVersions(a: string, b: string) {
+  const x = versionParts(a), y = versionParts(b);
+  for (let at = 0; at < Math.max(x.core.length, y.core.length); at++) { const delta = (x.core[at] ?? 0) - (y.core[at] ?? 0); if (delta) return delta; }
+  return x.pre === y.pre ? 0 : x.pre === null ? 1 : y.pre === null ? -1 : x.pre.localeCompare(y.pre);
+}
+export const newestVersion = (names: readonly string[]) => names.filter(name => versionName.test(name)).sort(compareVersions).at(-1) ?? null;
+
+/**
+ * Where a runtime's pinned install sits (GY-3103): the first entry of its launch PATH split at the
+ * first path segment naming a version — `root` holds every installed version, `rest` is the part
+ * below the version (e.g. `bin`). Null for a runtime whose PATH is not led by a versioned install.
+ */
+export function pinnedInstall(runtime: Pick<FleetRuntime, 'launch'>): { entry: string; root: string; version: string; rest: string } | null {
+  const entry = runtime.launch.environment?.PATH?.split(':')[0];
+  if (!entry || !isAbsolute(entry)) return null;
+  const parts = entry.split('/'), at = parts.findIndex(part => versionName.test(part));
+  if (at < 2) return null;
+  return { entry, root: parts.slice(0, at).join('/'), version: parts[at], rest: parts.slice(at + 1).join('/') };
+}
+/** A newer installed version of a registry runtime, offered to one launch as its canary: `entry` leads that launch's PATH. */
+export interface CanaryOffer { runtime: string; entry: string; version: string }
+/** The PATH entry `version` of a pinned install would lead with. */
+export const versionEntry = (pin: { root: string; rest: string }, version: string) => [pin.root, version, pin.rest].filter(Boolean).join('/');
+/** A PATH whose first entry is `entry`, the rest kept. */
+export const repinPath = (path: string, entry: string) => [entry, ...path.split(':').slice(1)].join(':');
+/** The runtime launched from `entry`: its PATH led by it, every other part of its launch kept. */
+export const repinRuntime = (runtime: FleetRuntime, entry: string): FleetRuntime =>
+  ({ ...runtime, launch: { ...runtime.launch, environment: { ...runtime.launch.environment, PATH: repinPath(runtime.launch.environment?.PATH ?? '', entry) } } });
