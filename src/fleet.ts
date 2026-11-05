@@ -262,7 +262,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
@@ -280,7 +280,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
     return !accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) && !roleUnsupported(fleet.registry, definition, name);
   }) : undefined;
   const usable = !full && (accounts.some(account => account.healthy) || !!failover);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running, ...failover ? { failover } : {} };
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running, failover: failover ?? null };
 }
 
 // ---------------------------------------------------------------------------

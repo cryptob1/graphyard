@@ -423,6 +423,46 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   assert.doesNotMatch(bytes, /claude-a|claude-b|codex-a/, 'and it never named an account');
 });
 
+test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer, producer and master all on one exhausted account run on the second usable account with no registry change, and the first account leads again once its hold ends', async () => {
+  await reset();
+  const homes = await temporaryDirectory('homes', scratch);
+  const homeA = await login(homes, 'claude-one', 'claude'), homeB = await login(homes, 'claude-two', 'claude');
+  await ok('agent-registry/apply', operator, { runtimes: [runtimeNamed('claude')], models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-one', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeA } }, { name: 'claude-two', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeB } }],
+    roles: fleetRoles.map(name => ({ name, accounts: ['claude-one'], concurrency: 5 })), reason: 'Every role on one account; a second account in no role' });
+  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
+  const before: Registry = await ok('agent-registry/document', operator);
+  const spent = network({ 'claude-one-oauth-token': { five: 10, seven: 100 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
+
+  // The worker launch runs on the second account; with what it observed folded in, the loop's gate reads every role launchable through the fleet.
+  const calls: string[][] = [];
+  const worker = await dispatch(root, config, 'worker-a', spent, calls);
+  assert.equal(worker.account!.environment, 'claude-two'); assert.equal(tabEnvironment(calls.find(call => call[0] === 'tab')!).CLAUDE_CONFIG_DIR, homeB);
+  for (const role of fleetRoles) {
+    const health = (await fleetRoleHealth(config, role, spent))!;
+    assert.deepEqual([health.available, health.failover], [true, 'claude-two'], `${role}: the role is launchable through the fleet`);
+  }
+  for (const [role, work] of [['reviewer', 'GY-3201'], ['producer', 'GY-3202'], ['master', undefined]] as const) {
+    const chosen = await selectAccount(config, role, { name: `${role}-a` }, { ...spent, work });
+    assert.equal(chosen.account!.name, 'claude-two', `${role} fails over`);
+    assert.ok(chosen.account && 'fleet' in chosen.account);
+    assert.match(chosen.account.fleet.reason, /failing over: none of the role's own 1 accounts can serve it;.*claude-one quota is exhausted/);
+  }
+  const history = (await ok('agent-registry/history', auditor)).filter((entry: any) => entry.kind === 'failover' && entry.change.failover.account === 'claude-two');
+  assert.deepEqual(history.map((entry: any) => [entry.change.failover.role, entry.change.failover.account]).sort(), fleetRoles.map(role => [role, 'claude-two']).sort());
+  for (const entry of history) assert.match(entry.change.failover.reason, /claude-one quota is exhausted/);
+
+  // No registry change was made for any of it: the roles still name only the first account.
+  const after: Registry = await ok('agent-registry/document', operator);
+  assert.deepEqual(after.roles, before.roles); assert.deepEqual(after.accounts.map(account => [account.name, account.enabled]), before.accounts.map(account => [account.name, account.enabled]));
+
+  // The hold ends (the provider's window resets): the very next launch of each role prefers the first account again.
+  const renewed = network({ 'claude-one-oauth-token': { five: 1, seven: 1 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
+  assert.equal((await dispatch(root, config, 'worker-a', renewed)).account!.environment, 'claude-one');
+  for (const [role, work] of [['reviewer', 'GY-3203'], ['producer', 'GY-3204']] as const)
+    assert.equal((await selectAccount(config, role, { name: `${role}-a` }, { ...renewed, work })).account!.name, 'claude-one', `${role} returns to its own account`);
+});
+
 // ---------------------------------------------------------------------------
 // AC-4 — unit:registry-visibility
 // ---------------------------------------------------------------------------
