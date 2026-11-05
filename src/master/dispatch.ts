@@ -185,14 +185,6 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       const visible = (options.agents ? await options.agents() : agents).find(agent => agent.name === profile.agentName);
       if (visible && !reclaimableAgent(profile, visible, allWork, now))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
-      // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
-      // closed, bounded, and the launch goes on as on a profile with no agent.
-      if (visible) {
-        try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
-        catch (error) { throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error }); }
-        closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
-        target = undefined;
-      }
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
@@ -232,6 +224,18 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         // The repository root rides the choice, so an opencode launch derives its repository-tree
         // permission from the checkout the dispatch serves (GY-2959).
         const chosen = selected;
+        // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
+        // closed, bounded, only once the registry granted this launch its slot, so a dispatch from a
+        // stale snapshot that the registry refuses never closes a session launched since.
+        if (visible && !closedAgent) {
+          try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
+          catch (error) {
+            await chosen.release?.(`worker launch for ${work.key}: the finished pane holding its name could not be closed`);
+            throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error });
+          }
+          closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
+          target = undefined;
+        }
         const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
         launched = launch;
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is

@@ -13,7 +13,7 @@ import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../p
  */
 export const sessionHistoryLimit = 100, refusalHistoryLimit = 20;
 export const launchGraceMs = 5 * 60_000, reviewSessionMs = 2 * 3_600_000, producerSessionMs = 24 * 3_600_000, sessionCapMs = 48 * 3_600_000;
-type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Partial<Pick<Work, 'specCheckLaunch'>>;
+type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Partial<Pick<Work, 'specCheckLaunch' | 'sessions'>>;
 /**
  * Whether a recorded session still occupies its account, and why not when it does not. Nothing
  * reports a session's end: the control plane already knows what each one was launched for, so a
@@ -23,6 +23,11 @@ type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Part
  */
 export function sessionEnded(session: FleetSession, work: SessionWork | undefined, now: number): string | null {
   if (session.endedAt) return session.endReason ?? 'ended';
+  // A worker whose runtime already ended with no live lease left frees its reservation at once, so
+  // the item's retry is not refused by its own dead attempt for the rest of the launch grace.
+  if (session.role === 'worker' && work && !(work.lease && Date.parse(work.lease.expiresAt) > now) && work.sessions?.some(handle => handle.kind === 'implementation'
+    && handle.state === 'finished' && (!session.principal || handle.principal === session.principal) && Date.parse(handle.endedAt ?? handle.updatedAt) >= Date.parse(session.selectedAt)))
+    return `${work.key}'s implementation session finished`;
   const age = now - Date.parse(session.selectedAt);
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';

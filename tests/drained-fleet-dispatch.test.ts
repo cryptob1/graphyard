@@ -171,7 +171,7 @@ test('unit:dispatch-refusal-names-agent-remedy — the per-profile reason names 
     const one = profile('one', fixture.credential);
     const herdr = fakeHerdr([{ name: 'agent-one', pane_id: 'pane-stuck', agent: 'codex', agent_status: 'done' }]), claims = fakeClaims(fixture.root);
     const failed = await dispatchWork(fixture.root, work('GY-2'), one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [work('GY-2')], claims.prepare, claims.release, 1, new Date().toISOString(),
-      { closePane: async () => { throw new Error('Herdr still reports pane pane-stuck after close'); } }).then(() => null, error => error as Error);
+      { ...registry(), closePane: async () => { throw new Error('Herdr still reports pane pane-stuck after close'); } }).then(() => null, error => error as Error);
     assert.match(failed?.message ?? '', /^Herdr agent agent-one is done with no live assignment, and its bounded close failed: Herdr still reports pane pane-stuck after close; remedy: close pane pane-stuck on the host \(herdr pane close pane-stuck\) or relaunch Herdr$/);
   } finally { await fixture.cleanup(); }
 });
