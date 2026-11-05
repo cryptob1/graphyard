@@ -5,7 +5,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
 import { describeAttempts, dispatchFailureLimit, emptyDispatchCursor, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';

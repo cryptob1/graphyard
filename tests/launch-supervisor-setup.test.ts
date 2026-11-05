@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { awaitRuntimeStart, observeStart, SessionStartError } from '../src/master.js';
 import { runsProgram, supervisorArgv, paneForeground } from '../src/master/launch.js';
-import { setupLine } from '../src/supervisor.js';
+import { setupLine } from '../src/session-watch.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 
@@ -133,3 +133,13 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   });
 
 }
+
+test('unit:launch-supervisor-setup — graphyard watch\'s supervision lives in src/session-watch.ts: its setup line is the one the launch quotes, and src/supervisor.ts no longer exists', async () => {
+  const watch = await import('../src/session-watch.js');
+  assert.equal(watch.setupLine('GY-1023', 4), 'graphyard: starting supervision of GY-1023 epoch 4');
+  assert.equal(typeof watch.supervise, 'function');
+  assert.deepEqual(watch.watchAssignment(['node', 'graphyard.mjs', 'watch', 'GY-1023', '4', '--', 'claude']), { key: 'GY-1023', epoch: '4' });
+  const { existsSync } = await import('node:fs');
+  assert.equal(existsSync(new URL('../src/supervisor.ts', import.meta.url)), false, 'src/supervisor.ts is gone');
+  assert.equal(existsSync(new URL('../src/daemon/loop-supervisor.ts', import.meta.url)), false, 'its loop half joined src/install/loop-unit.ts');
+});

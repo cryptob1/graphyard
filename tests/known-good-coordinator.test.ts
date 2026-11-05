@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { ChildRun } from '../src/child-runner.js';
 import { knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pinKnownGood } from '../src/master/known-good.js';
-import { loopUnitText } from '../src/supervisor.js';
+import { loopUnitText } from '../src/install/loop-unit.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import type { MasterSession } from '../src/cli/master/session.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

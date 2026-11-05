@@ -6,7 +6,7 @@ import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { agentStartCeilingMs, agentStartTimeoutMs, awaitRuntimeStart, launchCommand, launchCommandLimit, launchDelivery, loadMasterConfig, paneLastLine, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, writeLaunchFiles, type HerdrAgent } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { launchProducer, producerPrompt, readProducerLedger } from '../src/producer.js';

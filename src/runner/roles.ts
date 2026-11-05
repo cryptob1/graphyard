@@ -53,11 +53,11 @@ export function runConfinement(options: { coordinatorRoot?: string | null; bwrap
  * never by what the run says.
  */
 
-export function narrowRunner(pi: unknown, credentialMask?: CredentialMask): Runner {
+export function narrowRunner(pi: unknown, credentialMask?: CredentialMask, coordinatorRoot?: string): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
   // Every headless run is confined at its spawn (GY-888): the checkout the launcher runs from is
   // unwritable to the run, shell commands included, exactly as for a pane session.
-  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement({ credentialMask }) });
+  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement({ credentialMask, coordinatorRoot }) });
 }
 
 /**
@@ -92,9 +92,9 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
   return { [account.key.variable]: value };
 }
 /** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). Extra arguments after the account's own narrow the session further (the doctor's tool set). */
-export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] = [], credentialMask?: CredentialMask): Runner {
+export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] = [], credentialMask?: CredentialMask, coordinatorRoot?: string): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: [...launch.args, ...extraArgs], environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement({ credentialMask }) }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: [...launch.args, ...extraArgs], environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement({ credentialMask, coordinatorRoot }) }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,

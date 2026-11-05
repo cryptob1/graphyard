@@ -7,7 +7,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

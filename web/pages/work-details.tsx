@@ -22,7 +22,7 @@ import { stageLabel, serveView } from '../../src/model/plain-stage';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
-import { shownRisk } from '../../src/model/risk-class';
+import { shownRisk } from '../../src/model-boundary/risk-class.js';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -157,7 +157,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const held = stepHeld(item, now, null, release);
   const worker = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
-  const proofs = proofPreview(item, work);
+  const proofs = proofPreview(item, work, new Date(now));
   const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
   const postDeployment = <PostDeployment item={item} repository={status?.repository}/>;
   // The inverted loop, as this item sees it: what the control plane says to do next, which
@@ -275,7 +275,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
       {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
-      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{stageLabel(item, release, serve)}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
+      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{stageLabel(item, release, serve, now)}</span><span>In this step for {age(item.stageEnteredAt, now)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Worker assignment</h3><p>{worker.text}</p>{worker.owner && <p className="muted">Worker ID: {worker.owner} · assignment {worker.epoch}</p>}<p>{worker.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}
@@ -289,23 +289,23 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(unechoed(item.nextAction.refusal ?? ''))}”</> : ''}: {shortShas(unechoed(item.nextAction.reason))}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
         : <p className="muted">The control plane has no outstanding action for this item.</p>}
       {actions.map(row => <div className="criterion" key={row.id}><strong>{row.kind} · {row.state}{row.claim ? ` · ${row.claim.executor} on ${row.claim.host}` : ''}</strong>
-        <p>Requested by {row.requestedBy} {age(row.requestedAt)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(unechoed(row.resolution))}` : ''}</p>
+        <p>Requested by {row.requestedBy} {age(row.requestedAt, now)} ago · attempt {row.attempts}{row.resolution ? ` · last result: ${shortShas(unechoed(row.resolution))}` : ''}</p>
         <ul>{row.history.slice(-5).map((entry, index) => <li key={index}>{entry.event}{entry.executor ? ` by ${entry.executor}` : ''}: {shortShas(unechoed(entry.reason))}</li>)}</ul></div>)}
       {running.length > 0 && <><h3>Sessions running now</h3><ul className="sessions">{running.map(handle => <li key={handle.id}>
-        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
+        <strong>{handle.kind}</strong> · {handle.principal} · {handle.runtime} on {handle.host} · working on {shortShas(handle.subject)} · {age(handle.startedAt, now)} · seen {formatAge(handle.seenAt ?? handle.updatedAt, now)} ago<br/><code>{handle.attach}</code></li>)}</ul></>}
       <h3>Sessions ({sessions.length})</h3>
       {sessions.length === 0 && <p className="muted">No session has recorded a handle on this item.</p>}
       {sessions.map(handle => <div className="criterion" key={handle.id}><strong>{handle.live ? '▶' : handle.state === 'running' ? '?' : '■'} {handle.kind} · {handle.principal}</strong>
         <p>{handle.runtime} on {handle.host}{handle.workspace ? ` · workspace ${handle.workspace}` : ''}{handle.tab ? ` · tab ${handle.tab}` : ''}{handle.pane ? ` · pane ${handle.pane}` : ''} · {shortShas(handle.subject)}</p>
-        <p>{handle.live ? `Running for ${age(handle.startedAt)}` : handle.state === 'running' ? `Not seen for ${formatAge(handle.seenAt ?? handle.updatedAt, now)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt)} ago${handle.outcome ? `: ${shortShas(handle.outcome)}` : ''}`}</p>
+        <p>{handle.live ? `Running for ${age(handle.startedAt, now)}` : handle.state === 'running' ? `Not seen for ${formatAge(handle.seenAt ?? handle.updatedAt, now)}` : `Finished ${age(handle.endedAt ?? handle.updatedAt, now)} ago${handle.outcome ? `: ${shortShas(handle.outcome)}` : ''}`}</p>
         <code>{handle.attach}</code></div>)}
       <h3>Agent requests ({(item.agentRequests ?? []).length})</h3>
       {requests.length > 0 && <div className="notice"><strong>{requests.length === 1 ? 'An agent is waiting' : `${requests.length} agents are waiting`} on a decision</strong>
-        <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at)} ago and released its lease: {shortShas(r.reason)} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
+        <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at, now)} ago and released its lease: {shortShas(r.reason)} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
       {(item.agentRequests ?? []).length === 0 && <p className="muted">No agent has recorded a typed request on this item.</p>}
       {(item.agentRequests ?? []).map(request => <div className="criterion" key={request.id}><strong>{request.state === 'open' ? '○' : '✓'} {request.type} · {request.requestedBy}</strong>
         <p>{shortShas(request.reason)}</p>
-        <p>Decided by {request.decider.who}{request.decider.command ? ` · ${request.decider.command}` : ''} · recorded {age(request.at)} ago{request.releasedLease ? ' and the attempt released its lease' : ''}{request.state === 'resolved' ? ` · resolved: ${shortShas(request.resolution ?? 'no reason recorded')}` : ''}</p></div>)}
+        <p>Decided by {request.decider.who}{request.decider.command ? ` · ${request.decider.command}` : ''} · recorded {age(request.at, now)} ago{request.releasedLease ? ' and the attempt released its lease' : ''}{request.state === 'resolved' ? ` · resolved: ${shortShas(request.resolution ?? 'no reason recorded')}` : ''}</p></div>)}
       <h3>Acceptance criteria and required proof</h3>{item.criteria.map(ac => <div className="criterion" key={ac.id}><strong>{ac.id} · {ac.text}{ac.bootstrap ? ' · bootstrap mode' : ''}</strong>{ac.bootstrap && <p className="amber">Proof deferred by {ac.bootstrap.declaredBy} on {new Date(ac.bootstrap.declaredAt).toLocaleString()} at policy v{ac.bootstrap.policyRevision}: {shortShas(ac.bootstrap.reason)}. Review, CI and every other criterion still gate this item. The proof is not dropped — it stays owed on {ac.bootstrap.contractPaths.join(', ')} and the next change touching that contract must produce it.</p>}</div>)}
       {proofs.map(p => <div className="criterion" key={`${p.criterion}:${p.proof}`}><strong>{p.criterion} · {p.proof} · {p.status}</strong><p>{p.status === 'deferred' ? `Deferred in bootstrap mode; recorded as an obligation on ${p.bootstrap?.contractPaths.join(', ')}` : p.scenario ? `Scenario v${p.scenario.revision} in ${p.scenario.environment}` : 'Requires an authorized producer or manual operator evidence'} · current candidate and policy v{item.policyRevision}</p>{p.status !== 'deferred' && p.bootstrap && <p className="amber">Inherited from {p.bootstrap.key} {p.bootstrap.criterionId} because this item plans to touch {p.bootstrap.contractPaths.join(', ')}. A bootstrap deferral cannot be renewed by the change that inherits it.</p>}{item.proofGaps?.includes(p.proof) && <p className="amber">No principal was authorized to produce {p.proof} when this intent was recorded. Open Proof authority and grant it before dispatch.</p>}</div>)}
       {(() => { const ledger = obligationLedger(work); return ledger.length > 0 && <><h3>Bootstrap obligations ({ledger.length})</h3><p className="muted">Deferred proofs still owed across this repository. An obligation clears only when a delivered change produces trusted passing evidence for it; no operator command retires one.</p>{ledger.map(o => <div className="criterion" key={`${o.workId}:${o.criterionId}:${o.proof}`}><strong>{o.proof} · owed by {o.key} {o.criterionId}</strong><p>{shortShas(o.reason)} · contract {o.contractPaths.join(', ')} · declared by {o.declaredBy} on {new Date(o.declaredAt).toLocaleString()} at policy v{o.policyRevision}</p><p>{o.inheritedBy.length ? `Inherited by ${o.inheritedBy.join(', ')}` : 'No planned work touches this contract yet'}</p></div>)}</>; })()}

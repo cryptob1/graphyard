@@ -596,7 +596,6 @@ export class Delivery {
       await this.event(db, actor.id, rejection.length ? 'observation-rejected' : 'observed', { observationId: observation.id, environment: data.environment.id, generation: state.generation, snapshotId: data.snapshotId, rejection, states });
       // An authoritative observation is also what validation requests on this environment are
       // attributed against: a moved target re-anchors them, a contradicted pass is undermined.
-      if (observation.authoritative) await this.validation.reanchoring.observed(db, observation, actor.id, now);
       return { id: observation.id, authoritative: observation.authoritative, rejection, duplicate: false, receivedAt: observation.receivedAt };
     });
   }

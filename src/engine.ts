@@ -1,6 +1,6 @@
 import { decisionWork } from './store/decision-read.js';
 import { recordRenewalFault } from './store/renewal-fault.js';
-import { appendEvidence } from './model/append-evidence.js';
+import { appendEvidence } from './model-boundary/append-evidence.js';
 import { once, readReceipt, record } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { jsonChanged, stableJson } from './model/stable-json.js';
@@ -13,7 +13,12 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, proofExerciseSchema, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, resourcesSchema, demand, evaluate, proofSchema, type Criterion, type Evidence, type Lease, type Principal, type Work, type Observation, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, demand, type Criterion, type Evidence, type Lease, type Principal, type Work, type Observation, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { createSchema } from './model-boundary/work.js';
+import { criteriaSchema, resourcesSchema } from './model-boundary/policy.js';
+import { proofExerciseSchema } from './model-boundary/evidence.js';
+import { evaluate } from './model-boundary/gates.js';
+import { proofSchema } from './model-boundary/proof.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
@@ -21,23 +26,31 @@ import { implementerIdentities, leadMay, producerIndependenceRefusal } from './d
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { buildIdentity } from './protocol-version.js';
-import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { liveDispatchHandleIds, type DispatchTransition } from './model/dispatch.js';
+import { reconcileAutoDispatch } from './model-boundary/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
-import { actionAccount, sameAction } from './model/next-action.js';
+import { actionAccount } from './model-boundary/next-action.js';
+import { sameAction } from './model/next-action.js';
 import type { ActionAccount } from './model/action-account.js';
 import { resolveScenario } from './scenarios.js';
-import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
+import { filingRefusal } from './model-boundary/user-facing.js';
+import { e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
-import { openActions, reconcileActions, settleDelivered } from './model/actions.js';
-import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
-import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, type AgentRequest } from './model/agent-requests.js';
-import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { openActions } from './model/actions.js';
+import { reconcileActions, settleDelivered } from './model-boundary/actions.js';
+import { livenessFallback, livenessOf, livenessRepairEntry } from './model-boundary/liveness.js';
+import { rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
+import { agentRequestSchema } from './model-boundary/agent-requests.js';
+import { boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, type AgentRequest } from './model/agent-requests.js';
+import { recordSession, sessionObservationFields } from './model/sessions.js';
+import { sessionHandleSchema } from './model-boundary/sessions.js';
 import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
 import { observeBaseHold } from './model/behind-base.js';
-import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
+import { blockedAttemptMarker, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
+import { partialWorkSchema } from './model-boundary/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
@@ -287,7 +300,7 @@ export const planeStallMs = 60_000;
 /**
  * How long past a recorded stall's end a lease the stall kept may stand (GY-1801): the window a
  * still-retrying supervisor needs to land the renewal the stall ate. A supervisor's renewals wait
- * under its lease window and retry within a doubling backoff capped at ten seconds (`supervisor.ts`),
+ * under its lease window and retry within a doubling backoff capped at ten seconds (`session-watch.ts`),
  * so one that was mid-renewal when the plane stopped answering lands a fresh one well inside thirty
  * seconds of its recovery — a full lease period keeps a lease nobody renews standing instead, and a
  * pane closed under a lease only the stall keeps is exactly the live-lease close the soak's

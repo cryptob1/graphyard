@@ -26,7 +26,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01 `at` values only order fixture decisions and merges, and the 2026-10-03 `now` is handed explicitly to checkAgentEnvironment; Date.now() stamps other fixtures on the real clock.
 
 test('unit:review-followups-triaged — decisions are retained strictly by answer time rather than work-item order (Finding 2)', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // Create 30 work items with answers spaced 1 minute apart.
   // Item 1 has the oldest answer (t=1 min), item 30 has the newest answer (t=30 min).
@@ -59,7 +59,7 @@ test('unit:review-followups-triaged — decisions are retained strictly by answe
 
   // Shuffle or reverse item order in the snapshot
   const reversed = [...items].reverse();
-  updateProjectMemoryFromWork(memory, reversed);
+  updateProjectMemoryFromWork(memory, reversed, Date.now());
 
   // Must retain exactly 20 decisions
   assert.equal(memory.notes.length, retainedMemoryNotes);
@@ -72,7 +72,7 @@ test('unit:review-followups-triaged — decisions are retained strictly by answe
   }
 
   // Verify that an older answer on a high-numbered item never evicts a newer answer on a low-numbered item
-  const memory2 = emptyProjectMemory();
+  const memory2 = emptyProjectMemory(new Date().toISOString());
   const workMixed: Work[] = [
     {
       id: 'id-old-high',
@@ -106,13 +106,13 @@ test('unit:review-followups-triaged — decisions are retained strictly by answe
     } as unknown as Work,
   ];
 
-  updateProjectMemoryFromWork(memory2, workMixed);
+  updateProjectMemoryFromWork(memory2, workMixed, Date.now());
   assert.equal(memory2.notes[0].key, 'GY-1');
   assert.equal(memory2.notes[1].key, 'GY-9999');
 });
 
 test('unit:review-followups-triaged — oversized memory decision is abbreviated and included within word budget (Finding 3)', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // Create an oversized answer with ~600 words (over 4,000 characters), exceeding the default 500-word budget
   const reasonWords = Array.from({ length: 600 }, (_, i) => `word${i}`);
@@ -144,7 +144,7 @@ test('unit:review-followups-triaged — oversized memory decision is abbreviated
 });
 
 test('unit:review-followups-triaged — loop continues on oversized entry instead of breaking, preserving subsequent shorter entries (Finding 5)', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // 1. Decisions: First decision is long, second is short.
   // With a small budget, the second short decision must still be included if it fits.
@@ -171,7 +171,7 @@ test('unit:review-followups-triaged — loop continues on oversized entry instea
   assert.ok(docsWords(digestDec) <= 60);
 
   // 2. Merges: First merge has many files and exceeds budget, second merge has 1 file.
-  const memoryMerges = emptyProjectMemory();
+  const memoryMerges = emptyProjectMemory(new Date().toISOString());
   recordChangeInMemory(memoryMerges, {
     key: 'GY-201',
     sha: '1111111111222222222233333333334444444444',
@@ -194,7 +194,7 @@ test('unit:review-followups-triaged — loop continues on oversized entry instea
 
 test('unit:review-followups-triaged — syncProjectMemory caps retention and change-only disk writes are non-redundant (Finding 6)', async () => {
   const root = await temporaryDirectory('project-memory-test');
-  let memory = emptyProjectMemory();
+  let memory = emptyProjectMemory(new Date().toISOString());
 
   // Populate memory beyond caps
   for (let i = 1; i <= 30; i++) {
@@ -254,7 +254,7 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
 });
 
 test('unit:review-followups-triaged — settled summary items preserve existing project memory notes without backfill (Finding 1 & 4)', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // Existing decision in memory
   recordNoteInMemory(memory, {
@@ -281,7 +281,7 @@ test('unit:review-followups-triaged — settled summary items preserve existing 
     } as unknown as Work,
   ];
 
-  updateProjectMemoryFromWork(memory, settledSummaryWork);
+  updateProjectMemoryFromWork(memory, settledSummaryWork, Date.now());
 
   // Existing decisions are intact
   assert.equal(memory.notes.length, 1);

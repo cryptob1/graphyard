@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../../src/model.js';
-import { reconcileAutoDispatch } from '../../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../../src/model-boundary/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
 import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/auto-dispatch.js';
@@ -52,7 +52,8 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } }, coordinatorStatus as typeof fetch);
-  await saveReviewerProfile(root, reviewer);
+  // Fake runtime launches must not load the host's project-level Claude settings.
+  await saveReviewerProfile(root, { agentArgs: ['--setting-sources', 'user'], ...reviewer });
   await saveReviewerProfile(root, { name: 'spare-reviewer', agentName: 'review-spare', kind: 'claude' });
   if (automatic) {
     const file = join(root, '.graphyard/master.json');

@@ -10,14 +10,14 @@ import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and registerLaunch expiry from the real clock alone.
@@ -71,12 +71,12 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
  * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
  * count against a profile's limit is exactly what they started.
  */
-async function fleet(profiles: { reviewers: unknown[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
+async function fleet(profiles: { reviewers: Record<string, unknown>[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
   const root = await temporaryDirectory('concurrency'), credentialDirectory = await temporaryDirectory('concurrency-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  for (const profile of profiles.reviewers) await saveReviewerProfile(root, profile);
+  for (const profile of profiles.reviewers) await saveReviewerProfile(root, { agentArgs: ['--setting-sources', 'user'], ...profile });
   for (const profile of profiles.producers) {
     const credentialFile = join(credentialDirectory, `${profile.name}.token`); await writeFile(credentialFile, `${profile.principal}-token-`.padEnd(40, 'x'), { mode: 0o600 });
     await saveProducerProfile(root, { ...profile, kind: 'claude', credentialFile }, async () => ({ actor: { id: profile.principal, role: 'producer', proofs: ['unit:*', 'integration:*', 'manual:*'] } }));

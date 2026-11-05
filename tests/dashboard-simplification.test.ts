@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { evaluate, stages, type Gate, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { stages, type Gate, type Work } from '../src/model.js';
 import { apiRoutes } from '../src/server/index.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork as auditWork, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
@@ -128,16 +129,16 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
   ];
   for (const [gate, reason] of reasons) {
-    const plain = plainReason(reason, gate);
+    const plain = plainReason(reason, gate, Date.now());
     assert.ok(plain.known, `${gate}: no plain reading for "${reason}"`);
     assert.deepEqual(jargonIn(plain.text), [], `${reason} → ${plain.text}`);
     const status = plainStatus(withGates({ submission: { epoch: 1, pr: 7 }, candidate: { ...find('GY-15').candidate!, pr: 7 }, blocker: gate === 'ready' && !/^(Not released|Dependency)/.test(reason) ? reason : null, lease: null }, gate, [reason]), NOW);
     assert.deepEqual(jargonIn(status.sentence), [], `${reason} → ${status.sentence}`);
   }
   // The live evaluator's reasons for every fixture item are all recognised.
-  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW)).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name).known, `${item.key} ${gate.name}: ${reason}`);
+  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW)).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name, Date.now()).known, `${item.key} ${gate.name}: ${reason}`);
   // An unanticipated reason never leaks: it reads as its step.
-  assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
+  assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge', Date.now()).text, 'Waiting to merge');
 });
 
 test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
@@ -147,7 +148,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Delivered', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
+  for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -155,7 +156,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
   assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
@@ -175,7 +176,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
   assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
-  assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
+  assert.deepEqual(failing.features, { releases: null, validation: false, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.
   assert.equal(probed.operatorAgentsError, null);
   assert.equal(failing.operatorAgentsError, 'unavailable');
@@ -184,7 +185,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.doesNotMatch(text(unread), /safe bootstrap default/);
   assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
   assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
-  assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, true, 'a scenario requirement means validation is in use');
+  assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, false, 'repository cases do not enable the retired validation runner');
   // Delivery slices are about who works on what: on the Workers page once a slice has a lead, never on Work.
   const led = fixtureStatus('admin'); led.delegation.slices[0].lead = { id: 'lead', displayName: 'Pine', sessionKind: 'ai' } as any;
   assert.doesNotMatch(home(dashboard({ status: led })), /Delivery slices/);

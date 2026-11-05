@@ -91,7 +91,7 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     const admin: Principal = { id: 'serving-admin', role: 'admin', sessionKind: 'human' };
     const credential = { ...admin, token: `serving-admin-${'s'.repeat(32)}` };
     const engine = new Engine(store, 120, 'owner/history');
-    const http = server(engine, [credential], null, { production: watch });
+    const http = server(engine, [credential], { production: watch });
     await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
     try {
       assert.equal((await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind='production.environment'")).rows[0].count, 0);

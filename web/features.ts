@@ -19,14 +19,13 @@ export interface Probe { features: Features; operatorAgents: any[]; operatorAgen
 export async function probeFeatures(read: Read, admin: boolean, hasScenarios: boolean): Promise<Probe> {
   const settle = async <T,>(path: string, decide: (value: any) => T) => { try { return decide(await read(path)); } catch { return null; } };
   const attempt = async (path: string) => { try { return { value: await read(path), error: null }; } catch (e) { return { value: null, error: (e as Error).message || 'The read failed.' }; } };
-  const [releases, validation, automation] = await Promise.all([
+  const [releases, automation] = await Promise.all([
     settle('delivery', value => (value?.environments?.length ?? 0) + (value?.releases?.length ?? 0) > 0),
-    settle('validation', value => hasScenarios || (value?.requests?.length ?? 0) > 0),
     admin ? attempt('operator-agents') : Promise.resolve({ value: [], error: null }),
   ]);
   const agents = Array.isArray(automation.value) ? automation.value : null;
   return {
-    features: { releases, validation, automation: admin ? agents === null ? null : agents.length > 0 : false },
+    features: { releases, validation: false, automation: admin ? agents === null ? null : agents.length > 0 : false },
     operatorAgents: agents ?? [], operatorAgentsError: admin ? automation.error ?? (agents === null ? 'The control plane answered with something other than a list of identities.' : null) : null,
   };
 }

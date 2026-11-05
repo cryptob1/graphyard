@@ -17,36 +17,6 @@ The trial starts command, waits for 2xx, supplies `GRAPHYARD_E2E_TOKEN`, runs ca
 
 `human:NAME` is limited to physical checks named by the criterion. Needs you asks once per head with steps/commit/preview; pass advances, fail reworks. It is not general approval.
 
-## Approve the bundle and run an attempt
-
-Pinned validation uses `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json`. Admins define, worker runners poll/ack/heartbeat, producer builders/collectors attest/publish. Builder and collector remain separate; [grants](protocol/work-commands.md#evidence-and-pipeline) determine trust.
-
-```sh
-graphyard runner inspect [packages/web]
-graphyard runner snapshot selected-files.json > oracle-source.json
-graphyard runner bundle-digest ./oracle
-```
-
-Define pins digest/runnerImageDigest. `runner attempt runner.json` uses non-root runAsUser and boundary GID. `runner supervise` enumerates offline, executes read-only and signs inventory.
-
-### The acknowledgement is retried, never repeated
-
-Use identical `ATTEMPT_ID-ack` requests. Already acknowledged succeeds; unexpected 2xx or confirmed refusals stop. Transport/timeouts/408/429/5xx retry up to five sends, after 1/2/4/8 seconds, within 60 seconds total. No heartbeat or attestor execution starts before acknowledgement.
-
-### Attempt boundary
-
-```sh
-groupadd --gid 20001 graphyard-boundary
-useradd -r --uid 10001 -g graphyard-boundary graphyard-container
-useradd -r graphyard-collector
-usermod -aG graphyard-boundary graphyard-attestor
-usermod -aG graphyard-boundary graphyard-collector
-install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/attempts
-setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
-```
-
-Container writes; attestor/collector read. Never add the runner account. `runner collect collector.json` uses proof-scoped credentials to verify signature, inventory and teardown and upload artifacts. Observations bracket the run within maxGapMs.
-
 ## E2E case repository
 
 `delivery-pipeline` uses `scripts/e2e-serve.mjs` with temporary local bare origin, checkout and separate worker/coordinator credentials. It creates/claims work, submits an exact head, posts independent review, runs the real build/test trial and leased push, then checks delivery and bare origin's main. Initialization and refreshes use the writer's transport ports. The scratch item binds unit and `e2e:scratch-delivery` proofs; its trial serves submitted code on a temporary port and checks HTTP before pushing. No network or install credential is needed. `tests/graphyard-e2e-serve.test.ts` also runs the case with `--unwritable`, removing bare-repository write permission: the trial passes, push fails and the case fails with work undelivered.
@@ -78,15 +48,7 @@ Passed, failed, flaky (one retry passes at same SHA), unrun, blocked or pending.
 
 Legacy `/api/validation/import` requires external-runs:import, is idempotent by producer/runId, accepts only rc-tagged commits and gates nothing. The release-filing operator agent can read `GET /api/validation/import/:sha` and seal released imports with `POST /api/validation/import/:sha/seal`; it cannot import runs. The seal-authority route is removed.
 
-## Evidence reuse and replay
-
-A reuse policy allows the newest compatible settled pass on identical pins:
-
-```json
-{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json"],"buildInputs":["Dockerfile","tsconfig.json"],"configuration":["config/**"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**"]}
-```
-
-Relevant services must cover every service; changed relevant or unknown paths refuse. `validation reuse decision.json` names workId, expectedWorkRevision, proof, policy `{id,revision}` and buildAttestationId. `validation replay REQUEST ATTEMPT` preserves evaluator/time/outcome and grants no authority; evaluator-error reruns at most twice, fail never does. `validation analytics` reports outcomes, faults and cost.
+The validation runner and host-attestor protocol, its CLI commands, artifact storage, reuse/replay endpoints and background reconciliation are retired. The Shipped section no longer has a Validation request-history page. External report imports and the repository e2e runner remain available. Deployment definitions remain for the delivery service: authenticated admins create or revise environments and builder/observer/promoter/rollback registrations through `POST /api/validation/define`, with an `Idempotency-Key` and `expectedRevision` (0 to create). Set a registration’s `enabled` to false to revoke it. Each change appends a revision and history; stale revisions are refused. Runner definition kinds are retired.
 
 ## Host verification capacity
 

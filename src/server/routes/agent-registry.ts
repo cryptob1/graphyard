@@ -5,7 +5,8 @@ import type pg from 'pg';
 import { demand } from '../../model.js';
 import { readRegistry } from '../../agent-registry.js';
 import { connectDefaultRoles, connectProvider, connectProviders } from '../../fleet.js';
-import { applyRegistryMutation, executorHostHeader, looksLikeSecret, proposedConcurrency, proposedRuntimes, registryMutationSchemas, fleetRoles, type RegistryMutation } from '../../model/registry.js';
+import { applyRegistryMutation, registryMutationSchemas } from '../../model-boundary/registry.js';
+import { executorHostHeader, looksLikeSecret, proposedConcurrency, proposedRuntimes, fleetRoles, type RegistryMutation } from '../../model/registry.js';
 import { defineRoutes, parseJson } from '../routes.js';
 
 const collections = { runtimes: 'runtime', models: 'model', accounts: 'account', roles: 'role' } as const;

@@ -6,18 +6,22 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { evaluate, type Gate, type Observation, type Principal, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Gate, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionIdleMs } from '../src/model/actions.js';
-import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
-import { actionAccount, actionJudgment, nextAction, refusalAction } from '../src/model/next-action.js';
-import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
+import { reviewNeed } from '../src/model/dispatch.js';
+import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
+import { actionJudgment, refusalAction } from '../src/model/next-action.js';
+import { accountOutcome, stallBoundMs, type AccountOutcome } from '../src/model/action-account.js';
+import { actionlessItems, stalledItems } from '../src/model-boundary/action-account.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2026-09-21 `now` is handed explicitly to nextAction and actionAccount over fixtures built from it; new Date() serves the engine tests and stamps observations.
@@ -108,7 +112,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
     const dispatching = { ...state.work, autoDispatch: undefined } as Work;
     reconcileAutoDispatch(dispatching, [dispatching], now);
     assert.equal(dispatching.autoDispatch!.review, null, `${state.name}: no review request stands`);
-    assert.equal(reviewNeed(state.work).needed, false, `${state.name}: no launched reviewer can answer this head`);
+    assert.equal(reviewNeed(state.work, undefined, new Date()).needed, false, `${state.name}: no launched reviewer can answer this head`);
 
     const account = actionAccount(state.work, [state.work], now);
     assert.equal(account.defect, null, `${state.name}: the control plane accounts for the state`);
@@ -204,8 +208,8 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
       produced.set(`${gate}\u0000${refusal}`, seen);
       // Every refusal, not only the first of the first refusing gate: the mapping is a function
       // of (gate, refusal, record) and every one of them has to land somewhere nameable.
-      const kind = refusalAction(work, gate, refusal);
-      assert.equal(refusalAction(work, gate, refusal), kind, 'the mapping is a function of its inputs');
+      const kind = refusalAction(work, gate, refusal, undefined, new Date());
+      assert.equal(refusalAction(work, gate, refusal, undefined, new Date()), kind, 'the mapping is a function of its inputs');
     }
     // And the account for the whole item: an action an executor can complete, an action that is a
     // judgment somebody owes, an explicit dependency, or a recorded human need. Never nothing.

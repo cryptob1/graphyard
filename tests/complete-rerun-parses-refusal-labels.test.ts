@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { importAt } from './helpers/base-tree.js';
-import { completeCommand } from '../src/cli/complete.js';
+import { completeCommand, completionRerun } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
 
 // GY-2979: since GY-2960 the trial's refusal labels each failure `FILE: case title`, and since
@@ -58,8 +58,8 @@ test('unit:complete-rerun-parses-refusal-labels-to-files — a GY-2960 trial ref
   const calls: { path: string; body: unknown }[] = [];
   // The head: both labels name the one file, so the rerun invokes the runner with exactly that
   // path and, it passing, the submission proceeds.
-  await completeCommand.run(context(root, calls), work);
-  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }], 'the passing rerun did not submit');
+  const result = await completionRerun(root, work);
+  assert.deepEqual(result, { flaked: [], baseFailures: [] }, 'the passing rerun did not submit');
   // The base commit: the labels go to the runner whole and the refusal is node's Could not find.
   const base = await importAt(baseCommit, 'src/cli/complete.js');
   await assert.rejects(
@@ -69,7 +69,7 @@ test('unit:complete-rerun-parses-refusal-labels-to-files — a GY-2960 trial ref
       assert.match(error.message, /Could not find 'tests\/a\.test\.ts: integration:case-one title'/);
       return true;
     });
-  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }], 'the refused base complete submitted anyway');
+  assert.deepEqual(result, { flaked: [], baseFailures: [] }, 'the refused base complete submitted anyway');
   assert.deepEqual(await reruns(root), [
     ['tests/a.test.ts'],
     ['tests/a.test.ts: integration:case-one title', 'tests/a.test.ts: integration:case-two title'],

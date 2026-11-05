@@ -1,4 +1,4 @@
-import { observationWindowHold, type Work } from '../model.js';
+import { observationWindowHold, type Work } from './work.js';
 import { mergeWriterRefusal } from './gates.js';
 import { currentMergeStep, type MergeLedgerState } from './merge-ledger.js';
 import { mergeQueue } from './merge-queue.js';
@@ -64,8 +64,8 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
       const missing = refusal === undefined ? failing ? `Its ${failing.name} step reports a problem without saying what it is`
           : 'Nothing has been checked about it yet'
           : step && !step.fresh && mergeWriterRefusal(failing!.name, refusal)
-            ? `${plainReason(refusal, failing!.name).text}; its trial last ran ${step.step}`
-            : plainReason(refusal, failing!.name).text;
+            ? `${plainReason(refusal, failing!.name, now).text}; its trial last ran ${step.step}`
+            : plainReason(refusal, failing!.name, now).text;
       return { item, gate: failing?.name ?? null, heldSince: item.stageEnteredAt, movedBy, missing };
     })
     .sort((a, b) => Date.parse(a.heldSince) - Date.parse(b.heldSince));
