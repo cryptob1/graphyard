@@ -640,7 +640,7 @@ export interface MergePorts {
    * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
    * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
    */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, share?: number): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
@@ -725,7 +725,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     let run: MergeTrialRun;
-    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep); }
+    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
     catch (error) {
       // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
       const attempts = trialAttempts(error), last = attempts.at(-1)!;

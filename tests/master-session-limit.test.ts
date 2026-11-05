@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary } from '../src/daemon/run.js';
 import { masterSummary } from '../src/daemon/state.js';
 import { writeFile } from 'node:fs/promises';
-import { daemonStatePath } from '../src/master-daemon.js';
+import { daemonStatePath } from '../src/daemon/state.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterProfile } from '../src/master/master-session.js';
@@ -113,7 +115,7 @@ test('unit:master-session-limit-fails-over — a master pane showing its provide
   assert.equal(`${hour}:${minute}`, '1:30', 'the reset is a 1:30 wall clock in the notice\'s zone');
   assert.ok(Date.parse(observed.exhausted[0]!.resetsAt!) > clock, 'the reset stands after the notice');
   assert.deepEqual(observed.closed, ['pM'], 'the pane is closed');
-  assert.deepEqual(observed.ended, [{ session: 'session-claude-c', reason: 'the master session it recorded is gone from Herdr; the loop launches its replacement' }], 'the registry session the pane ran under is ended, freeing the role\'s one slot');
+  assert.deepEqual(observed.ended, [{ session: 'session-claude-c', reason: "the master session's pane pM is absent from Herdr's inventory; the loop launches its replacement" }], 'the registry session the pane ran under is ended, freeing the role\'s one slot');
   assert.equal(observed.launched.length, 1, 'the master launches in the same cycle');
   assert.match(observed.launched[0]!.handover, /continue from node \/bin\/graphyard master status/, 'the launch carries the handover');
   assert.deepEqual(registry.live(), ['codex'], 'the registry now counts only the next account\'s session');

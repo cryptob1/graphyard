@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
@@ -157,23 +159,32 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.notEqual(fallback, defaultWorktreeRoot(join(scratch, 'second-clone'), 'owner/project', { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), 'two clones never reclaim each other\'s checkouts');
     assert.equal(worktreeRoot(root, { repository: 'owner/project', run: {} }, { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), fallback);
 
-    // No generated prompt or checkout allocation hardcodes /tmp. The filesystem/socket boundary
-    // names private namespace aliases there; their host source is the allocated session scratch.
-    // This checkout's own
-    // path is an input, not something generated: the launcher and the runner's default data root
-    // (GRAPHYARD_DATA_HOME, tests/helpers/run-tests.ts) sit under it, and a shadow trial checks the
-    // merge out under /var/tmp/gy-c* (GY-1639), so it is read out of the prompt before the check.
+    // Only exact input paths may contain /tmp: the source checkout, the configured
+    // managed root and the environment's data directory (including a private HOME).
+    // Check the expected allocation first, then exclude it from the hardcoded-path check.
     const checkoutRoot = dirname(dirname(launcher));
-    const generated = (text: string) => text.split(checkoutRoot).join('<checkout>');
     const binding: ProducerBinding = { key: 'GY-88', id: 'id', pr: 88, sha: H, baseSha: B, policyRevision: 2, group: 'integration', proofs: ['integration:managed-worktree-root'], requestId: 'request-1', branch: 'graphyard/gy-88-1' };
     const elsewhere = sessionCheckout('/srv/graphyard/worktrees/project-0123456789ab', 'proof', 'GY-88', H, randomUUID());
-    for (const text of [producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }),
-      reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(generated(text).includes('/tmp'), false, 'a generated prompt never names /tmp');
-    assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
+    const configured = sessionCheckout(managed, 'proof', 'GY-88', H, binding.requestId!);
+    const defaultCheckout = sessionCheckout(defaultWorktreeRoot(process.cwd(), config.repository), 'proof', 'GY-88', H, binding.requestId!);
+    const previews = [
+      { name: 'producer explicit checkout', text: producerPrompt(config, binding, { principal: 'proof-runner' }, elsewhere), checkout: elsewhere, producer: true },
+      { name: 'producer configured root', text: producerPrompt(config, binding, { principal: 'proof-runner' }), checkout: configured, producer: true },
+      { name: 'producer default root', text: producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }), checkout: defaultCheckout, producer: true },
+      { name: 'review explicit checkout', text: reviewPrompt(config, binding, elsewhere), checkout: elsewhere },
+      { name: 'review without checkout', text: reviewPrompt(config, binding) },
+    ];
+    for (const { name, text, checkout, producer } of previews) {
+      if (checkout) assert.ok(text.includes(`git worktree add --detach ${checkout.worktree} ${H}`), `${name} uses the exact allocated checkout`);
+      if (producer) assert.ok(text.includes(join(checkout!.directory, 'integration-managed-worktree-root.evidence.json')), `${name} keeps evidence in its allocation`);
+      const generated = text.split(checkoutRoot).join('<checkout>').split(checkout?.directory ?? '<no-allocation>').join('<allocation>');
+      assert.equal(generated.includes('/tmp'), false, `${name}: a generated prompt never names /tmp: ${generated.match(/\S*\/tmp\S*/g)?.join(', ') ?? ''}`);
+    }
+    assert.ok(previews[2].text.includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
-    // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).
+    // Include every owning module under master/ and daemon/.
     const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);
-    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), 'master-daemon.ts', ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
+    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
       const code = (await readFile(join(sources, file), 'utf8')).split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
       assert.doesNotMatch(code, /tmpdir\(\)/, `${file} never allocates from the host temporary directory`);
       if (!['master/confinement.ts', 'master/socket-confinement.ts'].includes(file))
@@ -492,8 +503,8 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
 
     // A slot whose owner died is taken back by the next run rather than held forever.
     await mkdir(join(directory, 'slot-0'));
-    await writeFile(join(directory, 'slot-0', 'owner.json'), JSON.stringify({ pid: 999_999_999, label: 'npm test', cwd: '/gone', at: new Date().toISOString() }));
-    const taken = await acquireVerificationSlot({ directory, slots: 1, label: 'npm test', alive: pid => pid === process.pid, pollMs: 10 });
+    await writeFile(join(directory, 'slot-0', 'owner.json'), JSON.stringify({ locked: true, pid: 999_999_999, label: 'npm test', cwd: '/gone', at: new Date().toISOString() }));
+    const taken = await acquireVerificationSlot({ directory, slots: 1, label: 'npm test', pollMs: 10 });
     assert.equal(taken.slot, 0);
     assert.equal(heldSlots(directory)[0].owner?.pid, process.pid);
     taken.release();

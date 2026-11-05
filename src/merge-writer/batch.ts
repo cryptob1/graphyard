@@ -70,7 +70,7 @@ async function mergeBatchReady(ports: MergePorts, items: readonly Work[], retria
     for (const { work, head, baseTip: parent, mergeSha } of batch)
       await ports.record(work, { kind: 'intent', head, baseTip: parent, mergeSha, risk: riskOf(work).risk, at: at() });
     // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
-    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip, ports.onStep).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
+    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip, ports.onStep, undefined, batch.map(({ work, head }) => ({ key: work.key, head }))).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
     if (!run) return [...results, ...await alone(ports, works)];
     const again = async () => [...results, ...await (retrial < ports.retrials ? mergeBatch(ports, works, retrial + 1) : alone(ports, works))];
     if (ports.lands && !await ports.lands(baseTip)) return again();
@@ -131,9 +131,9 @@ export async function mergeStack(ports: MergePorts, positions: readonly (readonl
   const portsOf = (index: number): MergePorts => ({
     ...ports,
     fetch: async () => { const tip = await until(() => standing(index)); return tip === 'remote' ? landed = await ports.fetch() : tip; },
-    trial: async (mergeSha, files, item, baseTip, step) => {
+    trial: async (mergeSha, files, item, baseTip, step, onTiming, heads) => {
       offer(index, mergeSha);
-      try { return await ports.trial(mergeSha, files, item, baseTip, step, positions.length); } finally { offer(index, null); }
+      try { return await ports.trial(mergeSha, files, item, baseTip, step, onTiming, heads, positions.length); } finally { offer(index, null); }
     },
     lands: async baseTip => { await until(() => done.slice(0, index).every(Boolean) || null); return baseTip === landed; },
     push: async (mergeSha, baseTip) => {

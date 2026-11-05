@@ -25,9 +25,6 @@ export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, pro
 // they were private in this module: nothing about them is part of this path's export.
 import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
 
-// A stopped session's provider limit notices are read off its output beside its runtime prompts (runtime-prompt.ts).
-export { providerLimitNotices, runtimeLimitNotices, detectRuntimeExhaustion } from './runtime-prompt.js';
-
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
   return resolve(input ?? process.env.GRAPHYARD_AGENT_ENVIRONMENTS ?? resolve(homedir(), '.coding_agents'));

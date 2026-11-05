@@ -50,7 +50,7 @@ const recording = (calls: string[][]) => (async (_command: string, args: string[
 const networked = (calls: string[][]) => calls.filter(args => ['clone', 'fetch', 'ls-remote', 'pull', 'push'].includes(String(args[0])));
 
 test('unit:rework-local-branch — the local candidate head starts the workspace with no git fetch or push, whatever origin holds', async () => {
-  const { registeredReworkHead } = await import('../src/master/worktrees.js');
+  const { registeredReworkHead } = await import('../src/master/branch-release.js');
   const { origin, work, pushed, candidate, git } = await repository();
   const calls: string[][] = [];
   assert.equal(await registeredReworkHead(work, branch, candidate, recording(calls)), candidate, 'the registered candidate is the start the workspace resets onto');
@@ -65,7 +65,7 @@ test('unit:rework-local-branch — the local candidate head starts the workspace
 });
 
 test('unit:rework-local-branch — a local head that differs from the candidate never starts the workspace; with no registered start to honor it refuses with the existing message', async () => {
-  const { registeredReworkHead } = await import('../src/master/worktrees.js');
+  const { registeredReworkHead } = await import('../src/master/branch-release.js');
   const { work, pushed } = await repository();
   // The branch moved past the submitted head: the registered candidate starts the workspace, never the moved local head.
   const moved: string[][] = [];

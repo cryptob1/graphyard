@@ -8,7 +8,9 @@ import { concurrentOverlap, exclusionPaths } from '../src/coordination.js';
 import { dispatchHold } from '../src/model/concerns.js';
 import { assertDispatchable, dispatchWork, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

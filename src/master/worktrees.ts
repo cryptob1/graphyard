@@ -222,8 +222,4 @@ export function cycleBaseTip(root: string, baseBranch: string, cycle: string | u
   return shared;
 }
 
-// A stale attempt worktree holding the item's branch (GY-860) is released in ./branch-release.ts;
-// these re-export it, so every existing import keeps working.
-export { preservedDiffCaptureBytes, registeredReworkHead, releaseHeldBranch, releaseUnderFailure, reserveReleasingHold, workspaceFailure, type PreservedWorktree, type BranchGit } from './branch-release.js';
-
 export { diskExhaustion, reclaimAdvice, exhaustedPath, diskExhaustionMessage, writeFailure } from '../disk-space.js';
