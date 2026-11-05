@@ -36,6 +36,7 @@ import { batchGateStep } from './cycle-batch-gate.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
+import { diskHeadroomStep } from './disk-headroom.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -307,6 +308,8 @@ async function closeStep(cycle: Cycle) {
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
+  // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
+  await diskHeadroomStep(cycle);
 }
 
 /**
@@ -481,7 +484,8 @@ async function dispatchStep(cycle: Cycle) {
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   const launched: Work[] = [];
-  for (const item of claimable) {
+  // GY-3122: below the disk floor no new worker starts; master status names the shortage.
+  if (!state.diskHeadroom) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     const incident = state.actions[earlyExitKey(item)];

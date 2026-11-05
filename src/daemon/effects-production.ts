@@ -31,6 +31,9 @@ import { loopRunAdoption } from './run-adoption.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
+import { graphyardVolumes, reclaimGraphyardLeftovers } from './disk-headroom.js';
+import { dataDirectory } from '../install/worktree-root.js';
+import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 
@@ -166,6 +169,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
+    diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
+    reclaimDisk: () => reclaimGraphyardLeftovers(run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
       const directory = installDirectory(installIdFor(current().repository));
