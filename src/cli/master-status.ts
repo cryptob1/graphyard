@@ -1,4 +1,5 @@
 // Concern: `graphyard master status` — one page: the managed repository's served commit against its base tip (only what a deployment provider records; unconfigured when none does), each open item, the merge writer, live sessions and free worker profiles.
+import { latestReleaseNote, releaseNotesPath } from '../release-notes.js';
 import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
@@ -96,6 +97,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     trialTests,
     // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
     batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
+    // GY-3146: what the latest verified batch changed and how to try it.
+    releaseNote: latestReleaseNote(releaseNotesPath(root)),
     sessions,
     // GY-2994: a spec checker that ended without a report, named with its reason until the item's check reports.
     specChecksEnded: Object.entries(state?.actions ?? {}).filter(([key, action]) => key.startsWith('spec-check-ended:') && open.some(item => item.key === action.work && !specCheckCurrent(item)))
