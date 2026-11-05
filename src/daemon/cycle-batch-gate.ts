@@ -1,11 +1,12 @@
 // Concern: the loop's batch gate on main (GY-3119): one gate at a time beside the cycle, the
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
-import { bootstrapGate, gateLimitMs, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
+import { bootstrapGate, gateLimitMs, gateOutcomeReason, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
+import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
 
 /** The gate's own item key in the trial (a proofless pseudo-item, like a revert's). */
@@ -93,7 +94,7 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  * Cycle step beside the merge writer: with no gate in flight, one gate starts on main's tip beside
  * the cycle; the scheduled diagnostics run beside it when due. Neither blocks the cycle or a merge.
  */
-export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'performed' | 'now'>) {
+export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'now' | 'log'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
   if (!reads?.git || !gate) return null;
   const file = gateRecordPath(gate.root);
@@ -105,8 +106,13 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     await writeGateRecord(file, record);
   }
   const ports = batchGatePorts({ ...reads, git: reads.git }, cycle.snapshot.work);
-  const note = (key: string, state: 'done' | 'failed', detail: string) => cycle.performed.push(storeAction(cycle.state, key,
-    { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() }));
+  const note = (key: string, state: 'done' | 'failed', detail: string) => {
+    const entry = storeAction(cycle.state, key,
+      { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
+    // The gate settles beside the cycle, so its outcome line reaches the journal here and only here —
+    // never through the cycle's own actions, whose logging already passed (GY-3141).
+    cycle.log(actionLine(cycle.state.cycle, entry));
+  };
   if (!live.gate) {
     const current = record;
     live.gate = (async () => {
@@ -117,8 +123,15 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         const outcome = await runGate({ ...ports, checkpoint: () => mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt })) }, current);
         // The diagnostics' fields are theirs: a gate's write keeps what they recorded meanwhile.
         await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt }));
-        if (outcome.outcome !== 'idle') note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${'reason' in outcome ? `: ${outcome.reason}` : 'culprit' in outcome ? `: reverted ${outcome.culprit} for ${outcome.check}` : ''}`);
-      } catch (error) { note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`); }
+        if (outcome.outcome !== 'idle') {
+          const reason = gateOutcomeReason(outcome);
+          note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}`);
+        }
+      } catch (error) {
+        // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
+        await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt })).catch(() => undefined);
+        note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
+      }
       finally { live.gate = null; }
     })();
   }

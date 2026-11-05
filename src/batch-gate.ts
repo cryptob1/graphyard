@@ -17,7 +17,9 @@
 // The batch it cut is the batch it gates (GY-3135): a loop restart adopts the batch in flight —
 // the same candidate tip, files, checks and the steps already finished — and finishes it, so the
 // restart a deploy causes never recuts a batch onto a newer tip; merges that land meanwhile ride
-// the next batch, and only the gate's own failure or timeout recuts.
+// the next batch, and only the gate's own failure or timeout recuts. Each settled run is the
+// record's lastOutcome — tip, outcome, reason or failing check, end time — and the run in flight
+// names its current step; master status shows both (GY-3141).
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -37,6 +39,15 @@ export const revertRateWindow = 20, revertRateLimit = 1 / 5;
 
 /** One merge the gate judged: its landing commit, its item, and whether the gate reverted it. */
 export interface GateMerge { sha: string; item: string; reverted: boolean }
+/** What the last settled gate run came to (GY-3141): why the verified commit has not moved, at a glance. */
+export interface GateLastOutcome {
+  /** The tip the run gated; null when the run failed before it cut a batch. */
+  tip: string | null;
+  outcome: 'verified' | 'reverted' | 'timeout' | 'retry' | 'held' | 'error';
+  /** The reason it came to that outcome — the failing check a revert names — or null on a plain pass. */
+  reason: string | null;
+  finishedAt: string;
+}
 /** The gate's persisted state, beside the deploy record. */
 export interface GateRecord {
   /** The repository whose main this gates (owner/name), so the deploy watch of another repository never reads it. */
@@ -50,7 +61,9 @@ export interface GateRecord {
    * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
    * `results` fields are optional only for records an older loop wrote.
    */
-  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean } | null;
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string } | null;
+  /** The last settled run (GY-3141), so status names why nothing has verified instead of guessing. */
+  lastOutcome: GateLastOutcome | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
   attempt: { recuts: number; timeouts: number };
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
@@ -84,7 +97,7 @@ export async function writeGateRecord(file: string, record: GateRecord) {
 
 /** At rollout, the currently served commit is the first verified commit. */
 export const bootstrapGate = (repository: string | null, served: string): GateRecord => ({
-  repository, verified: served, verifiedAt: new Date().toISOString(), inFlight: null, attempt: { recuts: 0, timeouts: 0 }, held: null,
+  repository, verified: served, verifiedAt: new Date().toISOString(), inFlight: null, attempt: { recuts: 0, timeouts: 0 }, held: null, lastOutcome: null,
   results: {}, merges: [], catalogMs: null, diagnosticsAt: null, at: new Date().toISOString(),
 });
 
@@ -154,6 +167,13 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
+/** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
+export function gateOutcomeReason(outcome: GateOutcome): string | null {
+  if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}`;
+  if (outcome.outcome === 'timeout') return `past ${gateLimitMs / 60_000} minutes`;
+  return 'reason' in outcome ? outcome.reason : null;
+}
+
 /**
  * One gate of the batch from the last verified commit to the main tip, updating `record` in place.
  * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle. A batch a
@@ -163,7 +183,18 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
  */
 export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
   // A settled gate frees its batch; one that threw leaves it standing for the next loop to adopt.
-  return gateFlight(ports, record).then(outcome => { record.inFlight = null; return outcome; });
+  // Either way the run's outcome is the record's last (GY-3141), so status names why it ended.
+  const finishedAt = () => new Date(ports.now()).toISOString();
+  return gateFlight(ports, record).then(
+    outcome => {
+      record.inFlight = null;
+      if (outcome.outcome !== 'idle') record.lastOutcome = { tip: outcome.tip, outcome: outcome.outcome, reason: gateOutcomeReason(outcome), finishedAt: finishedAt() };
+      return outcome;
+    },
+    error => {
+      record.lastOutcome = { tip: record.inFlight?.tip ?? null, outcome: 'error', reason: error instanceof Error ? error.message : String(error), finishedAt: finishedAt() };
+      throw error;
+    });
 }
 
 async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
@@ -185,6 +216,8 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const results: Record<string, string[]> = adopted?.results ?? {};
   record.inFlight = adopted ? { ...adopted, files, checks, results, whole } : { tip, startedAt: at(), files, checks, results, whole };
   if (!adopted) await ports.checkpoint?.();
+  // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
+  const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
   // The clock is the batch's own, so a restart between steps never lengthens the gate.
   const deadline = Date.parse(record.inFlight.startedAt) + gateLimitMs;
   const finished = results;
@@ -209,20 +242,22 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   };
   const hold = (reason: string): GateOutcome => { record.held = { tip, reason, at: at() }; return { outcome: 'held', tip, reason }; };
   try {
+    await step(`running ${checks.length} check(s) on ${tip.slice(0, 12)}`);
     const failed = await run(tip, checks, files);
     if (!mainCached) measure(ports.now() - mainStarted);
     let confirmed: string[] = [], flakes: string[] = [];
     const knownRed: string[] = [];
     if (failed.length) {
       // A failing check runs once more before anything is blamed: a pass is a flake, filed for an owner.
+      await step(`re-running ${failed.join(', ')}`);
       const again = await run(tip, failed, files);
       flakes = failed.filter(check => !again.includes(check));
       for (const check of flakes) await ports.file({ key: `flake:${check}`, title: `Flaky check on main: ${check}`, description: `The batch gate's check ${check} failed on ${tip.slice(0, 12)} and passed on its re-run. Make it deterministic.` });
       for (const check of again) {
         // Only an affected test may be a known red: one that also fails on the last verified commit.
         if (check.startsWith('test:')) {
-          const cached = record.results[verified]?.[check];
-          const failsThere = cached ?? (await run(verified, [check], files)).includes(check);
+          let failsThere = record.results[verified]?.[check];
+          if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
           if (failsThere) {
             knownRed.push(check);
@@ -247,7 +282,9 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     const owned = landings.filter((landing): landing is ServeLanding & { item: Work } => !!landing.item && !record.merges.some(merge => merge.sha === landing.sha && merge.reverted));
     if (!owned.length) return hold(`${tip.slice(0, 12)} fails ${check} and no merged item in the batch is left to revert`);
     let culprit = owned[owned.length - 1]!;
+    await step(`bisecting ${check} over the batch's prefixes`);
     for (const landing of owned.slice(0, -1)) if ((await run(landing.sha, [check], files)).includes(check)) { culprit = landing; break; }
+    await step(`reverting ${culprit.item.key} for ${check}`);
     const reverted = await ports.revert(culprit, tip, check);
     if ('held' in reverted) return hold(reverted.held);
     // A push the moving main rejected blames nothing new: the next cycle gates again.
@@ -289,7 +326,10 @@ export function revertRate(record: Pick<GateRecord, 'merges'> | null) {
 export function gateSummary(record: GateRecord | null) {
   if (!record) return null;
   const rate = revertRate(record);
-  return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt, inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt } : null,
+  return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt,
+    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null } : null,
+    // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
+    lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
     held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()) };
 }
 
