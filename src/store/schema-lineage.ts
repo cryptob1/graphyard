@@ -38,6 +38,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:a127cbeeb6417fece94948bf7e28c43443b9c1f66a39c2023d15779b9935e0d8',
   // GY-3095: repeats of one registry refusal counted beside its ledger row.
   'sha256:c15146d251fe89e369361909267ff9ec32bbdb7d5d78ec2c935047711038d410',
+  // GY-3111: ledger compaction's saved cursor and the per-item delivery event index.
+  'sha256:9a5c9509616909d7861dda1419ec1f51914c392097d5313bd06ae565c53fd248',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
