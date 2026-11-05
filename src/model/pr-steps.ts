@@ -6,7 +6,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
-import { noServe, plainStage, waitingReason, type ServeView } from './plain-stage.js';
+import { noServe, plainStage, waitingLabel, type ServeView } from './plain-stage.js';
 
 /**
  * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
@@ -99,7 +99,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
       if (assignment(work, now).active) return { detail: 'the builder is writing the code', who: 'Builder agent' };
       // At build with nobody on it (GY-3095): the row names why it waits when that is known.
-      const reason = work.stage === 'build' ? waitingReason(work) : null;
+      const reason = work.stage === 'build' ? waitingLabel(work) : null;
       return { detail: reason ? `waiting for a builder: ${reason}` : 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
     }
     case 'validate': {

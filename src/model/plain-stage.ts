@@ -62,9 +62,12 @@ export function waitingReason(work: Work): string | null {
   return failed ? `its last launch failed: ${failed.result ?? failed.reason}` : `a launch is requested: ${dispatch.reason}`;
 }
 
+/** The wait a dashboard shows: a recorded blocker is pointed at, never repeated, since the item page shows it once (GY-1739). */
+export const waitingLabel = (work: Work) => work.blocker ? 'held by its recorded blocker' : waitingReason(work);
+
 /** The stage label a page shows: the plain stage, and for Waiting its reason when known (GY-3095). */
 export function stageLabel(work: Work, release: ReleaseView = noRelease, serve: ServeView = noServe, now = Date.now()): string {
-  const plain = plainStage(work, release, serve, now), reason = plain === 'Waiting' ? waitingReason(work) : null;
+  const plain = plainStage(work, release, serve, now), reason = plain === 'Waiting' ? waitingLabel(work) : null;
   return reason ? `Waiting: ${reason}` : plain;
 }
 
