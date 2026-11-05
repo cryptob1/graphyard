@@ -5,13 +5,13 @@ import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, typ
 /**
  * An in-memory control-plane registry for tests that launch a session: the registry is the only
  * authority for slots and accounts, so every launch needs one. One account per runtime named, on
- * `host`, in every role named.
+ * `host` (login `home`, default none), in every role named.
  */
-export function registryFixture(host: string, runtimes: string[], roles: FleetRoleName[] = ['worker'], concurrency = 4) {
+export function registryFixture(host: string, runtimes: string[], roles: FleetRoleName[] = ['worker'], concurrency = 4, home: string | null = null) {
   const at = new Date().toISOString();
   let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: proposedRuntimes.filter(runtime => runtimes.includes(runtime.name)), models: [{ name: 'default', id: null }],
-    accounts: runtimes.map(runtime => ({ name: `${runtime}-fixture`, runtime, model: 'default', credential: { host, home: null } })),
+    accounts: runtimes.map(runtime => ({ name: `${runtime}-fixture`, runtime, model: 'default', credential: { host, home } })),
     roles: roles.map(name => ({ name, accounts: runtimes.map(runtime => `${runtime}-fixture`), concurrency })), reason: 'fixture',
   }, { actor: 'operator', at }).registry;
   const client: FleetClient = {
