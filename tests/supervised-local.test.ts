@@ -222,3 +222,17 @@ test('unit:supervised-master-prompt — the supervised master prompt says an age
   assert.match(masterPrompt(baseConfig(identities)), /Every decision is yours to apply at once with your own identity/);
   assert.ok(!/not provisioned yet/.test(masterPrompt(baseConfig(identities))));
 });
+
+test('unit:supervised-local — the local install reaches loop supervision through src/install/loop-unit.ts: a non-Linux host is refused by name and a reachable systemd user manager is supported', async () => {
+  const { supervisorSupport } = await import('../src/install/loop-unit.js');
+  const darwin = supervisorSupport({ platform: 'darwin' });
+  assert.equal(darwin.supported, false);
+  assert.match(darwin.reason ?? '', /darwin/);
+  const calls: string[][] = [];
+  assert.deepEqual(supervisorSupport({ platform: 'linux', run: (command, args) => { calls.push([command, ...args]); return ''; } }), { supported: true, reason: null });
+  assert.deepEqual(calls, [['systemctl', '--user', 'show-environment']]);
+  const unreachable = supervisorSupport({ platform: 'linux', run: () => { throw new Error('Failed to connect to bus'); } });
+  assert.equal(unreachable.supported, false);
+  assert.equal(unreachable.unreachable, true);
+  assert.match(unreachable.reason ?? '', /Failed to connect to bus/);
+});
