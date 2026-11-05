@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { itemLine } from '../src/cli/master-status.js';
-import { plainStage, stageLabel } from '../src/model/plain-stage.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import type { Work } from '../src/model/work.js';
 
@@ -25,7 +24,9 @@ const dispatch = (history: { event: string; reason: string; result?: string | nu
   requestedBy: 'graphyard', requestedAt: '2026-11-04T23:00:00Z', state: 'pending', claim: null, attempts: history.length,
   history: history.map(entry => ({ at: '2026-11-04T23:30:00Z', requester: 'graphyard', executor: 'host', result: null, ...entry })) }] } });
 
-test('unit:build-without-session-reads-waiting — an item at build with no lease and no running session reads Waiting with its reason, never Building', () => {
+test('unit:build-without-session-reads-waiting — an item at build with no lease and no running session reads Waiting with its reason, never Building', async () => {
+  // Imported when called, so the regression fails as a test case on a base without the stage label.
+  const { plainStage, stageLabel } = await import('../src/model/plain-stage.js');
   const refused = 'role worker is at its concurrency limit (2 of 2 live: claude-a on GY-1, codex on GY-2)';
   const cases: [string, Work, string | null][] = [
     ['no reason known', item(), null],
