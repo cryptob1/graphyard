@@ -4,6 +4,9 @@ import { availableParallelism } from 'node:os';
 
 // Node's --test-timeout cancels callbacks but does not bound a file process with
 // leaked handles. Each file here owns a process group and an external deadline.
+// The bound rides into each file as FILE_TIMEOUT_MS, so a file whose work cannot fit
+// it (the slow-tick receipt's twenty sequential runs) can leave that work to an
+// unbounded runner instead of being killed mid-flight with its judgements.
 const args = process.argv.slice(2);
 const at = args.indexOf('--durations');
 const durations = at >= 0 ? args.splice(at, 2)[1] : undefined;
@@ -28,6 +31,7 @@ await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async 
     const file = files[next++], started = Date.now();
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...reporter, ...flags, file], {
       detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, FILE_TIMEOUT_MS: String(timeoutMs) },
     });
     children.add(child);
     let output = '', timedOut = false;

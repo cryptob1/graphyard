@@ -129,8 +129,14 @@ test('unit:slow-tick-independent-execution-retained — the retained output of t
 // CI's sharded suite sits at its 6-minute bound per shard, and this execution takes ~110 s of
 // twenty sequential runs, so a shard leaves it to the proof producer, which runs the whole file.
 const sharded = process.env.SHARD ? 'a CI shard leaves the twenty-run execution to the proof producer' : false;
+// The merge trial bounds every file at five minutes (trial.ts --file-timeout, named to the file as
+// FILE_TIMEOUT_MS), and twenty sequential runs do not fit it under the trial's shared cores — the
+// trial of GY-3101's head killed this file at the bound with every judgement it holds unjudged. A
+// bounded runner leaves the execution to the proof producer exactly as a shard does; the receipt's
+// judgements above still run there, against the committed receipt, its logs and its fixtures.
+const bounded = process.env.FILE_TIMEOUT_MS ? 'a per-file-bounded runner leaves the twenty-run execution to the proof producer' : false;
 
-test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: sharded }, async t => {
+test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: sharded || bounded }, async t => {
   const execution = await executeSlowTickReceiptRuns();
   try {
     const verdict = verifySlowTickReceipt(execution.receipt);
