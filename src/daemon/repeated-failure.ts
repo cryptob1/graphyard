@@ -14,7 +14,9 @@ import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master/profiles.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import type { DaemonState, FailureRun } from './state.js';
-import { earlyExitKey } from './worker-launch-health.js';
+
+/** The cursor key of an item's early-exit incident (worker-launch-health.ts records it). */
+export const earlyExitKey = (item: Pick<Work, 'id'>) => `early-exit:${item.id}`;
 
 export type FailureKind = FailureRun['kind'];
 export interface Failure { id: string; kind: FailureKind; reason: string }
