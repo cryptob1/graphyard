@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -26,14 +26,11 @@ const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const coordinatorToken = `${coordinator.id}-token-${'x'.repeat(32)}`;
 const reviewer = 'review-claude-1';
 const now = () => new Date().toISOString();
-let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 let root: string, credentials: string, base: string, head: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3117;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('headless-review-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('headless_review_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/headless_review_test`); await store.init();
+  store = await withDatabase('headless-review'); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
   engine.gitRunner = null;
   http = server(engine, [{ ...coordinator, token: coordinatorToken }]);
@@ -58,7 +55,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (root) await rm(root, { recursive: true, force: true });
   if (credentials) await rm(credentials, { recursive: true, force: true });
 });

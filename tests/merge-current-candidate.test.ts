@@ -1,3 +1,4 @@
+import { freePort } from '../src/cli/test-isolation.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -29,13 +30,10 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 
 test('integration:merge-current-candidate — typed rework and replacement ownership stop pending trials and stale fallback; unchanged candidates land', { timeout: 600_000 }, async () => {
   const root = await temporaryDirectory('current-candidate');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3072;
-  const servePort = port + 1;
-  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('current-candidate-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const servePort = await freePort();
   let store: Store | undefined, http: ReturnType<typeof server> | undefined;
   try {
-    await pg.initialise(); await pg.start(); await pg.createDatabase('current_candidate');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/current_candidate`); await store.init();
+    store = await withDatabase('merge-current-candidate'); await store.init();
     const engine = new Engine(store, 120, 'owner/proofs');
     const token = 'fixture-coordinator-' + 'x'.repeat(32);
     http = server(engine, [{ ...coordinator, token }]);
@@ -193,7 +191,6 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
   } finally {
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     if (store) await store.close();
-    await pg.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

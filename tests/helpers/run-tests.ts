@@ -5,7 +5,7 @@ import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
 import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
@@ -71,6 +71,7 @@ export function durableTestTmpdir(current = tmpdir(), home = homedir(), statfs: 
 export const defaultBrowserPort = 4319;
 
 /**
+ * Admission still budgets Node processes and test workloads, even with one shared Postgres.
  * How many suite files a run starts at once (GY-1821). The base runner left this to node --test's
  * default, one file per CPU, whatever the host held: on the 24-CPU host whose dips GY-1821 files,
  * one full suite swung available memory from 27.4 GB to 9.4 GB (about `bytesPerSuiteFile` a file),
@@ -152,15 +153,9 @@ export function nodeTestArgs(cwd: string, args: string[]) {
   return { ...bounded, args: [...reporters, ...flags, ...files], empty: !files.length, ordered: false };
 }
 
-/** How far above its parent's base a run started inside a test run begins: past every per-file port offset (the highest is 642). */
-export const nestedPortGap = 1000;
+/** A nested runner starts beyond its parent's reserved window. */
+export const nestedPortGap = testPortSpan;
 
-/**
- * A run started from inside a test run — tests/test-isolation.test.ts runs this runner on fixture
- * projects — starts its window above the parent's. The parent holds only its sentinel, so a window
- * taken inside it hands the nested run ports a sibling test file's Postgres is about to bind: on a
- * shard, 15458 + 7 took tests/escalation-context.test.ts's 15438 + 27 (GY-499).
- */
 export function nestedFirst(environment: NodeJS.ProcessEnv = process.env): { first?: number } {
   const parent = Number(environment.GRAPHYARD_TEST_PORT);
   return Number.isInteger(parent) && parent > 0 ? { first: parent + nestedPortGap } : {};
@@ -179,14 +174,19 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   }
   // The browser window is the dev server's port and the sentinel above it that holds the window.
   const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
+  let postgres: Awaited<ReturnType<typeof import('./postgres.js').startPostgres>> | undefined;
   try {
+    if (!options.browser) {
+      const { startPostgres } = await import('./postgres.js');
+      postgres = await startPostgres(reservation.base);
+    }
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
     // A run of the suite reads no host memory (GY-612): a host the suite itself loaded low must not
     // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
@@ -207,7 +207,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     // processes are gone now, so the sweep takes their directories back at once.
     await sweepLeftoverTempDirectories(tmpRoot);
     return { code, base: reservation.base, environment, stdout, stderr };
-  } finally { reservation.release(); }
+  } finally { try { await postgres?.stop(); } finally { reservation.release(); } }
 }
 
 /** `tsc --noEmit` under the caller's environment, marked as holding the slot this process took. */

@@ -6,7 +6,7 @@ import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -329,18 +329,15 @@ const retryReviewer: Principal = { id: 'review-retry-test', role: 'reader' };
 const principals = [admin, coordinator, worker, retryReviewer];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const tokenOf = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1525;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('review-verdict-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('review_verdict_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/review_verdict_test`); await store.init();
+  store = await withDatabase('review-verdict'); await store.init();
   const engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 async function request(credential: string, path: string, body?: unknown, key: string = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
   return { status: response.status, body: await response.json() as any };
@@ -634,7 +631,6 @@ test('unit:review-launch-bot-identity — the launch body takes the configured A
   for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
     assert.throws(() => reviewLaunchBodySchema.parse({ ...base, reviewer: bad }), Error, bad);
 });
-
 
 test('unit:idempotency-uniform — work commands, review verdicts and merge records replay identical results and refuse changed input with HTTP 409', async () => {
   const work = await insert(item('GY-93024'));

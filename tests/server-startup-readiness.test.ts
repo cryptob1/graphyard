@@ -1,15 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl as createDatabaseUrl } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { main, refusedBeforeReady } from '../src/server/main.js';
 import { Delivery } from '../src/delivery.js';
 import { ProductionWatch } from '../src/production-watch.js';
 
-const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
-let database: EmbeddedPostgres;
 let scratch: string;
 let databaseUrl: string;
 
@@ -20,20 +17,8 @@ const credentials = [
 
 before(async () => {
   scratch = await temporaryDirectory('startup-readiness');
-  database = new EmbeddedPostgres({
-    databaseDir: join(scratch, 'pg'),
-    user: 'graphyard',
-    password: 'testing-only',
-    port,
-    persistent: false,
-    onLog: () => {},
-    onError: () => {},
-    postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('startup_readiness_test');
-  databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/startup_readiness_test`;
+
+  databaseUrl = await createDatabaseUrl('server-startup-readiness');
   process.env.DATABASE_URL = databaseUrl;
   process.env.GRAPHYARD_PRINCIPALS = JSON.stringify(credentials);
   process.env.PORT = '0';
@@ -42,7 +27,6 @@ before(async () => {
 });
 
 after(async () => {
-  await database?.stop();
   if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
 });
 

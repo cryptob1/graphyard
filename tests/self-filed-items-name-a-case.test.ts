@@ -1,13 +1,13 @@
+import { freePort } from '../src/cli/test-isolation.js';
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { freePort } from '../src/cli/test-isolation.js';
 import { applyDelivery, onboardingServe } from '../src/repository-setup.js';
 import * as onboarding from '../src/onboarding.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
@@ -30,17 +30,14 @@ const servePolicy = { ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-b
 const failure: BaseFailure = { test: 'the suite fails on the base', check: 'test', baseSha: sha('a'), jobId: 7, url: 'https://ci.example/run/7', raisedAt: '2026-10-31T00:00:00.000Z', blocks: [], item: null, cleared: null };
 const delivered = { key: 'GY-1', title: 'Delivered item', policy: { checks: ['test'], review: true } };
 const finding = { text: 'the guard reads the stale copy', path: 'src/guard.ts', line: 3, paths: ['src/guard.ts'] };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const operator = { id: 'operator', role: 'admin' as const };
 before(async () => {
-  const port = await freePort();
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('self-filed-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('self_filed');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/self_filed`); await store.init();
+  store = await withDatabase('self-filed-items-name-a-case'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const selfFiled = () => [
   ['the base-failure repair', baseFailureItem(failure, 'main')],
@@ -72,8 +69,8 @@ test('unit:self-filed-items-name-a-case — onboarding writes a serve declaratio
     assert.equal(await onboarding.onboardingFirstCase(root), 'served-head');
     const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
     assert.deepEqual(config.e2e.serve, onboardingServe, 'onboarding wrote its fallback server');
-    // Concurrent suite/proof runs must serve their own fixture, rather than share the default port.
     const port = await freePort();
+    // Concurrent suite/proof runs must serve their own fixture, rather than share the default port.
     config.e2e.serve.command = config.e2e.serve.command.replace('43911', String(port));
     config.e2e.serve.url = `http://127.0.0.1:${port}/`;
     await writeFile(join(root, 'graphyard.json'), JSON.stringify(config));

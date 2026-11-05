@@ -1,11 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -17,7 +16,7 @@ const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'hu
 const master: Principal = { id: 'master-admin', role: 'admin', sessionKind: 'ai' };
 const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
 const replacement: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 'ai' };
-let database: EmbeddedPostgres, store: Store, engine: Engine, expiring: Engine;
+let store: Store, engine: Engine, expiring: Engine;
 const id = () => randomUUID();
 const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] });
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
@@ -25,16 +24,13 @@ const events = async (work: Work, kind: string) => (await store.events(work.id))
 const merge = (work: Work) => work.gates.find(gate => gate.name === 'merge')!;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_LEASE_LAPSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 14);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-lapse'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('lease-lapse'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [human, master, worker, replacement];
   // Leases granted by this engine expire at once, so reconciliation sees the lapse.
   expiring = new Engine(store, 0, 'owner/project'); expiring.principals = engine.principals;
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 // A claim through the expiring engine has already lapsed by the time a workspace could be
 // registered, so that attempt is left without one, as a supervisor that never started leaves it.

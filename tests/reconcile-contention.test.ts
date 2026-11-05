@@ -1,14 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { wakeJob, wakeJobs } from '../src/store/store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql } from '../src/store/coordination-sql.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -21,7 +20,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 
 const operator: Principal = { id: 'contention-operator', role: 'admin', sessionKind: 'human' };
 const workers: Principal[] = Array.from({ length: 30 }, (_, n) => ({ id: `contention-worker-${n}`, role: 'worker', sessionKind: 'ai' }));
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let items: Work[] = [], leased: { work: Work; actor: Principal }[] = [];
 
 const shuffled = <T>(values: T[]) => values.map(value => ({ value, key: Math.random() })).sort((a, b) => a.key - b.key).map(entry => entry.value);
@@ -54,11 +53,8 @@ async function traffic(stop: Promise<void>, errors: unknown[], { rawMoves = true
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1115;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconcile-contention'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   // A small pool, so a tick that took more than its share would starve requests at once.
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`, { max: 6 });
+  store = await withDatabase('reconcile-contention', { max: 6 });
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, ...workers];
@@ -68,7 +64,7 @@ before(async () => {
   }
   for (const [n, actor] of workers.entries()) leased.push({ work: await engine.execute(actor, 'claim', items[n].id, {}, randomUUID()), actor });
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 // Proven at a 20 ms batch, which makes the most batches contend, and at the 250 ms production default (GY-1212).
 for (const batchMs of [20, 250]) test(`unit:reconcile-tick-bounded-under-contention — a tick over 100 live items under continuous mutation completes within 30 s, evaluating or deferring every candidate, no batch rerun more than twice (reconcileBatchMs ${batchMs})`, { timeout: 180_000 }, async () => {

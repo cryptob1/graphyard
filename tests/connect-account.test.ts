@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -26,18 +26,16 @@ const HOST = 'connect-host-1';
 /** A throwaway key made per run, so no key-shaped literal sits in the repository's history. */
 const KEY = `fixture-${randomUUID()}`;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string, scratch: string, bin: string;
 let originalPath = '';
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_CONNECT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 48);
   scratch = await temporaryDirectory('connect');
   bin = join(scratch, 'bin');
   await mkdir(bin, { recursive: true });
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('connect_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/connect_test`); await store.init();
+
+  store = await withDatabase('connect-account'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -95,7 +93,6 @@ after(async () => {
   process.env.PATH = originalPath;
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (database) await database.stop();
 });
 
 async function call(path: string, actor: Principal, data?: unknown) {

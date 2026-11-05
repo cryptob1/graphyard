@@ -1,14 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import type { Work } from '../src/model.js';
 import { actionId } from '../src/model-boundary/actions.js';
 import { claimable, claimAction, openActions, settleAction, type ActionRow } from '../src/model/actions.js';
 import { claimCandidatesParams, claimCandidatesSql } from '../src/model/action-candidates.js';
 import type { NextActionKind } from '../src/model/next-action.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1132: executors claimed the oldest open row whatever it was, so on 2026-10-03 a P0 item's
@@ -23,15 +22,11 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const executor = { id: 'executor-a', host: 'host-1', principal: 'executor-a' };
 const noWorker = (key: string) => `no worker profile can take ${key}: every healthy profile is reserved by another dispatch`;
 
-let database: EmbeddedPostgres, store: Store;
+let store: Store;
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail whichever starts second.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1132;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('claim-order'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('action-claim-order'); await store.init();
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 let sequence = 0;
 /** An item holding one open row of `kind`, requested at `requestedAt`. */

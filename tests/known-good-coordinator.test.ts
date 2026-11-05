@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -83,19 +83,16 @@ test('unit:master-unit-uses-known-good — ExecStart runs coordinator/current/di
   assert.match(loopUnitText(input), new RegExp(`^ExecStart=/usr/bin/node ${knownGoodDirectory(w.installDir)}/current/dist/cli\\.js master run$`, 'm'));
 });
 
-let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 const admin = { id: 'human-operator', role: 'admin' as const, sessionKind: 'human' as const, token: `human-operator-token-${'x'.repeat(32)}` };
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 152;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('known-good-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('known_good_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/known_good_test`); await store.init();
+  store = await withDatabase('known-good-coordinator'); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
   http = server(engine, [admin, { id: 'graphyard-master', role: 'coordinator', token: `graphyard-master-token-${'y'.repeat(32)}` }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 test('integration:master-recover-repins-and-records — master recover repins the previous SHA (or --to), rewrites the unit onto the pin, restarts it and records policy.coordinator.recovered {from, to, reason}', async () => {
   const w = await world();
@@ -167,4 +164,3 @@ test('unit:known-good-launcher-parses — the fallback dist/cli.js is two real l
   writeFileSync(file, text);
   execFileSync(process.execPath, ['--check', file]);
 });
-

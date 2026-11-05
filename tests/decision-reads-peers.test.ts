@@ -1,14 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { resourceConflicts } from '../src/coordination.js';
 import type { Work, Principal } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const worker: Principal = { id: 'peer-worker', role: 'worker' };
 const at = new Date().toISOString();
 function item(n: number): Work {
@@ -19,13 +18,10 @@ function item(n: number): Work {
     reworkRequested: false, evidence: [], observation: null, blocker: null, gates: [], violations: [] } as Work;
 }
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3035;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-peers'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('decision_peers');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decision_peers`);
+  store = await withDatabase('decision-reads-peers');
   await store.init(); engine = new Engine(store, 120, 'owner/project');
 });
-after(async () => { await store?.close(); await database?.stop(); });
+after(async () => { await store?.close(); });
 
 test('unit:decision-reads-peers — a cold claim, submission and evaluation on 2,000 items read only focus and prerequisite documents under the item lock', async () => {
   const board = Array.from({ length: 2000 }, (_, n) => item(n + 1));

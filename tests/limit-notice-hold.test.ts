@@ -1,14 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import { proposedRuntimes, type AgentRegistry as Registry } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3096: the hold a provider limit notice places lives in the control-plane registry, not in the
 // loop process that read the notice, so a freshly started loop's next selection skips the account.
@@ -19,7 +18,7 @@ const worker: Principal = { id: 'graphyard-cursor-2', role: 'worker', sessionKin
 const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 const ok = async (principal: Principal, path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
     method: body === undefined ? 'GET' : 'POST',
@@ -32,16 +31,13 @@ const ok = async (principal: Principal, path: string, body?: unknown) => {
 };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3096;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('limit-notice-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('limit_notice');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/limit_notice`);
+  store = await withDatabase('limit-notice-hold');
   await store.init();
   http = server(new Engine(store, 7200, 'owner/limit-notice'), credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:limit-notice-hold-persists — a session ended on its provider limit notice marks its account exhausted in the registry with the notice and reset, and a fresh loop\'s next selection for any role skips it', async () => {
   const runtime = proposedRuntimes.find(entry => entry.name === 'claude')!;

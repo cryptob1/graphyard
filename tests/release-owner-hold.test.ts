@@ -1,13 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { ownerHoldRefusal } from '../src/model/loop-owned.js';
 import { Store } from '../src/store.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -19,14 +18,14 @@ const repository = 'owner/hold';
 const owner: Principal = { id: 'human-owner', role: 'admin', sessionKind: 'human' };
 const credentials = [{ ...owner, token: `owner-hold-${'o'.repeat(32)}` }];
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['policy:requirements'] };
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (credential: string, path: string, body: unknown) => {
   const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
   return { status: response.status, body: await response.json() as any };
 };
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isolation when the owner says so', 
+const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isolation when the owner says so',
   description: 'Deferred by the owner. This item stays in the backlog until the owner releases it.',
   criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation', 'e2e:fixture'] }], reason: 'Owner deferral' };
 const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Next by priority' };
@@ -35,10 +34,7 @@ const release = (credential: string, work: Work) => call(credential, `work/${wor
 const fixture = (fields: Partial<Work>) => ({ key: 'GY-1', title: 'Work', description: '', criteria: [], ...fields }) as unknown as Work;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2605;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('release-owner-hold'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('owner_hold_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/owner_hold_test`); await store.init();
+  store = await withDatabase('release-owner-hold'); await store.init();
   engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -48,7 +44,7 @@ before(async () => {
     assert.equal(provisioned.status, 200, JSON.stringify(provisioned.body));
   }
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:release-owner-hold-refused — every recorded form of the hold refuses a non-owner release, naming the hold', () => {
   for (const work of [fixture({ title: 'Owner hold: later' }), fixture({ description: 'It leaves the backlog only when the owner releases it.' }),

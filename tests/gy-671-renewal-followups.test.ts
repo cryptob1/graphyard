@@ -1,16 +1,15 @@
-import { after, before, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { z } from 'zod';
 import { Store } from '../src/store.js';
 import { Engine, RenewalFault, renewalFaultEvent, renewalFaultOf } from '../src/engine.js';
 import { Refusal } from '../src/model/refusal.js';
 import { renewalGraceMs } from '../src/session-watch.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -24,16 +23,12 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // fails, so the manual proof exercises its criterion.
 const operator: Principal = { id: 'gy671-operator', role: 'admin', sessionKind: 'human' };
 const engineer: Principal = { id: 'gy671-worker', role: 'worker', sessionKind: 'ai' };
-let database: EmbeddedPostgres, connection: string;
+let connection: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 890;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy671'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('gy671_followups');
-  connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/gy671_followups`;
+  connection = await databaseUrl('gy-671-renewal-followups');
   const store = new Store(connection); await store.init(); await store.close();
 });
-after(async () => { if (database) await database.stop(); });
 
 function engineOn(store: Store, leaseSeconds = 120) {
   const engine = new Engine(store, leaseSeconds, 'owner/project');

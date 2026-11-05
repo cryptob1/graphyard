@@ -93,10 +93,10 @@ test('unit:ci-shards — a changed src file maps to its affected tests and a doc
   assert.deepEqual(selectAffected(['docs/guide.md'], map, tests).files, [], 'a docs-only change selects no test');
 });
 
-test('a test run started inside another test run reserves its ports above the parent\'s window, so a sibling file\'s Postgres keeps its port', async () => {
+test('a test run started inside another test run reserves its ports above the parent\'s window, so the parent cluster keeps its port', async () => {
   assert.deepEqual(nestedFirst({}), {}, 'a top-level run starts at the default base');
   assert.deepEqual(nestedFirst({ GRAPHYARD_TEST_PORT: '15438' }), { first: 15438 + nestedPortGap });
-  // This file runs inside the suite's window; a run it starts lands above that window's every offset.
+  // This file runs inside the suite's window; a run it starts lands above that window.
   const parent = Number(process.env.GRAPHYARD_TEST_PORT);
   assert.ok(parent > 0, 'the suite runs under a reserved GRAPHYARD_TEST_PORT');
   const project = await temporaryDirectory('nested-run');
@@ -104,5 +104,5 @@ test('a test run started inside another test run reserves its ports above the pa
   await writeFile(join(project, 'tests/port.test.ts'), "import { test } from 'node:test';\ntest('reserved', () => {});\n");
   const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
   assert.equal(run.code, 0, run.stdout + run.stderr);
-  assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
+  assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its sentinel`);
 });

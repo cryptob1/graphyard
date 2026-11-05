@@ -2,14 +2,13 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery, commonInterval, mergeSegments, serviceState, type EnvironmentDelivery, type Release } from '../src/delivery.js';
 import { server } from '../src/server.js';
 import type { Principal, Work, Observation } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { localRequest } from './helpers/local-request.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
@@ -36,14 +35,11 @@ const principals = [operator, worker, coordinator, ci, builder, observer, apiObs
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
 const expected = { api: digestOf('1'), web: digestOf('2') }, wrong = digestOf('f'), inputs = digestOf('d');
-let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
+let store: Store, engine: Engine, validation: Validation, delivery: Delivery;
 let http: ReturnType<typeof server>, url: string;
 let serial = 0;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_DELIVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('delivery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init();
+  store = await withDatabase('delivery'); await store.init();
   engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   // Deployment identities (builder, observers, promoter) hold producer credentials
   // and count toward the shared review/proof agent limit the server enforces at
@@ -54,7 +50,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 const id = () => randomUUID();
 const at = (offsetSeconds: number, from = Date.now()) => new Date(from + offsetSeconds * 1000).toISOString();
 async function reload(w: Work) { return (await store.list()).find(item => item.id === w.id)!; }

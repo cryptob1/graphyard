@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { server } from '../src/server.js';
@@ -30,7 +30,7 @@ const operator: Principal = { id: 'operator', role: 'admin' }, coordinator: Prin
 const workers: Principal[] = ['worker-a', 'worker-b'].map(id => ({ id, role: 'worker' }));
 const token = (actor: Principal) => `${actor.id}-${'x'.repeat(40)}`;
 const host = 'exit-host', secret = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890';
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 async function api(actor: Principal, path: string, data?: unknown) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(actor)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const result = await response.json() as any;
@@ -38,15 +38,12 @@ async function api(actor: Principal, path: string, data?: unknown) {
   return result;
 }
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3068;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('early-exit-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('early_exit');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/early_exit`); await store.init();
+  store = await withDatabase('early-worker-exit-recovery'); await store.init();
   http = server(new Engine(store, 7200, 'owner/project'), [operator, coordinator, ...workers].map(actor => ({ ...actor, token: token(actor) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 const proof = 'integration:early-worker-exit-recovery';
 test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route around, wake once and recover`, { timeout: 180_000 }, async t => {
