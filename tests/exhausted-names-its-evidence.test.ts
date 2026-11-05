@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
+import { accountIneligibility, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 
 /**
  * GY-3094: the registry reported claude-a exhausted with no usage, no reset and no hold, and a master
