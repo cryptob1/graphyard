@@ -122,7 +122,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   const { root, credentials, token, cleanup } = await installed();
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
@@ -428,7 +428,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const { root, token, cleanup } = await installed({ reviewer: true });
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const master = await loadMasterConfig(root);
     const item = requested();
     await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]) });
@@ -439,7 +439,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     assert.equal(producer.state, 'failed');
     assert.match(producer.resolution!, /ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
 
-    await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), registerLaunch, requestId: 'review-request' });
     const reviewStart = Date.parse((await readReviewLedger(root)).reviews[0].requestedAt);
     const reviewAgents = [{ name: 'review-claude-1', pane_id: 'pane-1', agent_status: 'blocked' }];

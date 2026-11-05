@@ -29,7 +29,7 @@ Use `Nit: PATH:LINE — FINDING`, ending with `(mechanical: …)` or `(substanti
 
 `plannedFiles` declares paths that serialize implementation through landing; it is not a scope-permission gate. No file-widening permission is needed. `graphyard sync GY-N` merges shared `origin/BASE` and regenerates generated files; only merge conflicts hold it.
 
-Workers run `graphyard verify GY-N` for their proofs; CI owns the full suite. A failed, skipped or unexecuted own proof blocks submission. `leftToCi` with exit 0 and `passing` means the selected tests passed before an abnormal runner end. Name unrelated sandbox failures in the commit message.
+Workers commit, then run `graphyard verify GY-N`: the host coordinator trials exact HEAD; CI owns the full suite. `complete` repeats required checks there. Failed, skipped or unexecuted own proofs block submission. Counts remain self-verification, never trusted evidence. Workers receive no Docker socket or producer credentials.
 
 ### Generated files
 

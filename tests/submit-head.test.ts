@@ -265,10 +265,14 @@ test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, 
   // The command: the worktree's HEAD is read from the repository root, the body is posted to submit, and the answer carries selfVerification.
   const calls: { path: string; body: unknown }[] = [], printed: any[] = [];
   const worktree = join(checkout, '.graphyard', 'worktrees', 'GY-1-1');
-  const context = { args: ['1', '--head'], api: async (path: string, body: unknown) => { calls.push({ path, body }); return { key: 'GY-1', submission: { epoch: 1, pr: 5 } }; }, print: (value: unknown) => printed.push(value), repositoryRoot: () => worktree } as unknown as CliContext;
+  const context = { args: ['1', '--head'], api: async (path: string, body: unknown) => {
+    // The private trial's answer, as the host runner returns it through the server.
+    if (path.endsWith('/worker-verification')) return { record: { key: 'GY-1', head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } };
+    calls.push({ path, body }); return { key: 'GY-1', submission: { epoch: 1, pr: 5 } };
+  }, print: (value: unknown) => printed.push(value), repositoryRoot: () => worktree } as unknown as CliContext;
   await completeCommand.run(context, { id: 'id-1', key: 'GY-1' } as any);
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
-  assert.equal(printed[0].submission.pr, 5); assert.equal(printed[0].selfVerification.state, 'not-run');
+  assert.equal(printed[0].submission.pr, 5); assert.equal(printed[0].selfVerification.state, 'passing', 'complete reports the private trial it just ran');
 });
 
 test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, judging only the merge (a file outside plannedFiles reports ok), for a clean tree as much as a changed one; under github or an older server without the field it fetches', async () => {
