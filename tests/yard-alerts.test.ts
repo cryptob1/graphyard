@@ -134,6 +134,13 @@ test('unit:stalled-yard-alerts-operator — no stop while work moves: a session 
   const stopped = yardStop(state, queued, at, alertMs);
   assert.ok(stopped, 'queued work with no movement at all is a stop');
   assert.equal(stopped!.since, at, 'with no movement ever recorded, the stop starts at this first observation');
+
+  // A session that made progress and exited — its worktree reading is recent — is a successful launch: no stop.
+  const progressed = [item({ id: 'w6', key: 'GY-6', title: 'Progressed', stage: 'build', sessions: [session({ state: 'finished', startedAt: iso(at - 30 * minute), workTree: { head: 'b'.repeat(40), dirty: null, at: iso(at - 5 * minute) } })] })];
+  assert.equal(lastYardMovement(stateWith(), progressed, at), at - 5 * minute, 'a session that made progress counts as movement');
+  assert.equal(yardStop(stateWith(), [...queued, ...progressed], at, alertMs), null, 'progress inside the window holds the alert');
+  await yardAlertStep(cycle(config(), stateWith(), [...queued, ...progressed], at, posts));
+  assert.equal(posts.length, 0, 'nothing is posted while an attempt progressed inside the window');
 });
 
 test('unit:stalled-yard-alerts-operator — a restart neither re-alerts at once nor loses the all-clear, and a stop that ends inside the window sends no all-clear', async () => {

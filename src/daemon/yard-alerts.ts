@@ -35,19 +35,23 @@ export function queuedForStartOrMerge(state: DaemonState, work: Work[], now: num
 /**
  * The newest instant the yard was seen moving (GY-3101): a merge the writer delivered
  * (`mergeWriter.lastMergeAt`), a worker session still up past the early-exit window of
- * worker-launch-health.ts — a session that stays up that long is itself a successful launch — or a
- * dispatch that landed within that window and whose item has no newer early-exit incident (the
- * grace that keeps a seconds-old launch from reading as a stop before it can prove itself). Null
- * when neither the cursor nor the snapshot names any movement.
+ * worker-launch-health.ts — a session that stays up that long is itself a successful launch — a
+ * session's recorded worktree progress — the reading the attempt bound advances by, so a session
+ * that made progress and then exited still counts as a successful launch — or a dispatch that
+ * landed within that window and whose item has no newer early-exit incident (the grace that keeps
+ * a seconds-old launch from reading as a stop before it can prove itself). Null when neither the
+ * cursor nor the snapshot names any movement.
  */
 export function lastYardMovement(state: DaemonState, work: Work[], now: number): number | null {
   const times: number[] = [];
   const lastMergeAt = state.mergeWriter.lastMergeAt ? Date.parse(state.mergeWriter.lastMergeAt) : null;
   if (lastMergeAt !== null && Number.isFinite(lastMergeAt)) times.push(lastMergeAt);
   for (const item of work) for (const session of item.sessions ?? []) {
-    if (session.kind !== 'implementation' || session.state !== 'running') continue;
+    if (session.kind !== 'implementation') continue;
     const startedAt = Date.parse(session.startedAt ?? '');
-    if (Number.isFinite(startedAt) && now - startedAt >= resumeExitWindowMs) times.push(startedAt);
+    if (session.state === 'running' && Number.isFinite(startedAt) && now - startedAt >= resumeExitWindowMs) times.push(startedAt);
+    const progress = session.workTree ? Date.parse(session.workTree.at) : Number.NaN;
+    if (Number.isFinite(progress)) times.push(progress);
   }
   for (const [key, action] of Object.entries(state.actions)) {
     if (!key.startsWith('dispatch:') || action.state !== 'done') continue;
