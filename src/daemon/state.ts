@@ -169,7 +169,10 @@ export const daemonStateSchema = z.object({
   cycle: z.number().int().min(0).default(0),
   lastCycleAt: z.string().nullable().default(null),
   actions: z.record(z.string(), daemonActionSchema).default({}),
-  profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
+  /** GY-3103: worker launch failures by `runtime:item id`, each backing off until `until` (launchBackoffMs). */
+  launchBackoff: z.record(z.string(), z.object({ failures: z.number().int().min(1), reason: z.string().max(500), until: z.string() }).strict()).default({}),
+  /** GY-3103: per registry runtime, the newer installed version one session runs on before the fleet switches; `failed` holds a failed canary's error until a newer version appears. */
+  canaries: z.record(z.string(), z.object({ entry: z.string().max(1000), version: z.string().max(100), work: z.string().nullable(), epoch: z.number().int().nullable(), startedAt: z.string().nullable(), failed: z.string().max(500).nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   mergeWriter: mergeWriterStateSchema.default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
@@ -217,7 +220,7 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
  * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
  */
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
-export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
+export const retainedActions = 500, retainedMetrics = 100, maxProofAttempts = 3;
 
 export function emptyDaemonState(config: MasterConfig): DaemonState {
   return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -307,7 +310,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     action.detail = boundDetail(action.detail);
     action.attempts = clampCount(action.attempts, 1000);
   }
-  for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
+  for (const entry of Object.values(state.launchBackoff)) entry.reason = cut(entry.reason, 500);
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
   if (state.master) {

@@ -21,6 +21,7 @@ import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
+import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, type HerdrAgent } from './herdr.js';
@@ -71,6 +72,8 @@ export interface DispatchOptions {
   renew?: LeaseRenewer;
   /** How often the launch renews the lease until its supervisor takes over (launchRenewalMs). */
   renewIntervalMs?: number;
+  /** Newer runtime versions this launch may run as their canary (GY-3103): a launch on one of these runtimes leads its PATH with the offer's entry, once per dispatch. */
+  canaries?: CanaryOffer[];
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
 }
@@ -162,6 +165,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
+  // GY-3103: the canary this dispatch ran, and its start failure; a fallback launch never runs it again.
+  let canary: { runtime: string; failed: string | null } | null = null;
   // GY-2971: the item's last launch on this host, whose runtime session the next attempt may resume.
   let initialHead: string | null = null, runtimeStartedAt: string | null = null;
   let resumed: { session: string | null; resumedFrom: number | null; path: string } | null = null;
@@ -236,7 +241,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
           target = undefined;
         }
-        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
+        let launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
+        const offer: CanaryOffer | undefined = !canary && chosen.account && 'fleet' in chosen.account ? options.canaries?.find(entry => entry.runtime === (chosen.account as { fleet: { runtime: string } }).fleet.runtime) : undefined;
+        if (offer) {
+          launch = { ...launch, environment: { ...launch.environment, PATH: repinPath(launch.environment.PATH ?? '', offer.entry) } };
+          canary = { runtime: offer.runtime, failed: null };
+        }
         launched = launch;
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
         // then made once more from a fresh claim, rather than leaving an idle session holding the item.
@@ -277,6 +287,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting', ...launch.kind === 'pi' ? ['exited'] : []].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
+          if (offer && canary) canary.failed = failure.reason;
           await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});
           startFailures.push(failure);
           continue;
@@ -291,7 +302,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // first runtime refused the prompt claims a later epoch — the record the loop, the resume fence
   // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
   // re-keys the registration once the claim is known.
-  return { work: work.key, epoch: claimedEpoch, runtime: launched?.kind ?? null, initialHead, runtimeStartedAt, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
+  return { work: work.key, epoch: claimedEpoch, runtime: launched?.kind ?? null, initialHead, runtimeStartedAt, canary, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     // Whether the attempt resumed the previous attempt's runtime session (GY-2971).

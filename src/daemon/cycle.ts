@@ -30,7 +30,8 @@ import { settledPurpose } from '../model/session-state.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from '../model/loop-owned.js';
 import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
 import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attempt-bound.js';
-import { profileHealth, recordProfileFailure } from './sessions.js';
+import { canaryOffer, canaryVerdict, launchBackoff, profileHealth, profileRuntime, recordLaunchFailure } from './sessions.js';
+import { pinnedInstall, repinRuntime, type CanaryOffer } from '../model/registry.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { batchGateStep } from './cycle-batch-gate.js';
@@ -485,6 +486,7 @@ async function dispatchStep(cycle: Cycle) {
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   const launched: Work[] = [];
+  let offers = state.diskHeadroom ? [] : await runtimeCanaries(cycle);
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   if (!state.diskHeadroom) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
@@ -493,10 +495,17 @@ async function dispatchStep(cycle: Cycle) {
     if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
-    const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
-    if (!free) break;
+    const open = health.filter(entry => entry.healthy && !taken.has(entry.profile.name));
+    if (!open.length) break;
+    // GY-3103: a runtime whose launches of this item failed backs off for this item only.
+    const free = open.find(entry => !launchBackoff(state, profileRuntime(entry.profile), item, clock));
+    if (!free) continue;
     taken.add(free.profile.name);
-    launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink));
+    // Each newer runtime version is offered to one launch at a time, the canary; the rest stay pinned.
+    const canaries = offers;
+    offers = [];
+    for (const offer of canaries) state.canaries[offer.runtime] = { entry: offer.entry, version: offer.version, work: item.key, epoch: null, startedAt: new Date(clock).toISOString(), failed: null };
+    launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink, canaries));
     launched.push(item);
   }
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
@@ -633,13 +642,24 @@ async function releaseBacklog(cycle: Cycle) {
 }
 
 /** One worker launch on the launcher: the claim is the worker's own, under its profile's principal. */
-async function launchWorker(cycle: Cycle, item: Work, key: string, profile: WorkerProfile, sink: DaemonAction[]) {
+async function launchWorker(cycle: Cycle, item: Work, key: string, profile: WorkerProfile, sink: DaemonAction[], canaries: CanaryOffer[] = []) {
   const { config, state, effects, snapshot, herdr, now } = cycle;
+  // An offer this launch did not take is free for the next one.
+  const settle = async (canary: { runtime: string; failed: string | null } | null | undefined, epoch: number | undefined, startedAt: string | null | undefined) => {
+    for (const offer of canaries) {
+      const claimed = state.canaries[offer.runtime];
+      if (claimed?.work !== item.key || claimed.epoch !== null) continue;
+      if (canary?.runtime !== offer.runtime) delete state.canaries[offer.runtime];
+      else if (canary.failed) await failCanary(cycle, offer.runtime, `${item.key}: ${canary.failed}`);
+      else state.canaries[offer.runtime] = { ...claimed, epoch: epoch ?? item.epoch + 1, startedAt: startedAt ?? new Date(now()).toISOString() };
+    }
+  };
   const attempts = (state.actions[key]?.attempts ?? 0) + 1;
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null } | undefined;
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, canaries) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null; canary?: { runtime: string; failed: string | null } | null } | undefined;
+    await settle(launched?.canary, launched?.epoch, launched?.runtimeStartedAt);
     // The session's handle is what the close step reads to end it once its attempt does.
     const pane = launched?.pane ?? null, attach = pane ? `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` : null;
     await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
@@ -648,14 +668,63 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), ...(pane && attach ? { pane, attach } : {}), subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running' })?.catch(() => undefined);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
+    await settle(null, undefined, undefined);
     const full = capacityRefusal(error);
     if (full) {
       sink.push(await entry('waiting', `Dispatch of ${item.key} waits for a worker slot, retried on the first cycle one frees: ${full}`));
       return;
     }
-    recordProfileFailure(state, profile, message(error), now());
+    recordLaunchFailure(state, profileRuntime(profile), item, message(error), now());
     sink.push(await entry('failed', `Dispatch of ${item.key} to ${profile.name} failed: ${message(error)}; it is retried next cycle`));
   }
+}
+
+/**
+ * GY-3103: runtime canaries. Each cycle, every registry runtime whose launch PATH is led by a
+ * versioned install (GY-3090) is compared with the newest version installed beside it. A newer one
+ * is offered to exactly one worker launch while the fleet keeps launching on the pinned version.
+ * A canary that submits, commits or runs longer than 60 s after its start switches the runtime by
+ * a registry runtime.set with the reason; one that fails keeps the pinned version, is not retried
+ * until a newer version appears, and wakes the master with its error.
+ */
+async function runtimeCanaries(cycle: Cycle): Promise<CanaryOffer[]> {
+  const { state, effects, snapshot, clock } = cycle;
+  if (!effects.registry) return [];
+  const runtimes = await effects.registry().then(registry => registry.runtimes, () => null);
+  if (!runtimes) return [];
+  const offers: CanaryOffer[] = [];
+  for (const runtime of runtimes) {
+    const offer = canaryOffer(runtime), canary = state.canaries[runtime.name];
+    if (!offer || canary?.entry !== offer.entry || (canary.epoch === null && clock - Date.parse(canary.startedAt ?? '') > 1_800_000)) {
+      delete state.canaries[runtime.name];
+      if (offer) offers.push(offer);
+      continue;
+    }
+    if (canary.failed || canary.epoch === null) continue;
+    const item = snapshot.work.find(entry => entry.key === canary.work);
+    if (!item) { delete state.canaries[runtime.name]; continue; }
+    const verdict = canaryVerdict(item, canary.epoch, clock);
+    if (!verdict) continue;
+    if (!verdict.passed) {
+      const incident = state.actions[earlyExitKey(item)];
+      await failCanary(cycle, runtime.name, incident?.epoch === canary.epoch ? incident.detail : `${item.key} epoch ${canary.epoch}: ${verdict.why}`);
+      continue;
+    }
+    const reason = `Canary ${item.key} epoch ${canary.epoch} on ${runtime.name} ${canary.version} ${verdict.why}; ${runtime.name} now launches from ${canary.entry} instead of ${pinnedInstall(runtime)?.entry}`.slice(0, 500);
+    try {
+      await effects.setRuntime!(repinRuntime(runtime, canary.entry), reason);
+      delete state.canaries[runtime.name];
+      await note(cycle, `runtime-canary:${runtime.name}`, 'judgement', item.key, 'done', reason);
+    } catch (error) { await note(cycle, `runtime-canary:${runtime.name}`, 'judgement', item.key, 'failed', `Could not switch ${runtime.name} to ${canary.version} after its canary passed: ${message(error)}`); }
+  }
+  return offers;
+}
+/** A failed canary keeps its runtime pinned and wakes the master with the error (masterCauses). */
+async function failCanary(cycle: Cycle, runtime: string, error: string) {
+  const canary = cycle.state.canaries[runtime];
+  if (!canary) return;
+  canary.failed = error.slice(0, 500);
+  await note(cycle, `runtime-canary:${runtime}`, 'judgement', canary.work, 'failed', `The canary of ${runtime} ${canary.version} failed, so ${runtime} stays on its pinned version: ${error}`);
 }
 
 /** The loop's master: launched when absent, adopted when visible, woken once per changed shared-base cause.
