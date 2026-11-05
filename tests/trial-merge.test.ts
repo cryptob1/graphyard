@@ -791,7 +791,15 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
 
 // GY-3008: deleting the dead base-break refresh must leave a failed trial's rework path intact —
 // the merge writer grounds and requests the rework; next-action waits on it, never on a base-break hold.
-test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', () => {
+test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', async () => {
+  // The proof this case carries is bound to the declared trial (AC-1): Graphyard's own graphyard.json
+  // must parse to usable preMerge declarations with a test selection. Imported dynamically — the
+  // declarations exist only with this change, and this case must fail as a case against a tree
+  // without it, never as a module crash.
+  const { declaredPreMerge } = await import('../src/merge-writer/trial.js');
+  const declared = declaredPreMerge(readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'));
+  if ('refusal' in declared) assert.fail(`Graphyard's own declarations are refused: ${declared.refusal}`);
+  assert.ok(declared.preMerge?.some(check => check.selection), "Graphyard's own graphyard.json declares its test selection");
   const now = new Date('2026-10-31T12:00:00.000Z');
   const head = 'c'.repeat(40), base = 'a'.repeat(40);
   const reason = `${trialFailurePrefix}: tests tests/policy.test.ts`;
