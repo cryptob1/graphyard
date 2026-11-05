@@ -15,6 +15,8 @@ import { noRelease } from '../model/release.js';
 import { specCheckCurrent } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
+import { stoppedRoles } from '../master/stopped-roles.js';
+import type { FleetView } from '../model/registry.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
@@ -35,6 +37,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     unreachable = error instanceof Error ? error.message : String(error);
     return { work: [] as Work[], now: new Date().toISOString() };
   }), observeHerdrAgents(run), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
+  // The registry as this host's launches see it (GY-3095): a role nothing can launch on is the plain stopped signal.
+  const fleet = unreachable ? null : await (masterApi(`agent-registry?host=${encodeURIComponent(master.hostId)}`) as Promise<FleetView>).catch(() => null);
   // The install master lists only unowned items; count personal scopes so the operator still sees them.
   const personalScopes = master.forPerson ? 0 : snapshot.work.filter(item => item.owner).length;
   snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
@@ -71,7 +75,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
+  const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
   return {
+    // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
+    attention: stopped,
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
