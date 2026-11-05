@@ -495,6 +495,12 @@ async function dispatchStep(cycle: Cycle) {
   const launched: Work[] = [];
   const registry = !state.diskHeadroom && effects.registry ? await effects.registry().catch(() => null) : null;
   let offers = registry ? await runtimeCanaries(cycle, registry.runtimes) : [];
+  // GY-3149: a freed worker slot goes to the highest-priority waiting item. An item whose launch last waited
+  // for a slot holds every lower-priority item back, and a launch waits for the higher-priority launches
+  // of this cycle to settle before it asks the registry for a slot.
+  const waiting = claimable.filter(item => state.actions[dispatchKey(item)]?.state === 'waiting').map(item => item.priority);
+  const slotHeldAbove = waiting.length ? Math.min(...waiting) : Infinity;
+  const ahead: { key: string; priority: number; done: Promise<void> }[] = [];
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   if (!state.diskHeadroom) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
@@ -505,6 +511,7 @@ async function dispatchStep(cycle: Cycle) {
     if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
+    if (item.priority > slotHeldAbove) continue;
     const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
     if (!free) break;
     // GY-3103: a runtime whose launches of this item failed backs off for this item only; its accounts are excluded from the selection.
@@ -515,7 +522,16 @@ async function dispatchStep(cycle: Cycle) {
     const canaries = offers;
     offers = [];
     for (const offer of canaries) state.canaries[offer.runtime] = { entry: offer.entry, version: offer.version, work: item.key, epoch: null, startedAt: new Date(clock).toISOString(), failed: null };
-    launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink, canaries, held.exclude));
+    const before = ahead.filter(entry => entry.priority < item.priority);
+    let settled!: () => void;
+    ahead.push({ key, priority: item.priority, done: new Promise<void>(resolve => { settled = resolve; }) });
+    launcher.submit(key, [free.profile.name], async sink => {
+      try {
+        await Promise.all(before.map(entry => entry.done));
+        if (before.some(entry => state.actions[entry.key]?.state === 'waiting')) return;
+        await launchWorker(cycle, item, key, free.profile, sink, canaries, held.exclude);
+      } finally { settled(); }
+    });
     launched.push(item);
   }
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
