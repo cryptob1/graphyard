@@ -46,8 +46,8 @@ test('unit:base-move-keeps-concurrent-trial — main moving during a trial keeps
   const w = world();
   const outcome = await mergeOne(w.ports, w.selected);
   assert.equal(outcome.outcome, 'merged', JSON.stringify(outcome));
-  assert.equal(w.trials.length, 1, 'no new trial');
-  assert.deepEqual(w.pushes, [sha(`merge-${moved}`)], 'the head re-merged onto the moved tip is pushed');
+  assert.deepEqual(w.trials, [sha(`merge-${base}`)], 'one trial, of the merge onto the original tip');
+  assert.deepEqual(w.pushes, [sha(`merge-${moved}`)], 'a fresh re-merge onto the moved tip is pushed, not the trialled merge');
   assert.ok(!w.events.some(event => event.kind === 'refused'), 'nothing is refused as candidate changed');
 });
 
