@@ -243,13 +243,13 @@ test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion 
     reason: 'test setup',
   }, { actor: 'operator', at: iso(-2 * hour) }).registry;
   const [a, b] = registry.accounts;
-  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-30 * minute) });
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-30 * minute) });
   foldObservation(b, { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null }, { actor: 'coordinator', at: iso(-5 * minute) });
   const before = structuredClone(a.quota);
   assert.equal(accountIneligibility(registry, a, now, 'host-a'), null);
   assert.deepEqual(a.quota, before, 'the read leaves the account\'s recorded quota as it was');
   // A newer exhaustion on the plan holds every account on it.
-  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
   assert.match(accountIneligibility(registry, b, now, 'host-b')!, /acc-b quota is exhausted on plan .*acc-a quota is exhausted: quota exceeded/);
 });
 

@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy, roleRuntimeRefusal } from './registry.js';
-import { exhaustedTwin, foldObservation } from './account-quota.js';
+import { exhaustedTwin, exhaustionEvidence, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { workerOrder, planSpreadOrder, preferenceOrder } from './worker-preference.js';
@@ -117,7 +117,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   const plan = deriveAccountPlan(account, registry.accounts);
   const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
-  const held = (other: FleetAccount) => other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now);
+  const held = (other: FleetAccount) => !!exhaustionEvidence(other.quota, now);
   // An operator hold on the plan wins, and so does a session's exhaustion report until its reset (GY-1581): no probe outranks either. Otherwise the
   // newest probe on the plan decides, so a stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158).
   // Another account's guessed report holds nothing here, never even as a probe: its host resends it every selection, so it is always the newest. A pure read.
@@ -252,7 +252,8 @@ export interface FleetAccountView {
   /** Every role that names the account, with its place in that role's order. */
   roles: { role: FleetRoleName; preference: number; of: number }[];
   liveSessions: { id: string; role: FleetRoleName; work: string | null; host: string; since: string }[];
-  quota: ObservedQuota['state']; loggedIn: boolean | null; usage: ObservedQuota['usage']; resetsAt: string | null; observedAt: string | null; quotaSource: ObservedQuota['source'];
+  /** `exhausted` only with evidence that still holds, named in `evidence` with its reset; an exhausted reading without it is `unknown` (GY-3094). */
+  quota: ObservedQuota['state']; evidence: string | null; loggedIn: boolean | null; usage: ObservedQuota['usage']; resetsAt: string | null; observedAt: string | null; quotaSource: ObservedQuota['source'];
   eligible: boolean;
   /** Why the account cannot take a session now; null when it can. */
   ineligible: string | null;
@@ -281,12 +282,14 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     const model = registry.models.find(entry => entry.name === account.model);
     const ineligible = accountIneligibility(registry, account, now, host);
     const planInfo = deriveAccountPlan(account, registry.accounts);
+    // An account is reported exhausted only on evidence that still holds, and the report names it (GY-3094).
+    const evidence = exhaustionEvidence(account.quota, now);
     return { name: account.name, runtime: account.runtime, model: account.model, modelId: model?.id ?? null, cost: model?.cost ?? null, capability: model?.capability ?? null,
       host: account.credential.host, home: account.credential.home, enabled: account.enabled, maxSessions: account.maxSessions, note: account.note ?? null,
       plan: account.plan ?? planInfo.planName,
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
-      quota: account.quota.state, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source,
+      quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source,
       eligible: !ineligible, ineligible, smoke: account.smoke ?? null,
       held: fleetRoles.flatMap(role => { const reason = roleIneligibility(account, role, now); return reason ? [{ role, reason }] : []; }) };
   });

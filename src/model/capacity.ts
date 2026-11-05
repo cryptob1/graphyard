@@ -29,6 +29,8 @@ const exhaustionNotices: readonly RegExp[] = [
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
 ];
 export const exhaustionTailLines = 40, exhaustionNoticeMaxLength = 240;
+/** A free model's own allowance (OpenCode's `Free usage limit reached … subscribe to OpenCode Go`): not the account's plan, so never a hold on it (GY-3100). */
+export const freeModelNotice = /\bfree (?:usage|tier|model) limit\b|\bsubscribe to opencode go\b/i;
 /** Label words before a banner on its line (2 admits runtime labels, not agent sentences). */
 export const exhaustionNoticeLabelWords = 2;
 
@@ -144,7 +146,7 @@ function findExhaustion(output: string, now: number, retrying: boolean): Exhaust
   for (let index = lines.length - 1; index >= 0; index--) {
     // The banner itself, with whatever the terminal drew in front of it removed.
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
-    if (line.length > exhaustionNoticeMaxLength) continue;
+    if (line.length > exhaustionNoticeMaxLength || freeModelNotice.test(line)) continue;
     const at = exhaustionNotices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
@@ -164,7 +166,7 @@ const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?
 /** Provider quota/rate refusal in a headless error (GY-1092); never agent prose. */
 export function providerLimit(error: string, now: number): ExhaustionSignal | null {
   const text = error.replace(/\s+/g, ' ').trim();
-  if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
+  if (!text || freeModelNotice.test(text) || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: limitSignalReset(text, parseResetTime(text, now), now) };
 }
 

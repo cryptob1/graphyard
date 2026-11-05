@@ -16,7 +16,7 @@ import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
 import { removeAttemptWorktree } from '../master/worktrees.js';
-import { profileAccount, recordObservedExhaustion } from '../master/environments.js';
+import { releasedSince, profileAccount, recordObservedExhaustion } from '../master/environments.js';
 import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
@@ -99,7 +99,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const profile = config.workers.find(candidate => candidate.principal === session.principal);
       const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
       const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
-      if (stall.notice) await recordObservedExhaustion(config, account ?? profileAccount(name), { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
+      // GY-3100: a notice the session printed before an operator released the account is already applied.
+      const charged = account ?? profileAccount(name);
+      if (stall.notice && !await releasedSince(config, charged, session.updatedAt)) await recordObservedExhaustion(config, charged, { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
       const space = item.workspaces?.find(entry => entry.epoch === epoch);
       const partialWork = space && space.host === config.hostId
         ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped: ${stall.reason}`, run)
