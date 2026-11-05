@@ -2,7 +2,7 @@ Paths: src/server/**, src/server.ts
 
 ## Tests
 
-- `tests/signin-session-survives-restart.test.ts`: restart persistence, digest-only storage, expiry and sign-out; its `…-stable` case runs the browser case five times in a row, every run passing (GY-3134: the browser case carries every request through its route, so a host network change cannot fail the page's module loads with ERR_NETWORK_CHANGED, and answers a down control plane as a refused connection; its waits cover a loaded host's first render, and the disposable sign-in server cuts connections on stop instead of waiting out a slow in-flight request). Browser case: `e2e/cases/signin-session-survives-restart.json`.
+- `tests/signin-session-survives-restart.test.ts`: restart persistence, digest-only storage, expiry and sign-out. Browser case: `e2e/cases/signin-session-survives-restart.json`.
 - `tests/board-api.test.ts`: the board's HTTP routes and their principals.
 - `tests/production-watch-build-serving.test.ts`: status ignores historical environment/promotion events; the retired route returns 404.
 - `tests/delivery-observe-sha.test.ts`: serving-commit observations retain authorization, idempotency, bounded continuation and configured-environment checks.
