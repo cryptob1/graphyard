@@ -398,7 +398,7 @@ export interface DispatchEffects {
    * either leaves the registry's slots to the control plane's own settlement rules.
    */
   registry?: () => Promise<AgentRegistry | null>;
-  endRegistrySession?: (session: { id: string; role: string; work: string | null; pane: string; agentName: string | null }, reason: string) => Promise<unknown>;
+  endRegistrySession?: (session: { id: string; role: string; work: string | null; pane: string | null; agentName: string | null }, reason: string) => Promise<unknown>;
   /**
    * Wakes the item's observation job now (GY-1429), so a verdict a reviewer posted is read and its
    * request settled without waiting on the observation scheduler's cadence. A dispatcher wired
@@ -715,7 +715,7 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
   /** Registry sessions this tick ended because no Herdr pane backed them (GY-2945), with the missing pane. */
-  registryClosed?: { work: string | null; id: string; role: string; pane: string }[];
+  registryClosed?: { work: string | null; id: string; role: string; pane: string | null }[];
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
@@ -841,8 +841,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         // A completed verdict already settled the ledger. Its item may be
         // absent from this snapshot, so the handle-based close step cannot release its slot.
         // Once its pane is gone it needs no second miss, including after a loop restart.
-        if (!orphan.completedReview && !Number.isFinite(first)) continue;
-        const reason = `${orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+        // GY-3116: a closed review no watched pane backs has nothing to miss; it ends at once.
+        if (!orphan.completedReview && !orphan.closedReview && !Number.isFinite(first)) continue;
+        const reason = orphan.closedReview ? `its review record is ${orphan.closedReview} and no watched pane backs it (${orphan.agentName ?? 'no agent name recorded'}), so the review is over`
+          : `${orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
         try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
         catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
       }
