@@ -53,7 +53,11 @@ Missing panes free role capacity after two consecutive misses, including across 
 
 ## Automatic dispatch at submit
 
-The control-plane registry alone owns session capacity: configure every role there; profile concurrency and Herdr names grant no slots. Selection reserves a slot transactionally before the runtime starts and a failed launch returns it. Provider exhaustion is a registry observation every executor honours until reset, even if a fresh probe reports quota. When a submitted attempt's handle is finished and readable inventory confirms its pane gone, reconciliation frees its reservation, even within launch grace; an unreadable inventory is a gap.
+The control-plane registry alone owns session capacity. Configure every role there before launching; profile concurrency and Herdr names do not grant slots. Selection reserves a slot transactionally before the runtime starts, so racing executors cannot both take the last slot or replace an active reservation for the same work. Failed launches return their reservation. Launch history files support resume and diagnostics only; there are no filesystem reservation locks.
+
+Provider exhaustion is reported directly as a registry observation. Every executor skips that account until its reset, even if a fresh provider probe reports available quota. The local environment log records diagnostics and launch attribution, never exhaustion holds. A failed report is an error, not a local fallback.
+
+The loop reads a neutral session inventory from Herdr and headless runners. An unreadable inventory is a gap. When a submitted attempt's matching implementation handle is finished and readable inventory confirms its pane is gone, reconciliation ends its registry reservation, even within launch grace. Live leases and running handles remain reserved; the submitted candidate is preserved and queued work can take the freed slot.
 
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record \`dispatch.abandoned\`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
 
