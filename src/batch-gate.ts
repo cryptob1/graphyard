@@ -87,8 +87,8 @@ export interface GatePorts {
    * affected test as `test:<file>`.
    */
   run(commit: string, checks: readonly string[], files: readonly string[]): Promise<string[]>;
-  /** Reverts the landing from `tip` through the serve-revert path (trial, leased push, re-land filed); answers the revert or why it is held. */
-  revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string }>;
+  /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
+  revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`. */
   file(input: { title: string; description: string; key: string }): Promise<void>;
   /** Called once the gate is in flight, so the record can say so. */
@@ -101,6 +101,7 @@ export type GateOutcome =
   | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[] }
   | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string }
   | { outcome: 'timeout'; tip: string }
+  | { outcome: 'retry'; tip: string; reason: string }
   | { outcome: 'held'; tip: string; reason: string };
 
 class GateTimeout extends Error {}
@@ -178,6 +179,8 @@ export async function runGate(ports: GatePorts, record: GateRecord): Promise<Gat
     for (const landing of owned.slice(0, -1)) if ((await run(landing.sha, [check], files)).includes(check)) { culprit = landing; break; }
     const reverted = await ports.revert(culprit, tip, check);
     if ('held' in reverted) return hold(reverted.held);
+    // A push the moving main rejected blames nothing new: the next cycle gates again.
+    if ('retry' in reverted) return { outcome: 'retry', tip, reason: reverted.retry };
     record.merges = [...record.merges.filter(merge => merge.sha !== culprit.sha), { sha: culprit.sha, item: culprit.item.key, reverted: true }].slice(-revertRateWindow);
     record.attempt = { ...record.attempt, recuts: record.attempt.recuts + 1 };
     return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha };

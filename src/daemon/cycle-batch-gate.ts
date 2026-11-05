@@ -42,15 +42,17 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
     },
     run: (commit, checks, files) => trialChecks(reads, commit, checks, files),
-    revert: async (landing, tip, check) => {
+    revert: async (landing, gated, check) => {
+      // Merges may have landed while the gate ran: the revert goes onto main as it stands now.
+      const tip = (await reads.fetch()).toLowerCase();
       const revert = await revertMergeCommit(git, { mergeSha: landing.sha, before: landing.before, baseTip: tip, subject: landing.subject });
       if ('conflict' in revert) return { held: `the revert of ${landing.item.key}'s merge ${landing.sha.slice(0, 12)} does not apply cleanly on ${tip.slice(0, 12)}: ${revert.conflict.slice(0, 20).join(', ')}` };
       const files = lines(await git(['diff', '--name-only', tip, revert.revertSha]));
       const pushed = await trialAndPushRevert(reads, { revertSha: revert.revertSha, files, baseTip: tip, culpritKey: landing.item.key, mergeSha: landing.sha });
       if ('held' in pushed) return { held: pushed.held };
-      if ('retry' in pushed) return { held: pushed.retry };
+      if ('retry' in pushed) return { retry: pushed.retry };
       const failingCase = check.startsWith('e2e:') ? check.slice(4) : null;
-      const reland = relandItemFor(landing.item, { serve: tip, failingCase: failingCase ?? check, failingStep: null, failingReason: `the batch gate's check ${check} failed`, mergeSha: landing.sha, baseBranch: reads.baseBranch });
+      const reland = relandItemFor(landing.item, { serve: gated, failingCase: failingCase ?? check, failingStep: null, failingReason: `the batch gate's check ${check} failed`, mergeSha: landing.sha, baseBranch: reads.baseBranch });
       // A build or test failure names no case: the re-land carries the original criteria alone.
       await reads.createWork?.(failingCase ? reland : { ...reland, criteria: landing.item.criteria.map(({ id, text, proofs }) => ({ id, text, proofs: [...proofs] })) }, `gate-reland:${landing.sha}`).catch(() => null);
       return { revertSha: revert.revertSha };
