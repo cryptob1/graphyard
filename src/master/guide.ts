@@ -29,7 +29,7 @@ The loop follows the master's live Herdr pane after a move. Weekly/session limit
 
 ### Master wake and delivery progress
 
-The systemd watchdog receives a ping after each completed cycle (\`src/supervisor.ts\`). It restarts a hung loop; it does not prove commits are merging, diagnose failed tests or decide repairs.
+The systemd watchdog receives a ping after each completed cycle (\`src/install/loop-unit.ts\`). It restarts a hung loop; it does not prove commits are merging, diagnose failed tests or decide repairs.
 
 Completed cycles and a pane marked \`working\` alone establish no delivery progress. Diagnose failures with all gates intact.
 

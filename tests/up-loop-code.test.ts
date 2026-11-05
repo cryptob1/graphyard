@@ -217,7 +217,7 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
 async function pinnedReplacement() {
   const { runUp } = await up();
   const { readLoopCode, liftLoopPins, removeHeldCliPin } = await repositorySetup();
-  const { loopUnitText } = await import('../src/supervisor.js');
+  const { loopUnitText } = await import('../src/install/loop-unit.js');
   const { knownGoodCli, knownGoodState } = await import('../src/master/known-good.js');
   const { access } = await import('node:fs/promises');
   const units: InstallUnits = perInstallUnits('acme/shop');
@@ -270,7 +270,7 @@ async function pinnedReplacement() {
 test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphyard manages itself, a loop whose ExecStart starts the managed checkout\'s launcher is rewritten onto this CLI, never only restarted, and goes green on this CLI\'s commit', async () => {
   const { runUp } = await up();
   const { readLoopCode } = await repositorySetup();
-  const { loopUnitText } = await import('../src/supervisor.js');
+  const { loopUnitText } = await import('../src/install/loop-unit.js');
   const units: InstallUnits = perInstallUnits('acme/shop');
   const base = await temporaryDirectory('graphyard-up-loop-self-managed');
   // The managed checkout B (this repository, at the older commit) and this CLI's checkout A at COMMIT.

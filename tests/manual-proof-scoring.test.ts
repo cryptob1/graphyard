@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Evidence, type Observation, type Work } from '../src/model.js';
 import { automatableOutcomes, producerGroupDecisions, producerManualFailures, evidenceProves } from '../src/model/mechanical-proofs.js';
 import { deliveredProof } from '../src/model/bootstrap.js';
 import { classifyProofs } from '../src/cli/verify.js';
 import { proofOutcome } from '../src/producer.js';
-import { actionAccount, nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
 import { neededRework, proofRework } from '../src/daemon/rework.js';
 
 // GY-895. The producer prompts already state the manual-proof rule — a manual: proof is judged,

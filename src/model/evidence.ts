@@ -1,9 +1,7 @@
-import { z } from 'zod';
+import { type ClosedQuestionRecord, reservedForAttestation } from './closed-question.js';
 import type { Work } from './work.js';
 import { evidenceBindsCandidate } from './carry.js';
-import { reservedForAttestation, type ClosedQuestionRecord } from './closed-question.js';
 import { inheritedObligations } from './bootstrap.js';
-
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
 export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
 export interface EvidenceArtifact {
@@ -109,7 +107,7 @@ export function implementerIdentities(work: Work): string[] {
 // an assignment stops being applicable, without any history being rewritten. The
 // loss is reported only for proofs no still-independent producer has re-proved,
 // so re-proving the same candidate remains possible.
-export function evidenceIndependenceRefusals(work: Work, now = new Date()): string[] {
+export function evidenceIndependenceRefusals(work: Work, now: Date): string[] {
   const implementers = implementerIdentities(work);
   const refusals: string[] = [];
   for (const proof of new Set(work.criteria.flatMap(criterion => criterion.proofs))) {
@@ -135,7 +133,7 @@ export function answerCounts(work: Pick<Work, 'producerProofs'>, evidence: Evide
 
 // Shared by gates and human-facing proof previews. A record binds the candidate exactly, or
 // carried across a Graphyard-authored tip (see carry.ts); nothing else applies.
-export function currentEvidence(work: Work, proof: string, now = new Date()): Evidence | undefined {
+export function currentEvidence(work: Work, proof: string, now: Date): Evidence | undefined {
   const scenario = work.scenarioRequirements?.find(s => s.proof === proof);
   const validation = work.validation?.[proof];
   const implementers = implementerIdentities(work);
@@ -196,11 +194,11 @@ export const evaluationRetryBackoffMs = 250;
  * each attempt's time, so a test drives both without the wall clock.
  */
 export async function evaluateWithRecovery(evaluator: string, attempt: () => Promise<'pass' | 'fail' | { error: string }>,
-  options: { retries?: number; backoffMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => Date } = {}): Promise<EvaluationRecord> {
+  options: { retries?: number; backoffMs?: number; sleep?: (ms: number) => Promise<void>; now: () => Date }): Promise<EvaluationRecord> {
   const retries = options.retries ?? evaluationRetries;
   const backoffMs = options.backoffMs ?? evaluationRetryBackoffMs;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
-  const now = options.now ?? (() => new Date());
+  const now = options.now;
   const attempts: EvaluationAttempt[] = [], errors: string[] = [];
   for (;;) {
     let verdict: 'pass' | 'fail' | { error: string };
@@ -216,12 +214,6 @@ export async function evaluateWithRecovery(evaluator: string, attempt: () => Pro
     await sleep(backoffMs * 2 ** (attempts.length - 1));
   }
 }
-
-/** What a producer submits as `exercise`. */
-export const proofExerciseSchema = z.object({
-  criterion: z.string().trim().min(1).max(80).optional(), behaviour: z.string().trim().min(1).max(300),
-  result: z.enum(['pass', 'fail']), executed: z.number().int().min(0),
-}).strict();
 
 /** The criteria a proof is attached to on this item: its own, and any bootstrap obligation it inherited. */
 export function attachedCriteria(work: Work, all: Work[], proof: string): string[] {

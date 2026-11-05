@@ -6,7 +6,7 @@ import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPre
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
-import { withRisk } from '../model/risk-class.js';
+import { withRisk } from '../model-boundary/risk-class.js';
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
@@ -31,7 +31,7 @@ export const workCommands = defineCommands([
       let authorities: ProofAuthority[] = [];
       try { authorities = ((await api('principals')).principals ?? []).map((principal: Principal) => proofAuthority(principal)); } catch { /* reported as unknown authority below */ }
       const authorization = proofAuthorization(item, authorities, snapshot.work);
-      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work),
+      return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work, new Date(snapshot.now)), obligations: inheritedObligations(item, snapshot.work),
         proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });
     },
   },

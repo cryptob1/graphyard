@@ -19,7 +19,8 @@ import { pinnedPython } from '../benchmarks/hard-math/python.js';
 import { fixtureExecutor, writeControlledArtifact } from '../benchmarks/hard-math/fixture.js';
 import { validateReceipt, comparison } from '../benchmarks/hard-math/receipt-schema.js';
 import { routeAccounts } from '../benchmarks/hard-math/routing.js';
-import { emptyRegistry, applyRegistryMutation } from '../src/model/registry.js';
+import { emptyRegistry } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession } from '../src/model/registry-sessions.js';
 import { countProofCases } from '../src/merge-writer/executor.js';
 

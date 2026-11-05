@@ -8,7 +8,8 @@ import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
 import { applicationProblems, caseIdsOf, detectApplications } from './project-applications.js';
-import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, localDeliveryDefaults, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
+import { defaultCandidateSchedule, generatedWorkflowFiles, localDeliveryDefaults, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
+import { deliveryPolicySchema } from './model-boundary/delivery-policy.js';
 import { onboardingBranch, onboardingWorkRequest } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {

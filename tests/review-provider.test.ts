@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeReviewRequired, policySchema, reviewProviderOf } from '../src/model.js';
+import { nativeReviewRequired, reviewProviderOf } from '../src/model.js';
+import { policySchema } from '../src/model-boundary/policy.js';
 
 test('only the reviewer-session provider is accepted, including by default', () => {
   for (const reviewProvider of ['codex', 'agent'])

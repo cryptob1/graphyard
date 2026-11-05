@@ -4,9 +4,10 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
+import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, supersededByRequest, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, registryMutationSchemas, observationRequestSchema, selectionRequestSchema, settleSessions, supersededByRequest,
-  type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { holdLimitNoticeAccount } from './model/account-quota.js';
 
 /**
  * The agent registry as control-plane state.
@@ -30,12 +31,28 @@ export async function readRegistry(db: Pick<pg.PoolClient, 'query'>): Promise<Re
   return row?.registry ?? emptyRegistry();
 }
 
+const appendRegistry = async (db: Pick<pg.PoolClient, 'query'>, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) => {
+  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}${kind}`, JSON.stringify({ change, registry })]);
+};
+
+/**
+ * A session ended on its provider's limit notice (GY-3096): the account it spent is marked exhausted
+ * in the registry, with the notice and its reset, inside the caller's transaction that records the
+ * exhaustion on the item — so no selection by any loop, restarted or not, hands it out before the reset.
+ */
+export async function recordLimitNoticeHold(db: Pick<pg.PoolClient, 'query'>, actor: Principal, notice: Parameters<typeof holdLimitNoticeAccount>[1], now: Date) {
+  const registry = await readRegistry(db), at = now.toISOString();
+  const account = holdLimitNoticeAccount(registry, notice, { actor: actor.id, at });
+  if (!account) return null;
+  registry.revision++; registry.updatedAt = at;
+  await appendRegistry(db, actor, 'observed', registry, { limitNotice: { account, work: notice.work, role: notice.role, reason: notice.reason, resetsAt: notice.resetsAt } });
+  return account;
+}
+
 export class AgentRegistry {
   constructor(private store: Store) {}
 
-  private async append(db: pg.PoolClient, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) {
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}${kind}`, JSON.stringify({ change, registry })]);
-  }
+  private append(db: pg.PoolClient, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) { return appendRegistry(db, actor, kind, registry, change); }
   /** The work items live sessions were launched for: all that session liveness reads. */
   private async sessionWork(db: Pick<pg.PoolClient, 'query'>, registry: RegistryDocument) {
     const keys = [...new Set(liveSessions(registry).map(session => session.work).filter((key): key is string => !!key))];
@@ -134,6 +151,8 @@ export class AgentRegistry {
           selectedAt: at, selectedBy: actor.id, reason: choice.reason, skipped: choice.skipped, endedAt: null, endReason: null };
         registry.sessions.push(session); registry.revision++; registry.updatedAt = at;
         await this.append(db, actor, 'selected', registry, { session });
+        // A role served past its own accounts says so in the registry history (GY-3092).
+        if (choice.failover) await this.append(db, actor, 'failover', registry, { failover: { ...choice.failover, session: session.id, work: request.work } });
         result = { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, policy: choice.policy, revision: registry.revision };
       } else {
         const last = registry.refusals.at(-1);

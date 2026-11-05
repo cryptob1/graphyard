@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
+import type { AgentRegistry } from '../model/registry.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
 import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
@@ -194,6 +195,7 @@ const environmentLogSchema = z.object({
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
   exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable(),
     identity: z.string().nullable().optional(), home: z.string().optional(), kind: z.string().optional(), reported: z.boolean().optional() }).strict()).default({}),
+  released: z.record(z.string(), z.string()).optional(),
 }).strict();
 /**
  * An account a running session exhausted. The provider's own usage endpoint may lag behind the
@@ -207,7 +209,7 @@ const environmentLogSchema = z.object({
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
-export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion>; /** When an operator last released each account's hold (GY-3100): no notice read before it holds the account again. */ released?: Record<string, string> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
 export const profileAccount = (profile: string) => `profile:${profile}`;
 /**
@@ -281,6 +283,25 @@ async function keepIdentities(config: Pick<MasterConfig, 'credentialFile'>, pend
 /** The accounts still held by an observed exhaustion at `now`. */
 export const observedExhaustions = async (config: Pick<MasterConfig, 'credentialFile'>, now = Date.now()): Promise<Record<string, ObservedExhaustion>> =>
   Object.fromEntries(Object.entries((await readEnvironmentLog(config)).exhausted ?? {}).filter(([, held]) => Date.parse(held.until) > now));
+/**
+ * Holds an operator overruled (GY-3100): an account the agent registry shows an operator set
+ * available after this host held it is released here, and the release remembered, so neither this
+ * host's reports nor a later read of a notice printed before it mark it spent again. Returns the holds that stand.
+ */
+export async function releaseOperatorClearedHolds(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'hostId'>>, held: Record<string, ObservedExhaustion>, registry: Pick<AgentRegistry, 'accounts'> | null | undefined, now = Date.now()) {
+  const cleared = Object.entries(held).filter(([name, hold]) => {
+    const quota = registry?.accounts.find(entry => entry.name === name && (!config.hostId || entry.credential.host === config.hostId))?.quota;
+    return quota?.source === 'operator' && quota.state === 'available' && Date.parse(quota.observedAt ?? '') > Date.parse(hold.at);
+  });
+  if (!cleared.length) return held;
+  const log = await readEnvironmentLog(config), at = new Date(now).toISOString();
+  log.released = Object.fromEntries(Object.entries(log.released ?? {}).filter(([, when]) => now - Date.parse(when) < 2 * 86_400_000));
+  for (const [name] of cleared) { delete log.exhausted[name]; log.released[name] = at; }
+  await atomicPrivateWrite(environmentLogPath(config), log);
+  return Object.fromEntries(Object.entries(held).filter(([name]) => !cleared.some(([other]) => other === name)));
+}
+/** Whether an operator released `account` after `instant` (GY-3100): a notice printed by then is already applied and never applied again. */
+export const releasedSince = async (config: Pick<MasterConfig, 'credentialFile'>, account: string, instant: string) => Date.parse((await readEnvironmentLog(config)).released?.[account] ?? '') >= Date.parse(instant);
 export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string; group?: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
@@ -326,7 +347,7 @@ export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'
   const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs) : null); if (!client) return probe;
   let document: Awaited<ReturnType<FleetClient['document']>> | undefined; const launched = (await readEnvironmentLog(config)).environments; // a same-named hold is judged by the registry account's home (GY-1574)
   return { ...probe, registry: { document: async () => (document = await client.document()), end: (session, reason, outcome) => client.end(session, reason, outcome),
-    select: async request => { const registry = document ?? await client.document().catch(() => undefined); return client.select({ ...request, observations: request.observations.map(entry => ({ ...entry, quota: heldOverlay(held, entry.account, entry.quota, registryLogin(registry, config.hostId, entry.account), launched[entry.account]) })) }); } } };
+    select: async request => { const registry = document ?? await client.document().catch(() => undefined), standing = await releaseOperatorClearedHolds(config, held, registry, probe.now?.() ?? Date.now()); return client.select({ ...request, observations: request.observations.map(entry => ({ ...entry, quota: heldOverlay(standing, entry.account, entry.quota, registryLogin(registry, config.hostId, entry.account), launched[entry.account]) })) }); } } };
 }
 /** The registry's choice for a role it defines, recorded in the environment log; null when the registry does not define the role. */
 export async function selectRegistryAccount(config: Pick<MasterConfig, 'credentialFile' | 'run'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, role: LaunchRole, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {

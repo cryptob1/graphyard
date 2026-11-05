@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { foldMergeLedger } from '../src/model/merge-ledger.js';
+import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
 import { mergePipeline, withMergePipeline } from '../src/pipeline-speed.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';

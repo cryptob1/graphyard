@@ -24,12 +24,12 @@ export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 
   return 0;
 }
 
-/** One queued control-plane candidate, oldest submission first. */
+/** One queued control-plane candidate, highest priority first, oldest on ties. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
 export interface MergeQueue {
   /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
   next: Work | null;
-  /** Every candidate due a merge, oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
+  /** Every candidate due a merge, highest priority then oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
   due: Work[];
   queue: QueuedMerge[];
   /** The item whose open intent (or unreconciled push) holds the queue until it is reconciled; null when none does. */
@@ -59,7 +59,7 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
     ? { reason: state.refusal.reason } : null;
 }
 /**
- * The control-plane candidates owed a merge, hotfixes and base-failure repairs first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
+ * The control-plane candidates owed a merge, hotfixes and base-failure repairs first, then by priority (0 first, GY-3098), then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
  * and `review` gates passed as the control plane served them: its review gate fails a sensitive delta until its
  * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
@@ -83,9 +83,9 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
     return true;
-  // The oldest item first, by when it was filed, not by its latest submission: lead time runs from release, so a head
-  // redone after a refusal goes ahead of newer work instead of rejoining at the back.
-  }).sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
+  // The order dispatch releases in (GY-3098): highest priority first, then the oldest item, by when it was filed, not by its latest
+  // submission: lead time runs from release, so a head redone after a refusal goes ahead of newer work instead of rejoining at the back.
+  }).sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || a.priority - b.priority || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
   return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
 }

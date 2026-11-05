@@ -9,7 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark, wholeFindings } from '../src/model/post-merge-review.js';
 import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';

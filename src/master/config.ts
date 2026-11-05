@@ -9,7 +9,7 @@ import { sessionName } from '../session-name.js';
 import { discover, assertRepository, localDirectory, saveDiscovery } from '../onboarding.js';
 import { serverOrigin, loadConnection, managedInstructions } from '../repository-setup.js';
 import { launchPlan } from '../harness.js';
-import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
+import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../install/loop-unit.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';

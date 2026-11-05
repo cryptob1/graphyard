@@ -6,7 +6,7 @@ import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
-import { watchAssignment } from '../supervisor.js';
+import { watchAssignment } from '../session-watch.js';
 import type { WorkerProfile } from './profiles.js';
 import { type HerdrAgent, listHerdrAgents } from './herdr.js';
 

@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
+import { evaluateLandability } from '../src/model-boundary/landability.js';
+import { landabilityRefusals } from '../src/model/landability.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
+import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
+import { mergeTrialKind } from '../src/model/merge-ledger.js';
 import { mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';

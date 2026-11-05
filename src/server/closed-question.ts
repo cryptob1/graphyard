@@ -1,9 +1,10 @@
-import { appendEvidence } from '../model/append-evidence.js';
+import { appendEvidence } from '../model-boundary/append-evidence.js';
 import { once, receipt } from '../store/mutations.js';
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { demand, type Evidence, type Principal, type Work } from '../model.js';
-import { appliedThreshold, closedQuestionFor, closedQuestionRefusal, closedQuestionRequestSchema, judgeAnswer, type ClosedQuestionRecord } from '../model/closed-question.js';
+import { appliedThreshold, closedQuestionFor, closedQuestionRefusal, judgeAnswer, type ClosedQuestionRecord } from '../model/closed-question.js';
+import { closedQuestionRequestSchema } from '../model-boundary/closed-question.js';
 import { boundState, type StateReaders } from '../closed-question.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';

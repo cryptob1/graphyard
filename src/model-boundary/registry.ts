@@ -1,0 +1,255 @@
+import { z } from 'zod';
+import { secretName, isAbsolute, capabilityTiers, quotaStates, registryRoles, type AgentRegistry, type RegistryMutation, type FleetAccount, type FleetRuntime, upsert, demandRegistry, registryLimits, type FleetModel, type FleetAccountInput, unobservedQuota, type FleetRole, roleRuntimeRefusal } from '../model/registry.js';
+import { notSecret, secretPaths } from '../model/registry-keys.js';
+import { accountKeySchema, smokeObservationSchema } from './registry-keys.js';
+/**
+ * The agent registry: the fleet as control-plane state (GY-91).
+ *
+ * A *runtime* is an agent CLI and the launch contract every session of it starts with. An
+ * *account* is one login of a runtime: it references where the credential lives (a host and a
+ * home directory) and never holds the credential, runs one *model*, and carries the quota state
+ * executors last observed for it. A *role* names the accounts that may serve it, in preference
+ * order, and how many sessions of the role may run at once. Executors ask the control plane for a
+ * session when they run an action; the choice — the first eligible account — is made here, inside
+ * the coordination transaction, and recorded with its reason. Nothing in this file names a
+ * particular runtime or account: the built-in contracts below are what setup *proposes*, and only
+ * what the registry stores is ever launched.
+ */
+const entryName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/, 'Use letters, digits, dot, underscore or dash (at most 80 characters)');
+const hostName = z.string().trim().min(1).max(200).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'A host id cannot contain control characters');
+const text = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed');
+
+const launchEnvironment = z.record(
+  z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher').refine(name => !secretName.test(name), 'A launch contract never carries a secret; the credential lives in the runtime login the account references'),
+  z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Environment values cannot contain control characters').refine(notSecret, 'That value looks like a credential; the registry stores references, never secrets'),
+).default({});
+
+/**
+ * How a session of a runtime is started. `kind` is what the session host launches (the agent
+ * kind it knows the executable by). `args` are the runtime's own non-interactive startup arguments,
+ * `homeVariable` the variable that points the CLI at one account's login home, `modelFlag` the
+ * argument that selects the account's model, `login` the command an operator runs to log an
+ * account in (`{home}` stands for the account's home), and `loginFile` a path inside the home
+ * whose presence means the account is logged in, for runtimes Graphyard has no richer probe for.
+ */
+export const launchContractSchema = z.object({
+  kind: entryName,
+  args: z.array(z.string().max(1000).refine(notSecret, 'That argument looks like a credential; the registry stores references, never secrets')).max(30).default([]),
+  environment: launchEnvironment,
+  homeVariable: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher').nullable().default(null),
+  modelFlag: z.string().regex(/^--?[a-zA-Z][a-zA-Z0-9-]*$/).nullable().default(null),
+  login: z.string().trim().min(1).max(500).refine(notSecret, 'A login command names how to log in, never the credential').nullable().default(null),
+  loginFile: z.string().trim().min(1).max(200).refine(value => !isAbsolute(value) && !value.split('/').includes('..'), 'loginFile is a path inside the account home').nullable().default(null),
+  /** The argument that limits a session to a tool allowlist (a role's `policy.tools`, joined by commas); null when the runtime has none. */
+  toolsFlag: z.string().regex(/^--?[a-zA-Z][a-zA-Z0-9-]*$/).nullable().optional(),
+}).strict();
+
+export const runtimeSchema = z.object({
+  name: entryName,
+  description: text(300).optional(),
+  launch: launchContractSchema,
+}).strict();
+/** A model an account runs: what it costs and what it is good for, so role order can weigh both. */
+export const modelSchema = z.object({
+  name: entryName,
+  provider: text(100).optional(),
+  /** The identifier handed to the runtime's model flag; null runs the account's own default. */
+  id: z.string().trim().min(1).max(200).refine(notSecret, 'A model id is a name, never a credential').nullable().default(null),
+  /** US dollars per million tokens; null when the account is a flat subscription or unknown. */
+  cost: z.object({ inputPerMTok: z.number().min(0).max(100_000).nullable().default(null), outputPerMTok: z.number().min(0).max(100_000).nullable().default(null) }).strict().prefault({}),
+  capability: z.object({ tier: z.enum(capabilityTiers).default('strong'), contextTokens: z.number().int().min(1000).max(100_000_000).nullable().default(null), notes: text(300).optional() }).strict().prefault({}),
+}).strict();
+export const usageSchema = z.object({ window: text(40), percent: z.number().min(0).max(1000), resetsAt: z.string().datetime().nullable() }).strict();
+/** What was last observed about an account: by an executor's probe on its host, or marked by an operator. */
+export const quotaObservationSchema = z.object({
+  loggedIn: z.boolean().nullable().default(null),
+  state: z.enum(quotaStates).default('unknown'),
+  usage: z.array(usageSchema).max(10).default([]),
+  resetsAt: z.string().datetime().nullable().default(null),
+  reason: text(500).nullable().default(null),
+  /**
+   * The provider login behind the account (GY-1573): its runtime kind and a digest of the provider's own
+   * account and organization ids, read from the login home. Two accounts with one identity are one
+   * subscription, spent together; null when the login names none Graphyard can read, absent when a
+   * probe could not read the login file just now and the identity last read stands.
+   */
+  identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
+  /** A session that ran out mid-work reported this exhaustion (GY-1581); it stands against later probes until its reset.
+   * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account. */
+  session: z.enum(['named', 'guessed']).optional(),
+}).strict();
+
+/**
+ * One login of a runtime. The credential is held by reference: the host whose filesystem holds
+ * the login and the home directory it lives in (null for a runtime's own default login). That
+ * host is also the account's placement — a session can only start where the login is.
+ */
+export const accountSchema = z.object({
+  name: entryName,
+  runtime: entryName,
+  model: entryName,
+  credential: z.object({
+    host: hostName,
+    home: z.string().min(1).max(500).refine(isAbsolute, 'An account home is an absolute path on its host').refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed').nullable().default(null),
+    /** How an API-key runtime's key reaches a headless run (GY-446): a reference, never the key. */
+    key: accountKeySchema.optional(),
+  }).strict(),
+  enabled: z.boolean().default(true),
+  maxSessions: z.number().int().min(1).max(100).nullable().default(null),
+  plan: text(100).optional(),
+  note: text(300).optional(),
+}).strict();
+/**
+ * How every session of a role is launched, whichever account serves it (GY-170): the runtime
+ * flags it starts with beyond its runtime's contract — a permission mode, an auto-approve flag —
+ * the tools it may use, and the model it runs in place of each account's own. The launcher still
+ * refuses flags that would let a session stop to ask (src/harness.ts), so a policy narrows what a
+ * session may do and never brings a prompt back. Like everything else here it holds no secret.
+ */
+export const rolePolicySchema = z.object({
+  args: z.array(z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed').refine(notSecret, 'That argument looks like a credential; the registry stores references, never secrets')).max(30).default([]),
+  /** The tools a session may use, passed on the runtime's `toolsFlag`; empty leaves the runtime's own set. */
+  tools: z.array(z.string().trim().min(1).max(200).refine(value => !value.includes(','), 'One tool per entry').refine(notSecret, 'A tool is a name, never a credential')).max(100).default([]),
+  /** A registered model this role runs instead of each account's own; null keeps the account's. */
+  model: entryName.nullable().default(null),
+}).strict();
+export const roleSchema = z.object({
+  name: z.enum(registryRoles),
+  /** Eligible accounts, most preferred first. */
+  accounts: z.array(entryName).max(50).refine(list => new Set(list).size === list.length, 'A role lists each account once'),
+  /** How many sessions of this role may run at once; 0 pauses the role. */
+  concurrency: z.number().int().min(0).max(100),
+  /** The role's launch policy; a role stored before GY-170 has none, which is the empty policy. */
+  policy: rolePolicySchema.optional(),
+}).strict();
+
+const reason = text(2000);
+export const registryMutationSchemas = {
+  'runtime.set': z.object({ runtime: runtimeSchema, reason }).strict(),
+  'runtime.remove': z.object({ name: entryName, reason }).strict(),
+  'model.set': z.object({ model: modelSchema, reason }).strict(),
+  'model.remove': z.object({ name: entryName, reason }).strict(),
+  'account.set': z.object({ account: accountSchema, reason }).strict(),
+  'account.remove': z.object({ name: entryName, reason }).strict(),
+  'account.quota': z.object({ name: entryName, quota: quotaObservationSchema, reason }).strict(),
+  'role.set': z.object({ role: roleSchema, reason }).strict(),
+  'role.remove': z.object({ name: z.enum(registryRoles), reason }).strict(),
+  /** A whole proposal at once, in dependency order: what setup discovers and an operator accepts. */
+  apply: z.object({ runtimes: z.array(runtimeSchema).max(50).default([]), models: z.array(modelSchema).max(100).default([]), accounts: z.array(accountSchema).max(200).default([]), roles: z.array(roleSchema).max(registryRoles.length).default([]), reason }).strict(),
+} as const;
+
+export const selectionRequestSchema = z.object({
+  role: z.enum(registryRoles),
+  host: hostName,
+  work: z.string().trim().min(1).max(40).nullable().default(null),
+  principal: z.string().trim().min(1).max(200).nullable().default(null),
+  /** A producer's proof group, or a personal master's human owner; other roles name none. */
+  group: z.string().trim().min(1).max(200).nullable().default(null),
+  /** Which runtimes a worker is tried on first (GY-1746): `fast` tries Pi accounts before the rest of the role's order, `strong` tries every other runtime before Pi; null keeps the role's own order. `exclude` lists accounts this dispatch already failed to start a session on, passed over so the next account takes the launch. */
+  prefer: z.enum(['fast', 'strong']).nullable().default(null),
+  exclude: z.array(entryName).max(50).default([]),
+  /** What the executor just observed about the accounts that live on its host. */
+  observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
+}).strict();
+/** What an executor reports of its own host's accounts between selections (GY-1573): a hold a session just saw. */
+export const observationRequestSchema = selectionRequestSchema.pick({ host: true, observations: true }).strict();
+
+/**
+ * Apply one configuration change to a copy of the registry, keeping every reference whole. An
+ * account names a runtime and a model that exist; a role names accounts that exist. Removing an
+ * account takes it out of every role, and removing a runtime removes its accounts the same way,
+ * so the roles that used them fall back to the accounts that remain, in the order they held.
+ */
+export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMutation, input: unknown, context: { actor: string; at: string }) {
+  const next: AgentRegistry = structuredClone(current);
+  const removed = { accounts: [] as string[], roles: {} as Record<string, string[]> };
+  const dropAccounts = (names: string[]) => {
+    for (const name of names) {
+      next.accounts = next.accounts.filter(account => account.name !== name); removed.accounts.push(name);
+      for (const role of next.roles) if (role.accounts.includes(name)) { role.accounts = role.accounts.filter(entry => entry !== name); (removed.roles[role.name] ??= []).push(name); }
+      for (const session of next.sessions) if (session.account === name && !session.endedAt) { session.endedAt = context.at; session.endReason = `account ${name} was removed from the registry`; }
+    }
+  };
+  const retest = (names: (account: FleetAccount) => boolean) => { for (const account of next.accounts) if (names(account)) { delete account.smoke; delete account.unjudged; } };
+  const setRuntime = (runtime: FleetRuntime) => { upsert(next.runtimes, runtime); retest(account => account.runtime === runtime.name); demandRegistry(next.runtimes.length <= registryLimits.runtimes, `The registry holds at most ${registryLimits.runtimes} runtimes`); };
+  const setModel = (model: FleetModel) => { upsert(next.models, model); retest(account => account.model === model.name); demandRegistry(next.models.length <= registryLimits.models, `The registry holds at most ${registryLimits.models} models`); };
+  const setAccount = (account: FleetAccountInput) => {
+    demandRegistry(next.runtimes.some(runtime => runtime.name === account.runtime), `Unknown runtime ${account.runtime}; add the runtime before its accounts`);
+    demandRegistry(next.models.some(model => model.name === account.model), `Unknown model ${account.model}; add the model before the accounts that run it`);
+    const existing = next.accounts.find(entry => entry.name === account.name);
+    // A login that moved is a different login: what was observed about the old one says nothing about it.
+    const sameLogin = existing && existing.runtime === account.runtime && existing.credential.host === account.credential.host && existing.credential.home === account.credential.home;
+    // Any change to an account is tested again before it takes a session (GY-446), and clears the
+    // holds its earlier runs set: the change is what an operator makes to fix it.
+    // Its identity is read again by the next probe (GY-1573): the operator may have logged the home in afresh.
+    // The registry's copy of a session's exhaustion report is one (GY-1581); its reporting host re-reports its own until the reset.
+    const { session: _held, ...kept } = existing?.quota ?? unobservedQuota;
+    upsert(next.accounts, { ...account, quota: sameLogin ? { ...kept, identity: null } : { ...unobservedQuota } });
+    demandRegistry(next.accounts.length <= registryLimits.accounts, `The registry holds at most ${registryLimits.accounts} accounts`);
+  };
+  const setRole = (role: FleetRole) => {
+    const unknown = role.accounts.filter(name => !next.accounts.some(account => account.name === name));
+    demandRegistry(!unknown.length, `Unknown account${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}; add an account before the role that names it`);
+    const model = role.policy?.model;
+    demandRegistry(!model || next.models.some(entry => entry.name === model), `Unknown model ${model}; add the model before the role policy that runs it`);
+    // A stored role refuses what it cannot launch, naming the runtime and the ones it supports; the registry stands unchanged.
+    const unsupported = role.accounts.flatMap(name => {
+      const account = next.accounts.find(entry => entry.name === name)!; // unknown accounts already refused above
+      const refusal = roleRuntimeRefusal(next, account, role.name);
+      return refusal ? [refusal] : [];
+    });
+    demandRegistry(!unsupported.length, unsupported.join('; '));
+    upsert(next.roles, role.name === 'master' ? { ...role, concurrency: Math.min(role.concurrency, 1) } : role); // One master session per ownership scope; all scopes share one coordinator loop.
+  };
+  let reasonText: string;
+  if (kind === 'runtime.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRuntime(data.runtime); }
+  else if (kind === 'runtime.remove') {
+    const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
+    demandRegistry(next.runtimes.some(runtime => runtime.name === data.name), `Unknown runtime ${data.name}`);
+    next.runtimes = next.runtimes.filter(runtime => runtime.name !== data.name);
+    dropAccounts(next.accounts.filter(account => account.runtime === data.name).map(account => account.name));
+  }
+  else if (kind === 'model.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setModel(data.model); }
+  else if (kind === 'model.remove') {
+    const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
+    demandRegistry(next.models.some(model => model.name === data.name), `Unknown model ${data.name}`);
+    const users = next.accounts.filter(account => account.model === data.name).map(account => account.name);
+    demandRegistry(!users.length, `Model ${data.name} is what ${users.join(', ')} run${users.length === 1 ? 's' : ''}; point ${users.length === 1 ? 'that account' : 'those accounts'} at another model first`);
+    const roles = next.roles.filter(role => role.policy?.model === data.name).map(role => role.name);
+    demandRegistry(!roles.length, `Model ${data.name} is what the ${roles.join(', ')} role policy runs; change that policy first`);
+    next.models = next.models.filter(model => model.name !== data.name);
+  }
+  else if (kind === 'account.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setAccount(data.account); }
+  else if (kind === 'account.remove') {
+    const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
+    demandRegistry(next.accounts.some(account => account.name === data.name), `Unknown account ${data.name}`);
+    dropAccounts([data.name]);
+  }
+  else if (kind === 'account.quota') {
+    const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
+    const account = next.accounts.find(entry => entry.name === data.name);
+    demandRegistry(account, `Unknown account ${data.name}`);
+    // An operator marks the quota, not the login: the identity a probe read stays unless the mark names one, and a mark
+    // naming null clears it, so an account whose login is now unknown is no longer anyone's twin (GY-1573).
+    account.quota = { ...data.quota, reason: data.quota.reason ?? data.reason.slice(0, 500), identity: data.quota.identity !== undefined ? data.quota.identity : account.quota.identity ?? null, observedAt: context.at, observedBy: context.actor, source: 'operator' };
+  }
+  else if (kind === 'role.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRole(data.role); }
+  else if (kind === 'role.remove') {
+    const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason;
+    demandRegistry(next.roles.some(role => role.name === data.name), `Role ${data.name} is not configured`);
+    next.roles = next.roles.filter(role => role.name !== data.name);
+  }
+  else {
+    const data = registryMutationSchemas.apply.parse(input); reasonText = data.reason;
+    demandRegistry(data.runtimes.length + data.models.length + data.accounts.length + data.roles.length > 0, 'The proposal is empty; nothing to apply');
+    data.runtimes.forEach(setRuntime); data.models.forEach(setModel); data.accounts.forEach(setAccount); data.roles.forEach(setRole);
+  }
+  // Past each field's own check, the registry holds references, never secrets: a write carrying
+  // anything that looks like a credential, in any field, is refused whole (GY-446).
+  const pasted = secretPaths(input);
+  demandRegistry(!pasted.length, `${pasted.join(', ')} look${pasted.length === 1 ? 's' : ''} like a credential; the registry stores references (a key file and the variable it is read into), never the key`);
+  next.revision = current.revision + 1; next.updatedAt = context.at;
+  next.lastMutation = { kind, actor: context.actor, at: context.at, reason: reasonText };
+  return { registry: next, removed };
+}
+export * from './registry-keys.js';

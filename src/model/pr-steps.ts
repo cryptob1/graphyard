@@ -1,4 +1,5 @@
-import { isClosed, type Gate, type Work } from '../model.js';
+import { isClosed } from './closure.js';
+import type { Gate, Work } from './work.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
@@ -92,7 +93,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (ready !== undefined) {
         // A dependency waits for the other item to ship; a blocker is named, never restated: the row's
         // own line carries its one-sentence summary (GY-1739), the item page's details its text.
-        if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready').text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
+        if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready', now).text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
         return { detail: 'held by a recorded blocker', who: 'Master agent' };
       }
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
@@ -143,10 +144,10 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // beside those refusals (src/model/gates.ts), so they are read first: waiting a turn in line
       // is automatic only when nothing else holds the merge.
       const master = reasons.find(reason => mergeMasterClears.test(reason));
-      if (master) return { detail: plainReason(master, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
+      if (master) return { detail: plainReason(master, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
       const builder = reasons.find(reason => mergeBuilderClears.test(reason));
-      if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
-      const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
+      if (builder) return { detail: plainReason(builder, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
+      const stuck = reasons.map(reason => plainReason(reason, 'merge', now)).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
   }

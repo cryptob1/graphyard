@@ -1,0 +1,15 @@
+{
+  "id": "single-account-exhaustion-keeps-pipeline-running",
+  "title": "One exhausted account never stops the pipeline while another account can work",
+  "description": "Runs the agent registry suite against a real control plane: worker, reviewer, producer and master all configured on one exhausted account launch on a second usable account with no registry change, the failover recorded in registry history, and the first account leads again once its usage window resets.",
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "single account exhaustion keeps every role running",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/agent-registry.test.ts tests/role-fleet-failover.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
