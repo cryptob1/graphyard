@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { applyRegistryMutation, emptyRegistry, fleetView, foldObservation, recordRunOutcome, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, recordRunOutcome, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { accountStatus, countdown, localTime, roleLaunch, whenText } from '../web/agent-status.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 

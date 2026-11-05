@@ -5,7 +5,6 @@ import { Store } from '../store.js';
 import { waitForDatabase } from '../store/pools.js';
 import { Engine } from '../engine.js';
 import { demand } from '../model.js';
-import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
@@ -33,14 +32,13 @@ export async function main(options: MainOptions = {}) {
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
-  const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
   // The configured roster is the one this installation runs with: an over-limit roster starts with a warning.
   const knownPrincipals = credentials.map(credential => credential.id);
   const build = buildIdentity();
   // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
   const provider = productionProvider(process.env, fetch);
   const production = new ProductionWatch(store, { provider, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main' });
-  const http = server(engine, credentials, artifacts, { knownPrincipals, production });
+  const http = server(engine, credentials, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
   // runs with against the managed repository's manifest and name the command that fixes it.
@@ -50,20 +48,14 @@ export async function main(options: MainOptions = {}) {
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
   const { validation, delivery } = http.services;
-  console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
 
-  // Startup validation (GY-1127): artifact expiry and the full validation reconcile took minutes
-  // against a busy database and held http.listen past the deploy's 120 s healthcheck. The port now
-  // opens first; until startup validation completes, /healthz reports `readiness: false`, every
-  // mutation that could act on unvalidated state is refused with a retryable 503, and the
-  // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it.
+  // Serve liveness while loading production state; mutations wait for readiness.
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
   services.readiness = false;
-  const runStartupValidation = async () => {
+  const runStartup = async () => {
     if (ready || validating || closing) return;
     validating = true;
     const task = (async () => {
@@ -74,14 +66,12 @@ export async function main(options: MainOptions = {}) {
           prepared = true;
         }
         if (closing) return;
-        mark('validation.expireArtifacts'); await validation.expireArtifacts();
-        if (closing) return;
-        mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+        mark('startup done');
         if (closing) return;
         ready = true; services.readiness = true;
         startBackground();
       } catch (error) {
-        if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
+        if (!closing) console.error('startup initialization failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
       } finally {
         validating = false;
       }
@@ -108,7 +98,7 @@ export async function main(options: MainOptions = {}) {
   http.on('request', (req: IncomingMessage, res: ServerResponse) => {
     if (!ready && refusedBeforeReady(req.method, req.url)) {
       res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' });
-      res.end(JSON.stringify({ error: 'Startup validation has not completed; retry shortly', retryable: true }));
+      res.end(JSON.stringify({ error: 'Startup initialization has not completed; retry shortly', retryable: true }));
       return;
     }
     handle(req, res);
@@ -116,10 +106,9 @@ export async function main(options: MainOptions = {}) {
   let receiptsPrunedAt = 0, ledgerCompactedAt = 0;
   const stopPlaneBeat = await engine.startPlaneBeat(); // the gap since the previous process ticked is on the record before the first heartbeat is answered (GY-1791)
   const reconciliation = startReconciliation(async step => {
-    if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
+    if (!ready) { await step('startup', () => runStartup()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
-    await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
     await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
     // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
     if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
@@ -128,7 +117,7 @@ export async function main(options: MainOptions = {}) {
   }, 2000);
   http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}`));
   await once(http, 'listening');
-  void runStartupValidation();
+  void runStartup();
 
   const close = async () => {
     closing = true;
@@ -140,11 +129,11 @@ export async function main(options: MainOptions = {}) {
   };
   const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
-  return { http, store, validation, runStartupValidation, isReady: () => ready, close };
+  return { http, store, validation, runStartup, isReady: () => ready, close };
 }
 
 /**
- * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
+ * Whether a request is refused while startup initialization runs (GY-1127): every mutation under /api
  * except a work lease heartbeat, which reads no validation state and would otherwise lapse leases
  * for the whole startup window. Reads stay open, and /healthz answers liveness throughout.
  */

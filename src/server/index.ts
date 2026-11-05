@@ -2,9 +2,8 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
-import { artifactCapacityFromEnv } from '../artifacts.js';
 import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule } from './routes.js';
-import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ArtifactOptions, type ServerOptions } from './auth.js';
+import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
@@ -19,7 +18,7 @@ import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
 export { principalSchema, type Credential } from './principals.js';
-export type { ArtifactOptions, ServerOptions } from './auth.js';
+export type { ServerOptions } from './auth.js';
 export { assembleServices } from './auth.js';
 
 /** Routes that answer without a bearer token. */
@@ -40,9 +39,8 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 
-export function server(engine: Engine, credentials: Credential[], artifacts: ArtifactOptions | null = null, options: ServerOptions = {}) {
-  const artifactOptions: ArtifactOptions = artifacts ?? { backend: null, capacityBytes: artifactCapacityFromEnv() };
-  const services = assembleServices(engine, credentials, artifactOptions, options);
+export function server(engine: Engine, credentials: Credential[], options: ServerOptions = {}) {
+  const services = assembleServices(engine, credentials, options);
   const unauthenticated: Principal = { id: '', role: 'reader' };
   // The services ride on the server so the entry announces decisions without reassembling.
   return Object.assign(createServer(async (req, res) => {

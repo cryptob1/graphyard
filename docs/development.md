@@ -15,6 +15,8 @@ Typechecking enforces `noUnusedLocals` across source, web, and tests. Remove unu
 | Generated AGENTS.md block | `src/repository-setup.ts` |
 | Protocol guides | `docs/protocol/` |
 
+Every runtime import in `src/model/` stays within that directory, including library imports. Zod schemas, hashing, configuration loaders and the operations that need them live in `src/model-boundary/`; model references to their inferred types are type-only. The `src/model.ts` facade exports both layers for consumers. Pass the caller's clock explicitly through gate evaluation, evidence selection, dispatch and proof previews. `tests/model-purity.test.ts` checks this boundary and evidence expiry. Schema generations live in `src/store/schema-lineage.ts`.
+
 Claim work and use its assigned worktree before editing ([AGENTS.md](../AGENTS.md)).
 
 Keep runtime helpers below launch and coordination modules: environment-file parsing in `src/env-file.ts`, test-host detection in `src/runtime-environment.ts`, private file I/O in `src/private-file.ts`, loop-code readings in `src/loop-code.ts`, and review wording in `src/review-prompt.ts`. Daemon schemas live beside state, separate from cycle execution. `tests/import-cycles.test.ts` counts static imports, re-exports and literal dynamic imports, excluding type-only edges; no runtime component may exceed three modules.
@@ -75,7 +77,7 @@ Edit handwritten guides and their `<!-- page: Section | order | summary -->` met
 
 Diagram specs live in `scripts/render-docs-diagrams.mjs`. The opening video has a separate HTML source and renderer under `scripts/walkthrough/`; [rendering instructions](walkthrough.md) cover both committed media assets.
 
-Mutation bookkeeping lives in `src/store/mutations.ts`: call `once(db, actor, key, input, fn)` inside the existing transaction and locks. It fingerprints input, replays the recorded result and refuses changed input with HTTP 409. `record` appends history. Use `appendEvidence(work, evidence, db)` from `src/model/append-evidence.ts` to append evidence and its scenario run together. External I/O stays outside the transaction; receipt preflight reads never replace the transactional check.
+Mutation bookkeeping lives in `src/store/mutations.ts`: call `once(db, actor, key, input, fn)` inside the existing transaction and locks. It fingerprints input, replays the recorded result and refuses changed input with HTTP 409. `record` appends history. Use `appendEvidence(work, evidence, db)` from `src/model-boundary/append-evidence.ts` to append evidence and its scenario run together. External I/O stays outside the transaction; receipt preflight reads never replace the transactional check.
 
 Schema generation 13 retires job holds and their status fields, the unused work-index owner, epoch and next-action columns, and the legacy merger pin and production observation tables. Startup migrates existing databases and rebuilds the work index; fresh databases omit those fields. Repeating the migration skips column removal when the index projection is unchanged, so live writers do not block startup. Job scheduling still uses wake generations, due times and lease tokens.
 

@@ -9,7 +9,6 @@ import { operatorAgentTables } from './tables/operator-agents.js';
 import { validationTables } from './tables/validation.js';
 import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
-import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { planeLivenessTables } from './tables/plane-liveness.js';
 
@@ -19,12 +18,12 @@ import { planeLivenessTables } from './tables/plane-liveness.js';
  */
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...attributionTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables,
   ...schemaGenerationTables, ...planeLivenessTables, humanSignInSessions,
 ];
 
 /** Tables retired from the schema and logical backups. */
-export const retiredTables = ['flow_facts', 'flow_projection', 'flow_projection_state', 'deployment_merge_observations', 'deployment_observations', 'proof_grants', 'proof_grant_history', 'merger_default_pin', 'production_observation_merges', 'production_observations'] as const;
+export const retiredTables = ['flow_facts', 'flow_projection', 'flow_projection_state', 'deployment_merge_observations', 'deployment_observations', 'proof_grants', 'proof_grant_history', 'merger_default_pin', 'production_observation_merges', 'production_observations', 'attribution_records', 'attribution_reanchors', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_runner_polls', 'validation_resources', 'validation_attempts', 'validation_reuse_decisions', 'validation_replays'] as const;
 
 /** The startup migration: the append-only trigger function, the retired tables dropped, then each table's DDL. */
 export const migration = `

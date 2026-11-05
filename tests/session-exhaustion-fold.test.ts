@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { heldObservation, type ObservedExhaustion } from '../src/master/environments.js';
-import { accountIneligibility, applyRegistryMutation, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
+import { accountIneligibility, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 
 /**
  * GY-1581: a session that ran out mid-work reports its account exhausted until the reset it named

@@ -14,7 +14,7 @@ import { localRequest } from './helpers/local-request.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 /**
@@ -360,7 +360,7 @@ test('deployment identity registrations are service-scoped and carry no executio
   await assert.rejects(validation.define(operator, { ...definition, services: ['database'] }, id()), /services of their environment/);
   await assert.rejects(validation.define(operator, definition, id()), /services of their environment/);
   await assert.rejects(validation.define(operator, { ...definition, services: ['api'], proofs: ['e2e:x'] }, id()), /no proof scope/);
-  await assert.rejects(validation.define(operator, { ...definition, services: ['api'], executionNetwork: 'gy' }, id()), /Only runner registrations/);
+  await assert.rejects(validation.define(operator, { ...definition, services: ['api'], executionNetwork: 'gy' }, id()), /Unrecognized key/);
   await assert.rejects(validation.define(operator, { ...definition, role: 'builder', services: ['api'] }, id()), /Only observer, promoter and rollback/);
   await assert.rejects(validation.define(operator, { ...definition, services: ['api'], principalId: worker.id }, id()), /appropriate separate role/);
   await assert.rejects(delivery.lease(observer, { registration: f.registrations.builder }), /not an enabled deployment identity/);

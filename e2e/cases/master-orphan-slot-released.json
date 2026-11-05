@@ -1,0 +1,15 @@
+{
+  "id": "master-orphan-slot-released",
+  "title": "An orphaned master registry session frees the role's slot",
+  "description": "Runs the regression where a live master-role registry session the loop's state does not name, with no Herdr pane, is ended before the master launches; a failed end is a failed, retried action, an unreadable Herdr ends nothing and a live master pane keeps its slot.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master orphan slot regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-orphan-slot.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

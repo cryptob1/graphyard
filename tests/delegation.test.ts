@@ -18,7 +18,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { mergeIntent } from './helpers/merge-ledger.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // The merge writer merges (GY-1524, GY-2010): what it may push is a head its trial passed with every
@@ -444,7 +444,7 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   let item = await candidate(workerA, 'exact-candidate', 'docs-experience');
   // Whether trusted evidence for the item's proof binds the candidate as it stands now. Proofs gate
   // nothing under GitHub delivery, but which evidence is applicable is still decided this way.
-  const acceptance = (work: Work) => { const applicable = currentEvidence(work, 'unit:works'); return !!applicable && evidenceProves('unit:works', applicable); };
+  const acceptance = (work: Work) => { const applicable = currentEvidence(work, 'unit:works', new Date()); return !!applicable && evidenceProves('unit:works', applicable); };
   // Same proof, wrong candidate or policy: never applicable evidence.
   for (const mismatch of [{ sha: 'c'.repeat(40) }, { baseSha: 'd'.repeat(40) }, { policyRevision: 2 }, { executed: 0 }, { skipped: 1 }, { result: 'fail' }]) {
     item = await engine.execute(reviewer, 'evidence', item.id, proof(mismatch), id());
@@ -760,11 +760,11 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   // The worker's own assertion is recorded, never trusted.
   item = await bootstrap.execute(workerA, 'evidence', item.id, proof(), id());
   assert.equal(item.evidence.at(-1)!.trusted, false);
-  assert.equal(currentEvidence(item, 'unit:works'), undefined);
+  assert.equal(currentEvidence(item, 'unit:works', new Date()), undefined);
   item = await bootstrap.observe(item.id, item.revision, observation(item));
   item = await bootstrap.execute(reviewer, 'evidence', item.id, proof(), id());
   assert.equal(item.evidence.at(-1)!.trusted, true);
-  assert.ok(currentEvidence(item, 'unit:works'));
+  assert.ok(currentEvidence(item, 'unit:works', new Date()));
   item = await mergeIntent(bootstrap, item);
   assert.equal(item.stage, 'merge');
   // Unsliced work is never constrained by per-lead engineer capacity.

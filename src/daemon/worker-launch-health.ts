@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { resumeExitWindowMs } from '../master/session-resume.js';
-import { redactString } from '../evidence-replay.js';
+import { redactString } from '../redaction.js';
 import type { Cycle } from './cycle.js';
 import { record } from './effects.js';
 import { clearProfileFailure, recordProfileFailure } from './sessions.js';

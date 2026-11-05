@@ -10,7 +10,7 @@
  * it for a release whose whole migration is already recorded — so an upgrade deploy asks no
  * work table for a lock at all.
  *
- * GY-1961: the generation follows the table definitions (`schemaGenerations` in release.ts), so
+ * GY-1961: the generation follows the table definitions (`schemaGenerations` in schema-lineage.ts), so
  * a release whose definitions are older than the ones that migrated the database refuses before
  * any statement runs instead of re-applying its older DDL over the newer schema.
  */
@@ -18,7 +18,8 @@ import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { advisoryLocks } from './locks.js';
 import { migration, migrationDigestComment, recordedMigrationDigests, tables, type MigrationDigests } from './schema.js';
-import { releaseInfo, schemaVersion } from '../release.js';
+import { releaseInfo } from '../release.js';
+import { schemaVersion } from './schema-lineage.js';
 import { reserve } from './pools.js';
 
 type Step = (waiting: string, sql: string, values?: unknown[]) => Promise<{ rows: any[] }>;

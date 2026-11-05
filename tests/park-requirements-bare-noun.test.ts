@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '../src/model/human-request.js';
+import { humanRequestSchema } from '../src/model-boundary/human-request.js';
+import { parkRefusal, requirementsQuestionRefusal } from '../src/model/human-request.js';
 
 // GY-1819, follow-up from GY-1818 (threads PRRT_kwDOUZby-s6snGag, PRRT_kwDOUZby-s6snGai,
 // PRRT_kwDOUZby-s6snWK8): the structural guard's outcome for the bare noun 'requirements' turned on

@@ -1,31 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import {
-  emptyProjectMemory,
-  projectMemorySchema,
-  updateProjectMemoryFromWork,
-  type ProjectMemory,
-} from './model/project-memory.js';
+import { emptyProjectMemory, updateProjectMemoryFromWork, type ProjectMemory } from './model/project-memory.js';
+import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
 
-export {
-  emptyProjectMemory,
-  isNoteRoleRelevant,
-  projectMemoryDigest,
-  projectMemorySchema,
-  projectMemoryWordBudget,
-  recentChangesWindowMs,
-  recordChangeInMemory,
-  recordNoteInMemory,
-  retainedMemoryChanges,
-  retainedMemoryNotes,
-  updateProjectMemoryFromWork,
-  type MemoryChange,
-  type MemoryNote,
-  type ProjectMemory,
-  type SessionRole,
-} from './model/project-memory.js';
+export { emptyProjectMemory, isNoteRoleRelevant, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordNoteInMemory, retainedMemoryChanges, retainedMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type SessionRole } from './model/project-memory.js';
+export { projectMemorySchema } from './model-boundary/project-memory.js';
 
 export const projectMemoryPath = (root: string) => resolve(root, '.graphyard', 'project-memory.json');
 
@@ -35,7 +16,7 @@ export async function readProjectMemory(root: string): Promise<ProjectMemory> {
     const raw = await readFile(file, 'utf8');
     return projectMemorySchema.parse(JSON.parse(raw));
   } catch (error: any) {
-    if (error.code === 'ENOENT') return emptyProjectMemory();
+    if (error.code === 'ENOENT') return emptyProjectMemory(new Date().toISOString());
     throw error;
   }
 }
@@ -61,7 +42,7 @@ export async function syncProjectMemory(
   }
 ): Promise<ProjectMemory> {
   const now = options.now ?? Date.now();
-  let memory = options.existing ?? (options.root ? await readProjectMemory(options.root).catch(() => emptyProjectMemory()) : emptyProjectMemory());
+  let memory = options.existing ?? (options.root ? await readProjectMemory(options.root).catch(() => emptyProjectMemory(new Date(now).toISOString())) : emptyProjectMemory(new Date(now).toISOString()));
 
   // 1. Update from work items (operator answers and merges)
   if (options.work?.length) {

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { listTestFiles, repositoryRoot } from '../scripts/ci-tests.mjs';
-import { policySchema } from '../src/model/policy.js';
+import { policySchema } from '../src/model-boundary/policy.js';
 
 // GY-1093 ran the soak and timing budgets only on release candidates; GY-1983 removed candidates, so
 // every test file is in the one ordinary selection the merge writer's trial runs. One case per

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { observeAccount } from '../src/fleet.js';
 import { accountIneligibility } from '../src/model/registry-sessions.js';
-import { applyRegistryMutation, emptyRegistry, foldObservation } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, foldObservation } from '../src/model/registry.js';
 
 // GY-2871: pi-a and pi-b ran zai/glm-5.3-flash on the operator's shared Z.AI credit, but pi-a's own key
 // answered the quota endpoint with no limits, so both read quota unknown and stayed eligible while

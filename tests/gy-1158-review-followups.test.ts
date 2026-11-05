@@ -9,12 +9,8 @@ import { observeAccount } from '../src/fleet.js';
 import {
   accountIneligibility,
 } from '../src/model/registry-sessions.js';
-import {
-  emptyRegistry,
-  applyRegistryMutation,
-  foldObservation,
-  accountSchema,
-} from '../src/model/registry.js';
+import { emptyRegistry, foldObservation } from '../src/model/registry.js';
+import { applyRegistryMutation, accountSchema } from '../src/model-boundary/registry.js';
 
 const HOST = 'test-host';
 const now = Date.parse('2026-10-03T12:00:00.000Z');

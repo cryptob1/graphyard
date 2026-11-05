@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { closeWork } from '../src/server/close.js';
 import { closeRequest } from '../src/cli/master-close.js';
 import { isClosed, isDelivered, type Principal, type Work } from '../src/model.js';
-import { nextAction } from '../src/model/next-action.js';
+import { nextAction } from '../src/model-boundary/next-action.js';
 import type { Services } from '../src/server/routes.js';
 import { plainStatus } from '../src/model/plain-status.js';
 import ShippedPage from '../web/pages/shipped.js';
@@ -18,7 +18,7 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // `graphyard master close`: obsolete, duplicate and superseded items leave every open list and

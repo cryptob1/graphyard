@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
+export const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
 /**
  * The directories every host treats as temporary, by name. A unit whose WorkingDirectory is under
  * one outlives the directory: on 2026-09-22 a unit written with a reviewer's `/var/tmp` checkout as

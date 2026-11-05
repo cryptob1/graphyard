@@ -4,7 +4,7 @@ import { exhaustedTwin, exhaustionEvidence, foldObservation } from './account-qu
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { workerOrder, planSpreadOrder, preferenceOrder } from './worker-preference.js';
-import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
+import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from './provider-usage.js';
 
 /**
  * Which sessions of the agent registry are live, which accounts may take another, the choice an

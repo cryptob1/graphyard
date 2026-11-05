@@ -1,11 +1,12 @@
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { workerVerificationPump } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
-import { endRegistrySlot, endRegistrySessionById } from '../master/registry-slot.js';
+import { endRegistrySlot, endRegistrySessionById, liveMasterSessions } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
@@ -40,6 +41,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
+  /** Explicit confinement root for an embedded, non-CLI coordinator. */
+  coordinatorRoot?: string;
   fetcher?: typeof fetch;
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
@@ -68,9 +71,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
+  const verifyWorkers = workerVerificationPump(root, () => current().hostId, mutate);
   let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
-    snapshot: deps.snapshot,
+    snapshot: async () => {
+      const snapshot = await deps.snapshot();
+      // Never holds up or fails the cycle; a missed take is retried on the next snapshot.
+      void verifyWorkers().catch(() => {});
+      return snapshot;
+    },
     sessionHistory: deps.sessionHistory,
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
@@ -160,18 +169,19 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const directory = installDirectory(installIdFor(current().repository));
       return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
     },
-    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
+    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot }),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
-    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run }),
+    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice.
     dispatchTick: snapshot => ticking ??= (async () => {
       cursor ??= await readDispatchCursor(root, current());
-      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
+      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, coordinatorRoot: deps.coordinatorRoot }));
     })().finally(() => { ticking = null; }),
     personalMasterSession: config => ({
       ...masterSessionEffects(root, () => config, run),
       end: (session, reason) => endRegistrySessionById(config, session, reason),
+      live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
     masterSession: {
@@ -183,6 +193,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       },
       // The registry session the closed or vanished pane ran under is ended, so the role's one slot frees for the next account; the registry's end is idempotent.
       end: (session, reason) => endRegistrySessionById(current(), session, reason),
+      live: () => liveMasterSessions(current()),
     },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
     // GY-2990: it also reads the served commit's required-cases verdict beside the checkout, and

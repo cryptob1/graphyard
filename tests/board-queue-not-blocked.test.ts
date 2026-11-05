@@ -59,7 +59,7 @@ test('integration:board-queue-not-blocked — a head queued behind the merge in 
 test('integration:board-queue-not-blocked — three real batch positions publish their flights before trials finish, leaving only additional heads queued', async () => {
   const { mergeStack } = await import('../src/merge-writer/batch.js');
   const { mergeRecordKinds } = await import('../src/merge-writer/executor.js');
-  const { foldMergeLedger } = await import('../src/model/merge-ledger.js');
+  const { foldMergeLedger } = await import('../src/model-boundary/merge-ledger.js');
   const work = Array.from({ length: 16 }, (_, index) => head(index + 1));
   work[15]!.blocker = 'Recorded failure';
   const events: import('../src/model/merge-ledger.js').MergeLedgerEvent[] = [];

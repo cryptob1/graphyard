@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { applyRegistryMutation, emptyRegistry, fleetView, foldObservation, type AgentRegistry, type FleetView } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, type AgentRegistry, type FleetView } from '../src/model/registry.js';
 import { FleetOverview, probeStatus, quotaStaleThresholdMs } from '../web/pages/fleet.js';
 
 /**
