@@ -526,11 +526,11 @@ export type SessionSandboxProbe = SandboxExec | 'host' | null;
  * first command and is recorded as never started. A runtime without a write-restricting sandbox is
  * not probed here.
  */
-export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false, credentialMask?: CredentialMask) {
+export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false, credentialMask?: CredentialMask, coordinatorRoot?: string) {
   const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
-  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask });
+  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask }, coordinatorRoot);
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 
@@ -821,6 +821,7 @@ export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'cr
 
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
+  coordinatorRoot?: string;
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
@@ -1000,7 +1001,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
-        await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
+        await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
         const own = withVerificationPath(harness.environment, launch.environment);
         const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
@@ -1010,7 +1011,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
           delivery = 'request';
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-            contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+            contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
             holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
             answer: output => postReview({ ...headlessVerdictPost(jsonAnswer(output, headlessVerdictSchema)), cliPath: config.cliPath ?? launcherPath, environment },
@@ -1022,7 +1023,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           pane = created.pane; tabId = created.tab;
           // The request is the session's own first message, on the runtime's command line (GY-93), read
           // from the request file in the session's checkout so the typed line stays short (GY-121).
-          ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], request(), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
+          ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], request(), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask }));
         }
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
