@@ -1,4 +1,4 @@
-// Concern: a managed repository's own E2E cases and static-site build (GY-1535) — the merge preview runs every required case of its checkout through src/e2e/runner.ts against the site it builds.
+// Concern: a managed repository's own E2E cases and static-site build (GY-1535) — a preview or the merge trial runs a checkout's cases through src/e2e/runner.ts against the site it builds.
 import { spawn } from 'node:child_process';
 import { loadCases, type CaseFile, type ReleaseContract } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';

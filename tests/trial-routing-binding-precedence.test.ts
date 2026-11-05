@@ -25,7 +25,7 @@ test('integration:trial-routing-binding-precedence — a bound case runs against
     env: {}, scratch: checkout, budgetMs: 60_000, log: () => {},
     holds: async path => existsSync(join(checkout, path)),
     runGroup: async (target, proofs) => {
-      ran.push({ target: 'kind' in target ? `application:${target.id}` : `serve:${target.url}`, proofs });
+      ran.push({ target: target.kind === 'command' ? `serve:${target.url}` : `application:${target.id}`, proofs });
       return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 }));
     },
   });

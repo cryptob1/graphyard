@@ -9,7 +9,6 @@ import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { runTrial, recordedTests, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import type { TrialE2eCase } from './e2e-trial.js';
-import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
@@ -86,7 +85,6 @@ export type MergeRecordEvent =
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
     /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
-    /** The preview's verdict (GY-1718), when the passing trial was previewed. */ preview?: PreviewVerdict;
     /** GY-2965: how each bound E2E case ran against the served head; the passing runs become trusted evidence (the trial is the trusted producer). */ e2e?: TrialE2eCase[];
     /** GY-1834: the trial's flake, kept on the item's merge ledger so the flake ledger reads it after any restart. */ flaked?: TrialFlaked }
   /**
@@ -633,12 +631,6 @@ export interface MergePorts {
    * Aborting `signal` stops the trial's children (GY-3099). `timeoutMs` bounds the whole trial; absent, the merge-trial deadline (`trialTimeoutMinutes`).
    */
   trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
-  /**
-   * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
-   * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
-   * Absent, nothing is previewed.
-   */
-  preview?(mergeSha: string, files: readonly string[], item: Pick<Work, 'key'>): Promise<PreviewVerdict | null>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -652,7 +644,7 @@ export interface MergePorts {
 }
 export type MergeOutcome =
   | { outcome: 'merged'; mergeSha: string; baseTip: string; observedTip: string; pushes: number }
-  | { outcome: 'refused'; reason: string; trial: MergeTrialRun | null; conflict: string[]; preview?: PreviewVerdict | null }
+  | { outcome: 'refused'; reason: string; trial: MergeTrialRun | null; conflict: string[] }
   | { outcome: 'requeued'; reason: string; pushes: number }
   | { outcome: 'reconciled'; mergeSha: string; observedTip: string };
 
@@ -662,18 +654,17 @@ export type MergeOutcome =
  * pushed, or an open intent whose merge commit the base holds, is only fetched and reconciled,
  * never pushed again. Otherwise the head is trial-merged onto the fetched tip, the intent is
  * recorded before anything runs, the trial runs on the exact merge commit with the proof files
- * included (the affected selection plus the proofs, GY-3120), a passing trial is previewed
- * (GY-1718: its required and uat cases run against the merge commit served, the verdict recorded
- * with the trial), and the merge commit is pushed with a lease on the tip it was tested on.
+ * included (the affected selection plus the proofs, GY-3120) and its bound E2E cases run against
+ * the head it serves (GY-3032: the one serve of the merge), and the merge commit is pushed with a
+ * lease on the tip it was tested on.
  *
  * GY-3120: a head whose trial passed lands without another trial. A push rejected because the tip
  * moved re-merges the same reviewed head onto the new tip (`trialMerge`: a `Merge GY-N` commit or a
  * fast-forward, the head unchanged), records that intent and pushes it; a conflict there is refused
  * and returned for rework. Main is verified afterwards by the batch gate (GY-3119). A push rejected
  * while the tip stood still was rejected for another cause and is refused `unmovedTipReason`, queued
- * for a later cycle. A failed trial, a failing required case on the preview or a conflict is refused
- * naming what failed, and the rework that refusal grounds is the loop's to request; a preview that
- * timed out or could not run is refused leaving the head queued, as a trial timeout does.
+ * for a later cycle. A failed trial or a conflict is refused naming what failed, and the rework that
+ * refusal grounds is the loop's to request.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
@@ -721,15 +712,11 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   }
   // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
   const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
-  const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
-  // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
-  const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
-    ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;
+  const failure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
   // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
   const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
   await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-    ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
-  const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
+    ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
   let pushes = 0;
   for (;;) {
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
@@ -740,8 +727,8 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
-      if (baseHeld || preview?.result === 'timeout' || preview?.result === 'error') return { outcome: 'requeued', reason: failure, pushes };
-      return { outcome: 'refused', reason: failure, trial: run, conflict: [], ...(preview ? { preview } : {}) };
+      if (baseHeld) return { outcome: 'requeued', reason: failure, pushes };
+      return { outcome: 'refused', reason: failure, trial: run, conflict: [] };
     }
     pushes += 1;
     if (await ports.push(mergeSha, baseTip) === 'pushed') {

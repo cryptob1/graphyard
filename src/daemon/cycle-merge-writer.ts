@@ -13,7 +13,7 @@ import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
-import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
+import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
@@ -64,7 +64,7 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * them in effects.ts; a test hands its own through `effects.mergeWriter`.
  */
 export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository'>, root: string, run: ChildRun,
-  options: { base: string; record: MergePorts['record']; hold?: MergePorts['hold']; trial?: typeof runMergeTrial; preview?: typeof runPreview; environment?: NodeJS.ProcessEnv; now?: () => number;
+  options: { base: string; record: MergePorts['record']; hold?: MergePorts['hold']; trial?: typeof runMergeTrial; environment?: NodeJS.ProcessEnv; now?: () => number;
     itemPreviews?: Partial<ItemPreviewPorts> }): MergeWriterReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...(options.environment ?? process.env), ...env } } : undefined));
@@ -94,12 +94,6 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         // Trials running at once divide the host's cores, so their shards never oversubscribe it.
         ...(share && share > 1 ? { cores: Math.max(1, Math.floor(availableParallelism() / share)) } : {}) });
-    },
-    // GY-1718: a repository naming a static UAT previews every passing trial whose delta is more than docs or tests.
-    preview: async (mergeSha, files) => {
-      const environment = options.environment ?? process.env, site = previewSiteOf(environment);
-      if (!site || previewSkip(files, site)) return null;
-      return (options.preview ?? runPreview)({ root, base: options.base, mergeSha, site, timeoutMs: trialTimeoutMinutes * 60_000, run, hostEnvironment: environment });
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
     itemPreviews: { root, base: options.base, timeoutMs: trialTimeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
