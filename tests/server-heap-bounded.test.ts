@@ -12,7 +12,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Principal } from '../src/model.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-975: the production server's heap climbed to its 4 GB limit every ten to fifteen minutes. These
@@ -42,7 +42,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('heap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  http = server(engine, credentials, null);
+  http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });

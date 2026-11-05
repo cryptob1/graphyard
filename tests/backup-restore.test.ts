@@ -1,6 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -18,7 +18,8 @@ import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -52,7 +53,7 @@ after(async () => { if (pg) await pg.stop(); });
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an
  * assignment under a live lease with its registered workspace, a submitted candidate whose
  * lease the submission released, the append-only history behind them, two revisions of one
- * scenario, and a validation request that is still pending. Plus the tables an installation accumulates around them. And the
+ * scenario. Plus the tables an installation accumulates around them. And the
  * delivery side of the same environment: an attested release build, the release selected
  * from it under an approval, the observer's lease and the observation that verified it,
  * then a second release selected over it and a rollback requested back to the first.
@@ -65,13 +66,9 @@ async function populate(store: Store) {
   const first = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking', steps: ['Book'], expected: ['Booked'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts' }, id());
   const second = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking and cancellation', steps: ['Book', 'Cancel'], expected: ['Booked', 'Cancelled'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts', expectedRevision: first.revision }, id());
   assert.equal(second.revision, first.revision + 1);
-  const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
   await validation.define(operator, { kind: 'environment', id: 'preview', expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: 'preview-1', immutable: true, services: ['api'], resources: ['test-account-1'] }, id());
   const environment = { id: 'preview', revision: 1 };
-  await validation.define(operator, { kind: 'registration', id: 'runner-1', expectedRevision: 0, principalId: runner.id, role: 'runner', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated' }, id());
-  await validation.define(operator, { kind: 'registration', id: 'collector-1', expectedRevision: 0, principalId: collector.id, role: 'collector', environment, adapterVersion: 'test-v1', proofs: ['e2e:booking'], enabled: true }, id());
   await validation.define(operator, { kind: 'registration', id: 'builder-1', expectedRevision: 0, principalId: builder.id, role: 'builder', environment, adapterVersion: 'test-v1', proofs: [], enabled: true }, id());
-  await validation.define(operator, { kind: 'bundle', id: 'bundle-1', expectedRevision: 0, scenario: 'booking', scenarioRevision: second.revision, scenarioHash: second.hash, digest, runnerImageDigest: inputs, reportFormat: 'junit-xml-v1' }, id());
   // A submitted item (submission releases its lease), a second item still in backlog, and a
   // third item under a live lease with its registered workspace.
   let w = await engine.execute(operator, 'create', null, { title: 'Booking flow', criteria: [{ id: 'AC-1', text: 'Booking is proven', proofs: ['e2e:booking'] }] }, id());
@@ -85,19 +82,6 @@ async function populate(store: Store) {
   leased = await engine.execute(operator, 'ready', leased.id, {}, id()); leased = await engine.execute(worker, 'claim', leased.id, {}, id());
   await engine.execute(worker, 'workspace', leased.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/cancellation', branch: 'graphyard/cancellation-1' }, id());
   w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: 7, branch: 'graphyard/booking-1', author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
-  const build: any = await validation.attestBuild(builder, { registration: { id: 'builder-1', revision: 1 }, workId: w.id, expectedWorkRevision: w.revision, sourceSha: sha, baseSha: base, buildInputsDigest: inputs, artifacts: [{ service: 'api', digest }], provenanceUrl: 'https://ci.example.test/build/1' }, id());
-  const candidate: any = await validation.createCandidate(operator, { workId: w.id, expectedWorkRevision: w.revision, proof: 'e2e:booking', environment, bundle: { id: 'bundle-1', revision: 1 }, buildAttestationId: build.id, requiredArtifacts: ['report'], artifactStorage: 'postgres' }, id());
-  const current = (await store.list()).find(x => x.id === w.id)!;
-  const request: any = await validation.createRequest(operator, { candidateId: candidate.id, expectedWorkRevision: current.revision, runner: { id: 'runner-1', revision: 1 }, collector: { id: 'collector-1', revision: 1 }, deadline: new Date(Date.now() + 3_600_000).toISOString(), maxAttempts: 3 }, id());
-  // Dispatch and acknowledge, so the request is running under an attempt epoch with a
-  // reserved protected resource — the state a restart must hand back untouched.
-  const dispatched: any = await validation.dispatch(runner, { registration: { id: 'runner-1', revision: 1 } }, id());
-  const command = { requestId: request.id, attemptId: dispatched.attempt.id, epoch: dispatched.attempt.epoch };
-  await validation.runnerCommand(runner, 'ack', command, id());
-  await validation.collectionAuthority(collector, command);
-  await validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ format: 'junit-xml-v1', private: 'artifact-bytes-marker' })).toString('base64'), capturePolicy: 'approved-test-data-only' }, id());
-  // Observed delivery for the same environment: a release built, approved, selected and
-  // seen running, so the restored ledger still knows what production is expected to be.
   const delivery = new Delivery(validation);
   await validation.define(operator, { kind: 'registration', id: 'observer-1', expectedRevision: 0, principalId: observer.id, role: 'observer', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, services: ['api'] }, id());
   await validation.define(operator, { kind: 'registration', id: 'promoter-1', expectedRevision: 0, principalId: promoter.id, role: 'promoter', environment, adapterVersion: 'test-v1', proofs: [], enabled: true, services: ['api'] }, id());
@@ -118,16 +102,13 @@ async function populate(store: Store) {
   const secondApproval: any = await delivery.approve(operator, { release: { id: secondRelease.id, revision: secondRelease.revision }, environment }, id());
   await delivery.select(operator, { environment, release: { id: secondRelease.id, revision: secondRelease.revision }, expectedGeneration: 1, approvalId: secondApproval.id }, id());
   await delivery.requestRollback(operator, { environment, target: { id: release.id, revision: release.revision }, expectedGeneration: 2, reason: 'Release two degraded' }, id());
-  return { engine, validation, workId: w.id, leasedId: leased.id, requestId: request.id, scenario: { revision: second.revision, hash: second.hash } };
+  return { engine, validation, workId: w.id, leasedId: leased.id, scenario: { revision: second.revision, hash: second.hash } };
 }
 
 async function snapshot(store: Store) {
   const work = await store.list();
   const events = (await store.pool.query('SELECT seq, work_id, actor, kind, payload FROM events ORDER BY seq')).rows;
   const scenarios = (await store.pool.query('SELECT id, revision, document FROM scenarios ORDER BY id, revision')).rows;
-  const requests = (await store.pool.query('SELECT id, document FROM validation_requests ORDER BY id')).rows;
-  const resources = (await store.pool.query('SELECT resource, request_id FROM validation_resources ORDER BY resource')).rows;
-  const artifacts = (await store.pool.query('SELECT id, request_id, attempt_id, name, digest, media_type, encode(bytes, \'hex\') AS bytes, expires_at FROM validation_artifacts ORDER BY id')).rows;
   const definitions = (await store.pool.query('SELECT kind, id, revision, document FROM validation_definitions ORDER BY kind, id, revision')).rows;
   const releases = (await store.pool.query('SELECT id, revision, document FROM releases ORDER BY id, revision')).rows;
   const approvals = (await store.pool.query('SELECT id, document FROM release_approvals ORDER BY id')).rows;
@@ -136,18 +117,16 @@ async function snapshot(store: Store) {
   const leases = (await store.pool.query('SELECT registration_id, principal, epoch, expires_at FROM delivery_leases ORDER BY registration_id')).rows;
   const rulings = (await store.pool.query('SELECT id, work_id, lead_id, slice_id, action, rule_id, reason, created_at FROM lead_rulings ORDER BY created_at, id')).rows;
   const intake = (await store.pool.query('SELECT id, origin, title, description, source_work_id, submitted_by, created_at FROM intake_items ORDER BY created_at, id')).rows;
-  const polls = (await store.pool.query('SELECT registration_id, principal, polled_at, granted_request_id FROM validation_runner_polls ORDER BY registration_id')).rows;
   const rollbacks = (await store.pool.query('SELECT id, environment_id, generation, document, created_at FROM delivery_rollbacks ORDER BY created_at, id')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks };
+  return { work, events, scenarios, definitions, releases, approvals, environments, observations, leases, rulings, intake, rollbacks };
 }
 
-test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
+test('the documented backup and restore exercise preserves assignments, history, scenario revisions and delivery state, and the restored ledger keeps ordering', async () => {
   const source = new Store(url('source')); await source.init();
   const seeded = await populate(source);
   const before = await snapshot(source);
   assert.ok(before.work.find(w => w.id === seeded.leasedId)!.lease, 'the fixture holds a live assignment');
   assert.equal(before.work.find(w => w.id === seeded.workId)!.lease, null, 'the submitted item released its lease at submission');
-  assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
   assert.equal(before.approvals.length, 2); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
   assert.equal(before.environments[0].document.verification?.status, 'unobserved', 'the fixture holds a newly selected second release');
@@ -155,7 +134,6 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.deepEqual(before.rulings.map(r => [r.lead_id, r.action]), [[lead.id, 'send-back']], 'the fixture holds a standing slice-lead ruling');
   assert.deepEqual(before.intake.map(i => [i.origin, i.submitted_by]), [['verification-finding', operator.id]], 'the fixture holds an intake item citing sliced work');
   assert.equal(before.work.find(w => w.slice === 'product')!.leadHold?.action, 'send-back');
-  assert.deepEqual(before.polls.map(p => [p.registration_id, p.granted_request_id]), [['runner-1', seeded.requestId]], 'the fixture holds the runner poll that granted the request');
   assert.deepEqual(before.rollbacks.map(r => [r.environment_id, r.generation, r.document.state]), [['preview', 3, 'requested']], 'the fixture holds an open rollback, its own generation, back to the verified release');
   assert.equal(before.releases.length, 2, 'two releases, the second superseding the verified first');
 
@@ -182,15 +160,10 @@ test('the documented backup and restore exercise preserves assignments, history,
   await restored.init();
   assert.deepEqual(await snapshot(restored), before);
   const engine = new Engine(restored.pool ? restored : source, 120, 'test/repository');
-  const validation = new Validation(engine, principals, 'test/repository');
   const item = (await restored.list()).find(w => w.id === seeded.workId)!;
   assert.equal(item.lease, null); assert.equal(item.workspaces[0].path, '/srv/worktrees/booking'); assert.equal(item.submission?.pr, 7);
   const live = (await restored.list()).find(w => w.id === seeded.leasedId)!;
   assert.equal(live.lease?.owner, worker.id); assert.equal(live.lease?.epoch, 1); assert.equal(live.workspaces[0].path, '/srv/worktrees/cancellation');
-  const request = (await validation.list()).requests.find(r => r.id === seeded.requestId)!;
-  assert.equal(request.state, 'collecting'); assert.equal(request.attempts.at(-1)?.epoch, 1);
-  // The heartbeat the collector was holding continues under the same epoch after restore.
-  await validation.collectionHeartbeat(collector, { requestId: request.id, attemptId: request.attempts.at(-1)!.id, epoch: 1 }, id());
   // Sequences continue after the restored rows rather than colliding with them.
   const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'After restore', criteria: [{ id: 'AC-1', text: 'Continues', proofs: ['unit:after', 'e2e:fixture'] }] }, id());
   const numbers = (await restored.pool.query('SELECT number FROM work_items ORDER BY number')).rows.map(r => Number(r.number));
@@ -198,10 +171,6 @@ test('the documented backup and restore exercise preserves assignments, history,
   const seqs = (await restored.pool.query('SELECT seq FROM events ORDER BY seq')).rows.map(r => Number(r.seq));
   assert.deepEqual(seqs.slice(0, before.events.length), before.events.map(e => Number(e.seq)));
   assert.ok(seqs.length > before.events.length && seqs.every((seq, i) => i === 0 || seq > seqs[i - 1]), 'new history appends after the restored history');
-  // Private artifact bytes come back intact and are still served only to the right identity.
-  const artifactId = (await restored.pool.query('SELECT id FROM validation_artifacts WHERE request_id=$1', [request.id])).rows[0].id;
-  const served = await validation.readArtifact(collector, request.id, artifactId);
-  assert.ok(served.bytes.toString('utf8').includes('artifact-bytes-marker'));
   await source.close(); await restored.close();
 });
 

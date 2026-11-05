@@ -9,8 +9,8 @@ import { masterHarness, masterPrompt } from './harness.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type FleetProbe, httpFleetClient, selectFleetSession } from '../fleet.js';
 import { accountLaunch, heldAwareProbe, readEnvironmentLog } from './environments.js';
-import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, startAgentSession, withLaunchClose } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './herdr.js';
+import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, launchSession, withLaunchClose } from './launch.js';
+import { type HerdrAgent, observeHerdrAgents } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
@@ -89,14 +89,11 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // The same harness the human launch writes (master start): the master's own commands, and the
     // deny rules that keep it from borrowing another identity — never a worker or producer credential.
     await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
-      '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...(config.forPerson ? ['--env', `GRAPHYARD_FOR_PERSON=${config.forPerson}`] : []), '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`,
-      ...Object.entries(plan.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
+
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
-    ({ delivery } = await startAgentSession(name, kind, pane, [...plan.args, ...conversationArgs(kind, nativeId, resume)], request, run, { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile) }));
+    ({ delivery } = await launchSession({ name, kind, args: [...plan.args, ...conversationArgs(kind, nativeId, resume)], text: request, workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...(config.forPerson ? { GRAPHYARD_FOR_PERSON: config.forPerson } : {}), GRAPHYARD_URL: config.url, GRAPHYARD_HOST_ID: config.hostId, ...plan.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile) } }));
     const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config), request);
     const conversation = { launch, runtime: kind, account: selected.account.name, ...discovered,
       record: resume ? current!.record : join(masterRecords(root), `${launch}.jsonl`), origins,
@@ -119,6 +116,8 @@ export interface MasterSessionEffects {
   exhaust?: (account: string, notice: ExhaustionSignal) => Promise<unknown>;
   /** Ends the agent-registry session a closed or vanished pane ran under, so the role's next account can be selected (GY-2949). */
   end?: (session: string, reason: string) => Promise<unknown>;
+  /** The live master-role registry sessions of this host and person, each ended before a launch whether or not the loop's state names it (GY-3091). */
+  live?: () => Promise<{ id: string; selectedAt: string }[]>;
 }
 export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
   initialize: async (master, handle, prompts = []) => {

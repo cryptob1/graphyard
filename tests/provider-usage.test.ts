@@ -17,14 +17,8 @@ import {
   clearPlanUsageCache,
   deriveAccountPlan,
 } from '../src/provider-usage.js';
-import {
-  applyRegistryMutation,
-  emptyRegistry,
-  fleetView,
-  foldObservation,
-  accountIneligibility,
-  chooseSession,
-} from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, accountIneligibility, chooseSession } from '../src/model/registry.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 
 const HOST = 'agents-host';

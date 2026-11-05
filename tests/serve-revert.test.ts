@@ -15,8 +15,11 @@ import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import { baseFailureHoldMs } from '../src/merge-writer/executor.js';
 import { mergeWriterInFlight } from '../src/daemon/cycle-merge-writer.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
-import { createSchema } from '../src/model/work.js';
+import { createSchema } from '../src/model-boundary/work.js';
 import type { Work } from '../src/model.js';
+import { archiveDaemonCursor, writeDaemonState, readDaemonState } from '../src/daemon/state.js';
+import type { MergeLedgerEvent } from '../src/model/merge-ledger.js';
+import { mergeRecordKinds } from '../src/merge-writer/executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2990: one failing item comes back out. With two merges since the last verified commit and a
@@ -27,6 +30,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // repository and a served.json fixture read through the serve record the deploy unit writes.
 
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't@t', GIT_COMMITTER_EMAIL: 't@t' } as NodeJS.ProcessEnv;
+import { foldServeReverts } from '../src/merge-writer/serve-revert-ledger.js';
+
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim();
 const gitEnv = (cwd: string, args: string[], extra: Record<string, string>) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...env, ...extra } }).trim();
@@ -685,7 +690,7 @@ test('unit:revert-only-the-failing-item — an original at the 50-criterion limi
   assert.deepEqual(createSchema.parse(atLimit).criteria[0]!.proofs, ['unit:proof-1', 'e2e:production-exact-verification']);
 });
 
-test('unit:revert-only-the-failing-item — a re-land still owed is never forgotten: a filed record makes room, and at 20 owed no new revert starts until one is filed', async t => {
+test('unit:revert-only-the-failing-item — revert history is retained beyond the old cursor bound and owed re-lands do not stop another revert', async t => {
   const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-owed-kept');
   t.after(() => rm(base, { recursive: true, force: true }));
   const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
@@ -703,30 +708,105 @@ test('unit:revert-only-the-failing-item — a re-land still owed is never forgot
   const seeded = [record(0, 'GY-2000'), ...Array.from({ length: 19 }, (_, index) => record(index + 1, null))];
   state.mergeWriter.serveRevert = { lastVerified: verified, reverts: seeded, held: null, retry: null, answered: null };
 
-  // The 20th owed revert drops the filed record, never an owed one.
+  // Ledger history retains filed and owed reverts.
   await servedFixture(coordinator, served, 'case-beta');
   await step();
   await mergeWriterIdle(state);
   await step();
   const kept = state.mergeWriter.serveRevert.reverts;
-  assert.equal(kept.length, 20);
-  assert.deepEqual(kept.slice(0, 19).map(entry => entry.failingCase), seeded.slice(1).map(entry => entry.failingCase));
-  assert.equal(kept[19]!.failingCase, 'case-beta');
-  assert.equal(kept.every(entry => entry.reland === null), true);
+  assert.equal(kept.length, 21);
+  assert.deepEqual(kept.slice(0, 20).map(entry => entry.failingCase), seeded.map(entry => entry.failingCase));
+  assert.equal(kept[20]!.failingCase, 'case-beta');
+  assert.equal(kept.slice(1).every(entry => entry.reland === null), true);
   mergeWriterStateSchema.parse(JSON.parse(JSON.stringify(state.mergeWriter)));
 
-  // Twenty owed: the next failing serve starts no revert.
+  // Twenty owed: the ledger can retain another revert.
   const tip = tipOf(origin);
   await servedFixture(coordinator, tip, 'case-alpha');
   await step();
-  assert.equal(tried.length, 1);
-  assert.equal(state.mergeWriter.inFlight, null);
+  await mergeWriterIdle(state);
+  assert.equal(tried.length, 2);
 
   // The filing route returns: every owed re-land is filed, each from its own record, and the serve is answered.
   reads.createWork = createWork;
   await step();
   await mergeWriterIdle(state);
-  assert.equal(filed.length, 20);
+  assert.equal(filed.length, 21);
   assert.equal(filed.filter(input => input.criteria.at(-1)!.proofs[0] === 'e2e:case-1').length, 1);
   assert.equal(tried.length, 2);
+});
+
+for (const upgrade of ['current', 'legacy-owed', 'legacy-filed'] as const)
+for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-survives-reinstall — a ${outcome} revert survives archiving the daemon cursor (${upgrade})`, async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('revert-survives-reinstall');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(base, 'coordinator.token'), cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  const reads = loopReads(coordinator, origin, join(coordinator, '.graphyard', 'served.json'), clock, () => outcome === 'reverted' ? passTrial : { ...passTrial, build: 'fail' }, tried, filed);
+  const createWork = reads.createWork;
+  delete reads.createWork;
+  const initialLedger = Object.fromEntries(work.map(item => [item.key, structuredClone(item.mergeLedger!)]));
+  const rows: MergeLedgerEvent[] = [];
+  reads.record = async (item, event) => {
+    const { kind, ...payload } = event;
+    rows.push({ kind: mergeRecordKinds[kind], work: item.key, payload });
+    const ledger = foldServeReverts(structuredClone(initialLedger), rows);
+    for (const entry of work) entry.mergeLedger = ledger[entry.key];
+  };
+  let state = emptyDaemonState(config);
+  const step = () => mergeWriterStep({ state, effects: { mergeWriter: reads, persist: () => writeDaemonState(config, state) },
+    now: () => clock.nowMs, snapshot: { work }, performed: [] } as unknown as Cycle);
+  await servedBaseline(coordinator, verified);
+  await step();
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+  const reverted = work[1]!.mergeLedger!.serveReverts![0]!;
+  assert.equal(reverted.outcome, outcome);
+  assert.equal(reverted.revertSha, outcome === 'reverted' ? tipOf(origin) : null);
+  assert.equal(reverted.reland, null);
+  if (upgrade !== 'current') {
+    // Reproduce the pre-upgrade cursor: all outcomes exist only on disk.
+    for (const entry of state.mergeWriter.serveRevert!.reverts) {
+      delete entry.recorded;
+      if (upgrade === 'legacy-filed') entry.reland = 'GY-4000';
+    }
+    if (state.mergeWriter.serveRevert!.held) delete state.mergeWriter.serveRevert!.held.recorded;
+    rows.length = 0;
+    for (const entry of work) entry.mergeLedger = structuredClone(initialLedger[entry.key]);
+    await writeDaemonState(config, state);
+    state = await readDaemonState(coordinator, config);
+    const record = reads.record;
+    reads.record = async () => { throw new Error('ledger unavailable'); };
+    await assert.rejects(step(), /ledger unavailable/);
+    // Even a failure-cycle persistence and another restart must keep the legacy receipt.
+    await writeDaemonState(config, state);
+    state = await readDaemonState(coordinator, config);
+    assert.equal(state.mergeWriter.serveRevert!.reverts.length, outcome === 'reverted' ? 1 : 0);
+    assert.equal(!!state.mergeWriter.serveRevert!.held, outcome === 'refused');
+    reads.record = record;
+    await step();
+    assert.equal(rows.length, 1);
+    assert.equal(work[1]!.mergeLedger!.serveReverts![0]!.outcome, outcome);
+    assert.equal(work[1]!.mergeLedger!.serveReverts![0]!.reland, outcome === 'reverted' && upgrade === 'legacy-filed' ? 'GY-4000' : null);
+  }
+  await writeDaemonState(config, state);
+  assert.ok(await archiveDaemonCursor(config));
+  state = await readDaemonState(coordinator, config);
+  assert.deepEqual(state.mergeWriter.serveRevert?.reverts ?? [], []);
+  reads.createWork = createWork;
+  // Re-establish the same healthy baseline, then replay the exact failure.
+  await servedBaseline(coordinator, verified);
+  await step();
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+  assert.equal(tried.length, 1);
+  assert.equal(filed.length, outcome === 'reverted' && upgrade !== 'legacy-filed' ? 1 : 0);
+  assert.equal(tipOf(origin), reverted.revertSha ?? served);
+  assert.equal(work[1]!.mergeLedger!.serveReverts!.length, 1);
 });

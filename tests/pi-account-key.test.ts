@@ -7,8 +7,8 @@ import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { needsSmoke, selectFleetSession, type FleetClient, type FleetProbe, type FleetSelection } from '../src/fleet.js';
 import { inspectProfileAccounts, loadMasterConfig, setupMaster } from '../src/master.js';
-import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, smokeRetestMs, supersededByRequest, unjudgedHoldMs,
-  type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
+import { RegistryError, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, smokeRetestMs, supersededByRequest, unjudgedHoldMs, type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { looksLikeSecret } from '../src/model/registry-keys.js';
 import { accountKeyEnvironment } from '../src/runner/roles.js';
 import { registryCommand } from '../src/cli/master-registry.js';

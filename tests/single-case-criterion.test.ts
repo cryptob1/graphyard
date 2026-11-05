@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // Every filed fixture owes an E2E proof and the serve declaration its trial needs.
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -33,7 +33,7 @@ before(async () => {
   await pg.initialise(); await pg.start(); await pg.createDatabase('single_case_criterion_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/single_case_criterion_test`); await store.init();
   engine = new Engine(store, 120, 'owner/project');
-  http = server(engine, [{ ...operator, token: token = `${operator.id}-${'t'.repeat(32)}` }], null);
+  http = server(engine, [{ ...operator, token: token = `${operator.id}-${'t'.repeat(32)}` }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });

@@ -20,7 +20,7 @@ test('unit:complete-head-no-push — omitted --head submits the worktree HEAD wi
   const calls: { path: string; body: unknown }[] = [];
   const context = {
     args: ['10'], repositoryRoot: () => root, print: () => {},
-    api: async (path: string, body: unknown) => { calls.push({ path, body }); return {}; },
+    api: async (path: string, body: unknown) => { if (path.endsWith('/worker-verification')) return { record: { key: 'GY-2999', head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } }; calls.push({ path, body }); return {}; },
   } as unknown as CliContext;
   // No remote exists: a push would fail before this submission could succeed.
   await completeCommand.run(context, { id: 'item', key: 'GY-2999' } as never);

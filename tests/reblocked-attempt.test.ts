@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from './helpers/warm-postgres.js';

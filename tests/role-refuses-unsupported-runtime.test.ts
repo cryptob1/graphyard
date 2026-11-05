@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetRuntime } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetRuntime } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { registryCommand, type RegistryCommandApi } from '../src/cli/master-registry.js';
 
 // GY-3093: the master launch failed on an opencode account the registry had accepted

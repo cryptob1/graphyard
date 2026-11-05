@@ -51,6 +51,13 @@ export async function registryDocument(config: Pick<MasterConfig, 'url' | 'crede
   catch { return null; }
 }
 
+/** The live master-role registry sessions of this host and person (GY-3091); none without a control plane. */
+export async function liveMasterSessions(config: Pick<MasterConfig, 'url' | 'credentialFile' | 'hostId' | 'forPerson'>, client: FleetClient | null = null) {
+  if (!config.url) return [];
+  const registry = await (client ?? httpFleetClient({ url: config.url, credentialFile: config.credentialFile })).document();
+  return liveSessions(registry).filter(session => session.role === 'master' && session.host === config.hostId && (session.group ?? null) === (config.forPerson ?? null));
+}
+
 /** End one live registry session by id, with the reason its reconciliation judged (GY-2945). */
 export async function endRegistrySessionById(config: Pick<MasterConfig, 'url' | 'credentialFile'>, id: string, reason: string, client: FleetClient | null = null): Promise<void> {
   await (client ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile })).end(id, reason.slice(0, 500));

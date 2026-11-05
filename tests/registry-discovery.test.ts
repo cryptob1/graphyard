@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**

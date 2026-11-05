@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { nonInteractiveLaunch } from './harness.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -285,6 +287,28 @@ const defaultHomes: Record<EnvironmentKind, (home: string) => string> = {
   opencode: home => process.env.XDG_DATA_HOME ?? resolve(home, '.local/share'),
 };
 const onPath = (executable: string) => { try { execFileSync('which', [executable], { stdio: 'ignore' }); return true; } catch { return false; } };
+const output = (command: string, args: string[]) => { try { return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0] || null; } catch { return null; } };
+
+/**
+ * The directory `program` is installed in on this host (GY-3090). A mise shim — a link to mise
+ * itself, or anything in mise's `shims` directory — is resolved through `mise which`, so the
+ * registry pins the real install and no launch depends on the user's global mise config.
+ */
+export function installDirectory(program: string): string | null {
+  const found = output('which', [program]);
+  if (!found) return null;
+  const shim = basename(dirname(found)) === 'shims' || basename(realpathSync(found)) === 'mise';
+  const installed = shim ? output('mise', ['which', program]) : found;
+  return installed ? dirname(installed) : null;
+}
+
+/** A proposed runtime launched from its resolved install directory, with mise kept off every config. */
+export function pinRuntime(runtime: FleetRuntime, install: (program: string) => string | null = installDirectory): FleetRuntime {
+  const directory = install(nonInteractiveLaunch[runtime.launch.kind]?.program ?? runtime.launch.kind);
+  if (!directory) return runtime;
+  const path = [directory, ...(process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin').split(':').filter(entry => entry && entry !== directory)].join(':');
+  return { ...runtime, launch: { ...runtime.launch, environment: { ...runtime.launch.environment, PATH: path, MISE_NO_CONFIG: '1' } } };
+}
 
 /**
  * The agent CLIs already logged in on this host: every isolated environment under the agent
@@ -368,10 +392,10 @@ export interface FleetProposal { runtimes: FleetRuntime[]; models: FleetModel[];
  * order. Nothing already registered is changed: existing runtimes, models, accounts and role
  * orders stand, and new accounts are appended to the roles that exist.
  */
-export function proposeFleet(logins: HostLogin[], host: string, current: Pick<AgentRegistry, 'runtimes' | 'models' | 'accounts' | 'roles'> = { runtimes: [], models: [], accounts: [], roles: [] }): FleetProposal {
+export function proposeFleet(logins: HostLogin[], host: string, current: Pick<AgentRegistry, 'runtimes' | 'models' | 'accounts' | 'roles'> = { runtimes: [], models: [], accounts: [], roles: [] }, install?: (program: string) => string | null): FleetProposal {
   const usable = logins.filter(login => login.loggedIn !== false);
   const runtimes = [...new Set(usable.map(login => login.runtime))].filter(name => !current.runtimes.some(runtime => runtime.name === name))
-    .flatMap(name => proposedRuntimes.filter(runtime => runtime.name === name));
+    .flatMap(name => proposedRuntimes.filter(runtime => runtime.name === name)).map(runtime => install ? pinRuntime(runtime, install) : runtime);
   const known = (name: string) => current.runtimes.some(runtime => runtime.name === name) || runtimes.some(runtime => runtime.name === name);
   const modelName = (runtime: string) => `${runtime}-default`;
   const taken = new Set(current.accounts.map(account => account.name));
