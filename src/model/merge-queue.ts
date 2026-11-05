@@ -1,4 +1,4 @@
-// Concern: the merge writer's serial queue (GY-1524), pure over the work and its folded ledger so the board reads the order the writer merges in.
+// Concern: the merge writer's queue (GY-1524), pure over the work and its folded ledger: it only orders which head starts its trial next (GY-3120), so the board reads that order.
 import type { Work } from './work.js';
 import type { MergeLedgerState } from './merge-ledger.js';
 import { trialFailurePrefix } from './rework-ground.js';
@@ -29,7 +29,7 @@ export interface QueuedMerge { key: string; id: string; head: string; submittedA
 export interface MergeQueue {
   /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
   next: Work | null;
-  /** Every candidate due a merge, highest priority then oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
+  /** Every candidate due a merge, highest priority then oldest first (`next` leading it), or none while an open intent blocks the queue: the writer starts the first `parallel` of them (GY-3120). */
   due: Work[];
   queue: QueuedMerge[];
   /** The item whose open intent (or unreconciled push) holds the queue until it is reconciled; null when none does. */
@@ -43,7 +43,7 @@ const createdAtOf = (item: Pick<Work, 'createdAt'>) => Date.parse(item.createdAt
 export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 /** The item the loop's base-failure step files for a failing base test (`baseFailureItem`'s title): it unblocks every held head, so it goes first too. */
 export const isBaseRepair = (item: Pick<Work, 'title'>) => /^base branch \S+ fails .+ test: /i.test(item.title ?? '');
-const mergesFirst = (item: Pick<Work, 'title'>) => isHotfix(item) || isBaseRepair(item);
+const mergesFirst = (item: Pick<Work, 'title' | 'yardRepair'>) => isHotfix(item) || isBaseRepair(item) || !!item.yardRepair;
 /**
  * The trial-failure refusal the item's own record holds for its exact candidate head, or null: the
  * one fact that takes a head out of the queue (`mergeQueue`'s `trial failed` drop, GY-1524 AC-3)
@@ -64,9 +64,9 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
  * and `review` gates passed as the control plane served them: its review gate fails a sensitive delta until its
  * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
  * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
- * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent
- * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
- * so never more than one merge is in flight.
+ * trial; one refused for another cause (a push rejected on an unmoved tip, a hold) is queued again.
+ * An item whose ledger holds an open intent or an unreconciled push blocks the whole queue:
+ * `reconcileIntents` settles it before any new flight starts.
  */
 export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
   const blocking = Object.values(ledger).find(open);

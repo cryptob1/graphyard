@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
@@ -12,7 +12,6 @@ import { reconciledClosure } from '../web/workers-view.js';
 import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -35,16 +34,13 @@ const coordinator: Principal = { id: 'executor-a', role: 'coordinator' };
 const producer: Principal = { id: 'producer-a', role: 'producer' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_SESSION_MODEL_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 191);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('session-model'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('session-liveness-model'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, coordinator, worker, producer];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const config = masterConfigSchema.parse({
   version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs',
@@ -62,7 +58,9 @@ function dispatcher(items: () => Promise<Work[]>, runtime: () => RuntimeSession[
     mutate: async (path: string, body: unknown) => { const [, id, command] = path.split('/'); return engine.execute(coordinator, command as any, id, body, randomUUID()); },
     run: () => { throw new Error('nothing is launched here'); },
   });
-  return { ...production, agents: () => runtime() as any, credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
+  // GY-3030: the tick reads its session inventory (session-inventory.ts) before Herdr alone; the test's listing is that inventory, null an unreadable one.
+  const inventory = async () => { const listed = runtime(); return { available: !!listed, sessions: (listed ?? []).map(entry => ({ name: entry.name ?? null, runtime: entry.agent ?? null, state: entry.agent_status ?? null, pane: entry.pane_id ?? null, workspace: null })) }; };
+  return { ...production, inventory, agents: () => runtime() as any, credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
     launchReview: async () => { throw new Error('no launch'); }, launchProducer: async () => { throw new Error('no launch'); }, persist: async () => {} };
 }
 

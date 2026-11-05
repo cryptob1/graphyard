@@ -18,7 +18,7 @@ import { formatAge } from '../../src/model/duration';
 import { candidatePrUrl } from '../links';
 import { activityLabel, historyLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
 import { plainStatus } from '../../src/model/plain-status';
-import { plainStage, serveView } from '../../src/model/plain-stage';
+import { stageLabel, serveView } from '../../src/model/plain-stage';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
@@ -275,7 +275,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
       {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
-      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{plainStage(item, release, serve)}</span><span>In this step for {age(item.stageEnteredAt, now)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
+      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{stageLabel(item, now, release, serve)}</span><span>In this step for {age(item.stageEnteredAt, now)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Worker assignment</h3><p>{worker.text}</p>{worker.owner && <p className="muted">Worker ID: {worker.owner} · assignment {worker.epoch}</p>}<p>{worker.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}

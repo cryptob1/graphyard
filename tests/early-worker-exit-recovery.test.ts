@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { server } from '../src/server.js';
@@ -30,7 +30,7 @@ const operator: Principal = { id: 'operator', role: 'admin' }, coordinator: Prin
 const workers: Principal[] = ['worker-a', 'worker-b'].map(id => ({ id, role: 'worker' }));
 const token = (actor: Principal) => `${actor.id}-${'x'.repeat(40)}`;
 const host = 'exit-host', secret = 'ghp_abcdefghijklmnopqrstuvwxyz1234567890';
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 async function api(actor: Principal, path: string, data?: unknown) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(actor)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   const result = await response.json() as any;
@@ -38,15 +38,12 @@ async function api(actor: Principal, path: string, data?: unknown) {
   return result;
 }
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3068;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('early-exit-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('early_exit');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/early_exit`); await store.init();
+  store = await withDatabase('early-worker-exit-recovery'); await store.init();
   http = server(new Engine(store, 7200, 'owner/project'), [operator, coordinator, ...workers].map(actor => ({ ...actor, token: token(actor) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 const proof = 'integration:early-worker-exit-recovery';
 test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route around, wake once and recover`, { timeout: 180_000 }, async t => {
@@ -85,7 +82,9 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
     return { work: (await response.json() as { work: Work[] }).work, now: new Date(now).toISOString() };
   };
   const effects: DaemonEffects = {
-    snapshot, credentials: async () => ({}), agents: () => [{ name: config.masterAgentName, pane_id: 'master-live-pane', agent_status: 'working' }],
+    snapshot, credentials: async () => ({}),
+    // GY-3103: the loop reads the registry to back a failed runtime off its item.
+    registry: () => api(coordinator, 'agent-registry/document'), agents: () => [{ name: config.masterAgentName, pane_id: 'master-live-pane', agent_status: 'working' }],
     persist: async () => {}, closeSession: pane => { closed.push(pane); },
     recordSession: (item, handle) => api(coordinator, `work/${item.id}/session`, handle),
     sessionScreen: session => { if (mode === 'unreadable' && session.pane !== 'master-live-pane') throw new Error('pane vanished'); return screens.get(session.pane!) ?? null; },
@@ -159,30 +158,40 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.match(incident.detail, /\[redacted\]/); assert.ok(incident.detail.length <= 500);
   assert.match(failed.sessions![0].outcome!, /controlled startup failure/); assert.ok(closed.includes(`${target.key}-pane-1`));
   assert.equal(state.actions[`close:${target.id}:${launched.id}`]?.state, 'done');
-  assert.equal(state.profiles['claude-0'].failures, 1);
-  assert.ok(launchedProfiles.includes('claude-1'), 'healthy fallback profile still advances work');
+  assert.equal(state.launchBackoff[`codex:${target.id}`].failures, 1, 'the failed runtime backs off for this item');
+  assert.equal(launchedProfiles.length, 2, 'other work still launches while the failed runtime holds this item; no profile cools off');
   assert.equal(prompts.length, 1); assert.match(prompts[0], /controlled startup failure/);
   assert.equal((await store.coordinationSnapshot()).work.find(item => item.id === target.id)?.pipeline, undefined, 'test reads the actual compact snapshot');
+  // GY-3103: the failed runtime holds the item for its first minute of back-off.
+  const beforeHold = (await reload()).epoch;
+  await Promise.all(runs); await cycle(); assert.equal((await reload()).epoch, beforeHold, 'no profile relaunches the item inside its back-off');
+  now += 61_000;
   await Promise.all(runs); await cycle(); await Promise.all(runs); await cycle();
   state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
-  await cycle(); assert.equal(prompts.length, 1, 'unchanged diagnosis survives restart without another wake');
+  // GY-3104: the second equal exit replaces the per-failure cause with the run's one wake, carrying both reasons.
+  assert.equal(prompts.length, 2); assert.match(prompts[1], /the same launch failure twice[\s\S]*epoch 1[\s\S]*epoch 2/);
+  await cycle(); assert.equal(prompts.length, 2, 'unchanged diagnosis survives restart without another wake');
   assert.equal(closed.filter(pane => pane === launched.pane).length, 1, 'reporter-finished pane closes exactly once');
 
   // Retry the same exact failure on another epoch. Starting it does not erase health or incident.
   now += 11 * 60_000;
-  await cycle(); assert.ok(state.actions[key]); assert.ok(state.profiles['claude-0']); await Promise.all(runs);
-  await cycle(); assert.equal(prompts.length, 1, 'unchanged failure across epochs does not spam');
+  await cycle(); assert.ok(state.actions[key]); assert.ok(state.launchBackoff[`codex:${target.id}`]); await Promise.all(runs);
+  // GY-3104: the third equal exit holds the item and wakes the master once to decide.
+  await cycle(); assert.equal(prompts.length, 3, 'unchanged failure across epochs does not spam'); assert.match(prompts[2], /a third time; the loop stopped dispatching it/);
   assert.ok(currentIncident().attempts >= 2, JSON.stringify(state.actions));
   diagnostic = 'runtime error: changed failure'; now += 11 * 60_000;
+  const held = launchedProfiles.length;
+  await cycle(); await Promise.all(runs); assert.equal(launchedProfiles.length, held, 'a held item is not relaunched');
+  await api(operator, `work/${target.id}/rework`, { reason: 'Try a different start', previousWorkerStopped: true });
   await cycle(); await Promise.all(runs); await cycle();
-  assert.equal(prompts.length, 2); assert.match(prompts[1], /changed failure/);
+  assert.equal(prompts.length, 4); assert.match(prompts[3], /changed failure/);
   const attempts = launchedProfiles.length;
-  for (const profile of Object.values(state.profiles)) profile.cooldownUntil = null;
+  for (const entry of Object.values(state.launchBackoff)) entry.until = new Date(0).toISOString();
   await cycle(); assert.equal(launchedProfiles.length, attempts, 'item backoff applies even with healthy profiles');
   now += actionStallDelay(currentIncident().attempts) + 1;
   mode = 'long'; await cycle(); assert.ok(state.actions[key], 'started pane retains incident');
   now += 61_000; await cycle();
-  assert.equal(state.actions[key], undefined); assert.deepEqual(state.profiles, {});
+  assert.equal(state.actions[key], undefined); assert.deepEqual(state.launchBackoff, {});
   assert.equal(masterCauses([await reload()], state.actions).filter(cause => cause.detail.includes('worker exited')).length, 0);
   const running = await reload();
   const session = running.sessions!.at(-1)!;

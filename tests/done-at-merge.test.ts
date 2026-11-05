@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import type { Principal, Work } from '../src/model.js';
 import { deliveryState } from '../src/model/delivery.js';
 import { actionAccount } from '../src/model-boundary/next-action.js';
@@ -14,7 +14,6 @@ import { operationsCommand } from '../src/cli/master/operations.js';
 import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -39,7 +38,7 @@ const legacyRow = (work: Work) => ({ id: 'legacy-row', kind: 'verify-deployment'
 const delivered = (key: string, itemPolicy: Work['policy'], overrides: Partial<Work> = {}): Work => ({
   id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 1,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:done-at-merge-settles'] }],
-  policy: itemPolicy, 
+  policy: itemPolicy,
   stage: 'done', revision: 40, policyRevision: 1, createdAt: iso(nowMs - 2 * day), updatedAt: iso(nowMs - day), stageEnteredAt: iso(nowMs - day),
   ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: { epoch: 1, pr: 1110 }, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
@@ -80,16 +79,13 @@ test('unit:done-at-merge-board-and-goal — the board groups a merged item as sh
 
 const operator: Principal = { id: 'done-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'done-coordinator', role: 'coordinator', sessionKind: 'ai' };
-let database: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1981;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('done-at-merge'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('done_at_merge_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/done_at_merge_test`); await store.init();
+  store = await withDatabase('done-at-merge'); await store.init();
   engine = new Engine(store, 120, 'owner/done-at-merge');
   engine.principals = [operator, coordinator];
 });
-after(async () => { await store?.close(); await database?.stop(); });
+after(async () => { await store?.close(); });
 
 test('unit:verify-deployment-removed-history-loads — the kind, deployment command and master verify-deployment are gone, and a verify-deployment row, action or deployment event written earlier loads and settles', { timeout: 120_000 }, async () => {
   assert.ok(!(nextActionKinds as readonly string[]).includes('verify-deployment'), 'no verify-deployment action kind');

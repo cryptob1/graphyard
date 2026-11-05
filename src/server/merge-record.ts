@@ -15,7 +15,6 @@ import { exactApproval } from '../model/review.js';
 import { decisionWork } from '../store/decision-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
-import { defaultMergeBatch } from '../merge-writer/batch.js';
 import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
@@ -42,8 +41,8 @@ const tests = z.object({ passed: z.number().int().min(0), failed: z.array(z.stri
 const trialPhase = z.enum(trialPhases), trialNoVerdictOutcome = z.enum(['timeout', 'cancelled', 'host-failure']);
 const trialPhaseDurations = z.object(Object.fromEntries(trialPhases.map(phase => [phase, z.number().min(0)])) as Record<TrialPhase, z.ZodNumber>).strict();
 const trialAttempts = z.array(z.object({ outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().max(1000), phases: trialPhaseDurations }).strict()).max(10);
-/** Every e2e result one trial can owe: a full batch of items, each with create's 50 criteria of 20 proofs. */
-const trialE2eResultLimit = defaultMergeBatch * 50 * 20;
+/** Every e2e result one trial can owe: one item's 50 criteria of 20 proofs. */
+const trialE2eResultLimit = 50 * 20;
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   mergeServeRevertSchema.extend({ kind: z.literal('serve-revert') }),
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),

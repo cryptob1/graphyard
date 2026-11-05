@@ -6,7 +6,7 @@ import { daemonSummary } from '../src/daemon/run.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { mergeWriterIdle, mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { baseMovedReason, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -16,7 +16,7 @@ import type { Work } from '../src/model.js';
 /**
  * GY-1524: the control-plane merge executor over a simulated day of the real loop's cycles, in the
  * real step order. Items are submitted every few minutes; the base tip moves under some pushes
- * (one re-trial lands, one head exhausts its re-trials and is queued again); some trials fail
+ * (the passing head is re-merged onto the moved tip and lands without another trial, GY-3120); some trials fail
  * (refused, reworked, resubmitted on a new head); the coordinator's merge-record route is down for
  * stretches (a step fails before or after the push, and the next cycle reconciles or retries);
  * the executor is killed between a push and its record (reconciled, no second push); some trials
@@ -31,7 +31,7 @@ const start = Date.parse('2030-05-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
 
 /** The day's script, by item ordinal. */
@@ -89,10 +89,10 @@ class World {
       } as unknown as Work;
     });
   }
-  ports(batch?: number, parallel?: number): MergeWriterReads {
+  ports(parallel?: number): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now,  ...(batch ? { batch } : {}), ...(parallel ? { parallel } : {}),
+      baseBranch: 'main', now: this.now, ...(parallel ? { parallel } : {}),
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         const mergeSha = sha(`merge:${head}:${baseTip}`);
@@ -145,7 +145,7 @@ class World {
   };
 }
 
-test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-trialled within the bound then queued again, failed trials reworked exactly once through refused rework requests, crashes between push and record reconciled without a second push, record outages retried, and state bounded', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-merged without another trial, failed trials reworked exactly once through refused rework requests, crashes between push and record reconciled without a second push, record outages retried, and state bounded', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
@@ -185,8 +185,9 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   assert.ok(world.trials > items, `re-trials happened: ${world.trials} trials for ${items} items`);
   // The scripted faults each left their trace and were recovered from.
   const reasons = (n: number) => (world.recorded.get(n) ?? []).filter(event => event.kind === 'refused').map(event => (event as { reason: string }).reason);
-  assert.ok(reasons(53).includes(baseMovedReason(4)), `GY-53 exhausted its re-trials: ${reasons(53).join(' | ')}`);
-  assert.equal(final.find(item => item.key === 'GY-53')!.stage, 'done', 'and was merged once the tip held still');
+  const intents53 = (world.recorded.get(53) ?? []).filter(event => event.kind === 'intent'), trials53 = (world.recorded.get(53) ?? []).filter(event => event.kind === 'trial');
+  assert.ok(intents53.length >= 2 && trials53.length === 1, `GY-53's head was re-merged onto the moved tip without another trial: ${intents53.length} intents, ${trials53.length} trials`);
+  assert.equal(final.find(item => item.key === 'GY-53')!.stage, 'done', 'and was merged on the moved tip');
   const failing = Array.from({ length: items }, (_, index) => index + 1).filter(failsTrial);
   const timingOut = Array.from({ length: items }, (_, index) => index + 1).filter(timesOut);
   assert.ok(timingOut.length > 0, 'the day scripts trial timeouts');
@@ -220,36 +221,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   assert.deepEqual(summary.refusals, [], 'once every item lands, no standing refusal remains; historical refusals stay on the ledger');
 });
 
-test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with heads queued faster than one trial each, merged four at a time: every head is delivered exactly once at its own merge commit on main, no commit is pushed twice, one merge is in flight at a time, failed and timed-out trials are reworked exactly once after the batch falls back to single heads, crashes and record outages recover, and fewer pushes than heads land the day', { timeout: 300_000 }, async () => {
-  let now = start;
-  const world = new World(() => now), count = 120, dayCycles = 360;
-  for (let n = 1; n <= count; n++) world.submit(n, 1, start + n * 3 * minute);
-  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {},
-    decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(4), rework: world.rework } as unknown as DaemonEffects;
-  const state = emptyDaemonState(config);
-  for (let cycle = 0; cycle < dayCycles; cycle++) {
-    now = start + cycle * cycleMs; world.cycle = cycle;
-    for (const [n, { confirmedAt }] of world.reworked) if (world.submissions.get(n)!.head === sha(`head${n}-1`) && now >= confirmedAt + 30 * minute) world.submit(n, 2, now);
-    await runCycle(config, state, effects, () => now);
-    await mergeWriterIdle(state);
-    assert.ok(world.widest <= 1, `cycle ${cycle}: one merge in flight`);
-  }
-  const final = world.snapshot();
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every head is delivered');
-  const delivered = final.map(item => item.delivery!.mergeSha);
-  assert.equal(new Set(delivered).size, count, 'each item has its own merge commit');
-  for (const mergeSha of delivered) assert.ok(world.main.includes(mergeSha), `${mergeSha.slice(0, 12)} is on main's first-parent chain`);
-  assert.equal(new Set(world.pushes).size, world.pushes.length, 'no merge commit was pushed twice');
-  assert.ok(world.pushes.length < count, `batches landed several heads per push: ${world.pushes.length} pushes for ${count} heads`);
-  const failing = Array.from({ length: count }, (_, index) => index + 1).filter(n => failsTrial(n) || timesOut(n));
-  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'each failed or repeatedly timed-out head got exactly one rework request; no head batched beside it was refused');
-  assert.deepEqual(state.mergeWriter.reworks, [], 'no rework is still owed');
-});
-
-test('unit:soak-merge-writer-stacked — the simulated day with three queue positions trialled at once, each stacked on the one before it: every head is still delivered exactly once at its own merge commit on main, no commit is pushed twice, and each failed or repeatedly timed-out head is reworked exactly once', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-writer-concurrent — GY-3120: the simulated day with three heads trialled at once, each alone on the current tip: every head is still delivered exactly once at its own merge commit on main, no commit is pushed twice, and each failed or repeatedly timed-out head is reworked exactly once', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
@@ -257,7 +229,7 @@ test('unit:soak-merge-writer-stacked — the simulated day with three queue posi
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
     decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(undefined, 3), rework: world.rework } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(3), rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs; world.cycle = cycle;
@@ -266,7 +238,7 @@ test('unit:soak-merge-writer-stacked — the simulated day with three queue posi
     await mergeWriterIdle(state);
     assert.ok(world.widest <= 3, `cycle ${cycle}: at most three trials at once`);
   }
-  assert.ok(world.widest > 1, 'positions were trialled at once');
+  assert.ok(world.widest > 1, 'heads were trialled at once');
   const final = world.snapshot();
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every head is delivered');
   const delivered = final.map(item => item.delivery!.mergeSha);
@@ -274,6 +246,6 @@ test('unit:soak-merge-writer-stacked — the simulated day with three queue posi
   for (const mergeSha of delivered) assert.ok(world.main.includes(mergeSha), `${mergeSha.slice(0, 12)} is on main's first-parent chain`);
   assert.equal(new Set(world.pushes).size, world.pushes.length, 'no merge commit was pushed twice');
   const failing = Array.from({ length: items }, (_, index) => index + 1).filter(n => failsTrial(n) || timesOut(n));
-  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'only a failing head is reworked, never one stacked on it');
+  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'only a failing head is reworked, never one trialled beside it');
   assert.deepEqual(state.mergeWriter.reworks, [], 'no rework is still owed');
 });

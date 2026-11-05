@@ -10,6 +10,8 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewLedgerLockStaleMs, saveReviewerProfile, updateReviewLedger } from '../src/reviewer.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
 // Time-bomb allowance (GY-1694): the 2026-10-05 submittedAt is a past verdict literal that reconcile records without comparing it to a clock; the gh stub's submitted_at and the item timestamps come from Date.now().
 
 // GY-1303, 2026-10-05: with the coordinator checkout mounted read-only, every reconcile pass failed
@@ -90,7 +92,7 @@ test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock locatio
     assert.equal(existsSync(join(root, '.graphyard', 'reviews.json.lock')), false, 'nothing is ever written beside the ledger');
 
     // A reconcile pass that records a verdict saves it although its lock location is read-only.
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, registerLaunch });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, registerLaunch, probe: registryFixture(hostname(), ['claude'], ['reviewer']).probe });
     const config = await loadMasterConfig(root);
     const reasons: string[] = [];
     const ledgerLock = { environment: { GRAPHYARD_DATA_HOME: dataHome }, fs: await readOnlyLockFs('open'), onLockless: (reason: string) => reasons.push(reason) };

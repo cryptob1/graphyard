@@ -1,7 +1,7 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -10,7 +10,6 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Principal } from '../src/model.js';
 import { relandItemFor } from '../src/merge-writer/serve-revert.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -18,15 +17,12 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 
 const alice: Principal = { id: 'alice', role: 'admin', sessionKind: 'human' };
 const bob: Principal = { id: 'bob', role: 'admin', sessionKind: 'human' };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2987;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('owners-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('owners_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/owners_test`); await store.init();
+  store = await withDatabase('masters-dispatch-owned-items'); await store.init();
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [alice, bob];
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 const criteria = [{ id: 'AC-1', text: 'Ownership routes work', proofs: ['unit:masters-dispatch-owned-items', 'e2e:fixture'] }];
 const create = (owner?: string | null) => engine.execute(alice, 'create', null, { title: `Item ${owner ?? 'install'}`, type: 'chore', criteria, owner }, randomUUID());
 

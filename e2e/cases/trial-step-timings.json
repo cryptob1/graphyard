@@ -1,13 +1,13 @@
 {
   "id": "trial-step-timings",
   "title": "Master status retains completed merge trial step durations",
-  "description": "Run a merge trial in a temporary Git repository, persist and reload the writer state, and read master status to check the covered head, each step duration and medians. Check retention of the last 20 trials and batch fallback head attribution.",
+  "description": "Run a merge trial in a temporary Git repository, persist and reload the writer state, and read master status to check the covered head, each step duration and medians. Check retention of the last 20 trials, each naming the heads it covered.",
   "target": "any",
   "required": false,
   "steps": [{
     "kind": "command",
     "name": "Completed trials, persisted master status and bounded timing history",
-    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-trial-step-visibility.test.ts tests/merge-batch.test.ts",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-trial-step-visibility.test.ts",
     "timeoutSeconds": 180
   }]
 }

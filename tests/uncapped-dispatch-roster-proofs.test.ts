@@ -65,7 +65,7 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   assert.equal(authorizedForProof(admin, 'manual:works'), false);
   assert.equal(authorizedForProof(attester, 'manual:works'), true);
   // A human sign-in session keeps its roster entry's patterns, and gains none it lacks.
-  const database = await signInDatabase(3078);
+  const database = await signInDatabase();
   try {
     const signIn = new HumanSignIn(database.store);
     const session = async (issuer: Principal) => (await signIn.authenticate((await signIn.redeem(signIn.issue({ ...issuer, sessionKind: 'human' }, true).code)).token))!;

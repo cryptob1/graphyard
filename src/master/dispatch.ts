@@ -1,6 +1,6 @@
 export { shellQuote } from '../shell-quote.js';
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
@@ -19,7 +19,9 @@ import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
-import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import type { FleetProbe } from '../fleet.js';
+import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, type HerdrAgent } from './herdr.js';
@@ -28,7 +30,7 @@ import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessio
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { carryTranscript, freshLaunch, readAttemptLaunch, resumeLaunchVariable, resumePlan, type AttemptLaunch } from './session-resume.js';
-import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch } from './dispatch-reservation.js';
+import { dispatchedFile, DispatchReservedError, profileLaunchedFile, reclaimableAgent } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
@@ -53,12 +55,14 @@ type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
  * always probed; a worktree an injected preparer supplies is probed only when a runner is given.
  */
 export interface DispatchOptions {
-  probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  /** The prompt section a run of repeated equal failures asks for (GY-3104, daemon/repeated-failure.ts). */
+  diagnosis?: string;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
   /** Closes, bounded, the pane of a finished session a launch takes its profile's name back from (GY-1322); closeHerdrPane by default. */
   closePane?: (pane: string) => Promise<void>;
-  /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
+  /** A fresh runtime inventory for safe pane reclamation. */
   agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
@@ -70,6 +74,12 @@ export interface DispatchOptions {
   renew?: LeaseRenewer;
   /** How often the launch renews the lease until its supervisor takes over (launchRenewalMs). */
   renewIntervalMs?: number;
+  /** Newer runtime versions this launch may run as their canary (GY-3103): a launch on one of these runtimes leads its PATH with the offer's entry, once per dispatch. */
+  canaries?: CanaryOffer[];
+  /** Accounts whose runtime backs off this item (GY-3103), excluded from the selection. */
+  exclude?: string[];
+  /** Hears the runtime each launch of this dispatch chose, so a failure backs off that runtime (GY-3103). */
+  onRuntime?: (kind: string) => void;
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
 }
@@ -161,6 +171,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
+  // GY-3103: the canary this dispatch ran, and its start failure; a fallback launch never runs it again.
+  let canary: { runtime: string; failed: string | null } | null = null;
   // GY-2971: the item's last launch on this host, whose runtime session the next attempt may resume.
   let initialHead: string | null = null, runtimeStartedAt: string | null = null;
   let resumed: { session: string | null; resumedFrom: number | null; path: string } | null = null;
@@ -179,21 +191,11 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
     rework = appliedReworkBrief(work);
-    // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
-    // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
-    const unreserve = await reserveDispatch(root, work, profile, observedAt);
-    try {
-      const visible = (await currentAgents(root, profile, agents, observedAt, run, options.agents)).find(agent => agent.name === profile.agentName);
-      if (visible && (!reclaimableAgent(profile, visible, allWork, now) || await launchedSinceSnapshot(root, profile, allWork)))
+    // Inventory only identifies an old pane to reclaim. The registry selection below reserves capacity.
+    {
+      const visible = (options.agents ? await options.agents() : agents).find(agent => agent.name === profile.agentName);
+      if (visible && !reclaimableAgent(profile, visible, allWork, now))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
-      // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
-      // closed, bounded, and the launch goes on as on a profile with no agent.
-      if (visible) {
-        try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
-        catch (error) { throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error }); }
-        closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
-        target = undefined;
-      }
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
@@ -204,7 +206,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       // without it could hand the same spent account back, and the loop's retry takes it from there.
       // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
       const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
-      await holdRepeatedLimitAccount(config, work, holdAt, {}).catch((error: unknown) => {
+      await holdRepeatedLimitAccount(config, work, holdAt, { registry: options.probe?.registry }).catch((error: unknown) => {
         throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
       });
       let startError: unknown = null;
@@ -214,7 +216,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} to fall back to`, { cause: startError });
         try {
           prefer = workerPreference(work, startFailures.length);
-          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: startFailures.map(failure => failure.account) });
+          selected = await selectAccount(config, 'worker', accounts && accounts.length < (profile.accounts?.length ?? 0) ? { ...profile, accounts } : profile, { ...clock, ...options.probe, work: work.key, prefer, exclude: [...options.exclude ?? [], ...startFailures.map(failure => failure.account)] });
         } catch (error) {
           if (!startFailures.length || !(error instanceof NoHealthyAccountError)) throw error;
           throw new Error(`${describeStartFailures(startFailures, null)}; no further account of profile ${profile.name} could be launched: ${failureText(error).slice(0, 300)}`, { cause: error });
@@ -233,8 +235,26 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         // The repository root rides the choice, so an opencode launch derives its repository-tree
         // permission from the checkout the dispatch serves (GY-2959).
         const chosen = selected;
-        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
+        // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
+        // closed, bounded, only once the registry granted this launch its slot, so a dispatch from a
+        // stale snapshot that the registry refuses never closes a session launched since.
+        if (visible && !closedAgent) {
+          try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
+          catch (error) {
+            await chosen.release?.(`worker launch for ${work.key}: the finished pane holding its name could not be closed`);
+            throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error });
+          }
+          closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
+          target = undefined;
+        }
+        let launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
+        const offer: CanaryOffer | undefined = !canary && chosen.account && 'fleet' in chosen.account ? options.canaries?.find(entry => entry.runtime === (chosen.account as { fleet: { runtime: string } }).fleet.runtime) : undefined;
+        if (offer) {
+          launch = { ...launch, environment: { ...launch.environment, PATH: repinPath(launch.environment.PATH ?? '', offer.entry) } };
+          canary = { runtime: offer.runtime, failed: null };
+        }
         launched = launch;
+        options.onRuntime?.(launch.kind ?? profile.kind ?? 'unknown');
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
         // then made once more from a fresh claim, rather than leaving an idle session holding the item.
         try {
@@ -242,11 +262,12 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous, options.diagnosis));
               claimedEpoch = epoch;
-              // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
+              // History supports session resume and status; it never grants or reserves a slot.
               const at = new Date().toISOString();
               // It also names the runtime session the next attempt may resume (GY-2971).
+              await mkdir(resolve(root, '.graphyard/dispatch'), { recursive: true }).catch(() => {});
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at, runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...resumed }), { mode: 0o600 }).catch(() => {});
               // The dispatch record names the runtime and account the session runs on, the preference
               // that ordered the accounts (GY-1772), every account whose runtime failed to start
@@ -273,13 +294,14 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting', ...launch.kind === 'pi' ? ['exited'] : []].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
+          if (offer && canary) canary.failed = failure.reason;
           await recordAccountStartFailure(config, failure.account, failure.kind, failure.reason).catch(() => {});
           startFailures.push(failure);
           continue;
         }
         break;
       }
-    } finally { await unreserve(); }
+    }
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   // The epoch the launch claimed rides the result (GY-1791): the launcher registered the session
@@ -287,7 +309,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // first runtime refused the prompt claims a later epoch — the record the loop, the resume fence
   // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
   // re-keys the registration once the claim is known.
-  return { work: work.key, epoch: claimedEpoch, runtime: launched?.kind ?? null, initialHead, runtimeStartedAt, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
+  return { work: work.key, epoch: claimedEpoch, runtime: launched?.kind ?? null, initialHead, runtimeStartedAt, canary, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     // Whether the attempt resumed the previous attempt's runtime session (GY-2971).
@@ -362,7 +384,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null, diagnosis = '') {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -401,7 +423,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // GY-2956: the prompt reads the claimed document when the preparer returned it, not the
     // snapshot the dispatch chose from — an attempt preserved in the same cycle is in the claim's
     // record, and a handoff built from the older copy would send the worker back to the shared base.
-    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework);
+    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework, diagnosis);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
@@ -509,6 +531,7 @@ export function workerPrompt(
   baseSha?: string | null,
   verificationMaps?: readonly VerificationMap[] | null,
   rework?: AppliedRework | null,
+  diagnosis = '',
 ) {
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
@@ -528,6 +551,8 @@ export function workerPrompt(
     + simplicityParagraph
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + reworkBriefSection(work, rework)
+    // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.
+    + diagnosis
     + resumedAttempt(work)
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')

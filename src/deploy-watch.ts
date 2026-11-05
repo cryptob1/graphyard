@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { GitRunner } from './merge-writer/local-observation.js';
 import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
+import { servedVerified } from './batch-gate.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -42,6 +43,8 @@ export interface DeployWatchPorts {
   restart(commit: string): Promise<void>;
   /** /healthz answers healthy at the commit. */
   health(commit: string): Promise<void>;
+  /** The first commit is an ancestor of, or equal to, the second: the second contains it. */
+  contains?(ancestor: string, commit: string): Promise<boolean>;
   /** Advances the known-good coordinator pin the loop's unit loads, so the loop's restart loads the commit. */
   pin(commit: string): Promise<void>;
   /** After a verified deploy, removes the per-commit images of every commit but these (the serving tip and the previous one). */
@@ -59,7 +62,8 @@ export const rollbackAttempts = 5;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /**
- * One pass: fetch, and when the base tip is new, deploy it. A failure at any step rolls back to the
+ * One pass: fetch, and when the base tip (the batch gate's latest verified commit, once the gate
+ * names this repository) is new, deploy it. A failure at any step rolls back to the
  * previous tip through the same steps and records the failed tip, which waits for the next one —
  * unless the failed deploy may have migrated the database, which the previous tip would refuse: a
  * failure from the restart on whose tip's code migrates past the previous tip's is kept and recorded
@@ -68,7 +72,10 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  * succeeds; a new base tip is deployed in its place.
  */
 export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line), owner: string | null = null): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
-  const tip = await ports.fetch();
+  // GY-3119: once the loop's batch gate names this repository, only its latest verified commit serves, never the fetched main tip.
+  const fetched = await ports.fetch();
+  const verified = servedVerified(join(dirname(file), 'main-gate.json'), owner);
+  const tip = verified ?? fetched;
   const stored = readDeployRecord(file);
   const record = stored ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
   const write = (entry: Omit<DeployRecord, 'at' | 'repository'>) => writeDeployRecord(file, { ...entry, repository: owner });
@@ -88,6 +95,9 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     return restore(record.restore, tip, record.reason ?? '', attempts);
   }
   const previous = record.restore ?? record.tip;
+  // GY-3137: serving only moves forward: a verified commit the served one already contains (or that diverges from it) never deploys.
+  const behind = verified && previous && tip !== previous && ports.contains ? !(await ports.contains(previous, tip).catch(() => false)) : false;
+  if (behind) return 'unchanged';
   if (tip === previous || tip === record.failed) {
     // The base tip is what the checkout already serves: nothing to deploy, but a record an older
     // watcher left without the repository it serves gains the name on this first pass, so master
@@ -130,11 +140,18 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   }
 }
 
-/** `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried. `repository` is the record's owner: the repository the watch serves. */
-export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void; repository?: string | null }) {
+/**
+ * `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried.
+ * `repository` is the record's owner: the repository the watch serves. `handover` runs after a pass
+ * served a new tip; it may stop the watch by throwing, so the process that restarts it loads the
+ * code the checkout published — the watch runs the code it deploys (GY-3123).
+ */
+export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void; repository?: string | null; handover?: (tip: string) => Promise<void> }) {
   const log = options.log ?? (line => console.error(line));
   for (;;) {
-    try { await deployOnce(file, ports, log, options.repository ?? null); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
+    let served: Awaited<ReturnType<typeof deployOnce>> | undefined;
+    try { served = await deployOnce(file, ports, log, options.repository ?? null); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
+    if ((served === 'deployed' || served === 'kept') && options.handover) await options.handover(readDeployRecord(file)?.tip ?? '');
     if (options.once || options.signal?.aborted) return;
     try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { return; }
   }

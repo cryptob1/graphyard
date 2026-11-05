@@ -6,15 +6,15 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { daemonStateSchema, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { daemonSummary } from '../src/daemon/run.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, replayUnconfirmed, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, supersededIntentReason, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
-import { defaultDeployKeyFile, defaultMergeWriterParallel, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
+import { attributeFailures, baseFailureReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, supersededIntentReason, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { defaultDeployKeyFile, defaultMergeWriterParallel, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -46,7 +46,7 @@ const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const tip = sha('main-tip'), newerTip = sha('newer-tip');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const gates = (passed: Record<string, boolean>) => ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: passed[name] ?? false, reasons: passed[name] ?? false ? [] : [`${name} refused`] }));
 const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works', 'integration:item-holds', 'manual:item-looks'] }],
@@ -74,7 +74,7 @@ test('unit:executor-serial-oldest-first — nextToMerge takes the oldest-submitt
     assert.equal(blocked.queue.length, 2, 'the queue is still reported');
   }
   assert.equal(nextToMerge([late, early], { 'GY-1': ledgerState('GY-1', 1, 'reconciled') }, start)?.key, 'GY-2', 'a reconciled merge blocks nothing');
-  assert.equal(nextToMerge([late, early], { 'GY-2': ledgerState('GY-2', 2, 'refused', { refusal: { kind: 'merge', reason: baseMovedReason(4) } }) }, start)?.key, 'GY-2', 'a head refused because the base moved is queued again');
+  assert.equal(nextToMerge([late, early], { 'GY-2': ledgerState('GY-2', 2, 'refused', { refusal: { kind: 'merge', reason: unmovedTipReason('main', tip) } }) }, start)?.key, 'GY-2', 'a head refused because its push was rejected is queued again');
   assert.equal(nextToMerge([late, early], { 'GY-2': ledgerState('GY-2', 2, 'refused', { refusal: { kind: 'merge', reason: `${trialFailurePrefix}: tests tests/x.test.ts` } }) }, start)?.key, 'GY-1', 'a head whose trial failed waits for its rework');
   assert.equal(nextToMerge([late, early], { 'GY-2': ledgerState('GY-2', 2, 'reconciled') }, start)?.key, 'GY-1', 'a head already reconciled has no turn');
   const github = submitted(4, 90, ['src/app.ts'], { observation: { candidate: { sha: sha('head4') }, checks: [], reviews: [], merged: false } });
@@ -103,7 +103,7 @@ function fakePorts(options: { pushes?: ('pushed' | 'rejected')[]; holds?: (sha: 
   const fails = (mergeSha: string) => typeof options.failTrial === 'function' ? options.failTrial(mergeSha) : !!options.failTrial;
   const trialRun = (mergeSha: string): MergeTrialRun => ({ build: 'pass', tests: fails(mergeSha) ? { passed: 1, failed: ['tests/item.test.ts'], files: 2 } : { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts', 'tests/other.test.ts'], proofs: { 'integration:item-holds': { executed: 1, failed: 0 }, 'unit:item-works': { executed: 1, failed: fails(mergeSha) ? 1 : 0 } } });
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 3, now: () => start,
+    baseBranch: 'main', now: () => start,
     fetch: async () => { calls.push('fetch'); const tips = options.tips ?? [tip]; return tips[Math.min(fetches++, tips.length - 1)]!; },
     merge: async (head, baseTip) => { calls.push(`merge:${head.slice(0, 6)}:${baseTip.slice(0, 6)}`); return options.conflict ? { conflict: options.conflict } : { mergeSha: sha(`merge:${head}:${baseTip}`), files: ['src/app.ts'] }; },
     trial: async mergeSha => { calls.push(`trial:${mergeSha.slice(0, 6)}`); trials++; return trialRun(mergeSha); },
@@ -172,39 +172,32 @@ test('unit:executor-intent-recorded-before-push — mergeOne records intent, tri
   await assert.rejects(mergeOne(clean.ports, item({ id: 'w9', key: 'GY-9' })), /no submitted candidate/);
 });
 
-test('unit:executor-stale-retrial-bounded — a push the tip moved under re-reads the tip and re-trials the head on it, at most run.mergeWriter.retrials times, then records merge.refused `base moved N times` and leaves the head queued; one rejection followed by a success merges on the second tip; a rejection the re-read tip did not move under is no moved tip: it is refused naming the unmoved tip without a re-trial and stays queued', async () => {
+test('unit:executor-moved-tip-lands-without-retrial — a push the tip moved under re-reads the tip and re-merges the same head onto it without another trial, recording the new intent before the leased push; a conflict on the moved tip is refused for rework; a rejection the re-read tip did not move under is refused naming the unmoved tip and stays queued', async () => {
   const work = submitted(1, 10);
-  const stale = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
-  const outcome = await mergeOne(stale.ports, work);
-  assert.deepEqual(outcome, { outcome: 'requeued', reason: baseMovedReason(4), pushes: 4 });
-  assert.deepEqual(stale.counts(), { trials: 4, pushes: 4 }, 'the first trial and three re-trials, each on the tip just read');
-  const merges = stale.calls.filter(call => call.startsWith('merge:'));
-  assert.deepEqual(merges.map(call => call.split(':')[2]), [tip, newerTip, sha('tip3'), sha('tip4')].map(entry => entry.slice(0, 6)), 'every re-trial merges onto the newly read tip');
-  assert.deepEqual(stale.events.filter(event => event.kind === 'intent').length, 4, 'each re-trial records its own intent before its trial');
-  assert.deepEqual(stale.events.at(-1), { kind: 'refused', head: sha('head1'), reason: 'base moved 4 times' });
-  // Refused this way the head is queued again, not reworked.
-  const refusedState = ledgerState('GY-1', 1, 'refused', { refusal: { kind: 'merge', reason: baseMovedReason(4) } });
-  assert.equal(nextToMerge([work], { 'GY-1': refusedState }, start)?.key, 'GY-1');
-  assert.equal(trialFailedGround({ ...work, mergeLedger: refusedState } as Work), null, 'a base-moved refusal grounds no rework');
-  // A bound of zero re-trials refuses on the first rejection the tip moved under.
-  const none = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip] }); none.ports.retrials = 0;
-  assert.deepEqual(await mergeOne(none.ports, work), { outcome: 'requeued', reason: baseMovedReason(1), pushes: 1 });
-  // A rejection while the tip stood still (a branch rule, a hook) is not a moved tip: no re-trial on the same tip, no `base moved`, the head queued for a later cycle.
+  const moved = fakePorts({ pushes: ['rejected', 'rejected', 'pushed'], tips: [tip, newerTip, sha('tip3'), sha('tip3')] });
+  const outcome = await mergeOne(moved.ports, work);
+  const landed = sha(`merge:${sha('head1')}:${sha('tip3')}`);
+  assert.deepEqual(outcome, { outcome: 'merged', mergeSha: landed, baseTip: sha('tip3'), observedTip: sha('tip3'), pushes: 3 });
+  assert.deepEqual(moved.counts(), { trials: 1, pushes: 3 }, 'one trial, however often main moves');
+  assert.deepEqual(moved.calls.filter(call => call.startsWith('merge:')).map(call => call.split(':')[2]), [tip, newerTip, sha('tip3')].map(entry => entry.slice(0, 6)), 'the same head is re-merged onto each tip it read');
+  assert.deepEqual(moved.events.map(event => event.kind), ['intent', 'trial', 'intent', 'intent', 'pushed', 'reconciled'], 'each re-merge records its intent before its push');
+  assert.ok(moved.calls.includes(`push:${landed.slice(0, 6)}:${sha('tip3').slice(0, 6)}`), 'the last push is leased on the tip it was merged onto');
+  // A conflict on the moved tip returns the head for rework.
+  let merges = 0;
+  const conflicting = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip] });
+  const merge = conflicting.ports.merge;
+  conflicting.ports.merge = async (head, baseTip, item) => merges++ ? { conflict: ['src/app.ts'] } : merge(head, baseTip, item);
+  assert.deepEqual(await mergeOne(conflicting.ports, work), { outcome: 'refused', reason: `${trialFailurePrefix}: the merge conflicts in src/app.ts`, trial: null, conflict: ['src/app.ts'] });
+  assert.deepEqual(conflicting.counts(), { trials: 1, pushes: 1 });
+  // A rejection while the tip stood still (a branch rule, a hook) is not a moved tip: the head queued for a later cycle.
   const unmoved = fakePorts({ pushes: ['rejected'] });
   assert.deepEqual(await mergeOne(unmoved.ports, work), { outcome: 'requeued', reason: unmovedTipReason('main', tip), pushes: 1 });
   assert.deepEqual(unmoved.counts(), { trials: 1, pushes: 1 }, 'the unmoved tip is re-read, never re-trialled');
-  assert.deepEqual(unmoved.calls.filter(call => call !== 'fetch'), [`merge:${sha('head1').slice(0, 6)}:${tip.slice(0, 6)}`, 'record:intent', `trial:${sha(`merge:${sha('head1')}:${tip}`).slice(0, 6)}`, 'record:trial', `push:${sha(`merge:${sha('head1')}:${tip}`).slice(0, 6)}:${tip.slice(0, 6)}`, 'record:refused']);
   assert.equal(unmoved.calls.filter(call => call === 'fetch').length, 2, 'the tip is read once before the merge and once after the rejection');
   assert.match(unmovedTipReason('main', tip), /^push rejected though main still stood at /);
   const unmovedState = ledgerState('GY-1', 1, 'refused', { refusal: { kind: 'merge', reason: unmovedTipReason('main', tip) } });
   assert.equal(nextToMerge([work], { 'GY-1': unmovedState }, start)?.key, 'GY-1', 'the head stays queued');
   assert.equal(trialFailedGround({ ...work, mergeLedger: unmovedState } as Work), null, 'an unmoved-tip refusal grounds no rework');
-  // One rejection then a success: the merge lands on the second tip, with its lease on that tip.
-  const once = fakePorts({ pushes: ['rejected', 'pushed'], tips: [tip, newerTip] });
-  const merged = await mergeOne(once.ports, work);
-  assert.equal(merged.outcome, 'merged');
-  assert.deepEqual([(merged as { baseTip: string }).baseTip, (merged as { pushes: number }).pushes], [newerTip, 2]);
-  assert.ok(once.calls.includes(`push:${sha(`merge:${sha('head1')}:${newerTip}`).slice(0, 6)}:${newerTip.slice(0, 6)}`), 'the second push is leased on the second tip');
 });
 
 /** A child runner that records every call and answers git's reads; `answers` decides what each command returns or throws. */
@@ -247,18 +240,18 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   await assert.rejects(reads.push(mergeSha, tip), (error: { status?: number; stderr?: string }) => error.status === 1 && /protected branch hook declined/.test(error.stderr ?? ''), "a remote's own rejection names no stale lease: it is thrown, never re-trialled as a moved tip");
   assert.equal(staleLeaseRejection(` ! [rejected]        abc1234 -> main (stale info)\nerror: failed to push some refs`), true);
   for (const other of [ruleRejection, ' ! [remote rejected] main -> main (pre-receive hook declined)', ' ! [rejected]        main -> main (fetch first)', ' ! [rejected]        main -> main (non-fast-forward)', 'fatal: Could not read from remote repository.', 'error: failed to push some refs: --force-with-lease']) assert.equal(staleLeaseRejection(other), false, `${other.split('\n')[0]} is no stale lease`);
-  assert.equal(reads.retrials, 3); assert.equal(reads.baseBranch, 'main');
+  assert.equal(reads.baseBranch, 'main');
   assert.equal(await reads.fetch(), tip);
   const fetch = git.calls.find(call => call.args.includes('fetch'))!;
   assert.deepEqual(fetch.args, ['-C', '/coordinator', 'fetch', '--no-tags', 'origin', 'main'], 'only the base is fetched: the head is already in the shared object store');
   // The deploy key defaults to the install's, under ~/.config/graphyard/<install>/deploy-key, and `~/` is the home directory.
-  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials, parallel: defaultMergeWriterParallel });
+  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', parallel: defaultMergeWriterParallel });
   assert.equal(defaultDeployKeyFile('owner-project', '/h'), '/h/.config/graphyard/owner-project/deploy-key');
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1, parallel: 2 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1, parallel: 2 });
-  assert.throws(() => mergeWriterSettingsSchema.parse({ retrials: 11 }));
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', parallel: 2 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', parallel: 2 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: mergeWriterSettingsSchema.parse({ retrials: 11 }) }, 'owner-project', '/home/loop').parallel, defaultMergeWriterParallel, 'the retired retrials key still loads and is ignored');
   assert.throws(() => mergeWriterSettingsSchema.parse({ parallel: 7 }));
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKey: '/k' }), /unrecognized/i);
-  assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k', retrials: 2 } } }).run.mergeWriter?.retrials, 2, 'run.mergeWriter is a master.json setting');
+  assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k' } } }).run.mergeWriter?.deployKeyFile, '/k', 'run.mergeWriter is a master.json setting');
 });
 
 test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the affected pre-merge files plus every test file whose cases carry one of the item\'s unit:/integration: proof ids (found by git grep at the merge commit), the run is read as TAP, and the record stores per-proof executed and failed counts beside the failing files', async () => {
@@ -274,6 +267,11 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
   const tap = ['TAP version 13', '# Subtest: tests/a.test.ts', '    ok 1 - unit:alpha-works — the thing', '    not ok 2 - integration:beta-holds — more', '    1..2', 'not ok 1 - tests/a.test.ts', '# Subtest: tests/proof.test.ts', '    ok 1 - unit:alpha-works — again', '    ok 2 - unit:alpha-works-not-this — a longer title is another proof', '    1..2', 'ok 2 - tests/proof.test.ts', '1..2', ''].join('\n');
   let listed: string[] = [], runnerArgs: string[] = [];
   const runner = recordingRun(async (command, args) => {
+    if (command === 'git' && args.includes('worktree') && args.includes('add')) {
+      const worktree = args[args.indexOf('--detach') + 1]!;
+      await mkdir(worktree, { recursive: true });
+      await writeFile(join(worktree, 'graphyard.json'), readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'));
+    }
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') { assert.deepEqual(args.slice(1), ['affected', 'src/app.ts']); return 'affected: 1 of 5 test files are affected by 1 changed file(s)\ntests/a.test.ts\n'; }
     if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) {
       runnerArgs = args;
@@ -407,12 +405,12 @@ test('unit:merge-executor — the step runs right after the merge step and does 
   assert.ok(refusedCycle.actions.some(action => action.state === 'failed' && /refused: trial failed: tests tests\/item\.test\.ts/.test(action.detail)));
   assert.deepEqual(reworked.mergeWriter.reworks, [], 'a confirmed request owes nothing');
   assert.ok(refusedCycle.actions.some(action => action.state === 'done' && /^Returned GY-1 to a worker on the merge writer's refusal of head/.test(action.detail)));
-  // A base that moved past the bound leaves the head queued and asks for no rework.
-  const moved = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
+  // A push rejected on a tip that did not move leaves the head queued and asks for no rework.
+  const moved = fakePorts({ pushes: ['rejected'] });
   const requeued = emptyDaemonState(config); decided.length = 0;
   const movedEffects = effectsFor({ work: () => work, now, mergeWriter: moved.ports, rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
   await runCycle(config, requeued, movedEffects, now); await mergeWriterIdle(requeued); await runCycle(config, requeued, movedEffects, now);
-  assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], baseMovedReason(4)]);
+  assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], unmovedTipReason('main', tip)]);
 });
 
 test('integration:executor-trial-failure-rework-no-approver — a rework the plane fails is kept on state.mergeWriter.reworks and applied again every cycle until it lands, exactly once; one the snapshot shows applied (the item reworked, on a new head or done) is settled without a request; without the master identity it waits, naming the command', async () => {
@@ -464,7 +462,7 @@ test('integration:executor-trial-failure-rework-no-approver — a rework the pla
 
 test('unit:merge-writer-status — master status and the daemon summary show mergeWriter.queue (oldest first), inFlight, lastMergeAt and refusals; the loop\'s own effects wire the reads with the merge-record post under one key per step; docs/delivery-redesign.md Merge writer states the sequence and the reconcile rule within 80 net words', async () => {
   const state = emptyDaemonState(config);
-  state.mergeWriter = { lastMergeAt: iso(start), queue: [{ key: 'GY-2', id: 'w2', head: sha('head2'), submittedAt: iso(start - minute), waitingMs: minute }], inFlight: { key: 'GY-1', id: 'w1', head: sha('head1'), startedAt: iso(start) }, refusals: [{ key: 'GY-3', head: sha('head3'), reason: baseMovedReason(4), at: iso(start) }], reworks: [{ key: 'GY-3', id: 'w3', head: sha('head3'), reason: `${trialFailurePrefix}: tests tests/x.test.ts`, refusedAt: iso(start), attempts: 2, lastError: 'route down' }] };
+  state.mergeWriter = { lastMergeAt: iso(start), queue: [{ key: 'GY-2', id: 'w2', head: sha('head2'), submittedAt: iso(start - minute), waitingMs: minute }], inFlight: { key: 'GY-1', id: 'w1', head: sha('head1'), startedAt: iso(start) }, refusals: [{ key: 'GY-3', head: sha('head3'), reason: unmovedTipReason('main', tip), at: iso(start) }], reworks: [{ key: 'GY-3', id: 'w3', head: sha('head3'), reason: `${trialFailurePrefix}: tests tests/x.test.ts`, refusedAt: iso(start), attempts: 2, lastError: 'route down' }] };
   const summary = daemonSummary(state, start, config.run.intervalSeconds * 1000, config.hostId);
   assert.deepEqual(summary.mergeWriter, mergeWriterSummary(state.mergeWriter, start));
   assert.deepEqual(summary.mergeWriter.queue.map(entry => entry.key), ['GY-2']);
@@ -486,7 +484,7 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.deepEqual(posted, [{ path: 'work/w1/merge-record', data: event, key: mergeRecordKey({ id: 'w1' }, event) }]);
   assert.equal(mergeRecordKey({ id: 'w1' }, event), `merge-record:w1:pushed:${sha('merge1')}`);
   assert.equal(mergeRecordKey({ id: 'w1' }, { kind: 'refused', head: sha('head1'), reason: 'x' }), `merge-record:w1:refused:${sha('head1')}:refused`);
-  assert.equal(wired.mergeWriter!.retrials, 3);
+  assert.equal(wired.mergeWriter!.parallel, defaultMergeWriterParallel);
 });
 
 // ——— Against a real control plane and a bare origin ———
@@ -496,7 +494,7 @@ const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const credentials = [admin, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let pg: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let fixtureRoot: string, origin: string, checkout: string, worktreeBase: string, baseTip: string;
 const heads: Record<number, string> = {};
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -523,17 +521,14 @@ before(async () => {
     git(worktree, 'config', 'user.email', 't@example.com'); git(worktree, 'config', 'user.name', 'T');
     heads[n] = await commit(worktree, file, `export const value = ${n};\n`, `change ${n}`);
   }
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1524;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
+  store = await withDatabase('merge-executor'); await store.init();
   engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 async function request(credential: string, path: string, body?: unknown, key: string = randomUUID(), method = 'POST') {
   const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -563,7 +558,7 @@ function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: 
   const pushes: { args: string[]; env?: NodeJS.ProcessEnv }[] = [], trials: Parameters<typeof runMergeTrial>[0][] = [];
   const run: ChildRun = (command, args, runOptions) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: runOptions?.env }); return defaultChildRun(command, args, runOptions); };
   const trial = options.trial ?? (async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] }; trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) }; });
-  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
+  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key') } } });
   const reads = mergeWriterReads(fixtureConfig, checkout, run, { base: worktreeBase, record: options.record ?? record,  trial });
   return { reads, pushes, trials };
 }
@@ -858,7 +853,7 @@ test('integration:executor-trial-failure-rework-no-approver — a merge.refused 
   assert.equal(doc.lease, null);
   // A refusal for another head, or because the base moved, grounds nothing.
   assert.equal(trialFailedGround({ ...doc, candidate: { ...doc.candidate!, sha: heads[5]! } } as Work), null);
-  assert.equal(trialFailedGround({ ...doc, mergeLedger: { ...doc.mergeLedger!, refusal: { kind: 'merge', reason: baseMovedReason(4) } } } as Work), null);
+  assert.equal(trialFailedGround({ ...doc, mergeLedger: { ...doc.mergeLedger!, refusal: { kind: 'merge', reason: unmovedTipReason('main', tip) } } } as Work), null);
 });
 
 test('integration:executor-reconcile-after-crash — holds reads the whole first-parent history, never a window of it: `git rev-list --first-parent BASE ^SHA` carries no bound, the chain holds the sha when the oldest commit listed has it as first parent or the tip is the sha, and a commit merged as a second parent or unknown to the checkout is not held', async () => {

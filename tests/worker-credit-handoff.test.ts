@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -14,6 +14,7 @@ import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { masterConfigSchema, workerPrompt, observedExhaustions, selectAccount, recordEnvironmentLog, selectionKey, type MasterConfig } from '../src/master.js';
 import { accountHeldForRole } from '../src/model/capacity.js';
+import { proposedRuntimes } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -26,7 +27,7 @@ const workerB: Principal = { id: 'worker-b', role: 'worker', sessionKind: 'ai' }
 const credentials = [operator, coordinator, workerA, workerB].map(principal => ({ ...principal, token: `${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -45,13 +46,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3042;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('credit-work-db'), user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('credit_work');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/credit_work`);
+  store = await withDatabase('worker-credit-handoff');
   await store.init();
   engine = new Engine(store, 7200, 'owner/credit-work');
   http = server(engine, credentials);
@@ -59,7 +54,7 @@ before(async () => {
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
 
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean-with-commits']) {
   test(`e2e:worker-credit-handoff — ${shape} survives a limit stop and reaches another account`, async () => {
@@ -104,6 +99,14 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
       await mkdir(join(root, name));
       await writeFile(join(root, name, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
     }
+    // GY-3030: the control-plane registry is the only authority for accounts and their exhaustion, so
+    // the executor's two accounts are this control plane's registry, read with the coordinator token.
+    await writeFile(config.credentialFile, token(coordinator), { mode: 0o600 });
+    await ok(operator, 'POST', 'agent-registry/apply', {
+      runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'default', id: null }],
+      accounts: ['claude-c', 'claude-d'].map(name => ({ name, runtime: 'claude', model: 'default', credential: { host: HOST, home: join(root, name) } })),
+      roles: [{ name: 'worker', accounts: ['claude-c', 'claude-d'], concurrency: 4 }], reason: 'The executor\'s two accounts',
+    });
     config.workers.push({ ...config.workers[0]!, name: 'spent-builder', principal: workerA.id });
     await recordEnvironmentLog(config, [], [], { key: selectionKey('worker', 'spent-builder'), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: filed.key });
     const clock = Date.now();
@@ -118,6 +121,8 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
     const effects: DaemonEffects = {
       ...real,
       agents: () => herdr as any, herdr: () => ({ agents: herdr as any, available: true }),
+      // GY-3030: the cycle reads its session inventory (session-inventory.ts) before Herdr alone; this stub's Herdr is that inventory.
+      inventory: async () => ({ available: true, sessions: herdr.map(agent => ({ name: agent.name, runtime: null, state: agent.agent_status, pane: agent.pane_id, workspace: null })) }),
       credentials: async () => ({ builder: { available: true, reason: null } }),
       closeSession: pane => { closed.push(pane); },
       promptSession: async () => { assert.fail('the limit stop needs no re-prompt'); },

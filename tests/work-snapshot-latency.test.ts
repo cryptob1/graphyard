@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -29,7 +29,7 @@ const ITEMS = 100, OBSERVATIONS_PER_ITEM = 40, HEADS_PER_ITEM = 12;
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'c'.repeat(40);
 
-let database: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let origin: string; let directory: string;
+let store: Store; let http: ReturnType<typeof server>; let origin: string; let directory: string;
 let config: MasterConfig;
 
 const sha = (item: number, head: number) => `${item.toString(16).padStart(4, '0')}${head.toString(16).padStart(4, '0')}`.padEnd(40, 'a');
@@ -72,10 +72,7 @@ function ledgerItem(index: number, now: Date): Work {
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_SNAPSHOT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 23);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('snapshot-test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_snapshot_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_snapshot_test`); await store.init();
+  store = await withDatabase('work-snapshot-latency'); await store.init();
   const now = new Date();
   for (let index = 0; index < ITEMS; index++) {
     const item = ledgerItem(index, now);
@@ -97,7 +94,7 @@ after(async () => {
   if (hotHttp) await new Promise<void>(resolve => hotHttp.close(() => resolve()));
   if (hotStore) await hotStore.close();
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
-  if (store) await store.close(); if (database) await database.stop();
+  if (store) await store.close();
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
@@ -293,9 +290,8 @@ function openItem(index: number, now: Date): Work {
 // Seeded on the first hot-path test's demand, so the snapshot tests above never wait on it.
 let seeded: Promise<void> | null = null;
 const hotPaths = () => seeded ??= (async () => {
-  await database.createDatabase('graphyard_hot_paths');
   watchResults((store.pool as any).Client);
-  hotStore = new Store((store.pool as any).options.connectionString.replace(/graphyard_snapshot_test$/, 'graphyard_hot_paths')); await hotStore.init();
+  hotStore = await withDatabase('graphyard_hot_paths'); await hotStore.init();
   const now = new Date();
   for (let index = 0; index < HOT_SETTLED; index++) { const item = settledItem(index, now); await hotStore.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [item.id, JSON.stringify(item)]); }
   for (let index = 0; index < HOT_OPEN; index++) {

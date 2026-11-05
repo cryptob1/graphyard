@@ -5,7 +5,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
@@ -30,16 +30,13 @@ const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human
 const coordinator: Principal = { id: 'executor-a', role: 'coordinator' };
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_EVERY_LAUNCH_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 193);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('every-launch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('every-launch-registered'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, coordinator];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const reload = async (id: string) => (await store.list()).find(entry => entry.id === id)!;
 const mutate = async (path: string, body: unknown) => { const [, id, command] = path.split('/'); return engine.execute(coordinator, command as any, decodeURIComponent(id), body, randomUUID()); };
@@ -75,7 +72,7 @@ await t.test('integration:every-launch-registered — the loop\'s reviewer launc
     order.length = 0;
     const config = masterConfigSchema.parse({ ...master });
     const loopTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...dispatchEffects(root, () => config, { snapshot: async () => ({ work: [withReview(await reload(item.id))], now: new Date().toISOString() }), mutate, run: () => '' }),
-      agents: () => [], credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), persist: async () => {},
+      inventory: undefined, agents: () => [], credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), persist: async () => {},
       launchReview: async () => { order.push('start:loop-review'); return { pane: 'wA:p71' }; }, recordSession: record });
     assert.ok(loopTick.launched.length, `the tick launched the reviewer; it waited on ${JSON.stringify([loopTick.waiting, loopTick.refused])}`);
     assert.deepEqual(order, [`record:${request.id}:running`, 'start:loop-review', `record:${request.id}:running:wA:p71`]);

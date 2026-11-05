@@ -1,7 +1,7 @@
 {
   "id": "board-queue-not-blocked",
   "title": "The board shows heads waiting in the merge queue as moving, with their place and the merge ahead",
-  "description": "Runs the real four-head batch executor and captures its board while its trial is pending, with two healthy heads and a recorded blocker waiting behind it.",
+  "description": "Runs the real merge executor on four heads at once and captures its board while their trials are pending, with two healthy heads and a recorded blocker waiting behind them.",
   "tags": [
     "api",
     "board",
@@ -12,7 +12,7 @@
   "steps": [
     {
       "kind": "command",
-      "name": "run a batch to its pending trial with additional queued heads",
+      "name": "run four heads to their pending trials with additional queued heads",
       "run": "node --import tsx scripts/e2e-seed-merge-queue.mjs",
       "timeoutSeconds": 60
     },

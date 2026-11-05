@@ -21,7 +21,7 @@ const servePort = 20000 + ((process.pid + 7) % 20_000);
 const homeCase = { id: 'home-shows-fix', title: 'The home page shows the fix', target: 'any', required: false,
   steps: [{ kind: 'http', method: 'GET', path: '/', status: 200, expect: [{ path: 'message', equals: 'fixed' }] }] };
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 0 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const policy = { mode: 'local', mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] }, candidateSchedule: null, deploy: { adapter: 'command', project: null, uat: null, production: null } };
 
 /** A repository whose test check prints the proof's case passing exactly when src/fixed exists; `fixedOnBase` puts the fix on the base, else the head adds it. */
@@ -62,7 +62,7 @@ const run: ChildRun = async (command, args, options) => {
 async function merge(repo: Awaited<ReturnType<typeof repository>>, type: Work['type'], proofs = [proof]) {
   const events: MergeRecordEvent[] = [];
   const reads = mergeWriterReads(config, repo.root, run, { base: await temporaryDirectory('bug-proof-trials', tmpdir()), record: async () => {},  environment: { PATH: process.env.PATH! } });
-  const ports: MergePorts = { baseBranch: 'main', retrials: 0, now: () => Date.parse('2030-01-01T00:00:00Z'), fetch: async () => repo.base, merge: reads.merge, trial: reads.trial,
+  const ports: MergePorts = { baseBranch: 'main', now: () => Date.parse('2030-01-01T00:00:00Z'), fetch: async () => repo.base, merge: reads.merge, trial: reads.trial,
     push: async () => 'pushed', holds: async () => false, record: async (_work, event) => { events.push(event); } };
   const work = { id: 'w-2984', key: 'GY-2984', type, title: 'fix', candidate: { sha: repo.head, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-2984-1', author: 'worker' },
     submission: { epoch: 1, pr: 1 }, criteria: [{ id: 'AC-1', text: 'the bug is fixed', proofs }] } as unknown as Work;

@@ -1,3 +1,4 @@
+import { sessionInventory } from '../session-inventory.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { workerVerificationPump } from './worker-verification.js';
@@ -6,6 +7,7 @@ import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
+import { fleetRequest } from '../fleet.js';
 import { endRegistrySlot, endRegistrySessionById, liveMasterSessions } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
@@ -16,7 +18,7 @@ import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
 import { removeAttemptWorktree } from '../master/worktrees.js';
-import { profileAccount, recordObservedExhaustion } from '../master/environments.js';
+import { releasedSince, profileAccount, recordObservedExhaustion } from '../master/environments.js';
 import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
@@ -31,6 +33,9 @@ import { loopRunAdoption } from './run-adoption.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
+import { graphyardVolumes, reclaimGraphyardLeftovers } from './disk-headroom.js';
+import { dataDirectory } from '../install/worktree-root.js';
+import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 
@@ -81,6 +86,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return snapshot;
     },
     sessionHistory: deps.sessionHistory,
+    inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).catch(() => []),
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
@@ -99,7 +105,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const profile = config.workers.find(candidate => candidate.principal === session.principal);
       const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
       const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
-      if (stall.notice) await recordObservedExhaustion(config, account ?? profileAccount(name), { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
+      // GY-3100: a notice the session printed before an operator released the account is already applied.
+      const charged = account ?? profileAccount(name);
+      if (stall.notice && !await releasedSince(config, charged, session.updatedAt)) await recordObservedExhaustion(config, charged, { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
       const space = item.workspaces?.find(entry => entry.epoch === epoch);
       const partialWork = space && space.host === config.hostId
         ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped: ${stall.reason}`, run)
@@ -164,12 +172,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
+    diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
+    reclaimDisk: () => reclaimGraphyardLeftovers(run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
       const directory = installDirectory(installIdFor(current().repository));
       return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
     },
-    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot }),
+    dispatch: (work, profile, agents, snapshot, launch) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot, ...launch }),
+    registry: () => fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'),
+    setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
     launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
@@ -204,6 +216,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        gate: { root, repository: config.repository },
       };
     },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

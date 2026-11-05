@@ -21,6 +21,8 @@ const base = {
 };
 
 const item = (stage: Stage, extra: Partial<Work> = {}): Work => ({ ...base, stage, ...extra } as Work);
+// A worker holds it: an item at build with no lease and no running session reads Waiting (GY-3095).
+const held = { lease: { epoch: 1, owner: 'worker', expiresAt: '2999-01-01T00:00:00Z' } } as Partial<Work>;
 
 const delivery = { mergeSha: 'a'.repeat(40), mergedAt: '2026-01-01T01:00:00Z', authorizationRevision: 1, pr: 1 };
 const served: ReleaseView = {
@@ -40,6 +42,7 @@ const withDeployment = (work: Work): Work => ({
 
 test('unit:plain-stage-labels — every derived stage maps to exactly one plain label, and master status items carry it', async () => {
   const { liveFailingLine, plainStage, plainStageLines, plainStages } = await import('../src/model/plain-stage.js');
+  const now = Date.parse('2026-01-02T00:00:00Z');
   // Each open stage has one plain label; done is refined by the release and the serve verdict below.
   const byStage: Record<Stage, string> = {
     backlog: 'Not started', ready: 'Not started', build: 'Building',
@@ -47,8 +50,8 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
     done: 'Done', // a repository with no deployment
   };
   for (const stage of stages) {
-    const work = stage === 'done' ? item('done', { delivery } as Partial<Work>) : item(stage);
-    assert.equal(plainStage(work), byStage[stage], stage);
+    const work = stage === 'done' ? item('done', { delivery } as Partial<Work>) : item(stage, held);
+    assert.equal(plainStage(work, now), byStage[stage], stage);
   }
 
   // Done + GY-2983's verdict on the served commit names an item only when the verdict is about it.
@@ -58,33 +61,34 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
   const verdict = (verified: boolean, commit: string, kase: string | null = null): ServeView =>
     ({ serves: true, commit, check: { verified, case: kase, step: null, reason: null } });
   const proving = withDeployment(item('done', { delivery, criteria: [{ id: 'AC-1', text: 'Home', proofs: ['e2e:home'] }] } as Partial<Work>));
-  assert.equal(plainStage(live, served, verdict(true, delivery.mergeSha)), 'Live and verified', 'its own merge is served and verified');
-  assert.equal(plainStage(live, served, verdict(false, delivery.mergeSha, 'home')), 'Live and failing', 'its own merge is served and failing');
-  assert.equal(plainStage(proving, served, verdict(false, other, 'home')), 'Live and failing', 'the failing case proves it');
-  assert.equal(plainStage(live, served, verdict(false, other, 'home')), 'Live', 'a later commit fails a case that is not its own');
-  assert.equal(plainStage(live, served, verdict(true, other)), 'Live', 'a later commit verified says nothing of this item');
-  assert.equal(plainStage(live, served, { serves: true, commit: delivery.mergeSha, check: null }), 'Live', 'served, verdict not yet run');
-  assert.equal(plainStage(merged, served, verdict(true, other)), 'Merged, not live yet', 'merged, not yet served');
-  assert.equal(plainStage(merged, served), 'Merged, not live yet', 'a watched release has not served it yet');
-  assert.equal(plainStage(live, served), 'Live', 'a watched release serves it');
+  assert.equal(plainStage(live, now, served, verdict(true, delivery.mergeSha)), 'Live and verified', 'its own merge is served and verified');
+  assert.equal(plainStage(live, now, served, verdict(false, delivery.mergeSha, 'home')), 'Live and failing', 'its own merge is served and failing');
+  assert.equal(plainStage(proving, now, served, verdict(false, other, 'home')), 'Live and failing', 'the failing case proves it');
+  assert.equal(plainStage(live, now, served, verdict(false, other, 'home')), 'Live', 'a later commit fails a case that is not its own');
+  assert.equal(plainStage(live, now, served, verdict(true, other)), 'Live', 'a later commit verified says nothing of this item');
+  assert.equal(plainStage(live, now, served, { serves: true, commit: delivery.mergeSha, check: null }), 'Live', 'served, verdict not yet run');
+  assert.equal(plainStage(merged, now, served, verdict(true, other)), 'Merged, not live yet', 'merged, not yet served');
+  assert.equal(plainStage(merged, now, served), 'Merged, not live yet', 'a watched release has not served it yet');
+  assert.equal(plainStage(live, now, served), 'Live', 'a watched release serves it');
   assert.equal(liveFailingLine(verdict(false, other, 'home')), 'The live app is failing home');
   assert.equal(liveFailingLine(verdict(true, other)), null);
   assert.equal(plainStage(item('done', {
     closure: { kind: 'obsolete', ref: null, reason: 'gone', by: 'op', at: '2026-01-01T00:00:00Z', from: 'build' },
-  } as Partial<Work>)), 'Done');
+  } as Partial<Work>), now), 'Done');
 
   // Every plain label is reached, and glossary names each once.
   const examples: Record<PlainStage, () => string> = {
-    'Not started': () => plainStage(item('ready')),
-    Building: () => plainStage(item('build')),
-    Testing: () => plainStage(item('test')),
-    'In review': () => plainStage(item('review')),
-    Merging: () => plainStage(item('merge')),
-    'Merged, not live yet': () => plainStage(merged, served),
-    Live: () => plainStage(live, served),
-    'Live and verified': () => plainStage(live, served, verdict(true, delivery.mergeSha)),
-    'Live and failing': () => plainStage(live, served, verdict(false, delivery.mergeSha, 'home')),
-    Done: () => plainStage(merged),
+    'Not started': () => plainStage(item('ready'), now),
+    Waiting: () => plainStage(item('build'), now),
+    Building: () => plainStage(item('build', held), now),
+    Testing: () => plainStage(item('test'), now),
+    'In review': () => plainStage(item('review'), now),
+    Merging: () => plainStage(item('merge'), now),
+    'Merged, not live yet': () => plainStage(merged, now, served),
+    Live: () => plainStage(live, now, served),
+    'Live and verified': () => plainStage(live, now, served, verdict(true, delivery.mergeSha)),
+    'Live and failing': () => plainStage(live, now, served, verdict(false, delivery.mergeSha, 'home')),
+    Done: () => plainStage(merged, now),
   };
   for (const label of plainStages) assert.equal(examples[label](), label);
 
@@ -92,7 +96,7 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
   assert.equal(itemLine(item('review'), Date.now()).stage, 'In review');
   assert.equal(itemLine(item('merge'), Date.now()).stage, 'Merging');
   assert.equal(itemLine(item('test'), Date.now()).stage, 'Testing');
-  assert.equal(itemLine(item('build'), Date.now()).stage, 'Building');
+  assert.equal(itemLine(item('build', held), Date.now()).stage, 'Building');
   assert.equal(itemLine(item('ready'), Date.now()).stage, 'Not started');
 
   // The row keeps one vocabulary and the wait: the label leads with the plain stage, then names what it waits on.

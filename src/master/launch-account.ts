@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import type { CapacityRole, ExhaustionRecord } from '../model/capacity.js';
 import type { MasterConfig } from './profiles.js';
-import { observedExhaustions, readEnvironmentLog, recordObservedExhaustion, selectionKey, sessionKeyOf, type LaunchRole, type ObservedExhaustion } from './environments.js';
+import { releasedSince, observedExhaustions, readEnvironmentLog, recordObservedExhaustion, selectionKey, sessionKeyOf, type LaunchRole, type ObservedExhaustion } from './environments.js';
 import { readProfileLaunchRecords } from './dispatch.js';
 
 /**
@@ -20,8 +20,8 @@ export interface SessionIdentity { work: string; epoch?: number; group?: string 
  * worker attempt is charged to the account its own launch record names — the account and runtime the
  * dispatch actually started it on — never to the profile's nominal account or to a selection the
  * environment log kept from an earlier launch: a profile named for one runtime can run on another
- * account entirely when its own are spent. Only a launch record of another attempt (or none) falls
- * back to the environment log's selection for the profile. A reviewer or producer session is read
+ * account entirely when its own are spent. A launch record of another attempt (or none) falls back
+ * to the selection kept for the session's own item, never the profile's latest (GY-3100). A reviewer or producer session is read
  * by its own identity — its item and proof group, of which only one session is pending at a time —
  * never from the profile's latest selection, which a later concurrent session on another account
  * overwrites; a selection recorded before sessions were kept is used only when it was for this item.
@@ -34,6 +34,9 @@ export async function sessionAccount(root: string, config: Pick<MasterConfig, 'c
     if (record && record.key === session.work && record.epoch === session.epoch) return { environment: record.account, kind: record.runtime };
   }
   const { selected } = await readEnvironmentLog(config);
+  // GY-3100: a worker session the profile's launch record no longer names is charged to the
+  // selection kept for its own item, never to the profile's latest — another launch's account.
+  if (role === 'worker' && session) return selected[sessionSelectionKey(role, profile, session.work)] ?? null;
   if (role !== 'worker' && session) {
     const own = selected[sessionSelectionKey(role, profile, session.work, session.group)];
     if (own) return own;
@@ -104,12 +107,13 @@ export function repeatedLimitAccount(work: Pick<Work, 'capacity'> & Partial<Pick
  */
 export async function holdRepeatedLimitAccount(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, work: Pick<Work, 'key' | 'capacity'> & Partial<Pick<Work, 'epoch'>>, now = Date.now(), report?: Parameters<typeof recordObservedExhaustion>[4], role: CapacityRole = 'worker'): Promise<{ account: string; hold: ObservedExhaustion } | null> {
   const repeated = repeatedLimitAccount(work, now, role);
-  if (!repeated || (await observedExhaustions(config, now))[repeated.account]) return null;
+  if (!repeated || (await observedExhaustions(config, now, report?.registry?.document ? { document: report.registry.document } : undefined))[repeated.account]) return null;
   const last = repeated.records.at(-1)!;
+  if (await releasedSince(config, repeated.account, last.at, report?.registry?.document ? { document: report.registry.document } : undefined)) return null; // GY-3100: an operator released it after that notice
   const launches = role === 'worker'
     ? `worker launches (epochs ${repeated.records.map(entry => entry.epoch ?? '?').join(', ')})`
     : `${role} sessions (${repeated.records.map(entry => entry.requestId ?? entry.at).join(', ')})`;
-  const hold = await recordObservedExhaustion(config, repeated.account, { at: new Date(now).toISOString(), resetsAt: last.resetsAt, role, profile: last.profile, work: work.key,
+  const hold = await recordObservedExhaustion(config, repeated.account, { at: last.at, resetsAt: last.resetsAt, role, profile: last.profile, work: work.key,
     reason: `${work.key}'s last ${repeated.records.length} ${launches} each ended on ${repeated.account}'s limit notice: ${last.reason}` }, now, report);
   return { account: repeated.account, hold };
 }

@@ -1,13 +1,13 @@
-import { after, before, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -21,7 +21,6 @@ import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
 import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
-import { defaultMergeBatch } from '../src/merge-writer/batch.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 import { linkedCases } from '../src/model/test-cases.js';
 
@@ -54,7 +53,7 @@ const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 const principals = [operator, worker, coordinator];
 const tokens = new Map(principals.map(entry => [entry.id, `${entry.id}-${'t'.repeat(32)}`]));
 
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let fixtureRoot: string, root: string, base: string, baseTip: string, head: string, branch: string;
 
 const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
@@ -71,10 +70,8 @@ async function commitFiles(files: Record<string, string>) {
 
 before(async () => {
   setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: serveUrl, readySeconds: 1 } } });
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 403;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('trial-e2e-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('trial_e2e_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/trial_e2e_test`); await store.init();
+
+  store = await withDatabase('trial-e2e-cases'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 
   fixtureRoot = await temporaryDirectory('trial-e2e-fixture', tmpdir());
@@ -106,7 +103,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 
@@ -124,6 +120,7 @@ async function call(path: string, actor: Principal, data?: unknown, key = random
   return { status: response.status, body: await response.json() as any };
 }
 
+describe('unit:trial-e2e-cases — declared serving and case verdicts survive the trial phases', () => {
 test('unit:trial-serves-head-and-runs-bound-cases — a head whose bound case is absent is refused naming the missing path', async () => {
   const merged = await trialMerge(gitOfRoot, { head, baseTip });
   assert.ok('mergeSha' in merged);
@@ -217,8 +214,8 @@ test('unit:trial-serves-head-and-runs-bound-cases — a host loopback listener c
   } finally { await new Promise<void>(resolve => other.close(() => resolve())); }
 });
 
-test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries every e2e result a full batch of valid items can owe', () => {
-  const results = Array.from({ length: defaultMergeBatch * 50 * 20 }, (_, index) => ({ proof: `e2e:case-${index}`, case: `case-${index}`, executed: 1, failed: 0 }));
+test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries every e2e result a valid item can owe', () => {
+  const results = Array.from({ length: 50 * 20 }, (_, index) => ({ proof: `e2e:case-${index}`, case: `case-${index}`, executed: 1, failed: 0 }));
   const sha = 'a'.repeat(40);
   const parsed = mergeRecordBodySchema.safeParse({ kind: 'trial', head: sha, baseTip: sha, mergeSha: sha, outcome: 'verdict', build: 'pass',
     tests: { passed: 0, failed: [], files: 0 }, files: [], proofs: {}, durationMs: 1, attempts: [], e2e: results });
@@ -248,4 +245,20 @@ test('unit:trial-serves-head-and-runs-bound-cases — each case runs against the
   assert.deepEqual([by('site-answers').executed, by('site-answers').failed], [1, 0], JSON.stringify(cases));
   assert.equal(by('unbound').failed, 1);
   assert.match(by('unbound').failingStep!, /bind it in delivery\.cases to one of site, api/);
+});
+
+});
+
+test('unit:trial-serves-head-and-runs-bound-cases — the repository runs e2e:fixture-static-home against its declared static site, whose home carries the expected text', async () => {
+  // GY-3126: the scheduled full run failed this case because main declared no fixture site, so it ran against e2e.serve.
+  const worktree = process.cwd();
+  const targets: unknown[] = [];
+  await runTrialE2eCases({
+    worktree, mergeSha: 'a'.repeat(40), proofs: ['e2e:fixture-static-home'], env: {}, scratch: worktree, budgetMs: 1_000,
+    holds: async path => existsSync(join(worktree, path)), log: () => {},
+    runGroup: async (target, proofs) => { targets.push(target); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); },
+  });
+  assert.deepEqual(targets, [{ id: 'fixture-site', kind: 'static', directory: 'fixtures/static-site', build: null }]);
+  const expected = JSON.parse(readFileSync(join(worktree, 'e2e/cases/fixture-static-home.json'), 'utf8')).steps.find((step: { action: string }) => step.action === 'expectText').text;
+  assert.ok(readFileSync(join(worktree, 'fixtures/static-site/index.html'), 'utf8').includes(expected));
 });

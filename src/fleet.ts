@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { nonInteractiveLaunch } from './harness.js';
 import { spawn } from 'node:child_process';
@@ -8,10 +8,11 @@ import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
-import { atomicPrivateWrite, readCredentialFile } from './private-file.js';
+import { readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
+import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -21,9 +22,7 @@ export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
  * probes the logins that live on its own host, reports what it saw, and the control plane picks
  * the first eligible account of the role and records the choice. Nothing is cached between
  * actions beyond the probe's own short cache, so a registry change takes effect on the next
- * action with no restart and no file edit. A role the registry does not define yet keeps
- * launching from the local profile, which is how an installation moves onto the registry one
- * role at a time.
+ * action with no restart and no file edit. Every role must be defined before it can launch.
  */
 export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
 export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
@@ -64,7 +63,7 @@ export class FleetUnreachableError extends Error {
  * not a fault of any account and not a decision to give up on: the launch waits for a slot, and the
  * loop makes it again on the first cycle after one frees.
  */
-export const roleAtCapacity = (reason: string) => /^role \S+ is at its concurrency limit\b/.test(reason);
+export const roleAtCapacity = (reason: string) => /^role \S+ (?:is at its concurrency limit|already reserved for)\b/.test(reason);
 /** The refusal's reason when `error` is a launch refused for its role's capacity, else null. (A tag, not a subclass: fleet.ts and master.ts import each other.) */
 export const capacityRefusal = (error: unknown): string | null => { const tag = error instanceof Error ? (error as Error & { roleAtCapacity?: unknown }).roleAtCapacity : null; return typeof tag === 'string' ? tag : null; };
 
@@ -117,13 +116,6 @@ export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pic
     observe: request => call('agent-registry/observe', request) };
 }
 
-// The registry as this executor last read it, kept beside the coordinator's other private state.
-// It is never launched from: it only tells an unreachable control plane ("refuse, the registry
-// decides this role") apart from one that never held a registry ("launch from the local profile").
-const fleetCachePath = (config: Pick<MasterConfig, 'credentialFile'>) => resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.registry.json`);
-async function readFleetCache(config: Pick<MasterConfig, 'credentialFile'>): Promise<{ revision: number; roles: string[]; readAt: string } | null> {
-  try { const parsed = JSON.parse(await readFile(fleetCachePath(config), 'utf8')); return typeof parsed?.revision === 'number' && Array.isArray(parsed.roles) ? parsed : null; } catch { return null; }
-}
 // One failed read is not repeated for every launch of the same cycle.
 const unreachable = new Map<string, { at: number; error: FleetUnreachableError }>();
 export const unreachableRetryMs = 30_000;
@@ -142,14 +134,9 @@ export async function readFleet(config: FleetConfig, role: FleetRoleName, probe:
   } catch (error) {
     if (!(error instanceof FleetUnreachableError)) throw error;
     if (!probe.registry && error !== failed?.error) unreachable.set(config.url!, { at: now, error });
-    const cached = await readFleetCache(config);
-    // Once the registry has decided a role, an outage never quietly hands that role back to a file.
-    if (cached?.roles.includes(role)) throw new Error(`${error.message}; role ${role} is decided by the agent registry (revision ${cached.revision}, read ${cached.readAt}), so nothing launches for it until the control plane answers`);
-    return { managed: false, reason: error.message };
+    throw error;
   }
   const roles = (registry.roles ?? []).map(entry => entry.name);
-  const cached = await readFleetCache(config);
-  if (!cached || cached.roles.join() !== roles.join()) await atomicPrivateWrite(fleetCachePath(config), { revision: registry.revision, roles, readAt: new Date(now).toISOString() }).catch(() => {});
   if (!roles.includes(role)) return { managed: false, reason: registry.roles?.length ? `role ${role} is not configured in the agent registry` : 'the agent registry is empty' };
   return { managed: true, registry, client };
 }
@@ -186,12 +173,11 @@ const smokesInFlight = new Map<string, Promise<SmokeResult>>();
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
- * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
- * session that cannot start fails its launch — and the registry's launch contract names no
- * one-prompt headless mode for it, so it has no smoke test to run.
+ * runtime (Pi, the narrow roles' runner) or of agy, whose interactive session waits silently at a
+ * missing login (GY-3108), with no result since it last changed, or whose last test failed
+ * `smokeRetestMs` ago or more (GY-515). Any other interactive runtime's session is its own check.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => smokeTestedKinds.includes(runtime.launch.kind) && account.enabled
   && (!account.smoke || smokeFailureDue(account, now));
 
 /**
@@ -201,10 +187,10 @@ export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = D
  */
 export async function selectFleetSession(config: FleetConfig, role: FleetRoleName, profile: { name: string; principal?: string }, probe: FleetProbe = {}) {
   const fleet = await readFleet(config, role, probe);
-  if (!fleet.managed) return null;
+  if (!fleet.managed) throw new Error(`Role ${role} must be configured in the control-plane registry: ${fleet.reason}`);
   const host = config.hostId ?? 'unknown-host', { registry, client } = fleet;
-  const named = registry.roles.find(entry => entry.name === role)!.accounts;
-  const local = registry.accounts.filter(account => named.includes(account.name) && account.enabled && account.credential.host === host);
+  // Every enabled account on this host is observed, not only the role's own: any of them may serve a failover (GY-3092).
+  const local = registry.accounts.filter(account => account.enabled && account.credential.host === host);
   const ceiling = probe.ceilingPercent ?? config.run?.quotaCeilingPercent;
   const observed = await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
@@ -261,20 +247,25 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
-    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
+    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) ?? roleRuntimeRefusal(fleet.registry, account, role) : `${name} is not a registered account`;
     // A twin on a spent login (GY-1573) waits for that login's reset, which is the twin's, not its own last read.
     const twin = account && reason ? [exhaustedTwin(fleet.registry, account, now)].find(other => other && reason.includes(`same provider login as ${other.name},`)) ?? null : null;
     return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
-  const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
+  // With none of its own accounts healthy, the role still launches when another registry account can serve it (GY-3092).
+  const failover = definition.accounts.length && !accounts.some(account => account.healthy) ? fleetOrder(fleet.registry, definition, null).find(name => {
+    const account = fleet.registry.accounts.find(entry => entry.name === name)!;
+    return !accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) && !roleUnsupported(fleet.registry, definition, name);
+  }) : undefined;
+  const usable = !full && (accounts.some(account => account.healthy) || !!failover);
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running, failover: failover ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +400,13 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   }
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
-  const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
+  const kindOf = (name: string) => runtimes.find(runtime => runtime.name === name)?.launch.kind ?? current.runtimes.find(runtime => runtime.name === name)?.launch.kind ?? null;
+  const serves = (account: FleetAccountInput, role: FleetRoleName) => {
+    const capability = roleRuntimeKinds[role];
+    // A role that can run only some runtimes is proposed only those accounts (GY-3093), whatever the runtime.
+    if (capability) { const kind = kindOf(account.runtime); return !!kind && capability.includes(kind); }
+    return proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
+  };
   // The master role is proposed like the reviewer's (GY-2939): the same accounts in the same
   // preference order at concurrency 1, so a fresh install's loop can launch its master session
   // instead of failing every cycle until an operator names the account by hand.

@@ -1,5 +1,6 @@
 
-import { dispatchCauses, deploymentCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
+import { gateRecordPath, readGateRecord } from '../batch-gate.js';
+import { dispatchCauses, deploymentCauses, batchGateCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
 import { readDispatchCursor } from '../auto-dispatch.js';
 import { servingReport } from '../deploy-watch.js';
 import { dirname } from 'node:path';
@@ -8,7 +9,7 @@ import { nameForLaunch } from '../session-name.js';
 import { masterHarness, masterPrompt } from './harness.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type FleetProbe, httpFleetClient, selectFleetSession } from '../fleet.js';
-import { accountLaunch, heldAwareProbe, readEnvironmentLog } from './environments.js';
+import { accountLaunch, readEnvironmentLog } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, launchSession, withLaunchClose } from './launch.js';
 import { type HerdrAgent, observeHerdrAgents } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
@@ -59,7 +60,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   const name = nameForLaunch(retry, () => config.masterAgentName);
   if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no master session is launched into it; the launch is made again once Herdr answers`);
   if (herdr.agents.some(agent => agent.name === name)) throw new Error(`Master session ${name} is already visible in Herdr; the loop adopts it instead of launching a second`);
-  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, await heldAwareProbe(config, { runtime: herdr, ...(config.forPerson ? { group: config.forPerson } : {}), ...probe }));
+  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, { runtime: herdr, ...(config.forPerson ? { group: config.forPerson } : {}), ...probe });
   if (!selected) throw masterRoleUnconfigured(`No agent registry role decides the master session`);
   const kind = selected.account.kind;
   let plan: ReturnType<typeof accountLaunch>;
@@ -146,7 +147,8 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
   pendingCauses: async work => {
     const current = config();
     const [cursor, serving] = await Promise.all([readDispatchCursor(root, current), servingReport(root, current.repository, current.baseBranch)]);
-    return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy)];
+    // GY-3119: a held batch gate and a revert rate above 1 in 5 wake the master.
+    return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy), ...batchGateCauses(readGateRecord(gateRecordPath(root)))];
   },
   wake: (target, text, continuity) => deliverPrompt(target, text, run, {
     beforeSubmit: (text, attempt) => graphyardInput(continuity?.current.origins ?? masterInputs(root, config().masterAgentName), attempt === 1 ? 'wake' : 'retry', text),

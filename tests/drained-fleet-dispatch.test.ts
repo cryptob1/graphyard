@@ -14,6 +14,10 @@ import { workerSlotWait } from '../src/model/action-kinds.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
+
+const registry = () => ({ probe: registryFixture(hostname(), ['codex']).probe });
 // Time-bomb allowance (GY-1694): the 2030-01-01T12:00Z observedAt is the clock handed to reclaimableAgent and runCycle; the new Date() dispatchWork calls stamp their own snapshot and a lease built from that same Date.now().
 
 // GY-1322: once every worker session had finished, each launch profile's name was still held by a
@@ -105,8 +109,9 @@ test('unit:idle-agent-profile-dispatchable — a profile whose name a finished, 
   try {
     const one = profile('one', fixture.credential);
     const herdr = fakeHerdr([{ name: 'agent-one', pane_id: 'pane-old', agent: 'codex', agent_status: 'idle' }]), claims = fakeClaims(fixture.root);
+    const shared = registryFixture(hostname(), ['codex'], ['worker'], 1);
     const now = new Date().toISOString(), ended = work('GY-1', { stage: 'done', epoch: 1 }), next = work('GY-2');
-    const result = await dispatchWork(fixture.root, next, one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [ended, next], claims.prepare, claims.release, 1, now) as { closedAgent?: string };
+    const result = await dispatchWork(fixture.root, next, one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [ended, next], claims.prepare, claims.release, 1, now, { probe: shared.probe }) as { closedAgent?: string };
     assert.deepEqual(herdr.closed, ['pane-old'], 'the finished session was closed');
     assert.match(result.closedAgent ?? '', /agent-one \(idle, pane pane-old\)/);
     assert.deepEqual([...claims.claims.keys()], ['GY-2'], 'and the item was claimed and launched');
@@ -115,15 +120,16 @@ test('unit:idle-agent-profile-dispatchable — a profile whose name a finished, 
     // The same session under a live lease is refused cleanly, before any claim, and left open.
     const held = fakeHerdr([{ name: 'agent-one', pane_id: 'pane-held', agent: 'codex', agent_status: 'idle' }]), heldClaims = fakeClaims(fixture.root);
     const owner = work('GY-3', { lease: { owner: 'one-principal', epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() } as Work['lease'] });
-    const refused = await dispatchWork(fixture.root, work('GY-4'), one, held.agents.map(agent => ({ ...agent })), held.run, [owner, work('GY-4')], heldClaims.prepare, heldClaims.release, 1, new Date().toISOString()).then(() => null, error => error);
+    const refused = await dispatchWork(fixture.root, work('GY-4'), one, held.agents.map(agent => ({ ...agent })), held.run, [owner, work('GY-4')], heldClaims.prepare, heldClaims.release, 1, new Date().toISOString(), registry()).then(() => null, error => error);
     assert.ok(dispatchReserved(refused), `refused as a held profile: ${refused?.message}`);
     assert.deepEqual([held.closed, heldClaims.claims.size], [[], 0]);
 
     // A launch this host made after the snapshot was read (GY-2 at epoch 1, shown here at epoch 0) is never closed on that snapshot's word.
     herdr.agents.forEach(agent => { agent.agent_status = 'idle'; });
-    const stale = await dispatchWork(fixture.root, work('GY-5'), one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [work('GY-2'), work('GY-5')], claims.prepare, claims.release, 1, new Date().toISOString()).then(() => null, error => error);
-    assert.ok(dispatchReserved(stale), `refused on a stale snapshot: ${stale?.message}`);
+    const stale = await dispatchWork(fixture.root, work('GY-5'), one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [work('GY-2'), work('GY-5')], claims.prepare, claims.release, 1, new Date().toISOString(), { probe: shared.probe }).then(() => null, error => error);
+    // The registry still records GY-2's live session (GY-3030: it, not a local launch record, is what knows the snapshot is stale).
     assert.deepEqual(herdr.closed, ['pane-old'], 'the fresh launch was not closed');
+    assert.ok(dispatchReserved(stale) || /role worker is at its concurrency limit \(1 of 1 live: codex-fixture on GY-2\)/.test(stale?.message ?? ''), `refused on a stale snapshot: ${stale?.message}`);
   } finally { await fixture.cleanup(); }
 });
 
@@ -165,7 +171,7 @@ test('unit:dispatch-refusal-names-agent-remedy — the per-profile reason names 
     const one = profile('one', fixture.credential);
     const herdr = fakeHerdr([{ name: 'agent-one', pane_id: 'pane-stuck', agent: 'codex', agent_status: 'done' }]), claims = fakeClaims(fixture.root);
     const failed = await dispatchWork(fixture.root, work('GY-2'), one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [work('GY-2')], claims.prepare, claims.release, 1, new Date().toISOString(),
-      { closePane: async () => { throw new Error('Herdr still reports pane pane-stuck after close'); } }).then(() => null, error => error as Error);
+      { ...registry(), closePane: async () => { throw new Error('Herdr still reports pane pane-stuck after close'); } }).then(() => null, error => error as Error);
     assert.match(failed?.message ?? '', /^Herdr agent agent-one is done with no live assignment, and its bounded close failed: Herdr still reports pane pane-stuck after close; remedy: close pane pane-stuck on the host \(herdr pane close pane-stuck\) or relaunch Herdr$/);
   } finally { await fixture.cleanup(); }
 });

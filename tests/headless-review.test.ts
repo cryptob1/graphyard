@@ -1,11 +1,14 @@
+import { AgentRegistry } from '../src/agent-registry.js';
+import { proposedRuntimes } from '../src/model/registry.js';
+import { headlessInventory } from '../src/session-inventory.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -14,8 +17,14 @@ import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/maste
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
 import { launchSpecCheck } from '../src/spec-check.js';
 import { reviewBindingFile } from '../src/review-post.js';
-import { liveRun, withRunnerAgents } from '../src/runner/registry.js';
-import { headlessArgs, headlessKind, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
+import { liveRun } from '../src/runner/registry.js';
+import { headlessArgs, headlessKind, headlessRunsDirectory, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
+import { readRunMeta, runAlive } from '../src/runner/pi.js';
+import { runDaemon } from '../src/daemon/run.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import type { DaemonEffects } from '../src/daemon/effects.js';
+import { loopRunAdoption } from '../src/daemon/run-adoption.js';
+import { existsSync, readdirSync } from 'node:fs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Headless reviews and spec checks: one child run of the reviewer's runtime, no Herdr pane, its
@@ -26,14 +35,11 @@ const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const coordinatorToken = `${coordinator.id}-token-${'x'.repeat(32)}`;
 const reviewer = 'review-claude-1';
 const now = () => new Date().toISOString();
-let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 let root: string, credentials: string, base: string, head: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3117;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('headless-review-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('headless_review_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/headless_review_test`); await store.init();
+  store = await withDatabase('headless-review'); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
   engine.gitRunner = null;
   http = server(engine, [{ ...coordinator, token: coordinatorToken }]);
@@ -52,13 +58,18 @@ before(async () => {
   git('add', 'feature.ts'); git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'head');
   head = git('rev-parse', 'HEAD');
   git('checkout', '-q', base);
+  // A fresh checkout (the private trial's) has no .graphyard directory yet.
+  await mkdir(join(process.cwd(), '.graphyard'), { recursive: true });
   await setupMaster(root, { url, token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w', run: { worktreeRoot: await temporaryDirectory('headless-review-checkouts', join(process.cwd(), '.graphyard')) } });
+  const config = await loadMasterConfig(root);
+  await new AgentRegistry(store).mutate(coordinator, 'apply', { runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
+    models: [{ name: 'opus', id: 'opus' }], accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host: config.hostId, home: null } }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency: 4, policy: { args: ['--setting-sources', 'user'] } }], reason: 'headless test registry' }, randomUUID());
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: reviewer, kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
 });
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (root) await rm(root, { recursive: true, force: true });
   if (credentials) await rm(credentials, { recursive: true, force: true });
 });
@@ -103,7 +114,7 @@ const until = async (what: string, check: () => Promise<boolean> | boolean) => {
   assert.fail(`timed out waiting for ${what}`);
 };
 const settled = async (id: string) => {
-  await until('the review run to end', async () => !liveRun(reviewer) && (await readReviewLedger(root)).reviews.some(record => record.id === id && (record.verdict || record.state !== 'pending')));
+  await until('the review run to end', async () => (await readReviewLedger(root)).reviews.some(record => record.id === id && !liveRun(record.agentName) && (record.verdict || record.state !== 'pending')));
   return (await readReviewLedger(root)).reviews.find(record => record.id === id)!;
 };
 
@@ -117,7 +128,7 @@ test('integration:headless-review — a review request is one headless run whose
   assert.deepEqual(commands.filter(([command]) => command !== 'git'), [], 'no Herdr command ran');
   // While it runs, the run is a working session under its name, so slots and supervision see it.
   await until('the run to start', () => fake.runs.length === 1);
-  assert.deepEqual(withRunnerAgents([]).find(agent => agent.name === launched.agentName), { name: launched.agentName, agent: 'claude', agent_status: 'working' });
+  assert.deepEqual(headlessInventory().sessions.find(session => session.name === launched.agentName), { name: launched.agentName, runtime: 'claude', state: 'working', pane: null, workspace: null });
   const [running] = (await readReviewLedger(root)).reviews;
   const token = JSON.parse(await readFile(join(running!.sessionDirectory, reviewBindingFile), 'utf8')).verdictToken as string;
   const [child] = fake.runs;
@@ -212,10 +223,61 @@ test('integration:headless-review — each runtime runs its one-shot form, and t
   assert.deepEqual(headlessArgs('claude', ['--permission-mode', 'bypassPermissions'], 'REQUEST'), ['--permission-mode', 'bypassPermissions', '-p', 'REQUEST']);
   assert.deepEqual(headlessArgs('pi', ['--model', 'm', '{request}'], 'REQUEST'), ['--model', 'm', 'REQUEST', '-p'], 'a registry contract places the request itself');
   assert.equal(headlessKind('gemini'), false, 'a runtime with no one-shot form keeps its pane session');
-  const options = { cwd: root, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10_000, signal: new AbortController().signal };
+  const options = { cwd: root, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10_000, signal: new AbortController().signal, run: join(root, '.graphyard', 'exec-probe', randomUUID()), detached: new AbortController().signal };
   assert.equal(await spawnHeadless(process.execPath, ['-e', 'process.stdin.on("data", () => process.exit(3)); process.stdin.on("end", () => console.log("{}"))'], options), '{}\n', 'stdin is closed: nothing waits on a person');
   await assert.rejects(spawnHeadless(process.execPath, ['-e', 'console.error("limit reached"); process.exit(2)'], options), /exited with code 2: limit reached/);
 });
+
+test('integration:headless-run-survives-loop-restart — a headless review in flight when the loop stops keeps running, the stop line counts it, and the next loop posts its verdict', async () => {
+  // The earlier tests' answered sessions settle first, so the profile's one slot is free.
+  const pending = (await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending').map(entry => entry.key);
+  const items = (await store.pool.query('SELECT document FROM work_items')).rows.map(row => row.document as Work).filter(item => pending.includes(item.key));
+  await reconcileReviews(root, await loadMasterConfig(root), { run, work: items, agents: [] });
+  const work = await insert(reviewItem('GY-9113'));
+  // A real detached child through the host exec, holding its answer until the test releases it.
+  const scratch = await temporaryDirectory('headless-loop-restart');
+  const script = join(scratch, 'fake-reviewer.mjs'), release = join(scratch, 'release');
+  const answer = `{"verdict": "APPROVE", "body": "Reviewed head ${head} against base ${base}. AC-1 met: feature.ts sets the flag.", "findings": []}`;
+  await writeFile(script, `import { existsSync } from 'node:fs';\nwhile (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 50));\nconsole.log(${JSON.stringify(answer)});\n`);
+  const exec: HeadlessExec = (_command, _args, options) => spawnHeadless(process.execPath, [script], options);
+  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-restart' });
+  const runs = headlessRunsDirectory(root);
+  await until('the detached child to start', () => existsSync(runs) && readdirSync(runs).some(name => readRunMeta(join(runs, name)) !== null));
+  const [directory] = readdirSync(runs).map(name => join(runs, name));
+  const meta = readRunMeta(directory!)!;
+  assert.ok(runAlive(meta), 'the child is live');
+
+  // The loop stops (as its unit's restart stops it): the line counts the run it leaves running, and signals none.
+  const config = { url, repository: 'owner/project', run: { intervalSeconds: 30 } } as never;
+  const effects = { persist: async () => {}, snapshot: async () => { throw new Error('the control plane is offline'); }, agents: () => [], credentials: async () => ({}) } as unknown as DaemonEffects;
+  const lines: string[] = [];
+  await runDaemon(config, emptyDaemonState(config), effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => lines.push(line) });
+  assert.ok(lines.some(line => /stopping: left 1 headless run\(s\) running, detached/.test(line)), lines.join('\n'));
+  assert.equal(liveRun(launched.agentName), null, 'the stopped loop no longer holds the run');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.ok(runAlive(meta), 'the child survived the loop\'s stop');
+  assert.equal((await readReviewLedger(root)).reviews.find(record => record.id === launched.review)!.verdict ?? null, null, 'no verdict yet');
+
+  // The next loop adopts it on start; the child answers, and that loop posts and records its verdict.
+  const next: string[] = [];
+  await runDaemon(config, emptyDaemonState(config), { ...effects, adoptRuns: loopRunAdoption(root, () => config) } as unknown as DaemonEffects,
+    { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => next.push(line) });
+  assert.ok(next.some(line => line.includes(`adopted 1 headless run(s): ${launched.agentName} (reviewer for GY-9113)`)), next.join('\n'));
+  assert.ok(next.some(line => /stopping: left 1 headless run\(s\) running, detached/.test(line)), 'its own stop counts the adopted run too');
+  const [adopted] = await loopRunAdoption(root, () => config)();
+  assert.equal(adopted!.name, launched.agentName);
+  assert.equal(adopted!.live, true);
+  await writeFile(release, '');
+  await adopted!.settled;
+  const record = (await readReviewLedger(root)).reviews.find(entry => entry.id === launched.review)!;
+  assert.equal(record.verdict?.state, 'APPROVED');
+  assert.equal(record.verdict?.reviewer, reviewer);
+  const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; sha: string; state: string; source?: string }[];
+  assert.deepEqual([review!.reviewer, review!.sha, review!.state, review!.source], [reviewer, head, 'APPROVED', 'control-plane'], 'the verdict landed under the reviewer identity');
+  assert.equal(existsSync(directory!), false, 'the run directory goes once its answer is recorded');
+  await rm(scratch, { recursive: true, force: true });
+});
+
 
 test('integration:headless-review — a run that stops on its provider\'s limit notice holds the account as a pane launch does, and is not run again on it', async () => {
   const config = await loadMasterConfig(root);
@@ -233,9 +295,9 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   assert.equal(runs.length, 1, 'a spent account is not run again');
   assert.equal(record.state, 'failed');
   assert.match(record.resolution!, /stopped on its provider's limit notice: You've hit your session limit/);
-  const held = (await observedExhaustions(config))['profile:reviewer-claude'];
+  const held = (await observedExhaustions(config))['reviewer-account'];
   assert.ok(held, 'the account is held');
-  assert.deepEqual([held.role, held.work, held.until], ['reviewer', 'GY-9107', resetsAt.toISOString()]);
+  assert.equal(held.until, resetsAt.toISOString());
   // The next launch skips the held account: with no other account on the profile it is refused before anything runs.
   await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
   assert.equal(runs.length, 1);

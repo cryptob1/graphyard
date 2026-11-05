@@ -31,7 +31,7 @@ const passed = (item: Work, gate: string) => item.gates.find(entry => entry.name
 function writer(items: Work[]) {
   const pushed = new Set<string>();
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => now.getTime(),
+    baseBranch: 'main', now: () => now.getTime(),
     fetch: async () => B,
     merge: async (sha, base) => ({ mergeSha: `${sha.slice(0, 20)}${base.slice(0, 20)}`, files: [] }),
     trial: async () => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'unit:works': { executed: 1, failed: 0 } } }),

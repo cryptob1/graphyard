@@ -14,6 +14,11 @@ import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/p
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
+
+/** GY-3030: the registry grants every launch; each launch takes a fresh one, as each session's reservation stands until it ends. */
+const registry = (role: 'worker' | 'producer') => registryFixture(hostname(), ['codex'], [role]).probe;
 // Time-bomb allowance (GY-1694): the 2026-09-23 `at`/clock stamps fixture items' createdAt/updatedAt; Date.now()/new Date() build live lease expiries only.
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
@@ -180,7 +185,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     try {
       const workerPane = new ConsentPane('codex', loginDialog);
       const assigned = join(root, 'assigned');
-      const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], workerPane.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: workerPane.bounds() });
+      const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], workerPane.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: workerPane.bounds(), probe: registry('worker') });
       assert.equal(dispatched.started, 'awaiting consent');
       assert.equal(dispatched.consent.awaiting!.prompt, held.awaiting!.prompt);
       assert.equal(dispatched.consent.awaiting!.pane, 'w1V:pC1');
@@ -212,7 +217,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     item.autoDispatch!.producers.push({ id: 'producer-integration', kind: 'producer', group: 'integration', proofs: ['integration:known-consent-answered-unknown-escalated'], sha: H, baseSha: B, policyRevision: item.policyRevision, pr: 130, requestedAt: at, reason: 'unproven', state: 'requested' });
     const request = item.autoDispatch!.producers[0];
     const hooks = new ConsentPane('codex', hooksDialog, ['3']);
-    const produced = await launchProducer(root, item, request, config.producers[0], [], at, { run: hooks.run, start: hooks.bounds() });
+    const produced = await launchProducer(root, item, request, config.producers[0], [], at, { run: hooks.run, start: hooks.bounds(), probe: registry('producer') });
     assert.deepEqual(hooks.keys, [['3']], 'one keystroke, option 3: continue without trusting');
     assert.equal(hooks.calls.some(call => call[1] === 'send-keys' && call.includes('2')), false, 'Trust all and continue is never chosen');
     const record = (await readProducerLedger(root)).producers.find(entry => entry.id === produced.producer)!;
@@ -251,7 +256,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
       const pane = new ConsentPane('codex', screen, ['1']);
       const closed: string[] = [];
       const run = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'close') closed.push(args[2]); return pane.run(command, args); };
-      await assert.rejects(launchProducer(root, item, request, config.producers[0], [], at, { run, start: pane.bounds() }), new RegExp(`awaiting consent in pane w1V:pC1 on a ${kind} prompt, and it is outside the launcher's consent allow-list`));
+      await assert.rejects(launchProducer(root, item, request, config.producers[0], [], at, { run, start: pane.bounds(), probe: registry('producer') }), new RegExp(`awaiting consent in pane w1V:pC1 on a ${kind} prompt, and it is outside the launcher's consent allow-list`));
       assert.deepEqual(pane.keys, [], `a ${kind} prompt is never answered`);
       assert.ok(closed.includes('w1V:pC1'), 'a refused reviewer or producer launch does not hold a slot');
     }
@@ -259,7 +264,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     // A worker on a prompt outside the list is held.
     const assigned = join(root, 'assigned');
     const login = new ConsentPane('codex', loginDialog, ['1']);
-    const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], login.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: login.bounds() });
+    const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], login.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: login.bounds(), probe: registry('worker') });
     assert.equal(dispatched.started, 'awaiting consent'); assert.deepEqual(login.keys, []);
     const holds = readConsentHolds(assigned);
     assert.equal(holds.length, 1);

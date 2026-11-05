@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
@@ -39,12 +39,12 @@ const worker: Principal = { id: 'implementer', role: 'worker' };
 const config = masterConfigSchema.parse({
   version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [],
-  run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } },
+  run: { mergeWriter: { deployKeyFile: '/keys/deploy' } },
 });
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`called GitHub (${String(name)})`); } });
 
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let fixtureRoot: string, origin: string, checkout: string, worktreeBase: string, baseTip: string, head: string, branch: string;
 
 async function commit(cwd: string, path: string, text: string, message: string) {
@@ -72,14 +72,11 @@ before(async () => {
   head = await commit(worktree, 'src/app.ts', 'export const app = 2;\n', 'change');
   assert.equal(git(origin, 'for-each-ref', '--format=%(refname)', 'refs/heads').trim(), 'refs/heads/main', 'origin holds only the base branch');
 
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3010;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('control-plane-local-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('local_head_trial');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/local_head_trial`); await store.init();
+  store = await withDatabase('control-plane-local-head-trial'); await store.init();
   engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
+after(async () => { if (store) await store.close(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 async function submittedItem(): Promise<Work> {
   let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: 'Local head trial', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
@@ -122,7 +119,7 @@ test('integration:control-plane-local-head-trial — a head present only in the 
     trials.push(input);
     return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
-  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
+  const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key') } } });
   const records: { kind: string }[] = [];
   const reads = mergeWriterReads(fixtureConfig, checkout, writerRun, {
     base: worktreeBase,  trial,

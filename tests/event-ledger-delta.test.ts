@@ -1,12 +1,11 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, appendSave, applyWorkDelta, eventStats, resolvedPayloadSql, snapshotEvery, workDiff, type WorkDelta } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -21,17 +20,14 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let serial = 0;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 177;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('event-ledger-delta'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('event_ledger_delta_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/event_ledger_delta_test`); await store.init();
+  store = await withDatabase('event-ledger-delta'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const raw = async (id: string) => (await store.pool.query('SELECT seq, kind, payload, pg_column_size(payload) AS bytes FROM events WHERE work_id=$1 ORDER BY seq', [id])).rows as { seq: string; kind: string; payload: any; bytes: number }[];

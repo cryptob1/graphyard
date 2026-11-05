@@ -11,6 +11,11 @@ import { readProducerLedger, reconcileProducers, saveProducerLedger, type Produc
 import { paneAlreadyGone } from '../src/request-settlement.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
+import { hostname } from 'node:os';
+
+/** A fresh registry per launch: the registry alone grants the reviewer its slot. */
+const reviewProbe = () => registryFixture(hostname(), ['claude'], ['reviewer']).probe;
 
 // Each test is named for the proof it produces (GY-137): integration:absent-pane-resolves-request
 // and integration:expired-request-never-blocks. A session whose pane is already gone settles its
@@ -67,7 +72,7 @@ test('integration:absent-pane-resolves-request — a pane close answered with pa
   try {
     const calls: string[][] = [];
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe(), requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     // The session is still listed by Herdr (so nothing is forced), its token has expired, and its
     // pane was closed by hand before the reconcile got to it: Herdr answers the close pane_not_found.
@@ -81,7 +86,7 @@ test('integration:absent-pane-resolves-request — a pane close answered with pa
     assert.match(after.resolution!, /pane pane-review was already gone when the session was closed/);
     assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'close').at(-1), ['pane', 'close', 'pane-review']);
     // The settled request no longer holds the key: a new review launch for the same item proceeds.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe(), requestId: 'review-request' });
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
   } finally { await cleanup(); }
@@ -91,14 +96,14 @@ test('integration:absent-pane-resolves-request — a close failing for any other
   const { root, cleanup } = await boundMaster();
   try {
     const calls: string[][] = [];
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe(), requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const agents = [{ name: record.agentName, pane_id: 'pane-review', agent_status: 'working' }];
     const held = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun(calls, 'broken'), observe: () => null, agents, now: afterExpiry(record) });
     assert.equal(held.reviews[0].state, 'pending');
     assert.match(held.reviews[0].closeFailure!, /Herdr could not close pane pane-review: herdr: connection reset/);
     assert.equal(held.reviews[0].closedAt, undefined);
-    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch }), /already pending/);
+    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe() }), /already pending/);
     // The classification itself: Herdr's code, or the code in a message, and nothing else.
     assert.equal(paneAlreadyGone(Object.assign(new Error('Herdr refused the operation'), { herdrCode: 'pane_not_found' })), true);
     assert.equal(paneAlreadyGone(new Error('Herdr refused the operation: pane_not_found')), true);
@@ -130,7 +135,7 @@ test('integration:expired-request-never-blocks — a request past its token expi
   try {
     const calls: string[][] = [];
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe(), requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const config = await loadMasterConfig(root);
     assert.ok(config.run.dispatchIntervalSeconds * 1000 <= expiredRequestBoundMs, 'the reconcile runs at least as often as the bound it declares');
@@ -147,7 +152,7 @@ test('integration:expired-request-never-blocks — a request past its token expi
     assert.match(after.resolution!, /the reviewer token expired at/);
     assert.match(after.closeFailure!, /Herdr could not close pane pane-review/);
     // Nothing blocks the next launch for the same item.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, probe: reviewProbe(), requestId: 'review-request' });
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
   } finally { await cleanup(); }

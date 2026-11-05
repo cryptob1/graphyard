@@ -1,9 +1,7 @@
-import { before, after, test } from 'node:test';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store, migrationDigests, recordedMigrationDigests } from '../src/store.js';
 import { migrationBackoffMs, retryLockFailures } from '../src/store/migration-locks.js';
 import { schemaVersion } from '../src/release.js';
@@ -12,17 +10,13 @@ import { schemaVersion } from '../src/release.js';
 // touches only the tables whose DDL changed, so the hot tables live traffic writes through are
 // never asked for a lock their unchanged DDL does not need; a changed hot table's alter is
 // retried with backoff inside the lock budget instead of failing the deploy.
-let postgres: EmbeddedPostgres, port: number;
-const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
+
+const urls = new Map<string, string>();
+const url = (database: string) => urls.get(database)!;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_MIGRATION_LOAD_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 182);
-  const scratch = await temporaryDirectory('migration-load');
-  postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await postgres.initialise(); await postgres.start();
-  for (const name of ['skips', 'upgrade', 'load']) await postgres.createDatabase(name);
+  for (const name of ['skips', 'upgrade', 'load']) urls.set(name, await databaseUrl('migration-under-load' + '-' + name));
 });
-after(async () => { if (postgres) await postgres.stop(); });
 
 const digests = migrationDigests();
 const recorded = async (store: Store) => recordedMigrationDigests((await store.pool.query("SELECT obj_description(to_regclass('graphyard_schema'),'pg_class') AS comment")).rows[0].comment);

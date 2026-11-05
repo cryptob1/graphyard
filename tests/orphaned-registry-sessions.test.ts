@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
-import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type FleetSession } from '../src/model/registry.js';
 import { exactApproval } from '../src/model/review.js';
 import type { FleetClient } from '../src/fleet.js';
-import { loadMasterConfig, type MasterConfig } from '../src/master.js';
+import { loadMasterConfig, masterConfigSchema, workerProfileSchema, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
@@ -60,7 +60,6 @@ function memoryRegistry(host: string, home: string, concurrency = 4) {
   const client: FleetClient = {
     document: async () => structuredClone(registry),
     select: async request => {
-      for (const superseded of supersededByRequest(registry, request)) Object.assign(superseded, { endedAt: at(), endReason: 'superseded' });
       const choice = chooseSession(registry, request, Date.now());
       if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
       const session: FleetSession = { id: randomUUID(), role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
@@ -371,4 +370,111 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.equal(done.gates.find(gate => gate.name === 'review')!.passed, false);
     assert.equal(exactApproval(done), null, 'COMMENTED cannot supply independent approval');
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
+});
+
+test('unit:orphaned-registry-sessions — GY-3012 submitted epoch 4 frees its worker slot when the finished pane is gone', async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude' }, 'review-a');
+  try {
+    const config = await loadMasterConfig(host.root), registry = memoryRegistry(config.hostId, await claudeLogin('submitted-worker'));
+    const selectedAt = '2026-11-04T15:44:00.000Z', endedAt = '2026-11-04T15:46:59.000Z', clock = Date.parse('2026-11-04T15:47:00.000Z');
+    const item = requested(12);
+    item.key = 'GY-3012'; item.epoch = 4; item.submission!.epoch = 4; item.autoDispatch = undefined;
+    item.sessions = [{ id: 'worker:4', kind: 'implementation', principal: 'worker', epoch: 4, runtime: 'codex', host: config.hostId,
+      workspace: null, tab: null, pane: 'w4G:finished', agentName: 'worker', role: null, head: item.candidate!.sha,
+      attach: null, transcript: null, subject: item.title, startedAt: selectedAt, updatedAt: endedAt, endedAt, state: 'finished', outcome: 'submitted' }];
+    const reservation: FleetSession = { id: 'cadad93d-0335-4c72-b4b6-959eebb04aaf', role: 'worker', account: 'reviewer-account', runtime: 'claude', model: 'opus',
+      host: config.hostId, work: item.key, principal: 'worker', group: null, selectedAt, selectedBy: 'master', reason: 'worker launch', skipped: [], endedAt: null, endReason: null };
+    registry.registry.roles.push({ ...registry.registry.roles[0], name: 'worker', concurrency: 1 });
+    registry.registry.sessions.push(reservation);
+    const kept = structuredClone(item);
+    const orphans = (items = [item], agents: { pane_id?: string }[] | null = []) => orphanedRegistrySessions(registry.registry, config.hostId, agents, [], clock, items);
+    assert.deepEqual(orphans([item], null), [], 'unreadable inventory is a gap');
+    assert.deepEqual(orphans([item], [{ pane_id: 'w4G:finished' }]), [], 'a visible pane keeps the reservation');
+    const active = structuredClone(item); active.sessions![0].state = 'running';
+    assert.deepEqual(orphans([active]), [], 'a genuinely active implementation keeps its slot');
+    const leased = structuredClone(item); leased.lease = { owner: 'worker', epoch: 4, expiresAt: new Date(clock + 60_000).toISOString() };
+    assert.deepEqual(orphans([leased]), [], 'a live lease is preserved');
+    const otherEpoch = structuredClone(item); otherEpoch.sessions![0].epoch = 3;
+    assert.deepEqual(orphans([otherEpoch]), [], 'another attempt cannot end this reservation');
+    assert.equal(orphans()[0].id, reservation.id, 'finished submitted work releases even within launch grace');
+    const effects = tickEffects(host, config, registry, () => [item], 0, clock);
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects, () => clock);
+    assert.deepEqual(tick.registryClosed, [{ work: item.key, id: reservation.id, role: 'worker', pane: 'w4G:finished' }]);
+    assert.match(reservation.endReason!, /submitted implementation is finished/);
+    // The next automatic worker dispatch takes the slot; no manual release or claim is needed.
+    const queued = requested(51);
+    Object.assign(queued, { key: 'GY-3051', type: 'chore', stage: 'ready', epoch: 17, submission: null, candidate: null, observation: null, autoDispatch: undefined });
+    config.workers = [workerProfileSchema.parse({ name: 'worker', principal: 'worker', agentName: 'worker', kind: 'claude', mode: 'launch', credentialFile: config.credentialFile })];
+    const dispatched: string[] = [];
+    await runCycle(config, emptyDaemonState(config), {
+      snapshot: async () => ({ work: [item, queued], now: new Date(clock).toISOString() }), agents: () => [],
+      credentials: async () => ({ worker: { available: true, reason: null } }), closeSession: async () => {}, persist: async () => {},
+      dispatch: async work => {
+        const next = await registry.client.select({ role: 'worker', host: config.hostId, group: null, work: work.key, principal: 'worker', observations: [] });
+        assert.equal(next.selected, true);
+        dispatched.push(work.key);
+        return { epoch: 18, pane: 'w4G:next-worker', runtime: 'claude' };
+      },
+    }, () => clock);
+    assert.deepEqual(dispatched, ['GY-3051']);
+    assert.deepEqual(item, kept, 'slot reconciliation preserves the submitted candidate and requirements');
+  } finally { await host.cleanup(); }
+});
+
+// GY-3116: on 2026-11-05 the post-merge reviews of GY-3090 and GY-3098 completed (their ledger
+// records closed with no pane recorded) and both items merged and left the open-work snapshot,
+// yet their reviewer registry sessions held two of four slots for up to 38 minutes: the close step
+// never saw the done items, and the orphan sweep needed a pane to miss.
+test('unit:review-session-released-after-merge — a closed review record with no pane releases its registry session on the next tick, though its item is done and absent', async () => {
+  const host = 'vishrog', at = Date.now();
+  const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
+    models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host, home: null } }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency: 4 }],
+    reason: 'fixture reviewer fleet',
+  }, { actor: 'operator', at: new Date(at).toISOString() }).registry;
+  const session = (id: string, work: string): FleetSession => ({ id, role: 'reviewer', account: 'reviewer-account', runtime: 'claude', model: 'opus', host, work, principal: 'reviewer',
+    selectedAt: new Date(at - 30 * 60_000).toISOString(), selectedBy: 'coordinator', reason: 'fixture', skipped: [], endedAt: null, endReason: null });
+  // The incident's records: GY-3090's post-merge review completed with no pane recorded, its item
+  // merged and gone from the snapshot; GY-3104's review is still running, also without a pane.
+  registry.sessions.push(session('36ec50d6', 'GY-3090'), session('be198685', 'GY-3098'), session('running', 'GY-3104'));
+  const records = [
+    { key: 'GY-3090', session: '36ec50d6', pane: null, runtime: 'claude', state: 'completed', agentName: 'review-claude-1-ee30901e' },
+    { key: 'GY-3098', session: 'be198685', pane: null, runtime: 'claude', state: 'failed', agentName: 'review-claude-1-ee309881' },
+    { key: 'GY-3104', session: 'running', pane: null, runtime: 'claude', state: 'pending', agentName: 'review-claude-1-ee310400' },
+  ];
+  // An empty Herdr inventory: nothing to miss, and the first sighting ends each closed review.
+  assert.deepEqual(orphanedRegistrySessions(registry, host, [], records, at), [
+    { id: '36ec50d6', role: 'reviewer', work: 'GY-3090', pane: null, agentName: 'review-claude-1-ee30901e', closedReview: 'completed' },
+    { id: 'be198685', role: 'reviewer', work: 'GY-3098', pane: null, agentName: 'review-claude-1-ee309881', closedReview: 'failed' },
+  ]);
+  // A closed review whose pane is still listed stays counted until that pane goes, as before.
+  const listed = [{ ...records[0], pane: 'w4G:p3B' }];
+  assert.deepEqual(orphanedRegistrySessions(registry, host, [{ pane_id: 'w4G:p3B' }], listed, at), []);
+
+  // One dispatch tick, the done items absent from its snapshot, ends both sessions.
+  const ended: Record<string, string> = {};
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/token', cliPath: '/nonexistent/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: host, masterAgentName: 'graphyard-master-project', workers: [] });
+  const effects = {
+    snapshot: async () => ({ work: [], now: new Date(at).toISOString() }),
+    agents: () => [],
+    credentials: async () => ({}),
+    reconcileReviews: async () => ({ reviews: records }),
+    reconcileProducers: async () => ({ producers: [] }),
+    launchReview: async () => { throw new Error('nothing is launched here'); },
+    launchProducer: async () => { throw new Error('nothing is launched here'); },
+    registry: async () => structuredClone(registry),
+    endRegistrySession: async (orphan: { id: string }, reason: string) => { ended[orphan.id] = reason; },
+    persist: async () => {},
+  } as unknown as DispatchEffects;
+  const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects);
+  assert.deepEqual(tick.registryClosed, [
+    { work: 'GY-3090', id: '36ec50d6', role: 'reviewer', pane: null },
+    { work: 'GY-3098', id: 'be198685', role: 'reviewer', pane: null },
+  ]);
+  assert.match(ended['36ec50d6'], /review record is completed/);
+  assert.match(ended['be198685'], /review record is failed/);
+  assert.equal(ended.running, undefined, 'a running review keeps its slot');
 });

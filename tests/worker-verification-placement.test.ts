@@ -49,9 +49,9 @@ test('integration:placed — private container and unnested namespaces', () => {
 // Exercise the shipped route and host-loop wiring, with the client under the
 // ordinary worker mount/socket boundary. The HTTP server has no usable repo path.
 test('integration:worker-verification-placement — confined verify/complete cross HTTP to the host runner', { timeout: 180_000 }, async t => {
-  const [{ default: EmbeddedPostgres }, { Store }, { Engine }, { server }, { daemonEffects },
+  const [{ withDatabase }, { Engine }, { server }, { daemonEffects },
     { readOnlyMountWrapper }, { defaultChildRun }, { randomUUID }] = await Promise.all([
-    import('embedded-postgres'), import('../src/store.js'), import('../src/engine.js'), import('../src/server.js'),
+    import('./helpers/postgres.js'), import('../src/engine.js'), import('../src/server.js'),
     import('../src/daemon/effects-production.js'), import('../src/master/confinement.js'), import('../src/child-runner.js'), import('node:crypto'),
   ]);
   const root = await temporaryDirectory('verification-http', process.cwd());
@@ -76,12 +76,9 @@ test('integration:placed-http', () => {
 });`;
   await writeFile(join(repository, 'tests/placed.test.ts'), source(false));
   git('add', '.'); git('commit', '-qm', 'passing');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3075;
-  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('verification-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('verification');
   let pump: NodeJS.Timeout | undefined;
-  t.after(() => { clearInterval(pump); return database.stop(); });
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/verification`);
+  t.after(() => { clearInterval(pump); });
+  const store = await withDatabase('worker-verification-placement');
   await store.init(); t.after(() => store.close());
   const engine = new Engine(store, 600, 'owner/project'); engine.gitRunner = null;
   const worker = { id: 'worker', role: 'worker' as const }, operator = { id: 'operator', role: 'admin' as const, sessionKind: 'human' as const };

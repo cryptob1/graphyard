@@ -6,7 +6,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -19,6 +19,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type Dispat
 import { neededRework, standingVerdict } from '../src/daemon/rework.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 import { hostMemoryVariable } from '../src/master/host-memory.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -101,6 +102,9 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // one, as the incident's two sessions ran two runtimes.
   const loaded = await loadMasterConfig(master.root);
   const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
+  // GY-3030: the registry is the only authority for the reviewer's slot; both launchers ask one
+  // registry, fresh for each race, so the session the winner holds never carries into the next.
+  const fleet = registryFixture(loaded.hostId, ['claude'], ['reviewer']).probe;
   // A review is requested only once the head's mechanical proofs pass (GY-115): prove it first.
   const item = work({ evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: H, baseSha: B, policyRevision: 3, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
   reconcileAutoDispatch(item, [item], new Date());
@@ -113,7 +117,7 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // launcher there keeps its record `launching` while the second one is let in.
   const registerLaunch = (who: Launcher) => async () => { minting[who].resolve(); if (order.at === 'launching' && order.first === who) await settled[other(who)].promise; return master.registerLaunch(); };
   const launch = (who: Launcher, profile: string) => (work: Work, dispatch: { id: string }, herdr: { name?: string }[], observedAt: string) => door[who].promise
-    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
+    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, probe: fleet, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
     .then(result => { outcomes[who] = { launched: true }; settled[who].resolve(); return result; }, error => { outcomes[who] = { launched: false, error: error.message }; settled[who].resolve(); throw error; });
   // A dispatch tick, launching through the real launcher with WHO's profile.
   const effects = (who: Launcher): DispatchEffects => ({
@@ -128,7 +132,8 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   if (!order.first) { door.cycle.resolve(); door.dispatcher.resolve(); }
   else {
     door[order.first].resolve();
-    await (order.at === 'launching' ? minting : settled)[order.first].promise;
+    // A first launcher that fails before it mints settles instead: the race goes on and its assertions name the failure, rather than waiting forever.
+    await Promise.race([(order.at === 'launching' ? minting : settled)[order.first].promise, settled[order.first].promise]);
     door[other(order.first)].resolve();
   }
   const [tick, dispatched] = await both;
@@ -234,18 +239,16 @@ const implementer: Principal = { id: 'implementer', role: 'worker' };
 const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:x'] };
 /** The mechanical proof passing on the observed head: a review is requested only after it (GY-115). */
 const proven = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: 'unit:x', sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/a.ts'] }, randomUUID());
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
   // verify runs this file directly, without the suite runner's host isolation.
   process.env[hostMemoryVariable] = 'unreadable';
   process.env.GRAPHYARD_DATA_HOME = await temporaryDirectory('gy124-data');
-  const port = Number(process.env.GRAPHYARD_ONE_REVIEWER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy124-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+
+  store = await withDatabase('one-reviewer-per-request'); await store.init();
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 /** Create rejects retired providers; the default accepts the actual session verdict route. */
 async function sessionProviderContract() {

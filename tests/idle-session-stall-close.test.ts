@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -14,6 +14,7 @@ import { accountHeldForRole } from '../src/model/capacity.js';
 import { assertDispatchable, masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, type MasterConfig } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { proposedRuntimes } from '../src/model/registry.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -34,7 +35,7 @@ const workerA: Principal = { id: 'worker-a', role: 'worker', sessionKind: 'ai' }
 const credentials = [operator, coordinator, workerA].map(principal => ({ ...principal, token: `${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -60,13 +61,7 @@ const item = async (key: string, title: string) => {
 };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2943;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('idle-stall-db'), user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('idle_stall');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/idle_stall`);
+  store = await withDatabase('idle-session-stall-close');
   await store.init();
   // A two-hour lease keeps every fixture lease live under the clock, which runs 30 minutes ahead.
   engine = new Engine(store, 7200, repository);
@@ -74,7 +69,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:idle-stall-handling — the close step ends a session idle past the window after its re-prompt (stalled, lease released, item dispatchable), re-prompts one that has had no re-prompt, and leaves a session inside the window alone', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
@@ -181,13 +176,20 @@ test('unit:limit-notice-ends-attempt-at-once — the close step ends a stopped s
 
   const root = await temporaryDirectory('fable-limit-hold');
   const credentialFile = join(root, 'coordinator.token');
-  await writeFile(credentialFile, 't'.repeat(40), { mode: 0o600 });
+  await writeFile(credentialFile, token(coordinator), { mode: 0o600 });
   for (const name of ['claude-c', 'claude-d']) {
     await mkdir(join(root, name), { recursive: true });
     await writeFile(join(root, name, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
   }
+  // The control plane's registry is the only holder of an account's exhaustion (GY-3030): both
+  // accounts are registered on this host in the worker role, and the hold is reported to it.
+  await ok(operator, 'POST', 'agent-registry/runtimes', { runtime: proposedRuntimes.find(runtime => runtime.name === 'claude'), reason: 'fixture runtime' });
+  await ok(operator, 'POST', 'agent-registry/models', { model: { name: 'fable', provider: 'anthropic' }, reason: 'fixture model' });
+  for (const name of ['claude-c', 'claude-d'])
+    await ok(operator, 'POST', 'agent-registry/accounts', { account: { name, runtime: 'claude', model: 'fable', credential: { host: 'loop-host', home: join(root, name) } }, reason: 'fixture account' });
+  await ok(operator, 'POST', 'agent-registry/roles', { role: { name: 'worker', accounts: ['claude-c', 'claude-d'], concurrency: 4 }, reason: 'fixture role' });
   const config = masterConfigSchema.parse({
-    version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/bin/graphyard',
+    version: 1, url, credentialFile, cliPath: '/bin/graphyard',
     repository, baseBranch: 'main', githubAppId: 1234, hostId: 'loop-host', masterAgentName: 'graphyard-master-fable', workers: [],
     environments: [{ name: 'claude-c', kind: 'claude', home: join(root, 'claude-c') }, { name: 'claude-d', kind: 'claude', home: join(root, 'claude-d') }],
   }) as MasterConfig;
@@ -260,7 +262,9 @@ test('unit:limit-notice-ends-attempt-at-once — the close step ends a stopped s
   const profile = { name: 'builder', principal: 'worker-a', agentName: 'agent-builder', mode: 'launch', kind: 'claude', accounts: ['claude-c', 'claude-d'] } as any;
   const chosen = await selectAccount(config, 'worker', profile, { quota: false, now: () => clock, cacheMs: 0, work: 'GY-48' });
   assert.equal(chosen.account?.name, 'claude-d', 'the dispatch excludes the held account');
-  await assert.rejects(selectAccount(config, 'worker', { ...profile, accounts: ['claude-c'] }, { quota: false, now: () => clock, cacheMs: 0, work: 'GY-48' }), /exhausted its quota mid-session/, 'a profile with only the held account waits for its reset');
+  // The registry chooses from the role's own accounts, so a choice left only the held one is refused on its hold.
+  await chosen.release?.('the fixture checked the choice');
+  await assert.rejects(selectAccount(config, 'worker', profile, { quota: false, now: () => clock, cacheMs: 0, work: 'GY-48', exclude: ['claude-d'] }), /exhausted its quota mid-session/, 'a choice with only the held account left waits for its reset');
 
   // A session Herdr still reports working is left alone, whatever its pane shows.
   assert.ok(!reads.includes('pane-gy-49'), 'a working session\'s pane is not judged');

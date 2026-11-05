@@ -1,28 +1,17 @@
-import { test, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rm } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl, databaseAvailable } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { closePool, trackedPool } from '../src/store/pools.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-483: pg-pool's end() resolved once it had asked its idle clients to end, not once they had
 // closed, so a test that stopped Postgres straight after Store.close() could terminate a live
 // client ("terminating connection due to administrator command"), about one CI run in eight.
-const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 483;
-let directory: string | undefined, database: EmbeddedPostgres | undefined;
-after(async () => {
-  await database?.stop();
-  if (directory) await rm(directory, { recursive: true, force: true });
-});
-
-test('unit:store-close-waits-for-clients — a store with idle clients closes fully before Postgres stops, 50 times over', async () => {
-  directory = await temporaryDirectory('store-close');
-  database = new EmbeddedPostgres({ databaseDir: directory, user: 'graphyard', password: 'testing-only', port, persistent: true, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('store_close');
-  const url = `postgres://graphyard:testing-only@127.0.0.1:${port}/store_close`;
+// Disable and disconnect just this database now that the cluster belongs to the whole runner.
+test('unit:store-close-waits-for-clients — a store with idle clients closes fully before its database disconnects clients, 50 times over', async () => {
+  const url = await databaseUrl('store-close');
   const failures: string[] = [], warnings: string[] = [];
   const unhandled = (error: unknown) => { failures.push(String((error as Error)?.message ?? error)); };
   const warn = console.warn;
@@ -30,14 +19,14 @@ test('unit:store-close-waits-for-clients — a store with idle clients closes fu
   console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
   try {
     for (let round = 0; round < 50; round++) {
-      if (round) await database.start();
+      if (round) await databaseAvailable(url, true);
       const store = new Store(url);
       // Several connections on each pool, all idle by the time close() runs.
       await Promise.all(Array.from({ length: 6 }, () => store.pool.query('SELECT pg_sleep(0.005)')));
       await Promise.all(Array.from({ length: 2 }, () => store.leasePool.query('SELECT 1')));
       assert.ok(store.pool.idleCount >= 2 && store.leasePool.idleCount >= 1, 'the store holds idle clients when it closes');
       await store.close();
-      await database.stop();
+      await databaseAvailable(url, false);
       // Give a still-open client's socket error its turn to surface before the next round.
       await new Promise(resolve => setImmediate(resolve));
     }

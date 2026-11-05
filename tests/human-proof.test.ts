@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -14,7 +14,6 @@ import { dueHumanProofs, humanProofRows, physicalCheckRefusal } from '../src/mod
 import type { HumanRequestRow } from '../src/model/human-request.js';
 import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
 import { lockedWork } from '../src/store/locked-read.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 // Every filed fixture owes an E2E proof and the serve declaration its trial needs.
@@ -32,18 +31,15 @@ const loop: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const credentials = [human, agentAdmin, loop].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const tokenOf = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let store: Store, http: ReturnType<typeof server>, url: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2986;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('human-proof-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('human_proof_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/human_proof_test`); await store.init();
+  store = await withDatabase('human-proof'); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 async function post(principal: Principal, path: string, body: unknown, key = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${tokenOf(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });

@@ -2,9 +2,9 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -26,8 +26,6 @@ import { readFileSync } from 'node:fs';
 const git = (args: string[], cwd: string) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 
 test('unit:served-app-verified-case — the release line names the served commit verified, and the failing case once that case is broken', { timeout: 300_000 }, async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2983;
-  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('served-app-verified'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   const operator: Principal = { id: 'e2e-operator', role: 'admin' }, token = `trial-${randomUUID()}`;
   // The checkout whose serving this control plane reports, and whose .graphyard the case's command
   // steps write the records into: the runner's root is the same checkout, exactly as in a trial.
@@ -35,12 +33,13 @@ test('unit:served-app-verified-case — the release line names the served commit
   git(['init', '-q', '-b', 'main'], root);
   await writeFile(join(root, 'served.txt'), 'the fixture app the record claims is served\n');
   git(['add', '.'], root); git(['commit', '-q', '-m', 'the fixture app'], root);
+  // The case's command steps write the records with this script, which with no e2e serve writes into its own checkout.
+  await mkdir(join(root, 'scripts')); await copyFile(join(process.cwd(), 'scripts', 'e2e-serve-record.mjs'), join(root, 'scripts', 'e2e-serve-record.mjs'));
   const written = join(root, '.graphyard', 'served.json');
   let http: ReturnType<typeof server> | null = null, store: Store | null = null;
   process.env.GRAPHYARD_REPOSITORY_ROOT = root;
   try {
-    await database.initialise(); await database.start(); await database.createDatabase('served_app_verified');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/served_app_verified`); await store.init();
+    store = await withDatabase('served-app-verified-case'); await store.init();
     const engine = new Engine(store, 120, '');
     http = server(engine, [{ ...operator, token }], {});
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
@@ -58,7 +57,6 @@ test('unit:served-app-verified-case — the release line names the served commit
     await rm(written, { force: true });
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     if (store) await store.close();
-    await database.stop();
   }
 });
 

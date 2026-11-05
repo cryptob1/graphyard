@@ -1,11 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -96,7 +95,7 @@ test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission i
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
 const replacement: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 'ai' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const id = () => randomUUID();
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 async function overwrite(work: Work, mutate: (document: Work) => void) {
@@ -115,14 +114,11 @@ const age = (work: Work, heldMs: number) => overwrite(work, document => { docume
 const heartbeat = (work: Work, epoch = work.epoch) => engine.execute(worker, 'heartbeat', work.id, { epoch }, id());
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_UNSUBMITTED_BOUND_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1462);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('unsubmitted-bound'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('daemon-unsubmitted-bound'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, replacement];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted the server refuses renewal, the lease lapses, and the item goes to a fresh attempt', async () => {
   const { unsubmittedAttempt } = await bound();

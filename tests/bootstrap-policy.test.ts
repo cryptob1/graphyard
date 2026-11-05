@@ -3,14 +3,13 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { bootstrapObligations, deliveredProof, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
 import { criterionSchema } from '../src/model-boundary/policy.js';
 import { evaluate } from '../src/model-boundary/gates.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
@@ -25,19 +24,16 @@ const worker: Principal = { id: 'implementer', role: 'worker' };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const harnessProof = 'integration:herdr-recovery';
 const contract = 'src/herdr/recovery.ts';
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let serial = 0;
 const id = () => randomUUID();
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_BOOTSTRAP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('bootstrap'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('bootstrap_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/bootstrap_test`); await store.init();
+  store = await withDatabase('bootstrap-policy'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const current = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
 const all = () => store.list();

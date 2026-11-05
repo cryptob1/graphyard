@@ -11,6 +11,8 @@ export interface RepositoryPolicy {
   e2e: { pendingOutcomes: typeof pendingOutcomeRules[number]; serve: E2eServe | null };
   release: { onFailure: typeof releaseFailureActions[number]; revertUnmatched: boolean };
   product: { ui: string[] } | null;
+  /** GY-3119: the E2E cases the batch gate on main always runs. */
+  gate: { core: string[] };
 }
 
 const anywhere = (rule: string, ...globs: string[]) => globs.map(glob => ({ rule, glob }));
@@ -38,6 +40,7 @@ export const defaultRepositoryPolicy: RepositoryPolicy = {
   e2e: { pendingOutcomes: 'non-blocking', serve: null },
   release: { onFailure: 'revert', revertUnmatched: true },
   product: null,
+  gate: { core: [] },
 };
 
 /** One rule compiled for a reader: its name, the entries' globs and one anchored pattern over them. */
@@ -76,7 +79,7 @@ export type Source = 'environment' | 'graphyard.json' | 'default';
 
 /** The `risk`, `e2e`, `release` and `product` sections of a parsed graphyard.json. */
 export const policySections = (config: Record<string, unknown> | null | undefined) =>
-  Object.fromEntries(['risk', 'e2e', 'release', 'product'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
+  Object.fromEntries(['risk', 'e2e', 'release', 'product', 'gate'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
 
 /** The nearest directory from `start` up holding `.git` (a directory, or a worktree's file); `start` when none does. */
 export function gitToplevel(fs: any, path: any, start: string): string {

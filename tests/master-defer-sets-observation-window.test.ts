@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { runAutonomyCommand, type MasterConfig } from '../src/master.js';
@@ -25,15 +25,12 @@ const operatorAgent = { id: 'graphyard-operator', role: 'operator-agent', sessio
   scope: { repositories: [repository], workItems: ['*'] } } as unknown as Principal;
 const followUp = { id: 'AC-1', text: 'From this head against the serving release f1984c118352: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:intervention-pattern-escalation-build-on-serving-release', 'e2e:fixture'] };
 
-let database: EmbeddedPostgres | undefined;
 const stores: Store[] = [];
-after(async () => { for (const store of stores) await store.close(); if (database) await database.stop(); });
+after(async () => { for (const store of stores) await store.close(); });
 
 async function plane() {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1740;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('master-defer'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('master_defer');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/master_defer`); await store.init(); stores.push(store);
+
+  const store = await withDatabase('master-defer-sets-observation-window'); await store.init(); stores.push(store);
   const engine = new Engine(store, 120, repository); engine.operatorAuthorizer = async (_db, _now, actor) => actor;
   const now = async () => ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   /** A released follow-up whose worker blocked on a reading that cannot exist yet, as GY-1689, GY-1721 and GY-1724 did. */

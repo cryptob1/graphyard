@@ -9,9 +9,10 @@ import { nextAction } from '../src/model-boundary/next-action.js';
 import { needsProductReview, type ProductReview } from '../src/model/product-review.js';
 import { productReviewCarries, productReviewRefusal } from '../src/model-boundary/product-review.js';
 import type { Work } from '../src/model.js';
-import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { loadMasterConfig, selectAccount, setupMaster } from '../src/master.js';
 import { saveReviewerProfile, reviewPrompt } from '../src/reviewer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 
 // GY-2989: the product review before merge. A feature head with passing proofs does not merge until
 // its product review approves; changes requested reworks with the findings; a reject is owed to the
@@ -150,6 +151,7 @@ test('unit:product-review-gates-features — the loop launches the product revie
     assert.ok(item.autoDispatch?.review, 'the code review request stands as it always has; its launch waits for the merge');
 
     const launches: { work: string; sha: string }[] = [];
+    const fleet = registryFixture(config.hostId, ['claude'], ['reviewer']);
     const agents: { name: string; pane_id?: string; agent_status?: string }[] = [];
     const effects = {
       snapshot: async () => ({ work: [item], now: at }),
@@ -159,8 +161,9 @@ test('unit:product-review-gates-features — the loop launches the product revie
       reconcileProducers: async () => ({ producers: [] }),
       launchReview: async () => { throw new Error('no code review is launched here'); },
       launchProducer: async () => { throw new Error('no producer is launched here'); },
-      // The stubbed product reviewer: it records the session it would start, as the ledger would.
-      launchProductReview: async (work: Work, request: { sha: string }) => { launches.push({ work: work.key, sha: request.sha }); agents.push({ name: 'product-reviewer' }); return { agentName: 'product-reviewer', pane: null }; },
+      // The stubbed product reviewer: it takes its slot from the registry, as every launch does
+      // (GY-3030), and records the session it would start, as the ledger would.
+      launchProductReview: async (work: Work, request: { sha: string }, profile: { name: string }) => { await selectAccount(config, 'reviewer', profile, { ...fleet.probe, work: work.key }); launches.push({ work: work.key, sha: request.sha }); agents.push({ name: 'product-reviewer' }); return { agentName: 'product-reviewer', pane: null }; },
       persist: async () => {},
     };
     // While a code-review session is still judging the head, the launch waits for it — one session
@@ -181,6 +184,7 @@ test('unit:product-review-gates-features — the loop launches the product revie
     // The request is that one session's: a second tick launches no second reviewer.
     const again = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.equal(again.launched.length, 0, 'one product review request is answered by one session');
+    assert.ok(again.waiting.some(entry => /role reviewer already reserved for GY-20/.test(entry.reason)), 'the registry\'s reservation for the item is what holds the second launch');
     assert.equal(launches.length, 1);
 
     // The verdict settles the request the way a control-plane verdict does: recorded on the item,

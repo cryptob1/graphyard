@@ -15,7 +15,9 @@ export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
 export interface ObservedQuota extends QuotaObservation { observedAt: string | null; observedBy: string | null; source: 'probe' | 'operator' | null }
 export const unobservedQuota: ObservedQuota = { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: null, observedAt: null, observedBy: null, source: null };
 export type FleetAccountInput = z.infer<typeof accountSchema>;
-export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
+/** An operator's latest quota decision on an account (GY-3117): kept through probes and account changes, so no exhaustion observed before it is applied again. */
+export interface QuotaDecision { state: QuotaObservation['state']; at: string }
+export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; quotaDecision?: QuotaDecision; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
 
 /** The roles a configured registry is expected to name. Setup proposes every one of them, master included (GY-2939); an operator re-names any role's accounts. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'master'] as const;
@@ -26,6 +28,30 @@ export const fleetRoles = ['worker', 'reviewer', 'producer', 'master'] as const;
  */
 export const registryRoles = [...fleetRoles, 'approver', 'escalation-handler', 'diagnostician', 'doctor', 'acceptance', 'planner'] as const;
 export type FleetRoleName = typeof registryRoles[number];
+/**
+ * Which launch kinds each role can run — the role's declared runtime capability. A role not
+ * declared here runs any registered runtime. The master resumes a durable native conversation
+ * with full read-only retention, which only Claude and Codex record (src/master/conversation.ts);
+ * every other role imposes no runtime constraint. The registry's role mutation refuses an account
+ * outside this list and selection passes it over, so a role never depends on a failed launch to
+ * learn what it can run.
+ */
+export const roleRuntimeKinds: Partial<Record<FleetRoleName, readonly string[]>> = { master: ['claude', 'codex'] };
+const runtimeList = (list: readonly string[]) => list.length < 2 ? (list[0] ?? '') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+/**
+ * Why `account`'s runtime cannot serve `role`, or null when it can: names the account's runtime
+ * and the ones the role supports, so the refusal says exactly what to change. An account naming
+ * an unregistered runtime is refused by the registry's own reference checks, not here.
+ */
+export function roleRuntimeRefusal(registry: Pick<AgentRegistry, 'runtimes'>, account: FleetAccount, role: FleetRoleName): string | null {
+  const supported = roleRuntimeKinds[role];
+  if (!supported) return null;
+  const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
+  if (!runtime) return null;
+  if (supported.includes(runtime.launch.kind)) return null;
+  const named = runtime.name === runtime.launch.kind ? `runtime ${runtime.name}` : `runtime ${runtime.name} (kind ${runtime.launch.kind})`;
+  return `${account.name} runs ${named}, which the ${role} role cannot run; the ${role} role supports ${runtimeList(supported)}`;
+}
 export type RolePolicy = z.infer<typeof rolePolicySchema>;
 export const emptyRolePolicy = (): RolePolicy => ({ args: [], tools: [], model: null });
 export type FleetRole = z.infer<typeof roleSchema>;
@@ -44,6 +70,7 @@ export interface FleetSession {
   /** For a headless run, whether it ended with a result (GY-446); recorded once. */
   outcome?: RunOutcome;
 }
+/** One refusal of a request; identical refusals of it after this one are counted in registry_refusal_repeats (GY-3095). */
 export interface FleetRefusal { at: string; role: string; host: string; work: string | null; by: string; reason: string; skipped: SessionSkip[] }
 
 export interface AgentRegistry {
@@ -71,3 +98,36 @@ export * from './registry-sessions.js';
 export * from './account-quota.js';
 export * from './registry-proposal.js';
 export * from './provider-usage.js';
+
+/** GY-3103: a version directory's name, as mise and similar installers write it: 2.2.5, v1.10.0, 1.0.0-beta.1. */
+export const versionName = /^v?\d+(?:\.\d+)*(?:[-+][\w.]+)?$/;
+const versionParts = (name: string) => { const [core, pre] = name.replace(/^v/, '').split(/[-+](.*)/s); return { core: core.split('.').map(Number), pre: pre ?? null }; };
+/** Orders version names: by their numeric parts, then a release above its prereleases. */
+export function compareVersions(a: string, b: string) {
+  const x = versionParts(a), y = versionParts(b);
+  for (let at = 0; at < Math.max(x.core.length, y.core.length); at++) { const delta = (x.core[at] ?? 0) - (y.core[at] ?? 0); if (delta) return delta; }
+  return x.pre === y.pre ? 0 : x.pre === null ? 1 : y.pre === null ? -1 : x.pre.localeCompare(y.pre);
+}
+export const newestVersion = (names: readonly string[]) => names.filter(name => versionName.test(name)).sort(compareVersions).at(-1) ?? null;
+
+/**
+ * Where a runtime's pinned install sits (GY-3103): the first entry of its launch PATH split at the
+ * first path segment naming a version — `root` holds every installed version, `rest` is the part
+ * below the version (e.g. `bin`). Null for a runtime whose PATH is not led by a versioned install.
+ */
+export function pinnedInstall(runtime: Pick<FleetRuntime, 'launch'>): { entry: string; root: string; version: string; rest: string } | null {
+  const entry = runtime.launch.environment?.PATH?.split(':')[0];
+  if (!entry || !isAbsolute(entry)) return null;
+  const parts = entry.split('/'), at = parts.findIndex(part => versionName.test(part));
+  if (at < 2) return null;
+  return { entry, root: parts.slice(0, at).join('/'), version: parts[at], rest: parts.slice(at + 1).join('/') };
+}
+/** A newer installed version of a registry runtime, offered to one launch as its canary: `entry` leads that launch's PATH. */
+export interface CanaryOffer { runtime: string; entry: string; version: string }
+/** The PATH entry `version` of a pinned install would lead with. */
+export const versionEntry = (pin: { root: string; rest: string }, version: string) => [pin.root, version, pin.rest].filter(Boolean).join('/');
+/** A PATH whose first entry is `entry`, the rest kept. */
+export const repinPath = (path: string, entry: string) => [entry, ...path.split(':').slice(1)].join(':');
+/** The runtime launched from `entry`: its PATH led by it, every other part of its launch kept. */
+export const repinRuntime = (runtime: FleetRuntime, entry: string): FleetRuntime =>
+  ({ ...runtime, launch: { ...runtime.launch, environment: { ...runtime.launch.environment, PATH: repinPath(runtime.launch.environment?.PATH ?? '', entry) } } });

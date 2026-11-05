@@ -2,12 +2,11 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -79,17 +78,13 @@ async function trivialLockHold(count: number): Promise<number> {
 
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_LOCKED_READ_BOUND_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1787);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('locked-read-bound'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('locked_read_bound');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/locked_read_bound`); await store.init();
+  store = await withDatabase('locked-read-bound'); await store.init();
   engine = new Engine(store, 120, 'owner/locked');
   engine.principals = [operator];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 let template: Work;
 async function ensureTemplate() {

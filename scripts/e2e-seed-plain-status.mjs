@@ -4,11 +4,13 @@
 //   node scripts/e2e-seed-plain-status.mjs
 //
 // Run from the checkout scripts/e2e-serve.mjs serves: it reads the database URL that serve wrote to
-// .graphyard/e2e-serve.json and writes .graphyard/served.json beside it. Re-running is a no-op.
-import { readFile, writeFile } from 'node:fs/promises';
+// .graphyard/e2e-serve.json and writes the serve record in the serving root it names (the delivery
+// fixture's repository, GY-3131; else this checkout). Re-running is a no-op.
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import pg from 'pg';
 
-const { databaseUrl } = JSON.parse(await readFile('.graphyard/e2e-serve.json', 'utf8'));
+const { databaseUrl, delivery } = JSON.parse(await readFile('.graphyard/e2e-serve.json', 'utf8')), servingRoot = delivery?.root ?? '.';
 const sha = '1234567890abcdef1234567890abcdef12345678', at = '2026-01-01T00:00:00.000Z';
 const candidate = (pr, branch) => ({ sha, baseSha: sha, pr, branch, author: 'w', createdAt: at });
 const item = (id, key, title, fields) => ({
@@ -38,4 +40,5 @@ try {
   for (const work of [review, live]) await pool.query('INSERT INTO work_items(id, document) VALUES($1, $2) ON CONFLICT (id) DO NOTHING', [work.id, JSON.stringify(work)]);
 } finally { await pool.end(); }
 // The record the serve pass writes once the served commit's required cases pass (GY-2983): the live item's own merge.
-await writeFile('.graphyard/served.json', JSON.stringify({ commit: sha, url: 'http://127.0.0.1:4399', failed: null, reason: null, pid: null, check: { verified: true, case: null, step: null, reason: null }, at }) + '\n');
+await mkdir(join(servingRoot, '.graphyard'), { recursive: true });
+await writeFile(join(servingRoot, '.graphyard', 'served.json'), JSON.stringify({ commit: sha, url: 'http://127.0.0.1:4399', failed: null, reason: null, pid: null, check: { verified: true, case: null, step: null, reason: null }, at }) + '\n');

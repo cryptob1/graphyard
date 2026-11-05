@@ -1,10 +1,12 @@
+import type { RuntimeSession } from '../model/sessions.js';
+import type { SessionInventory } from '../session-inventory.js';
 // Concern: the effects a cycle acts through — their interface and cursor records; the production wiring lives beside it in ./effects-production.ts.
 import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
 import type { ExhaustionSignal, PartialWork } from '../model/capacity.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
+import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
-import type { HerdrAgent } from '../master/herdr.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import { type DaemonAction, type DaemonState, type LoopRelease, storeAction } from './state.js';
@@ -31,14 +33,15 @@ export function refusedBodyDetail(result: unknown): string {
 }
 
 export interface DaemonEffects {
+  inventory?: () => Promise<SessionInventory>;
   /** The coordination read: the work snapshot, one GET. */
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   /** Full session history, read only to recover ownership of leftover panes omitted by coordination. */
   sessionHistory?: (work: Work) => Promise<SessionHandle[]>;
   /** Herdr's agent inventory: an empty list when Herdr cannot be read. */
-  agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
+  agents: () => RuntimeSession[] | Promise<RuntimeSession[]>;
   /** The same inventory with whether it could be read at all. */
-  herdr?: () => { agents: HerdrAgent[]; available: boolean } | Promise<{ agents: HerdrAgent[]; available: boolean }>;
+  herdr?: () => { agents: RuntimeSession[]; available: boolean } | Promise<{ agents: RuntimeSession[]; available: boolean }>;
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
   closeSession: (pane: string) => void | Promise<void>;
   /** Records a session's handle on its item: the launch writes it running, the close step finished. */
@@ -89,9 +92,23 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree (never forced); whether one was removed. */
   removeWorktree?: (path: string) => Promise<boolean>;
+  /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
+  diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
+  /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */
+  reclaimDisk?: () => Promise<string[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
-  dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /**
+   * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
+   * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
+   * result's `canary` names the one it ran, with its start failure if any); `exclude` names the
+   * accounts whose runtime backs off this item; `onRuntime` hears the runtime each launch chose.
+   */
+  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
+  /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
+  registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
+  /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
+  setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */
   launchSpecCheck?: (work: Work) => Promise<{ pane?: string | null; launch: string; settled?: Promise<string | null> } | void>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */

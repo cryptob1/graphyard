@@ -2,11 +2,10 @@ import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine, configuredReconcileFullMs } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -26,22 +25,14 @@ const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 const executor: Principal = { id: 'executor-a', role: 'coordinator' };
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 /** The slide applied to every transaction's `now`: the simulated time the fleet is living at. */
 let shiftMs = 0;
 /** The simulated instant the current scenario was seeded at, for bounds placed relative to it. */
 let baseMs = 0;
 
 before(async () => {
-  // An offset no other file takes, inside the window the suite reserves: test files run side by
-  // side, and two that share a port fail whichever starts its Postgres second, in its `before`
-  // hook, with no reason given.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 33;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconcile-due-times'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store = await withDatabase('reconcile-due-times');
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor];
@@ -52,7 +43,6 @@ before(async () => {
 
 after(async () => {
   await store?.close();
-  await database?.stop();
 });
 
 const nowMs = async () => { let at = 0; await store.transaction(async (_db, now) => { at = now.getTime(); }); return at; };

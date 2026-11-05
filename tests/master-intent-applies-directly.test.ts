@@ -2,12 +2,11 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { appliedReworkBrief } from '../src/master/rework-brief.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -18,19 +17,16 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const master: Principal = { id: 'graphyard-master-project-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: ['*'] } };
 const first: Principal = { id: 'worker-one', role: 'worker' };
 const second: Principal = { id: 'worker-two', role: 'worker' };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const id = () => randomUUID();
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 111;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('master-intent'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('master_intent_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/master_intent_test`); await store.init();
+  store = await withDatabase('master-intent-applies-directly'); await store.init();
   // A one-second lease, so the lapse is real time and not a fixture.
   engine = new Engine(store, 1, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const criteria = [{ id: 'AC-1', text: 'The first behaviour holds', proofs: ['unit:first', 'e2e:fixture'] }, { id: 'AC-2', text: 'The second behaviour holds', proofs: ['unit:second'] }];
 const create = (title: string) => engine.execute(operator, 'create', null, { title, type: 'chore', priority: 2, criteria, dependencies: [], policy: { checks: ['test'], review: true } }, id());

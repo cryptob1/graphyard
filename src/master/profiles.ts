@@ -214,7 +214,6 @@ function derivedSessionName(profile: { agentName: string }, tag: string, attempt
   return assertSessionName(`${shortened}-${digest}-${tail}`);
 }
 export function sessionAgentName(profile: { agentName: string; concurrency?: number }, session: { id: string; requestId?: string; attempt?: number }) {
-  if (profileConcurrency(profile) === 1) return profile.agentName;
   const tag = (session.requestId ?? session.id).toLowerCase().replace(/[^0-9a-f]/g, '').slice(0, 8).padEnd(8, '0');
   return derivedSessionName(profile, tag, session.attempt ?? 1);
 }
@@ -317,6 +316,8 @@ export const masterRunSchema = z.object({
   // required free space, and max size before master status warns.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
+  // GY-3122: the free space every volume Graphyard writes keeps; below it the loop reclaims its own leftovers, then starts no trial or worker (default 30).
+  diskFloorGb: z.number().min(0).max(100_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),

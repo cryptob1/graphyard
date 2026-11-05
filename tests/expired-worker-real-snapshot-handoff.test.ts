@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -39,7 +39,7 @@ const workerB: Principal = { id: 'worker-b', role: 'worker', sessionKind: 'ai' }
 const credentials = [operator, coordinator, workerA, workerB].map(principal => ({ ...principal, token: `${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, install: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, install: string;
 
 const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -58,13 +58,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const git = (args: string[], cwd = install) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2956;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('expired-real-db'), user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('expired_real_work');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/expired_real_work`);
+  store = await withDatabase('expired-worker-real-snapshot-handoff');
   await store.init();
   // A five-second lease is the attempt's own time bound: the expiry below is the bound, in real time.
   engine = new Engine(store, 5, 'owner/expired-real-work');
@@ -75,7 +69,7 @@ before(async () => {
   await writeFile(join(install, 'coordinator.token'), `${'c'.repeat(40)}\n`, { mode: 0o600 });
 });
 
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended unsubmitted attempt the control plane already reconciled has its committed and uncommitted work preserved on the loop\'s next cycle, the replacement\'s handoff names the saved commit before the worktree cleanup, and the expired epoch cannot continue working', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');

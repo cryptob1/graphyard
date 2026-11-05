@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -13,8 +13,9 @@ import {
 } from '../src/model/sessions.js';
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
 import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
-import { masterConfigSchema, profileSessions } from '../src/master.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { masterConfigSchema, selectAccount, sessionAgentName } from '../src/master.js';
+import { launchGraceMs } from '../src/model/registry.js';
+import { registryFixture } from './helpers/registry-fixture.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -46,18 +47,13 @@ const PROOF = 'integration:session-liveness';
 const head = 'a'.repeat(40), base = 'b'.repeat(40), nextHead = 'd'.repeat(40), mergeSha = 'c'.repeat(40);
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail whichever starts its
-  // Postgres second, in its `before` hook, with no reason given.
-  const port = Number(process.env.GRAPHYARD_SESSION_LIVENESS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 73);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('session-liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('session-liveness'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, coordinator, producer];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const reload = async (item: Work | string) => (await store.list()).find(entry => entry.id === (typeof item === 'string' ? item : item.id))!;
 let sequence = 0;
@@ -112,6 +108,8 @@ function dispatcher(items: () => Promise<Work[]>, runtime: () => RuntimeSession[
   });
   return {
     ...production,
+    // GY-3030: production reads the host's session inventory (session-inventory.ts); this test's runtime listing stands in for it through `agents`.
+    inventory: undefined,
     agents: () => runtime() as any,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: async () => ({ reviews: [] }),
@@ -274,7 +272,7 @@ test('integration:dead-session-reconciled — a session the runtime no longer re
 
 // ---- AC-2: a role slot is never held by a session that is not live ----------------------------
 
-test('integration:slot-released-on-death — the launcher\'s busy check counts reconciled liveness, so a request refused for a busy name launches once the session holding it dies', async () => {
+test('integration:slot-released-on-death — the role slot a dead session held in the control-plane registry is released by reconciled liveness, so a request refused for the busy slot launches once the session holding it dies', async () => {
   // An item whose candidate needs a review and no producer session, so this test is about one slot.
   const held = await submitted(reviewOnly);
   await engine.observe(held.id, (await reload(held)).revision, observation(await reload(held)));
@@ -283,50 +281,67 @@ test('integration:slot-released-on-death — the launcher\'s busy check counts r
   assert.equal(review.state, 'requested', 'the control plane asked for a review of this head');
   assert.deepEqual(item.autoDispatch!.producers, [], 'and asked for no producer session, so one slot is the whole story');
 
-  // One reviewer profile, concurrency 1. A session it launched is recorded on another item, whose
-  // own candidate asks for nothing, and is still reported by the runtime: the one slot is taken.
+  // GY-3030: the control-plane registry is the only slot authority. Its reviewer role runs one
+  // session at a time, and a session it granted is recorded on another item, whose own candidate
+  // asks for nothing, and is still reported by the runtime: the one slot is taken.
   const other = await submitted(reviewOnly);
   await engine.observe(other.id, (await reload(other)).revision, observation(await reload(other), { reviews: [{ reviewer: 'independent', sha: head, state: 'APPROVED' }] }));
   assert.equal((await reload(other)).autoDispatch?.review ?? null, null, 'nothing is requested for the item the busy session sits on');
+  const fleet = registryFixture('host-1', ['claude'], ['reviewer'], 1);
+  const granted = await fleet.client.select({ role: 'reviewer', host: 'host-1', work: other.key, group: null, principal: null, observations: [] });
+  const busySession = granted.session!.id;
   const busy = launchedSessionHandle('review', { ...review, id: 'review-elsewhere' }, `${other.key}: review elsewhere`, 'host-1', { pane: 'pane-90', agentName: 'review-claude' }, 'claude', 'wF');
   await engine.execute(coordinator, 'session', other.id, busy, randomUUID());
-  assert.equal((await handleOf(other, 'review-elsewhere')).agentName, 'review-claude', 'the handle carries the runtime name its slot is counted under');
+  assert.equal((await handleOf(other, 'review-elsewhere')).agentName, 'review-claude', 'the handle carries the runtime name and pane its session runs under');
 
+  // The launcher takes its slot from the registry; the review ledger names the registry session the busy review runs under.
+  const profile = fleetConfig.reviewers[0];
+  const ledger = [{ id: 'busy-record', key: other.key, sha: head, profile: profile.name, agentName: 'review-claude', pane: 'pane-90', session: busySession, state: 'pending', requestId: 'review-elsewhere', requestedAt: new Date().toISOString() }];
+  const overrides: Partial<DispatchEffects> = {
+    reconcileReviews: async () => ({ reviews: ledger }) as never,
+    launchReview: async work => { await selectAccount(fleetConfig, 'reviewer', profile, { ...fleet.probe, work: work.key }); return { pane: 'pane-review' }; },
+    registry: () => fleet.client.document(),
+    endRegistrySession: (session, reason) => fleet.client.end(session.id, reason),
+  };
   const listed: RuntimeSession[] = [{ name: 'review-claude', pane_id: 'pane-90', agent_status: 'working' }];
   const snapshot = async () => [await reload(item), await reload(other)];
   // One cursor across the ticks, as the loop keeps one.
   const cursor = emptyDispatchCursor(fleetConfig);
-  const refused = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => listed));
-  assert.deepEqual(refused.launched, [], 'nothing launched while a live session holds the name');
+  const refused = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => listed, Date.now, overrides));
+  assert.deepEqual(refused.launched, [], 'nothing launched while a live session holds the registry slot');
   const wait = refused.waiting.find(entry => entry.kind === 'review' && entry.work === item.key);
-  assert.match(wait!.reason, /every reviewer profile is busy/, `the request waits on the limit; it waited on ${JSON.stringify(refused.waiting)}`);
+  assert.match(wait!.reason, /waits for a reviewer slot.*concurrency limit/, `the request waits on the limit; it waited on ${JSON.stringify(refused.waiting)}`);
 
-  // The record alone holds the slot, even when this host's runtime has not listed the session: a
-  // handle is the durable record of a live session, and it outlives a restart of the loop.
-  const unlisted = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => []));
+  // The registry session alone holds the slot, even when this host's runtime has not listed the
+  // session: inside the launch grace nothing is judged, and the handle is not judged dead either.
+  const unlisted = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [], Date.now, overrides));
   assert.deepEqual(unlisted.launched, [], 'a session the runtime has not listed yet still holds its slot inside the grace');
-  assert.deepEqual(unlisted.closed, [], 'and is not judged dead for it');
+  assert.deepEqual([unlisted.closed, unlisted.registryClosed], [[], []], 'and is not judged dead for it');
   assert.deepEqual(Object.keys(cursor.sessionMisses), [sessionHandleKey(other.id, 'review-elsewhere')],
     'the sweep only notes that the runtime did not report it, for the next sweep to measure the grace against');
 
-  // The session is killed. Past the grace the sweep closes its record, and the same tick launches
-  // the request that was refused for that name — no hand-closed handle, no operator in between.
-  const after = new Date(Date.parse((await handleOf(other, 'review-elsewhere')).updatedAt) + sessionVanishGraceMs + 1000);
-  const launched = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [], () => after.getTime()), () => after.getTime());
-  assert.deepEqual(launched.closed.map(closure => [closure.key, closure.id, closure.cause]), [[other.key, 'review-elsewhere', 'vanished']]);
-  assert.deepEqual(launched.launched.map(entry => [entry.kind, entry.work, entry.profile]), [['review', item.key, 'claude-reviewer']],
-    `the next request for that role launched rather than being refused; the tick waited on ${JSON.stringify(launched.waiting)}`);
+  // The session is killed. Past both graces the sweep closes its record and notes the registry
+  // session's missing pane; the next tick ends that registry session and launches the request that
+  // was refused for its slot — no hand-ended session, no operator in between.
+  const after = new Date(Math.max(Date.parse((await handleOf(other, 'review-elsewhere')).updatedAt) + sessionVanishGraceMs, Date.parse(granted.session!.selectedAt) + launchGraceMs) + 1000);
+  const dead = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [], () => after.getTime(), overrides), () => after.getTime());
+  assert.deepEqual(dead.closed.map(closure => [closure.key, closure.id, closure.cause]), [[other.key, 'review-elsewhere', 'vanished']]);
   assert.equal((await handleOf(other, 'review-elsewhere')).state, 'finished');
   assert.match((await handleOf(other, 'review-elsewhere')).outcome!, /vanished/);
+  assert.deepEqual([dead.registryClosed, Object.keys(cursor.registryMisses)], [[], [busySession]], 'one missing listing of its pane ends no registry session');
+  const nextAt = () => after.getTime() + 1000;
+  const launched = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [], nextAt, overrides), nextAt);
+  assert.deepEqual(launched.registryClosed?.map(entry => [entry.work, entry.id, entry.pane]), [[other.key, busySession, 'pane-90']], 'the second consecutive miss ends the dead session\'s registry slot');
+  assert.deepEqual(launched.launched.map(entry => [entry.kind, entry.work, entry.profile]), [['review', item.key, 'claude-reviewer']],
+    `the next request for that role launched rather than being refused; the tick waited on ${JSON.stringify(launched.waiting)}`);
 
-  // And the freshly launched session now holds the slot itself, under the name the launcher gave it.
+  // And the freshly launched session now holds the slot itself, in the registry and under the name the launcher gave it.
   const fresh = (await running(item)).find(handle => handle.kind === 'review')!;
-  assert.deepEqual([fresh.agentName, fresh.role, fresh.head], ['review-claude', 'review', review.sha]);
-  assert.equal(profileSessions(fleetConfig.reviewers[0], [], [{ profile: 'claude-reviewer', agentName: fresh.agentName!, state: 'pending' }]).free, 1,
-    'the ledger alone frees the slot when nothing lists the session, exactly as it did before; the handle is what now holds it');
-  const againAt = () => after.getTime() + 1000;
-  const busyAgain = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [{ name: 'review-claude', pane_id: 'pane-review', agent_status: 'working' }], againAt), againAt);
-  assert.deepEqual(busyAgain.launched, [], 'and a second launch for the same profile waits on it');
+  assert.deepEqual([fresh.agentName, fresh.role, fresh.head], [sessionAgentName(profile, { id: review.id, requestId: review.id }), 'review', review.sha]);
+  assert.deepEqual(fleet.sessions().filter(session => !session.endedAt).map(session => [session.role, session.work]), [['reviewer', item.key]]);
+  const againAt = () => after.getTime() + 2000;
+  const busyAgain = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => [{ name: fresh.agentName!, pane_id: 'pane-review', agent_status: 'working' }], againAt, overrides), againAt);
+  assert.deepEqual(busyAgain.launched, [], 'and a second launch for the same role waits on it');
 });
 
 // ---- AC-3: a session bound to something that moved on is ended --------------------------------
@@ -393,7 +408,8 @@ test('integration:superseded-session-closed — a review or proof session for a 
     dispatcher(async () => Promise.all(items.map(id => reload(id))), () => [...alive(merged), ...alive(moved), ...alive(returned)], () => at.getTime()), () => at.getTime());
   assert.deepEqual(tick.closed.map(closure => closure.id).sort(), ['proof-old-head', 'review-merged', 'review-returned']);
   assert.ok(tick.closed.every(closure => closure.cause === 'superseded'));
-  for (const id of items) assert.deepEqual(await running(await reload(id)), [], `nothing is left running on ${id}`);
+  // A fresh review the new head of `moved` requests may launch beside them; none of the superseded sessions is left running.
+  for (const id of items) assert.deepEqual((await running(await reload(id))).filter(handle => ['proof-old-head', 'review-merged', 'review-returned'].includes(handle.id)), [], `nothing superseded is left running on ${id}`);
   const stored = await handleOf(await reload(items[0]), 'review-merged');
   assert.deepEqual([stored.state, stored.role, stored.head], ['finished', 'review', head]);
   assert.match(stored.outcome!, /^superseded: the candidate it was bound to merged/);

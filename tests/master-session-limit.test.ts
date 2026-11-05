@@ -11,7 +11,7 @@ import { daemonStatePath } from '../src/daemon/state.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterProfile } from '../src/master/master-session.js';
-import { recordObservedExhaustion, heldAwareProbe } from '../src/master/environments.js';
+import { recordObservedExhaustion } from '../src/master/environments.js';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, unobservedQuota, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { foldObservations } from '../src/model/registry-sessions.js';
@@ -46,6 +46,7 @@ function registryFixture() {
     selectedAt: iso(clock - 3_600_000), selectedBy: 'coordinator', reason: 'recorded', skipped: [], endedAt: null, endReason: null });
   const client: FleetClient = {
     document: async () => structuredClone(registry),
+    observe: async request => foldObservations(registry, request, { actor: 'executor', at: iso(clock) }),
     select: async request => {
       // The control plane folds what the executor observed into the registry before it chooses (as the server does), so a held account reads exhausted here too.
       foldObservations(registry, { host: request.host, observations: request.observations }, { actor: 'executor', at: iso(clock) });
@@ -86,13 +87,13 @@ async function effectsFor(config: MasterConfig, agents: { name?: string; pane_id
       launch: async handover => {
         if (observed.launchError) throw observed.launchError;
         observed.launched.push({ handover });
-        const selected = (await selectFleetSession(config, 'master', { name: masterProfile }, await heldAwareProbe(config, { registry: registry.client, now: () => clock, runtime: { agents: [], available: true } })))!;
+        const selected = (await selectFleetSession(config, 'master', { name: masterProfile }, { registry: registry.client, now: () => clock, runtime: { agents: [], available: true } }))!;
         return { agentName: MASTER, pane: 'pN', runtime: selected.account.kind, account: selected.account.name, session: selected.account.fleet.session };
       },
       // The production hold, on the fixture's own environment log beside the fixture credential file.
       exhaust: async (account, notice) => {
         observed.exhausted.push({ account, reason: notice.reason, resetsAt: notice.resetsAt });
-        await recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, clock);
+        await recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, clock, { registry: registry.client });
       },
       end: async (session, reason) => { observed.ended.push({ session, reason }); await registry.client.end(session, reason); },
     },

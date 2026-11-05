@@ -162,6 +162,13 @@ export function masterSummary(master: MasterSessionState, now: number, agent?: {
     state: masterSessionState(master, now, agent, screen) };
 }
 
+/** GY-3104: one item's current run of equal-signature failures (daemon/repeated-failure.ts) and the failure occurrences already counted. */
+const failureRunSchema = z.object({
+  key: z.string().max(100), kind: z.enum(['launch', 'trial', 'review']), signature: z.string().max(100),
+  reasons: z.array(z.string().max(1000)).max(2), count: z.number().int().min(0), rework: z.string().nullable(), handedIn: z.string().nullable(), seen: z.array(z.string().max(300)).max(20),
+}).strict();
+export type FailureRun = z.infer<typeof failureRunSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -169,7 +176,10 @@ export const daemonStateSchema = z.object({
   cycle: z.number().int().min(0).default(0),
   lastCycleAt: z.string().nullable().default(null),
   actions: z.record(z.string(), daemonActionSchema).default({}),
-  profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
+  /** GY-3103: worker launch failures by `runtime:item id`, each backing off until `until` (launchBackoffMs). */
+  launchBackoff: z.record(z.string(), z.object({ failures: z.number().int().min(1), reason: z.string().max(500), until: z.string() }).strict()).default({}),
+  /** GY-3103: per registry runtime, the newer installed version one session runs on before the fleet switches; `failed` holds a failed canary's error until a newer version appears. */
+  canaries: z.record(z.string(), z.object({ entry: z.string().max(1000), version: z.string().max(100), work: z.string().nullable(), epoch: z.number().int().nullable(), startedAt: z.string().nullable(), failed: z.string().max(500).nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   mergeWriter: mergeWriterStateSchema.default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
@@ -183,6 +193,10 @@ export const daemonStateSchema = z.object({
   personalMasters: z.record(z.string(), masterSessionSchema).default({}),
   /** The control plane the snapshot could not reach (GY-2966): since when, and on a compose install the loop's last `docker compose up -d` with the server's last exit and the free disk space; null while it answers. */
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
+  /** A disk shortage the headroom step could not reclaim (GY-3122): while set, no new merge trial or worker starts; null with room above the floor. */
+  diskHeadroom: z.object({ at: z.string(), floorBytes: z.number(), volumes: z.array(z.object({ path: z.string().max(1000), freeBytes: z.number() }).strict()).max(20), shortage: z.string().max(2000) }).strict().nullable().default(null),
+  /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
+  failureRuns: z.record(z.string(), failureRunSchema).default({}),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory(new Date().toISOString())),
 }).strip();
@@ -215,7 +229,7 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
  * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
  */
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
-export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
+export const retainedActions = 500, retainedMetrics = 100, maxProofAttempts = 3;
 
 export function emptyDaemonState(config: MasterConfig): DaemonState {
   return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -305,7 +319,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     action.detail = boundDetail(action.detail);
     action.attempts = clampCount(action.attempts, 1000);
   }
-  for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
+  for (const entry of Object.values(state.launchBackoff)) entry.reason = cut(entry.reason, 500);
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
   if (state.master) {

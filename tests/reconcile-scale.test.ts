@@ -1,12 +1,11 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { reconcileRowLockSql, reconcileVersionsSql } from '../src/store/coordination-sql.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -19,7 +18,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // coordination lock. Every test is named for the proof it produces.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 
 // What the passes read and lock, seen on every connection the pool opens. `hold` makes the
 // batch's row lock of one item it writes slow by `ms` after the lock is taken, so a test knows
@@ -54,10 +53,7 @@ const insert = async (document: Work) => { await store.pool.query('INSERT INTO w
 const candidateCount = async () => Number((await store.pool.query('SELECT count(*)::int AS n FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled)')).rows[0].n);
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 727;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconcile-scale'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store = await withDatabase('reconcile-scale');
   // Registered before the pool opens its first connection, so every query any test runs is seen.
   store.pool.on('connect', client => {
     const query = (client as { query: (...args: any[]) => any }).query.bind(client);
@@ -107,7 +103,7 @@ before(async () => {
   for (let n = 0; n < 547; n++) await insert(doneDocument(template, `GY-727S${n}`));
   for (let n = 0; n < 149; n++) openItems.push(await createItem(`Scale item ${n}`));
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('unit:reconcile-reads-open-items-once — a pass reads each candidate once, not once per batch', { timeout: 120_000 }, async () => {
   const expected = await candidateCount();

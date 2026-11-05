@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -15,7 +15,6 @@ import type { Services } from '../src/server/routes.js';
 import { plainStatus } from '../src/model/plain-status.js';
 import ShippedPage from '../web/pages/shipped.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -30,7 +29,7 @@ const worker: Principal = { id: 'close-worker', role: 'worker', sessionKind: 'ai
 const producer: Principal = { id: 'close-producer', role: 'producer', proofs: ['unit:close'] };
 const credentials = [operator, coordinator, worker, producer].map(principal => ({ ...principal, token: `close-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (principal: Principal, path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -55,16 +54,13 @@ async function patch(work: Work, change: Partial<Work>) {
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 157;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('close-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('close_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/close_test`); await store.init();
+  store = await withDatabase('close-work'); await store.init();
   engine = new Engine(store, 300, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('integration:close-obsolete — a stuck item closed as obsolete is terminal, audited, not delivered and not stuck', async () => {
   const work = await patch(await released('obsolete noise'), { blocker: 'Nobody will ever answer this' });

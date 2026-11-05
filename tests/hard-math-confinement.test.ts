@@ -48,7 +48,7 @@ test('integration:hard-math-smoke — non-CLI native launch denies oracle and au
     const headless = await startHeadlessSession({ name: 'benchmark-headless-review', work: 'GY-1', subject: 'boundary',
       kind: 'pi', args: [], environment: {}, directory: worktree, coordinatorRoot: root,
       credentialMask: credentialMaskFor(config, { credentialFile: null }, join(base, 'config-home')),
-      prompt: 'Boundary probe', answer: async output => output,
+      prompt: 'Boundary probe', answer: async output => output, root, route: 'review', context: {},
       exec: async (command, args) => {
         const end = args.indexOf('--');
         assert.ok(command.endsWith('bwrap') && end >= 0, 'headless launch carries the explicit-root wrapper');
@@ -86,7 +86,7 @@ test('integration:hard-math-smoke — embedded daemon worker and review dispatch
   const { setupMaster, loadMasterConfig, saveWorkerProfile } = await import('../src/master.js');
   const { saveReviewerProfile, readReviewLedger } = await import('../src/reviewer.js');
   const { requested } = await import('./helpers/review-fleet.js');
-  const { emptyRegistry } = await import('../src/model/registry.js');
+  const { registryFixture } = await import('./helpers/registry-fixture.js');
   const { readFile } = await import('node:fs/promises');
   const base = await temporaryDirectory('hard-math-embedded', process.cwd());
   const root = join(base, 'repository'), assigned = join(base, 'assigned');
@@ -109,7 +109,8 @@ test('integration:hard-math-smoke — embedded daemon worker and review dispatch
     await writeFile(path, 'fixture-only-token-'.padEnd(40, 'x'), { mode: 0o600 });
   }
   const item = requested(1);
-  Object.assign(item, { stage: 'ready', candidate: null, submission: null, observation: null, epoch: 0, workspaces: [], autoDispatch: undefined,
+  // A small change naming one ordinary path is offered to Pi first (GY-1772), so the registry's pi account may take it.
+  Object.assign(item, { description: 'Update docs/fixture-notes.md.', criteria: [], stage: 'ready', candidate: null, submission: null, observation: null, epoch: 0, workspaces: [], autoDispatch: undefined,
     specCheck: { policyRevision: 1, verdict: 'ready', paraphrase: 'Fixture', gaps: [], reviewer: 'spec', at: new Date().toISOString() } });
   const cli = join(base, 'fixture-cli.mjs');
   await writeFile(cli, `const command = process.argv[2];
@@ -127,9 +128,15 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
   config.confinement = { maskPaths: [install, oracle, source] };
   config.run.reviewerProfile = 'reviewer';
   await writeFile(join(root, '.graphyard/master.json'), JSON.stringify(config));
-  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+  const fleet = registryFixture(config.hostId!, ['pi'], ['worker', 'reviewer']);
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    if (url.endsWith('/agent-registry/document')) return Response.json(emptyRegistry());
+    // The control-plane registry (GY-3030): one pi account serving the worker and reviewer roles.
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined, ended = /\/agent-registry\/sessions\/([^/]+)\/end$/.exec(url);
+    if (url.endsWith('/agent-registry/document')) return Response.json(await fleet.client.document());
+    if (url.endsWith('/agent-registry/select')) return Response.json(await fleet.client.select(body));
+    if (url.endsWith('/agent-registry/observe')) return Response.json(await fleet.client.observe!(body));
+    if (ended) { await fleet.client.end(ended[1], body.reason); return Response.json({}); }
     if (url.endsWith('/review-launch')) return Response.json({ launch: 'fixture-review-launch' });
     throw new Error(`Unexpected fixture HTTP request: ${url}`);
   });

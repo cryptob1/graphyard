@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -22,15 +22,12 @@ import { readFileSync } from 'node:fs';
 // the serve record a served main writes.
 
 test('unit:served-app-link-case — the served head reports the declared serve over the API and the dashboard links it', { timeout: 300_000 }, async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2978;
-  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('served-app-link'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   const operator: Principal = { id: 'e2e-operator', role: 'admin' }, token = `trial-${randomUUID()}`;
   let http: ReturnType<typeof server> | null = null, store: Store | null = null;
   // The serve record the case's command step writes lives in this checkout's local .graphyard.
   const written = join(process.cwd(), '.graphyard', 'served.json');
   try {
-    await database.initialise(); await database.start(); await database.createDatabase('served_app_link');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/served_app_link`); await store.init();
+    store = await withDatabase('served-app-link-case'); await store.init();
     const engine = new Engine(store, 120, '');
     http = server(engine, [{ ...operator, token }], {});
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
@@ -47,7 +44,6 @@ test('unit:served-app-link-case — the served head reports the declared serve o
     await rm(written, { force: true });
     if (http) await new Promise<void>(resolve => http!.close(() => resolve()));
     if (store) await store.close();
-    await database.stop();
   }
 });
 

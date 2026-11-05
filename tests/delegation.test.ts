@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import {
   activeEngineers, classifyIntake, defaultDelegationLimits, delegationLimits, delegationSnapshot, humanOnlyIntakeOrigins, implementerIdentities,
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
@@ -14,7 +14,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { currentEvidence, sliceIds, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { mergeIntent } from './helpers/merge-ledger.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -56,7 +55,7 @@ const aiAdmin: Principal = { id: 'automation-admin', role: 'admin', sessionKind:
 const undeclaredAdmin: Principal = { id: 'legacy-admin', role: 'admin' };
 const roster = [admin, lead, infraLead, docsLead, workerA, workerB, workerC, reviewer, coordinator, aiAdmin, undeclaredAdmin];
 const head = 'a'.repeat(40), base = 'b'.repeat(40), redone = 'c'.repeat(40);
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string;
 const credentials = roster.map(principal => ({ ...principal, token: `delegation-${principal.id}-${'x'.repeat(32)}` }));
 let pr = 500;
@@ -93,16 +92,13 @@ async function proven(work: Work, sha = head) {
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 10;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delegation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('delegation_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delegation_test`); await store.init();
+  store = await withDatabase('delegation'); await store.init();
   engine = new Engine(store); engine.principals = roster;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:slice-model — formal slices are first-class objects with data-driven session kinds', () => {
   assert.deepEqual(slices.map(s => s.id), ['product', 'infrastructure', 'docs-experience']);

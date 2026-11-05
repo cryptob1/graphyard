@@ -51,11 +51,15 @@ Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches sp
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using reviewer accounts. The loop or `master start` adopts `masterAgentName` or replaces it. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
+`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using the claude and codex accounts (the only runtimes the master session can run). The loop or `master start` adopts `masterAgentName` or replaces it. The role refuses an account whose runtime it cannot run — the master's supported runtimes are claude and codex — naming the runtime and the supported runtimes, changing nothing; selection passes over one already stored, recording the skip with its reason, and selects the next eligible account. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
 Each cycle reads the master's recent output with the worker limit-notice judge. A provider limit holds the account until reset, closes the pane and launches the next account in the same cycle. Exited panes relaunch without a hold. Status is working, idle, limited until T or absent; none proves delivery.
+
+### A stopped pipeline is named under attention (GY-3095)
+
+`master status` lists under `attention` each role with no usable account, or whose launches the registry refused for a full cycle: the refusal, how long it has lasted and the next command. Identical consecutive refusals of one request are one `master registry history` entry with `count` and `lastSeenAt`.
 
 ### A closed Herdr workspace is replaced
 

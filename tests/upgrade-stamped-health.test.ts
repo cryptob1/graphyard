@@ -1,10 +1,11 @@
-import { after, before, test } from 'node:test';
+import { freePort } from '../src/cli/test-isolation.js';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl as createDatabaseUrl } from './helpers/postgres.js';
 import { composeAdapter, type AdapterContext, type AdapterObservation } from '../src/install/adapters.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { cliChangesOf, liveEffects, resolveTarget, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
@@ -12,20 +13,13 @@ import { checkoutRelease, imageRepository } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const previousVersion = '2026.10.18.1', version = '2026.10.18.2';
-const databasePort = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 38;
+
 const repositoryRoot = new URL('..', import.meta.url).pathname;
-let database: EmbeddedPostgres;
 let databaseUrl: string;
 
 before(async () => {
-  const scratch = await temporaryDirectory('upgrade-stamped-pg');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port: databasePort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('upgrade_stamped_health');
-  databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${databasePort}/upgrade_stamped_health`;
+  databaseUrl = await createDatabaseUrl('upgrade-stamped-health');
 });
-after(async () => { await database?.stop(); });
 
 /**
  * The installation's CLI checkout, as the upgrade gate builds it: this repository's committed code
@@ -125,7 +119,7 @@ process.stdout.write(JSON.stringify(calls));
 
 test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed compose release redeploys an image whose /healthz reports the upgraded-to version and commit, not unreleased unknown', async () => {
   const { root: cliRoot, previous, candidate } = await cliCheckout();
-  const port = databasePort + 1;
+  const port = await freePort();
   const workdir = await temporaryDirectory('upgrade-stamped-install');
   const docker = localDocker(port);
   try {

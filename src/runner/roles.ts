@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { spawn, type SpawnOptions } from 'node:child_process';
-import { lstatSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
 import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
@@ -101,11 +102,36 @@ export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] 
  * none of a role's policy. A key file that cannot be read fails the test with that reason.
  */
 export async function smokeRegistryAccount(account: FleetLaunchAccount, options: { cwd?: string; timeoutMs?: number; command?: string; commandArgs?: string[] } = {}): Promise<SmokeResult> {
+  if (account.kind === 'agy') return agySmoke(account, options);
   const launch = registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, policy: undefined } });
   let key: Record<string, string>;
   try { key = accountKeyEnvironment(account); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   return piSmoke({ command: options.command ?? launch.command, commandArgs: options.commandArgs, model: launch.model, args: launch.args, environment: { ...launch.environment, ...key } },
     { cwd: options.cwd ?? account.home ?? undefined, timeoutMs: options.timeoutMs, redact: Object.values(key) });
+}
+/**
+ * The agy account's smoke test (GY-3108): one print-mode prompt on the account's login, which agy
+ * reads only from `$HOME/.gemini/antigravity-cli`, so the run's HOME is a fresh directory that
+ * links there. It passes only when agy answers; a run that starts but never answers — waiting at a
+ * login, or silent — fails at the bound, as a session that never acts would hold its slot.
+ */
+export function agySmoke(account: Pick<FleetLaunchAccount, 'home' | 'fleet'>, options: { cwd?: string; timeoutMs?: number; command?: string } = {}): Promise<SmokeResult> {
+  const timeoutMs = options.timeoutMs ?? 120_000, command = options.command ?? account.fleet.contract.kind;
+  const home = mkdtempSync(join(tmpdir(), 'graphyard-agy-smoke-'));
+  if (account.home) { mkdirSync(join(home, '.gemini')); symlinkSync(account.home, join(home, '.gemini', 'antigravity-cli')); }
+  const { modelFlag } = account.fleet.contract, model = account.fleet.modelId;
+  return new Promise<SmokeResult>(settle => {
+    let output = '';
+    const child = spawn(command, [...(modelFlag && model ? [modelFlag, model] : []), '--print', 'Reply with the single word OK.'], { cwd: options.cwd ?? home, env: { ...process.env, ...account.fleet.contract.environment, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const bound = setTimeout(() => { child.kill('SIGKILL'); settle({ ok: false, error: `${command} started but gave no answer within ${Math.round(timeoutMs / 1000)}s${/authentication/i.test(output) ? ': it is waiting for a login' : ''}` }); }, timeoutMs);
+    child.stdout!.on('data', chunk => { output = (output + chunk).slice(-4000); });
+    child.stderr!.on('data', chunk => { output = (output + chunk).slice(-4000); });
+    child.on('error', error => { clearTimeout(bound); settle({ ok: false, error: `${command} could not be started: ${error.message}` }); });
+    child.on('close', code => {
+      clearTimeout(bound);
+      settle(code === 0 && /\bOK\b/.test(output) ? { ok: true, error: null } : { ok: false, error: output.trim().split('\n').slice(-3).join(' ').slice(0, 480) || `${command} exited with code ${code} without answering` });
+    });
+  }).finally(() => rmSync(home, { recursive: true, force: true }));
 }
 /**
  * How a headless run ended, as the registry counts it (GY-446): with a result, without one, or —

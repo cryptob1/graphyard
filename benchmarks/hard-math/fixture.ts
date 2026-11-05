@@ -136,6 +136,11 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
       assert.equal(item.postMergeReview,'owed');
       assert.deepEqual(item.observation.reviews,[],'no pre-approved fixture shortcut');
     }
+    // The registry is the only authority for review slots (GY-3030): the reviewer role joins the fleet now that every worker session ended.
+    const fleet=await c.plane.call('agent-registry/document',c.coordinator);
+    await c.plane.call('agent-registry/apply',c.coordinator,{runtimes:[...fleet.runtimes,{name:'controlled-reviewer',launch:{kind:'claude'}}],models:fleet.models,
+      accounts:[...fleet.accounts.map(({quota,quotaDecision,smoke,unjudged,...a}:any)=>a),{name:'fixture-reviewer',runtime:'controlled-reviewer',model:'fixture-cheap',credential:{host:'scratch',home:null}}],
+      roles:[...fleet.roles,{name:'reviewer',accounts:['fixture-reviewer'],concurrency:16}],reason:'Controlled independent reviewer for native post-merge review dispatch'});
     const credentialFile=join(c.install,'fixture-review-coordinator.token');
     await atomicPrivateText(credentialFile,c.coordinator);
     const config=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:join(c.config.sourceRoot,'bin/graphyard.mjs'),repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:'scratch',masterAgentName:'fixture-master',herdrWorkspace:'fixture-review',workers:[],

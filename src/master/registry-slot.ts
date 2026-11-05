@@ -2,6 +2,8 @@
 // when that session's work is over (GY-2944), so a finished review or proof stops consuming its
 // role's concurrency. The launch recorded the registry session on its ledger record
 // (`record.session`); this is the release side of that promise.
+import type { Work } from '../model.js';
+import { handleEpoch } from '../model/session-launch-window.js';
 import { httpFleetClient, type FleetClient } from '../fleet.js';
 import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { readProducerLedger } from '../producer.js';
@@ -12,7 +14,7 @@ import type { MasterConfig } from './profiles.js';
 /** The review or proof session whose slot is released: what the item's session handle carries. */
 export interface RegistrySlot { key: string; id: string; kind: 'review' | 'proof'; head: string | null; pane: string | null; agentName: string | null }
 /** A live registry session of this host no Herdr pane backs, with the pane that would back it. */
-export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string; agentName: string | null; completedReview?: boolean }
+export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string | null; agentName: string | null; completedReview?: boolean; completedImplementation?: boolean; closedReview?: string }
 
 /**
  * The live reviewer or producer sessions of `host` that no pane of `agents` backs (GY-2945): a
@@ -23,19 +25,37 @@ export interface OrphanedRegistrySession { id: string; role: string; work: strin
  * own it. `agents` null is a listing that could not be read: a gap, never a miss. Pure.
  * A completed review record also names its settled purpose, even when its delivered item
  * has left the open-work snapshot; the dispatcher can release it on the first confirmed miss.
+ * GY-3116: a closed review record (completed, failed, cancelled or expired) whose session no
+ * watched pane backs — none recorded, as a post-merge review's often is, or a headless runtime's —
+ * has nothing left to miss, so it is returned at once with its state, whatever its item's stage.
  */
 export function orphanedRegistrySessions(registry: AgentRegistry, host: string | null | undefined, agents: { pane_id?: string }[] | null,
-  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string }[], now: number): OrphanedRegistrySession[] {
+  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string }[], now: number, work: readonly Work[] = []): OrphanedRegistrySession[] {
   if (!agents) return [];
   const panes = new Set(agents.map(agent => agent.pane_id).filter((pane): pane is string => !!pane)), named = new Map(records.filter(record => record.session).map(record => [record.session!, record]));
   const orphans: OrphanedRegistrySession[] = [];
   for (const session of liveSessions(registry)) {
-    if (session.host !== host || (session.role !== 'reviewer' && session.role !== 'producer')) continue;
+    if (session.host !== host) continue;
+    if (session.role === 'worker') {
+      const item = work.find(item => item.key === session.work);
+      if (!item?.submission || (item.lease && Date.parse(item.lease.expiresAt) > now)) continue;
+      const handle = item.sessions?.find(handle => handle.kind === 'implementation' && handle.state === 'finished'
+        && handle.principal === session.principal && handleEpoch(handle) === item.submission!.epoch
+        && Date.parse(handle.endedAt ?? handle.updatedAt) >= Date.parse(session.selectedAt));
+      if (handle?.pane && !panes.has(handle.pane)) orphans.push({ id: session.id, role: session.role, work: session.work,
+        pane: handle.pane, agentName: handle.agentName, completedImplementation: true });
+      continue;
+    }
+    if (session.role !== 'reviewer' && session.role !== 'producer') continue;
     if (now - Date.parse(session.selectedAt) < launchGraceMs) continue;
     const record = named.get(session.id);
-    if (!record?.pane || record.runtime === 'pi' || panes.has(record.pane)) continue;
-    orphans.push({ id: session.id, role: session.role, work: session.work, pane: record.pane, agentName: record.agentName ?? null,
-      ...(session.role === 'reviewer' && record.state === 'completed' ? { completedReview: true } : {}) });
+    if (!record) continue;
+    const closed = session.role === 'reviewer' && !!record.state && record.state !== 'pending';
+    const watched = !!record.pane && record.runtime !== 'pi';
+    if (watched ? panes.has(record.pane!) : !closed) continue;
+    orphans.push({ id: session.id, role: session.role, work: session.work, pane: record.pane ?? null, agentName: record.agentName ?? null,
+      ...(watched && closed && record.state === 'completed' ? { completedReview: true } : {}),
+      ...(!watched ? { closedReview: record.state } : {}) });
   }
   return orphans;
 }
