@@ -178,7 +178,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const directory = installDirectory(installIdFor(current().repository));
       return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
     },
-    dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot }),
+    dispatch: (work, profile, agents, snapshot, options) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot, diagnosis: options?.diagnosis }),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
     launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick

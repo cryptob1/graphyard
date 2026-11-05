@@ -163,6 +163,8 @@ export interface Work extends Create {
   delivery?: Delivery;
   /** Retired repair lane (GY-406, removed by GY-1234): stored items keep loading; nothing reads these. */
   repair?: 'merge-path';
+  /** A yard repair (GY-3102): released past the pipeline cap, dispatched first, merged first. */
+  yardRepair?: boolean;
   repairLane?: Record<string, unknown> | null;
   /**
    * Independently observed production delivery, one record per environment: the first

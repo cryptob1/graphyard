@@ -162,17 +162,23 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.equal((await store.coordinationSnapshot()).work.find(item => item.id === target.id)?.pipeline, undefined, 'test reads the actual compact snapshot');
   await Promise.all(runs); await cycle(); await Promise.all(runs); await cycle();
   state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
-  await cycle(); assert.equal(prompts.length, 1, 'unchanged diagnosis survives restart without another wake');
+  // GY-3104: the second equal exit replaces the per-failure cause with the run's one wake, carrying both reasons.
+  assert.equal(prompts.length, 2); assert.match(prompts[1], /the same launch failure twice[\s\S]*epoch 1[\s\S]*epoch 2/);
+  await cycle(); assert.equal(prompts.length, 2, 'unchanged diagnosis survives restart without another wake');
   assert.equal(closed.filter(pane => pane === launched.pane).length, 1, 'reporter-finished pane closes exactly once');
 
   // Retry the same exact failure on another epoch. Starting it does not erase health or incident.
   now += 11 * 60_000;
   await cycle(); assert.ok(state.actions[key]); assert.ok(state.profiles['claude-0']); await Promise.all(runs);
-  await cycle(); assert.equal(prompts.length, 1, 'unchanged failure across epochs does not spam');
+  // GY-3104: the third equal exit holds the item and wakes the master once to decide.
+  await cycle(); assert.equal(prompts.length, 3, 'unchanged failure across epochs does not spam'); assert.match(prompts[2], /a third time; the loop stopped dispatching it/);
   assert.ok(currentIncident().attempts >= 2, JSON.stringify(state.actions));
   diagnostic = 'runtime error: changed failure'; now += 11 * 60_000;
+  const held = launchedProfiles.length;
+  await cycle(); await Promise.all(runs); assert.equal(launchedProfiles.length, held, 'a held item is not relaunched');
+  await api(operator, `work/${target.id}/rework`, { reason: 'Try a different start', previousWorkerStopped: true });
   await cycle(); await Promise.all(runs); await cycle();
-  assert.equal(prompts.length, 2); assert.match(prompts[1], /changed failure/);
+  assert.equal(prompts.length, 4); assert.match(prompts[3], /changed failure/);
   const attempts = launchedProfiles.length;
   for (const profile of Object.values(state.profiles)) profile.cooldownUntil = null;
   await cycle(); assert.equal(launchedProfiles.length, attempts, 'item backoff applies even with healthy profiles');

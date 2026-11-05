@@ -15,6 +15,7 @@
     "start": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
     "test": "node --import tsx tests/helpers/run-tests.ts",
+    "test:affected": "node scripts/test-affected.mjs",
     "typecheck": "node --import tsx tests/helpers/run-tests.ts --typecheck",
     "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },

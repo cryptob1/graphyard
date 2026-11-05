@@ -24,7 +24,8 @@ status\` names who resolves each attention item and the next command.
 
 Dispatch only ready work with \`graphyard master dispatch GY-N PROFILE\`. The
 worker must claim the item under its own identity and use the assigned worktree.
-Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
+Workers check their change with \`npm run test:affected\` and their bound proof test files,
+not npm test, before submitting. Treat prompt delivery as an invitation, never as ownership. Use durable handoffs
 when an agent, provider account, machine, or context window changes.
 
 Review and proof collection start on their own. When a candidate passes the build gate

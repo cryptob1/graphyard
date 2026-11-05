@@ -43,7 +43,7 @@ const createdAtOf = (item: Pick<Work, 'createdAt'>) => Date.parse(item.createdAt
 export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 /** The item the loop's base-failure step files for a failing base test (`baseFailureItem`'s title): it unblocks every held head, so it goes first too. */
 export const isBaseRepair = (item: Pick<Work, 'title'>) => /^base branch \S+ fails .+ test: /i.test(item.title ?? '');
-const mergesFirst = (item: Pick<Work, 'title'>) => isHotfix(item) || isBaseRepair(item);
+const mergesFirst = (item: Pick<Work, 'title' | 'yardRepair'>) => isHotfix(item) || isBaseRepair(item) || !!item.yardRepair;
 /**
  * The trial-failure refusal the item's own record holds for its exact candidate head, or null: the
  * one fact that takes a head out of the queue (`mergeQueue`'s `trial failed` drop, GY-1524 AC-3)
