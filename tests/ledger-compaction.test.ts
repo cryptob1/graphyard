@@ -247,9 +247,7 @@ test('integration:ledger-compaction-completes — on a generated ledger of hundr
   // GY-3111: a candidate query over the whole ledger ordered by age ran past the statement timeout and
   // rolled back every batch. Generated here, never production data: items with a create row, then
   // segments of three whole routine rows (the first two extended by nothing) and deltas on the third.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 979;
-  await pg.createDatabase('ledger_compaction_scale');
-  const scale = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_scale`);
+  const scale = await withDatabase('ledger-compaction-scale');
   try {
     await scale.init();
     const itemCount = 400, segments = 6, deltas = 120;
