@@ -20,6 +20,8 @@ const base = {
 };
 
 const item = (stage: Stage, extra: Partial<Work> = {}): Work => ({ ...base, stage, ...extra } as Work);
+// A worker holds it: an item at build with no lease and no running session reads Waiting (GY-3095).
+const held = { lease: { epoch: 1, owner: 'worker', expiresAt: '2999-01-01T00:00:00Z' } } as Partial<Work>;
 
 const delivery = { mergeSha: 'a'.repeat(40), mergedAt: '2026-01-01T01:00:00Z', authorizationRevision: 1, pr: 1 };
 const served: ReleaseView = {
@@ -46,7 +48,7 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
     done: 'Done', // a repository with no deployment
   };
   for (const stage of stages) {
-    const work = stage === 'done' ? item('done', { delivery } as Partial<Work>) : item(stage);
+    const work = stage === 'done' ? item('done', { delivery } as Partial<Work>) : item(stage, held);
     assert.equal(plainStage(work), byStage[stage], stage);
   }
 
@@ -75,7 +77,8 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
   // Every plain label is reached, and glossary names each once.
   const examples: Record<PlainStage, () => string> = {
     'Not started': () => plainStage(item('ready')),
-    Building: () => plainStage(item('build')),
+    Waiting: () => plainStage(item('build')),
+    Building: () => plainStage(item('build', held)),
     Testing: () => plainStage(item('test')),
     'In review': () => plainStage(item('review')),
     Merging: () => plainStage(item('merge')),
@@ -91,7 +94,7 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
   assert.equal(itemLine(item('review'), Date.now()).stage, 'In review');
   assert.equal(itemLine(item('merge'), Date.now()).stage, 'Merging');
   assert.equal(itemLine(item('test'), Date.now()).stage, 'Testing');
-  assert.equal(itemLine(item('build'), Date.now()).stage, 'Building');
+  assert.equal(itemLine(item('build', held), Date.now()).stage, 'Building');
   assert.equal(itemLine(item('ready'), Date.now()).stage, 'Not started');
 
   // The row keeps one vocabulary and the wait: the label leads with the plain stage, then names what it waits on.
