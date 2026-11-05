@@ -52,11 +52,10 @@ CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,s
   WHERE kind='production.deployment-pending';
 CREATE INDEX IF NOT EXISTS events_work_revision ON events (work_id,(payload->'work'->>'revision'),seq)
   WHERE payload ? 'work';
--- Ledger compaction (store/compaction.ts, GY-3111): an item's first delivery event, and the deltas
--- naming a whole row as their base, each one index probe instead of a scan of the item's history.
+-- Ledger compaction (store/compaction.ts, GY-3111): an item's first delivery event in one probe,
+-- never a scan of the item's history.
 CREATE INDEX IF NOT EXISTS events_work_delivery ON events(work_id,seq)
   WHERE ${DELIVERY_EVENT_PREDICATE};
-CREATE INDEX IF NOT EXISTS events_delta_base ON events(work_id,(payload->'delta'->>'base')) WHERE payload ? 'delta';
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
