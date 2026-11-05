@@ -22,7 +22,7 @@ const start = Date.parse('2030-05-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`a control-plane cycle called GitHub (${String(name)})`); } });
 
 /** The day's script, by item ordinal and cycle. */
@@ -63,7 +63,7 @@ class World {
   ports(): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now,
+      baseBranch: 'main', now: this.now,
       fetch: async () => world.main[0]!,
       merge: async (head, baseTip) => { const mergeSha = sha(`merge:${head}:${baseTip}`); world.merges.set(mergeSha, Number([...world.submitted.keys()].find(n => world.head(n) === head))); return { mergeSha, files: ['src/app.ts', 'src/other.ts'] }; },
       trial: async (mergeSha) => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),

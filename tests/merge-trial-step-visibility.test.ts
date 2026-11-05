@@ -82,7 +82,7 @@ function harness(): StepHarness {
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   let clock = start, settle: (() => void) | null = null;
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => clock,
+    baseBranch: 'main', now: () => clock,
     fetch: async () => base,
     merge: async () => ({ mergeSha: sha('merge'), files: ['src/app.ts'] }),
     trial: async (_mergeSha, _files, _picked, _baseTip, onStep, onTiming) => {
@@ -216,7 +216,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => Date.now(),
+    baseBranch: 'main', now: () => Date.now(),
     fetch: async () => repo.baseTip,
     merge: (mergeHead, mergeBase) => trialMerge(repo.git, { head: mergeHead, baseTip: mergeBase }).then(merged => ('conflict' in merged ? merged : { mergeSha: merged.mergeSha, files: ['src.ts'] })),
     trial: async (mergeSha, files, picked, _baseTip, onStep, onTiming) => {
@@ -284,7 +284,7 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.deepEqual(first.steps, [{ step: 'install', durationMs: 100 }, { step: 'build', durationMs: 300 }, { step: 'push', durationMs: 0 }]);
 
   let clock = start, duration = 0;
-  const ports = timedMergePorts({ baseBranch: 'main', retrials: 0, fetch: async () => base,
+  const ports = timedMergePorts({ baseBranch: 'main', fetch: async () => base,
     merge: async () => ({ mergeSha: head, files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
     step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
     return {} as never;

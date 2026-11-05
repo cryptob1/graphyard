@@ -281,7 +281,7 @@ test('hard math real cycle cannot merge a final candidate arriving after the cer
   assert.equal(nextToMerge([submitted],{},now())?.id,'final','normal candidate is otherwise eligible before its benchmark certificate');
   const events:string[]=[];let freshReads=0;
   const effects={snapshot:async()=>{freshReads++;return {work:[submitted],now:at};},agents:()=>[],herdr:()=>({agents:[],available:true}),credentials:async()=>({}),closeSession:()=>{},dispatch:async()=>{},persist:async()=>{},
-    mergeWriter:{baseBranch:'main',retrials:0,batch:1,now,fetch:async()=>base,merge:async(sha:string)=>({mergeSha:sha,files:['src/solver.mjs']}),
+    mergeWriter:{baseBranch:'main',now,fetch:async()=>base,merge:async(sha:string)=>({mergeSha:sha,files:['src/solver.mjs']}),
       trial:async()=>({build:'pass',tests:{passed:1,failed:[],files:1},proofs:{'unit:workbench-contract':{executed:1,failed:0}},files:['tests/contract.test.mjs'],durationMs:1}),
       push:async(sha:string)=>{events.push(`push:${sha}`);return 'pushed';},holds:async()=>false,record:async()=>{},
     },

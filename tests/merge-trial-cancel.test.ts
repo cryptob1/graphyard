@@ -41,7 +41,7 @@ function harness(work: Work[]) {
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => start,
+    baseBranch: 'main', now: () => start,
     fetch: async () => base,
     merge: async (head, tip) => ({ mergeSha: sha(`merge:${tip}:${head}`), files: ['src/app.ts'] }),
     trial: async (_mergeSha, _files, _item, _baseTip, _onStep, _onTiming, heads, _share, signal) => {
@@ -63,7 +63,7 @@ function harness(work: Work[]) {
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, batch: 4 };
+  const reads: MergeWriterReads = { ...ports };
   const state = emptyDaemonState(config);
   const effects = { mergeWriter: reads, persist: async () => {}, rework: async () => {} };
   let clock = start;

@@ -56,9 +56,8 @@ test('integration:board-queue-not-blocked — a head queued behind the merge in 
   }
 });
 
-test('integration:board-queue-not-blocked — three real batch positions publish their flights before trials finish, leaving only additional heads queued', async () => {
-  const { mergeStack } = await import('../src/merge-writer/batch.js');
-  const { mergeRecordKinds } = await import('../src/merge-writer/executor.js');
+test('integration:board-queue-not-blocked — GY-3120: three heads trialled at once publish their flights before trials finish, leaving only additional heads queued', async () => {
+  const { mergeHeads, mergeRecordKinds } = await import('../src/merge-writer/executor.js');
   const { foldMergeLedger } = await import('../src/model-boundary/merge-ledger.js');
   const work = Array.from({ length: 16 }, (_, index) => head(index + 1));
   work[15]!.blocker = 'Recorded failure';
@@ -67,8 +66,8 @@ test('integration:board-queue-not-blocked — three real batch positions publish
   const trialsStarted = new Promise<void>(resolve => { ready = resolve; });
   const pending = new Promise<void>(resolve => { finish = resolve; });
   let tip = base;
-  const running = mergeStack({
-    baseBranch: 'main', retrials: 0, now: () => now, holds: async () => false,
+  const running = mergeHeads({
+    baseBranch: 'main', now: () => now, holds: async () => false,
     fetch: async () => tip,
     merge: async (candidate) => ({ mergeSha: candidate, files: [] }),
     record: async (item, event) => {
@@ -83,18 +82,18 @@ test('integration:board-queue-not-blocked — three real batch positions publish
       return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} };
     },
     push: async sha => { tip = sha; return 'pushed'; },
-  }, [work.slice(0, 4), work.slice(4, 8), work.slice(8, 12)]);
+  }, work.slice(0, 3));
   await Promise.race([trialsStarted, running.then(results => { assert.fail(JSON.stringify(results)); })]);
   try {
     const board = buildBoard(work, now);
-    for (let index = 0; index < 12; index++) {
+    for (let index = 0; index < 3; index++) {
       const row = board.groups.moving.find(row => row.key === work[index]!.key);
-      assert.ok(row, 'every head in all three running batches is moving');
+      assert.ok(row, 'every head of the three running trials is moving');
       assert.ok(!row.queue, 'running heads do not occupy waiting positions');
     }
-    for (let index = 12; index < 15; index++) {
+    for (let index = 3; index < 15; index++) {
       const row = board.groups.moving.find(row => row.key === work[index]!.key)!;
-      assert.deepEqual(row.queue, { position: index - 11, of: 4, ahead: 'GY-1', step: 'queue wait' });
+      assert.deepEqual(row.queue, { position: index - 2, of: 13, ahead: 'GY-1', step: 'queue wait' });
       assert.equal(row.overdue, false);
     }
     assert.equal(board.groups.blocked[0]!.key, 'GY-16');

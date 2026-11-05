@@ -37,7 +37,7 @@ const start = Date.parse('2030-06-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
 const site: PreviewSite = { directory: 'dist', build: 'build the site' };
 
@@ -137,7 +137,7 @@ class World {
   ports(): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now,
+      baseBranch: 'main', now: this.now,
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         // commit-tree stamps the time, so a head merged again on the same tip (a timed-out preview's retry) is a fresh merge commit.

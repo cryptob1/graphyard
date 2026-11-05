@@ -525,7 +525,7 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
   const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
   const tip = sha('main-tip');
   const configFor = (credentialFile: string) => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
   const passed = ['ready', 'build', 'review', 'test'];
   const submitted = (n: number, minutesAgo: number) => {
     const candidate = { sha: sha(`head${n}`), baseSha: tip, pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' };
@@ -546,7 +546,7 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     const work = [submitted(2, 5), submitted(1, 30)];
     const trials: string[] = [];
     const mergeWriter: MergeWriterReads = {
-      baseBranch: 'main', retrials: 3, now: () => start,
+      baseBranch: 'main', now: () => start,
       fetch: async () => tip,
       merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
       trial: async mergeSha => { trials.push(mergeSha); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0, skipped: 0 } } }; },

@@ -347,7 +347,7 @@ test('unit:repository-check-base-failure-holds-head — the same failing reposit
     criteria: [],
   } as unknown as Work;
   const heldPorts: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => Date.parse('2030-01-01T00:00:00Z'),
+    baseBranch: 'main', now: () => Date.parse('2030-01-01T00:00:00Z'),
     fetch: async () => repo.base,
     merge: async () => ({ mergeSha: merged.mergeSha, files: ['src/change.ts'] }),
     trial: async () => both,
@@ -393,7 +393,7 @@ test('unit:repository-check-base-failure-holds-head — the same failing reposit
     criteria: [],
   } as unknown as Work;
   const reworkPorts: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => Date.parse('2030-01-01T00:00:00Z'),
+    baseBranch: 'main', now: () => Date.parse('2030-01-01T00:00:00Z'),
     fetch: async () => repo.base,
     merge: async () => ({ mergeSha: merged.mergeSha, files: ['src/change.ts'] }),
     trial: async () => headOnly,
