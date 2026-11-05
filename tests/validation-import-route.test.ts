@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -42,20 +41,18 @@ const tagObject = (index: number) => String(index + 1).repeat(40);
 /** The release ledger the import reads from the coordinator checkout: the `rc/` tag refs, and each annotated tag carrying its candidate record. `down` fails every read. */
 const github = releaseLedgerGit(() => candidates, tagObject);
 
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
+let store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_VALIDATION_IMPORT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1860);
   scratch = await temporaryDirectory('validation-import');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('validation_import_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_import_test`); await store.init();
+
+  store = await withDatabase('validation-import-route'); await store.init();
   const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = github.run;
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
 async function call(path: string, actor: Principal, data?: unknown, key = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: data === undefined ? undefined : JSON.stringify(data) });
@@ -143,7 +140,6 @@ test('unit:validation-import-route — binds-by-sha: POST /api/validation/import
   const unspaced = await call('validation/import', producer, run(boundSha, 'huck-run-spaced', [{ id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 1, result: 'PASS' }], { result: '  OK ' }));
   assert.equal(unspaced.status, 409, 'documents differing only in result whitespace are distinct');
   assert.equal((await call('validation/import', producer, run(boundSha, 'huck-run-blank', [], { result: '   ' }))).status, 400, 'a blank result is refused');
-
 });
 
 test('unit:validation-import-route — feeds-hold: a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -28,7 +28,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let pg: EmbeddedPostgres, store: Store, engine: Engine, root: string, head: string;
+let store: Store, engine: Engine, root: string, head: string;
 
 async function commit(cwd: string, path: string, text: string, message: string) {
   await mkdir(join(cwd, path, '..'), { recursive: true });
@@ -49,14 +49,12 @@ before(async () => {
   // The head changes nothing it planned: only files outside its plannedFiles.
   await commit(worktree, 'src/elsewhere.ts', 'export const elsewhere = 1;\n', 'outside the plan');
   head = await commit(worktree, 'docs/unplanned.md', '# Unplanned\n', 'docs outside the plan');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2875;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('planned-files-hint-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('planned_files_hint');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/planned_files_hint`); await store.init();
+
+  store = await withDatabase('planned-files-only-a-hint'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (root) await rm(root, { recursive: true, force: true }); });
+after(async () => { if (store) await store.close(); if (root) await rm(root, { recursive: true, force: true }); });
 
 const retired = ['scopeRequest', 'carriedScopeRequest', 'heldGroundings', 'scopeDecision', 'parent', 'children', 'researchBrief', 'decomposition', 'split', 'research', 'triage', 'pendingFollowUps', 'blockerProbe'];
 const events = async (id: string) => (await store.pool.query('SELECT kind FROM events WHERE work_id=$1', [id])).rows.map(row => row.kind as string);

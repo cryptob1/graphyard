@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
@@ -19,6 +19,7 @@ import { type Work } from '../src/model.js';
 import { actionAccount } from '../src/model-boundary/next-action.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { trialFailureRework } from '../src/daemon/cycle-merge-writer.js';
+import { trialFailureReason } from '../src/merge-writer/executor.js';
 
 // GY-1522: the merge writer's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
@@ -117,6 +118,7 @@ test('unit:trial-merge-conflict-reported — a head that conflicts with the base
 
 const fixtureFiles = {
   '.gitignore': 'node_modules\n',
+  'graphyard.json': readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'),
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
   // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.
@@ -789,7 +791,15 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
 
 // GY-3008: deleting the dead base-break refresh must leave a failed trial's rework path intact —
 // the merge writer grounds and requests the rework; next-action waits on it, never on a base-break hold.
-test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', () => {
+test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', async () => {
+  // The proof this case carries is bound to the declared trial (AC-1): Graphyard's own graphyard.json
+  // must parse to usable preMerge declarations with a test selection. Imported dynamically — the
+  // declarations exist only with this change, and this case must fail as a case against a tree
+  // without it, never as a module crash.
+  const { declaredPreMerge } = await import('../src/merge-writer/trial.js');
+  const declared = declaredPreMerge(readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'));
+  if ('refusal' in declared) assert.fail(`Graphyard's own declarations are refused: ${declared.refusal}`);
+  assert.ok(declared.preMerge?.some(check => check.selection), "Graphyard's own graphyard.json declares its test selection");
   const now = new Date('2026-10-31T12:00:00.000Z');
   const head = 'c'.repeat(40), base = 'a'.repeat(40);
   const reason = `${trialFailurePrefix}: tests tests/policy.test.ts`;
@@ -823,4 +833,21 @@ test('unit:trial-merge — a failed trial grounds a rework for the candidate and
   assert.equal(account.action, null, 'the merge writer answers the refused trial; no executor row asks for a new head yet');
   assert.deepEqual(account.wait, { kind: 'session', on: 'merge-writer', detail: `GY-3008 is queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}` });
   assert.notEqual(account.wait?.on, 'graphyard', 'no base-break wait stands in for the rework');
+});
+
+test('unit:trial-declared-policy-refusal — a head whose graphyard.json is malformed, fails the delivery schema, declares an empty selection command or a selection pattern that is no regular expression is refused naming graphyard.json, never retried as a host failure', async () => {
+  // Imported here, not at the top: declaredPreMerge exists only with this change, and a static
+  // import would fail the whole file against a tree without it — this case must fail as a case.
+  const { declaredPreMerge } = await import('../src/merge-writer/trial.js');
+  const policy = (check: Record<string, unknown>) => JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm test', source: 'script', reason: 'r', ...check }], perCandidate: [] } } });
+  const refusal = (text: string) => { const declared = declaredPreMerge(text); return 'refusal' in declared ? declared.refusal : null; };
+  assert.match(refusal('{ not json')!, /graphyard\.json is not valid JSON/);
+  assert.match(refusal(policy({ source: 'elsewhere' }))!, /preMerge is invalid: 0\.source/);
+  assert.match(refusal(policy({ selection: { command: '   ', pattern: '.' } }))!, /empty selection command/);
+  assert.match(refusal(policy({ selection: { command: 'node select.mjs', pattern: '(' } }))!, /no regular expression/);
+  assert.deepEqual(declaredPreMerge('{}'), { preMerge: null });
+  assert.equal(refusal(readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8')), null, "Graphyard's own declarations are valid");
+  // The refusal is a failing verdict naming the policy, so the merge writer sends the head back instead of re-trialling it.
+  const reason = 'graphyard.json is not valid JSON: x';
+  assert.equal(trialFailureReason({ run: { build: 'pass', tests: { passed: 0, failed: ['graphyard.json'], files: 0 }, failingCase: reason } }), `${trialFailurePrefix}: tests graphyard.json: ${reason}`);
 });

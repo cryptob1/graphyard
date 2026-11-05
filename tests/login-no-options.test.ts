@@ -77,7 +77,7 @@ for (const [layout, configHomeOf] of [['GRAPHYARD_CONFIG_HOME at <install>', (ho
 
 test('unit:signin-session-renews-on-use — a session used within 90 days stays valid, and one left unused for 90 days is refused', async () => {
   let now = Date.parse('2026-10-19T00:00:00Z');
-  const database = await signInDatabase(3077);
+  const database = await signInDatabase();
   try {
     const table = new HumanSignIn(database.store, () => now);
     const { code } = table.issue({ id: 'operator', role: 'admin', sessionKind: 'human' }, true);

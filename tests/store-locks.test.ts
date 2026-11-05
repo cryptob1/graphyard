@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { advisoryLocks, Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -15,7 +15,6 @@ import type { Evidence, Observation, Principal, Work } from '../src/model.js';
 import { actionSettleMs } from '../src/model/action-progress.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { mergeDelivered, mergeIntent } from './helpers/merge-ledger.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -30,21 +29,16 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
  * integration:index-matches-documents (AC-2).
  */
 
-let postgres: EmbeddedPostgres, port: number;
-const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
+const urls = new Map<string, string>();
+const url = (database: string) => urls.get(database)!;
 const stores: Store[] = [];
 const open = async (database: string) => { const store = new Store(url(database)); stores.push(store); await store.init(); return store; };
 
 before(async () => {
-  // An offset no other test file takes (see tests/stalled-actions.test.ts).
-  port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
-  postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('store-locks'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await postgres.initialise(); await postgres.start();
-  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'redeadlocked', 'lifecycle', 'board']) await postgres.createDatabase(name);
+  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'redeadlocked', 'lifecycle', 'board']) urls.set(name, await databaseUrl('store-locks' + '-' + name));
 });
 after(async () => {
   for (const store of stores) await store.close().catch(() => {});
-  if (postgres) await postgres.stop();
 });
 
 /** A second connection standing in for the live replica, holding its locks until released. */
@@ -111,7 +105,7 @@ test('integration:migration-backup-locks-separate — a migration and a backup p
     const waiting = blocked.init({ lockTimeoutMs: 10_000 });
     let observed = false;
     for (let attempt = 0; attempt < 100 && !observed; attempt++) {
-      observed = Number((await live.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objid=$1", [advisoryLocks.migration])).rows[0].n) === 1;
+      observed = Number((await live.pool.query("SELECT count(*) AS n FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND locktype='advisory' AND NOT granted AND objid=$1", [advisoryLocks.migration])).rows[0].n) === 1;
       if (!observed) await delay(20);
     }
     assert.ok(observed, 'the second migration queues on the migration lock');
@@ -134,7 +128,7 @@ test('GY-257 — a restore excludes a write in flight on the target: it waits fo
     const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error) => error);
     let waiting = false;
     for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
-      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='work_items'::regclass")).rows[0].n) === 1;
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='work_items'::regclass")).rows[0].n) === 1;
       if (!waiting) await delay(20);
     }
     assert.ok(waiting, 'the restore waits for the write in flight');
@@ -160,7 +154,7 @@ test('GY-443 — a restore that deadlocks with a writer holding a later ledger t
     const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error & { code?: string }) => error);
     let waiting = false;
     for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
-      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='events'::regclass")).rows[0].n) === 1;
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='events'::regclass")).rows[0].n) === 1;
       if (!waiting) await delay(20);
     }
     assert.ok(waiting, 'the restore holds work_items and waits for events');
@@ -433,3 +427,12 @@ async function spyQueries<T>(target: Store, run: () => Promise<T>) {
   try { return { result: await run(), seen }; }
   finally { pool.query = query; pool.connect = connect; for (const [client, own] of clients) client.query = own; }
 }
+
+test('unit:store-locks — databases on the shared cluster have independent advisory locks', async () => {
+  const held = await session('locks', async db => { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]); });
+  const other = await open('board');
+  try {
+    const result = await other.pool.query('SELECT pg_try_advisory_xact_lock($1) AS acquired', [advisoryLocks.coordination]);
+    assert.equal(result.rows[0].acquired, true);
+  } finally { await held.release(); }
+});

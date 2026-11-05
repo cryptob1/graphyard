@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { answerHumanDecision, listHumanRequests, requestHumanDecision } from '../src/server/waits.js';
@@ -9,7 +9,6 @@ import { buildBoard } from '../src/model/board.js';
 import { blockerSummary } from '../src/model/plain-status.js';
 import type { Services } from '../src/server/routes.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -22,17 +21,14 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
-let pg: EmbeddedPostgres, store: Store, engine: Engine, services: Services;
+let store: Store, engine: Engine, services: Services;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2876;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('blocker-plain-text-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('blocker_plain_text');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/blocker_plain_text`); await store.init();
+  store = await withDatabase('blocker-is-plain-text'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   services = { engine, repository: 'owner/project', principals: [] } as unknown as Services;
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 async function claimed(title: string) {
   let w = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:blocker-is-plain-text', 'e2e:fixture'] }] }, randomUUID());

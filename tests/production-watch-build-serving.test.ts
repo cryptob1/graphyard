@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { DEPLOYMENT_GRACE_MS, ENDPOINT_FRESH_MS, productionProvider, ProductionWatch } from '../src/production-watch.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { Store, type Store as StoreType } from '../src/store.js';
+import { type Store as StoreType } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // What production serves is observed from the deploy record and the watch alone: a fresh endpoint
 // observation of the exact release outranks the provider's newest successful deployment, which
@@ -81,10 +80,8 @@ test('unit:production-watch-build-serving — the watch observes the serving com
   // production environment the status names is this process's configuration — not the ledger
   // record `POST /api/production-environment` used to write (the route is gone, the read with it).
   {
-    const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3006;
-    const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('production-watch-serving'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-    await database.initialise(); await database.start(); await database.createDatabase('production_watch_serving_test');
-    const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/production_watch_serving_test`); await store.init();
+
+    const store = await withDatabase('production-watch-build-serving'); await store.init();
     const deployments = [deployment('d-live', 'success', sha(4))];
     const { watch } = watchOf({ built: 1, deployments });
     await watch.tick(true);
@@ -128,7 +125,7 @@ test('unit:production-watch-build-serving — the watch observes the serving com
       await readStatus(sha(1), 'build');
     } finally {
       await new Promise<void>(resolve => http.close(() => resolve()));
-      await store.close(); await database.stop();
+      await store.close();
     }
   }
   // The provider's newest successful deployment outranks the running build: no ancestry is

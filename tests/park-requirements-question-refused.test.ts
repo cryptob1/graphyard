@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -9,7 +9,6 @@ import type { Principal, Work } from '../src/model.js';
 import { humanRequestSchema } from '../src/model-boundary/human-request.js';
 import { parkRefusal, requirementsQuestionRefusal } from '../src/model/human-request.js';
 import { routedParkCommand } from '../src/cli/session-commands.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -18,7 +17,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // GY-1816: GY-1814's release-soak fix sat parked under goals and priorities on a question that was
 // never the operator's — its worker asked whether AC-1 should be rewritten to match GY-1762's test
 // assertions or GY-1762 reversed, and only a master session noticing it unblocked the item.
-// Requirement rewrites are two agent identities' decision (docs/glossary.md#who-decides): the master
+// Requirement rewrites are two agent identities' decision: the master
 // requests one, an independent approver approves it. So `park` refuses a goals-and-priorities park
 // whose ask, needed text or reason asks whether a criterion is rewritten, revised or matched to
 // another item's tests, naming the agent route — record the conflict with `graphyard blocked`, so
@@ -31,19 +30,16 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const worker: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
 const credentials = [operator, worker].map(principal => ({ ...principal, token: `park-requirements-question-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 84;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('park-requirements-question'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('park_requirements_question');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/park_requirements_question`); await store.init();
+  store = await withDatabase('park-requirements-question-refused'); await store.init();
   engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 const id = () => randomUUID();
 const request = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown) => {

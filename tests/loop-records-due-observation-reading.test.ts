@@ -1,13 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { isClosed, type Principal, type Work } from '../src/model.js';
 import * as model from '../src/model.js';
 import type { Services } from '../src/server/routes.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -23,7 +22,7 @@ const proof = 'manual:post-deploy/webhook-deliveries-clean-24h', own = 'manual:w
 const base = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'chore', priority: 1, stage: 'ready', ready: true, epoch: 0, revision: 3, policyRevision: 1,
   createdAt: iso(now - 30 * hour), updatedAt: iso(now - 2 * hour), stageEnteredAt: iso(now - 2 * hour), lease: null, lastAssignment: null, systemDriven: true, implementers: [],
-  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [], 
+  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [],
   policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [],
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
   ...extra,
@@ -42,15 +41,12 @@ const repository = 'owner/loop-readings';
 const operator: Principal = { id: 'readings-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'readings-master', role: 'coordinator', sessionKind: 'ai', proofs: ['manual:*'] };
 const worker: Principal = { id: 'readings-worker', role: 'worker', sessionKind: 'ai' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1790;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('loop-readings-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('readings_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/readings_test`); await store.init();
+  store = await withDatabase('loop-records-due-observation-reading'); await store.init();
   engine = new Engine(store, 300, repository);
 });
-after(async () => { await store?.close(); await database?.stop(); });
+after(async () => { await store?.close(); });
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 /** An item created through the engine, then written as the control plane would have left it: the fixture for what the reading binds to. */
 async function plant(shape: Work): Promise<Work> {

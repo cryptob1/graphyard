@@ -66,7 +66,7 @@ function reads(coordinator: string, options: { gate?: { root: string; repository
   const brokenCases = (commit: string) => run('ls-tree', '-r', '--name-only', commit, 'src').split('\n').filter(Boolean)
     .filter(file => run('show', `${commit}:${file}`) === 'broken').map(file => `e2e:case-${/f(\d+)/.exec(file)![1]}`);
   const value: MergeWriterReads = {
-    baseBranch: 'main', retrials: 0, now: Date.now,
+    baseBranch: 'main', now: Date.now,
     fetch: async () => { run('fetch', '-q', 'origin', 'main'); return run('rev-parse', 'origin/main'); },
     git: async (args, extra) => execFileSync('git', ['-C', coordinator, ...args], { encoding: 'utf8', env: { ...env, ...extra } }),
     merge: async () => { throw new Error('unused'); },
@@ -138,6 +138,75 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   assert.deepEqual(deployed, [merges[1]], 'the latest verified commit is deployed, not the main tip');
   assert.equal(await deployOnce(file, ports, () => {}, repository), 'unchanged', 'an unverified main tip deploys nothing');
   assert.equal(await deployOnce(file, ports, () => {}, 'owner/other'), 'deployed', 'a record gating another repository never pins this one');
+});
+
+test('integration:batch-gate-survives-restart — a batch in flight when the loop restarts is adopted and finished by the next loop on the same candidate tip, without a new run of its finished steps or a fetch, and a merge that lands meanwhile is verified by the following batch', async () => {
+  const { base, coordinator, verified, tip, work } = await fixture('batch-gate-restart', 'GY-2');
+  // Rollout: the deploy record's commit is the first verified one, so the first gate cuts verified..tip.
+  await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+  await writeFile(deployRecordPath(coordinator), JSON.stringify({ tip: verified, failed: null, reason: null, at: new Date().toISOString(), repository }));
+  const loop = reads(coordinator, { gate: { root: coordinator, repository } });
+  let fetches = 0;
+  const realFetch = loop.value.fetch!;
+  loop.value.fetch = async () => { fetches++; return realFetch(); };
+  // The first loop dies between the whole batch's run and its failing check's re-run — its flight
+  // ends unresolved, exactly as a process the restart kills leaves the record standing.
+  let loops = 1;
+  const onTip: { proofs: string[] }[] = [];
+  const trial = loop.value.trial!;
+  let diagnostics: Promise<unknown> | null = null;
+  loop.value.trial = async (commit, files, trialItem) => {
+    const proofs = trialItem.criteria.flatMap(criterion => criterion.proofs);
+    if (commit !== tip) return trial(commit, files, trialItem); // the diagnostics run on the verified commit
+    onTip.push({ proofs });
+    if (loops === 1 && proofs.length > 1) return trial(commit, files, trialItem); // the cut's one whole run
+    if (loops === 1) { await diagnostics; throw new Error('the loop restarted mid-gate'); } // the failing check's re-run
+    return trial(commit, files, { ...trialItem, criteria: [] }); // the next loop: the re-run passes, a flake
+  };
+  const first = await batchGateStep(cycleWith(loop.value, work));
+  diagnostics = first!.diagnostics;
+  await first!.gate;
+  assert.equal(fetches, 1, 'the first loop fetched the tip it cut its batch on');
+  const mid = readGateRecord(gateRecordPath(coordinator))!;
+  assert.equal(mid.verified, verified, 'nothing is verified yet');
+  assert.equal(mid.inFlight?.tip, tip, 'the cut batch stands on disk for the next loop to adopt');
+  assert.deepEqual(Object.values(mid.inFlight!.results ?? {}), [['e2e:case-2']], 'the whole run is a recorded finished step with its one failing check');
+
+  // A merge lands on main while the gate was in flight: it rides the next batch. (It repairs the
+  // broken file, so the following batch's whole-catalog gate — the diagnostics measured the catalog
+  // fast — passes; the phase-1 flake was the fake trial's pass, not the tree's.)
+  const pusher = join(base, 'pusher');
+  git(pusher, 'checkout', '-q', '-b', 'item-4');
+  await mkdir(join(pusher, 'src'), { recursive: true });
+  await writeFile(join(pusher, 'src/f2.ts'), 'ok\n');
+  git(pusher, 'add', 'src');
+  git(pusher, 'commit', '-q', '-m', 'change 4');
+  git(pusher, 'checkout', '-q', 'main');
+  git(pusher, 'merge', '-q', '--no-ff', '-m', 'Merge GY-4: change 4', 'item-4');
+  git(pusher, 'push', '-q', 'origin', 'HEAD:main');
+  const later = git(pusher, 'rev-parse', 'HEAD');
+
+  // The next loop — a fresh cycle state, as a restart builds — adopts the batch and finishes it.
+  loops = 2;
+  const work4 = [...work, item('GY-4', ['e2e:case-4'])];
+  const second = await batchGateStep(cycleWith(loop.value, work4));
+  await second!.gate;
+  await second!.diagnostics;
+  assert.equal(fetches, 1, 'the adopted batch fetches nothing: no new run is cut on the newer main');
+  assert.deepEqual(onTip.map(entry => entry.proofs.length), [5, 1, 1], 'the batch\'s whole run ran once, then only the interrupted re-run of the failing check');
+  const adopted = readGateRecord(gateRecordPath(coordinator))!;
+  assert.equal(adopted.verified, tip, 'the adopted batch verifies its own candidate tip, not the newer main');
+  assert.equal(adopted.inFlight, null);
+  assert.ok(loop.filed.some(entry => entry.key === 'flake:e2e:case-2'), 'the passing re-run files its flake');
+
+  // The following batch gates the merge that landed meanwhile.
+  const third = await batchGateStep(cycleWith(loop.value, work4));
+  await third!.gate;
+  await third!.diagnostics;
+  assert.equal(fetches, 2, 'the following batch is cut on the fetched main tip');
+  const following = readGateRecord(gateRecordPath(coordinator))!;
+  assert.equal(following.verified, later, 'the merge that landed while the gate ran is verified by the following batch');
+  assert.deepEqual(following.merges.map(merge => merge.item), ['GY-1', 'GY-2', 'GY-3', 'GY-4']);
 });
 
 /** Pure gate ports: `fails(commit, check)` decides each check's result on each commit. */

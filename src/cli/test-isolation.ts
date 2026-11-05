@@ -10,9 +10,8 @@ import { fileURLToPath } from 'node:url';
  * What a clean test run needs from the host, done by the tooling rather than remembered by the
  * session that runs it (GY-174). A worker, producer or master session carries its own Graphyard
  * and Herdr credentials in its environment; the project's own tests must never see them, or the CLI
- * credential tests read the session's token instead of the one they set. And every test file starts
- * its own Postgres on `GRAPHYARD_TEST_PORT` plus a fixed per-file offset, so two runs on one host —
- * two worktrees, or a worker beside a producer — must not share a base.
+ * credential tests read the session's token instead of the one they set. Each runner owns one
+ * Postgres on `GRAPHYARD_TEST_PORT`, so two runs on one host must not share a base.
  *
  * `npm test` (tests/helpers/run-tests.ts), `graphyard verify` and the proof runners all start the
  * suite through `isolatedTestEnvironment` with a port window `reserveTestPorts` holds for the run.
@@ -22,8 +21,8 @@ import { fileURLToPath } from 'node:url';
 export const passedTestControls = ['GRAPHYARD_TIMING_RECORD', 'GRAPHYARD_TIMING_BASELINE_RECORDING'] as const;
 /** The first base tried when nothing is reserved; the historical fixed base, so a lone run keeps its ports. */
 export const defaultTestPortBase = 15438;
-/** Every per-file offset a test file adds to the base lies below this (the highest is 177). */
-export const testPortSpan = 200;
+/** One shared Postgres port and the sentinel that reserves it. */
+export const testPortSpan = 2;
 const highestBase = 60_000;
 
 /**
@@ -40,10 +39,9 @@ export function isolatedTestEnvironment(environment: NodeJS.ProcessEnv = process
   return { ...Object.fromEntries(kept), ...set };
 }
 
-/** The variables a reserved window gives the suite: the base, and the per-file overrides the required check sets (tests/helpers/timing-stability.ts). */
+/** The base port of the runner's shared temporary Postgres cluster. */
 export function testPortEnvironment(base: number): Record<string, string> {
-  // tests/events-pagination.test.ts would otherwise share base + 25 with tests/reconciliation-snapshot.test.ts.
-  return { GRAPHYARD_TEST_PORT: String(base), GRAPHYARD_EVENTS_TEST_PORT: String(base + 28) };
+  return { GRAPHYARD_TEST_PORT: String(base) };
 }
 
 /** Whether nothing on this host listens on `port` at 127.0.0.1. */
@@ -84,8 +82,7 @@ export interface ReserveOptions {
  * Reserve a window of `span` ports for one test run. The window's last port is its sentinel: the
  * run listens on it until `release`, so taking the window is one exclusive bind the kernel decides
  * between concurrent runs — of any user on the host — and a run that exits, even killed, leaves no
- * lock behind to reclaim. No test listens on the sentinel (every per-file offset is below
- * `testPortSpan - 1`). With the sentinel held, every other port of the window must be free now, so
+ * lock behind to reclaim. No test listens on the sentinel. With the sentinel held, every other port of the window must be free now, so
  * a leftover test Postgres from an earlier run moves this run to the next window.
  */
 export async function reserveTestPorts(options: ReserveOptions = {}): Promise<TestPortReservation> {

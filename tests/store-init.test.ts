@@ -1,25 +1,19 @@
-import { before, after, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { advisoryLocks, Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A new release boots while the live replica is mid-coordination: holding the advisory lock
 // every coordination transaction takes, with a transaction open on the ledger's tables.
-let postgres: EmbeddedPostgres, port: number;
-const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
+
+const urls = new Map<string, string>();
+const url = (database: string) => urls.get(database)!;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_STORE_INIT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 181);
-  const scratch = await temporaryDirectory('store-init');
-  postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await postgres.initialise(); await postgres.start();
-  for (const name of ['fresh', 'migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock', 'retired']) await postgres.createDatabase(name);
+  for (const name of ['fresh', 'migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock', 'retired']) urls.set(name, await databaseUrl('store-init' + '-' + name));
 });
-after(async () => { if (postgres) await postgres.stop(); });
 
 test('unit:store-init initialises a fresh schema with an empty work list', async () => {
   const store = new Store(url('fresh'));
@@ -167,7 +161,7 @@ test('integration:migration-lock-bounded a migration whose watchdog loses its co
   const merges = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM work_items'); });
   let released: Promise<void> | undefined;
   const handoff = setTimeout(() => { released = observations(); }, 1200);
-  const cut = setTimeout(() => { void deployed.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='graphyard migration watchdog'"); }, 300);
+  const cut = setTimeout(() => { void deployed.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND application_name='graphyard migration watchdog'"); }, 300);
   const next = new Store(url('watchdog'));
   try {
     const boot = await timed(() => next.init({ lockTimeoutMs: 1500 }));
@@ -186,22 +180,25 @@ test('integration:migration-lock-bounded a migration whose watchdog loses its co
 
 test('integration:migration-lock-bounded a migration that cannot reserve its watchdog connection fails by its deadline without taking a lock', async () => {
   // The release's role is at its connection limit once the migration holds its own connection.
-  const admin = new pg.Client({ connectionString: url('postgres') });
+  const connection = new URL(await databaseUrl('reserve'));
+  const role = connection.pathname.slice(1);
+  const admin = new pg.Client({ connectionString: connection.href });
   await admin.connect();
-  await admin.query("CREATE ROLE reserve LOGIN PASSWORD 'testing-only'");
-  await admin.query('CREATE DATABASE reserve OWNER reserve');
-  const store = new Store(`postgres://reserve:testing-only@127.0.0.1:${port}/reserve`);
+  await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'testing-only'`);
+  await admin.query(`ALTER DATABASE "${role}" OWNER TO "${role}"`);
+  connection.username = role;
+  const store = new Store(connection.href);
   try {
     await store.init();
     await store.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
-    await admin.query('ALTER ROLE reserve CONNECTION LIMIT 1');
+    await admin.query(`ALTER ROLE "${role}" CONNECTION LIMIT 1`);
     const boot = await timed(() => store.init({ lockTimeoutMs: 500 }));
     assert.ok(boot.error, 'a migration without a watchdog must not start');
     assert.ok(boot.ms < 2000, `startup failed only after ${boot.ms} ms`);
     assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} could not reserve the connection its lock-wait watchdog needs \\(.*too many connections`));
-    const { rows } = await admin.query("SELECT count(*)::int AS locks FROM pg_locks WHERE locktype='advisory'");
+    const { rows } = await admin.query("SELECT count(*)::int AS locks FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND locktype='advisory'");
     assert.equal(rows[0].locks, 0, 'no migration lock was taken');
-    await admin.query('ALTER ROLE reserve CONNECTION LIMIT -1');
+    await admin.query(`ALTER ROLE "${role}" CONNECTION LIMIT -1`);
     await store.init({ lockTimeoutMs: 500 });
     assert.equal(await store.schema(), schemaVersion, 'with a connection to spare the migration completes');
   } finally { await store.close(); await admin.end(); }

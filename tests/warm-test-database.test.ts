@@ -1,27 +1,30 @@
-import { after, before, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { utimes } from 'node:fs/promises';
-import { join } from 'node:path';
 import pg from 'pg';
-import WarmPostgres from './helpers/warm-postgres.js';
+import { databaseUrl, startPostgres } from './helpers/postgres.js';
+import { reserveTestPorts } from '../src/cli/test-isolation.js';
 import { Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 import { currentSchemaCode } from '../src/store/migration-locks.js';
-import { copyTemplateCluster, createMigratedDatabase, templateCluster, warmPassword, warmUser } from '../src/e2e/warm-postgres.js';
+import { createMigratedDatabase, templateCluster, warmPassword, warmUser } from '../src/e2e/warm-postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A test or E2E cluster is a copy of one migrated template cluster per schema digest
 // (src/e2e/warm-postgres.ts) instead of a cold initdb, fsync and migration.
-const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3110;
-const url = (at: number, name: string) => `postgres://${warmUser}:${warmPassword}@127.0.0.1:${at}/${name}`;
-let database: WarmPostgres;
-
+let port: number;
+const names: Record<string, string> = {};
+const url = (at: number, name: string) => `postgres://${warmUser}:${warmPassword}@127.0.0.1:${at}/${names[name] ?? name}`;
 before(async () => {
-  database = new WarmPostgres({ databaseDir: await temporaryDirectory('warm-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start();
+  const allocated = new URL(await databaseUrl('cold'));
+  port = Number(allocated.port);
+  names.cold = allocated.pathname.slice(1);
 });
-after(async () => { if (database) await database.stop(); });
+async function migrated(name: string) {
+  names[name] = `warm_${name}_${crypto.randomUUID().replaceAll('-', '')}`;
+  await createMigratedDatabase(port, names[name]);
+}
 
 async function query<T = any>(at: number, name: string, sql: string): Promise<T[]> {
   const client = new pg.Client(url(at, name)); await client.connect();
@@ -36,9 +39,8 @@ const schema = async (at: number, name: string) => ({
 });
 
 test('integration:warm-test-database — two databases from the warm path are isolated from each other and carry the current schema, exactly what a cold migration builds', async () => {
-  await database.createMigratedDatabase('first'); await database.createMigratedDatabase('second');
+  await migrated('first'); await migrated('second');
   // The reference: an empty database the cold path migrates.
-  await database.createDatabase('cold');
   const cold = new Store(url(port, 'cold')); await cold.init(); await cold.close();
   const reference = await schema(port, 'cold');
   assert.equal(Number(reference.recorded[0].version), schemaVersion);
@@ -55,29 +57,29 @@ test('integration:warm-test-database — two databases from the warm path are is
   assert.equal((await query(port, 'second', "SELECT to_regclass('isolation_probe') AS oid"))[0].oid, null);
   assert.equal(Number((await query(port, 'second', 'SELECT MAX(version) AS version FROM graphyard_schema'))[0].version), schemaVersion);
   // Nor does a database cloned after it: the template is untouched.
-  await database.createMigratedDatabase('third');
+  await migrated('third');
   assert.equal((await query(port, 'third', "SELECT to_regclass('isolation_probe') AS oid"))[0].oid, null);
   assert.equal((await query(port, 'first', 'SHOW fsync'))[0].fsync, 'off', 'a throwaway cluster runs with fsync off');
 });
 
 test('integration:warm-test-database — the template is rebuilt when the schema generation changes, and the stale one is removed', async () => {
   const root = await temporaryDirectory('warm-templates');
-  const current = await templateCluster(port + 1, { root });
-  assert.equal(await templateCluster(port + 1, { root }), current, 'the same digest reuses its template');
-  await utimes(current, new Date(Date.now() - 7_200_000), new Date(Date.now() - 7_200_000));
-  const code = currentSchemaCode();
-  const next = { ...code, generation: code.generation + 1, tables: [...code.tables, { name: 'warm_probe', ddl: 'CREATE TABLE IF NOT EXISTS warm_probe(id int PRIMARY KEY);' }] };
-  const rebuilt = await templateCluster(port + 1, { root, code: next });
-  assert.notEqual(rebuilt, current, 'a new generation builds a new template');
-  assert.ok(!existsSync(current), 'the stale template of the old generation is removed');
-  // A cluster copied from the rebuilt template clones the new generation's schema.
-  const data = join(await temporaryDirectory('warm-next'), 'pg');
-  await copyTemplateCluster(data, port + 2, { root, code: next });
-  const cluster = new WarmPostgres({ databaseDir: data, user: 'graphyard', password: 'testing-only', port: port + 2, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await cluster.start();
+  const reservation = await reserveTestPorts();
   try {
-    await createMigratedDatabase(port + 2, 'next');
-    assert.notEqual((await query(port + 2, 'next', "SELECT to_regclass('warm_probe') AS oid"))[0].oid, null);
-    assert.equal(Number((await query(port + 2, 'next', 'SELECT MAX(version) AS version FROM graphyard_schema'))[0].version), schemaVersion + 1);
-  } finally { await cluster.stop(); }
+    const current = await templateCluster(reservation.base, { root });
+    assert.equal(await templateCluster(reservation.base, { root }), current, 'the same digest reuses its template');
+    await utimes(current, new Date(Date.now() - 7_200_000), new Date(Date.now() - 7_200_000));
+    const code = currentSchemaCode();
+    const next = { ...code, generation: code.generation + 1, tables: [...code.tables, { name: 'warm_probe', ddl: 'CREATE TABLE IF NOT EXISTS warm_probe(id int PRIMARY KEY);' }] };
+    const rebuilt = await templateCluster(reservation.base, { root, code: next });
+    assert.notEqual(rebuilt, current, 'a new generation builds a new template');
+    assert.ok(!existsSync(current), 'the stale template of the old generation is removed');
+    // A cluster copied from the rebuilt template clones the new generation's schema.
+    const cluster = await startPostgres(reservation.base, { root, code: next });
+    try {
+      await createMigratedDatabase(reservation.base, 'next');
+      assert.notEqual((await query(reservation.base, 'next', "SELECT to_regclass('warm_probe') AS oid"))[0].oid, null);
+      assert.equal(Number((await query(reservation.base, 'next', 'SELECT MAX(version) AS version FROM graphyard_schema'))[0].version), schemaVersion + 1);
+    } finally { await cluster.stop(); }
+  } finally { reservation.release(); }
 });

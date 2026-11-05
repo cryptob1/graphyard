@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -93,8 +93,8 @@ test('unit:mode-parity-github-snapshot — under the github merger the fixture\'
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let pg: EmbeddedPostgres | undefined, store: Store | undefined, fixtureRoot: string | undefined;
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
+let store: Store | undefined, fixtureRoot: string | undefined;
+after(async () => { if (store) await store.close(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 /** A coordinator-like checkout whose base holds src/app.ts and src/other.ts, and a worker head in its object store that changes both. */
 async function checkoutWithHead(root: string, branch: string) {
@@ -116,10 +116,8 @@ async function checkoutWithHead(root: string, branch: string) {
 
 test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixture: under the control-plane merger it accepts the head the shared object store holds', async () => {
   fixtureRoot = await realpath(await temporaryDirectory('mode-parity'));
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1528;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('mode-parity-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('mode_parity_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/mode_parity_test`); await store.init();
+
+  store = await withDatabase('mode-parity'); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
   engine.baseBranch = 'main';
   const assigned = async (branch: string) => {

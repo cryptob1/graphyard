@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { AgentRegistry } from '../src/agent-registry.js';
@@ -12,7 +12,6 @@ import { coordinationProjection, isSettledSummary, isStandIn, lockedWork } from 
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoasted } from '../src/store/coordination-sql.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -121,18 +120,14 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
 const worker: Principal = { id: 'engineer-a', role: 'worker', runtime: 'claude', sessionKind: 'ai' };
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, registry: AgentRegistry;
+let store: Store, engine: Engine, registry: AgentRegistry;
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_LOCKED_READ_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1027);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('locked-read'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('locked_read');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/locked_read`); await store.init();
+  store = await withDatabase('locked-read'); await store.init();
   engine = new Engine(store, 120, 'owner/locked');
   engine.principals = [operator, coordinator, worker];
   registry = new AgentRegistry(store);
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 /**
  * How long each transaction held the coordination lock, by the operation that took it, and which
@@ -199,7 +194,7 @@ function delivered(template: Work, n: number): Work {
   const at = stamp(n);
   return {
     ...structuredClone(template), id, key, title: `Delivered change ${n}`, description: `Why change ${n} mattered. `.repeat(40),
-    stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null, 
+    stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null,
     candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n } as Work['candidate'],
     submission: { epoch: 2, pr: 1000 + n } as Work['submission'],
     delivery: { mergedAt: at, mergeSha: sha(n, 'm'), authorizationRevision: 40,

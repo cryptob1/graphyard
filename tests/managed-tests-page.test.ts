@@ -5,7 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -25,22 +25,18 @@ const game = 'owner/openworld';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const tokens = new Map([[operator.id, `operator-${'t'.repeat(32)}`]]);
 
-let database: EmbeddedPostgres, gameStore: Store, gameEngine: Engine, gameHttp: ReturnType<typeof server>, gameUrl: string,
+let gameStore: Store, gameEngine: Engine, gameHttp: ReturnType<typeof server>, gameUrl: string,
   gyStore: Store, gyEngine: Engine, gyHttp: ReturnType<typeof server>, gyUrl: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3011;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('managed-tests-page'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start();
-  await database.createDatabase('managed_tests_game'); await database.createDatabase('managed_tests_graphyard');
   // The managed install: a fixture repository that is not Graphyard's own.
-  gameStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_tests_game`); await gameStore.init();
+  gameStore = await withDatabase('managed-tests-page'); await gameStore.init();
   gameEngine = new Engine(gameStore, 120, game);
   gameHttp = server(gameEngine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => gameHttp.listen(0, '127.0.0.1', resolve));
   gameUrl = `http://127.0.0.1:${(gameHttp.address() as any).port}`;
   // The control plane for Graphyard's own repository.
-  gyStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_tests_graphyard`); await gyStore.init();
+  gyStore = await withDatabase('managed-tests-page'); await gyStore.init();
   gyEngine = new Engine(gyStore, 120, 'cryptob1/graphyard');
   gyHttp = server(gyEngine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => gyHttp.listen(0, '127.0.0.1', resolve));
@@ -49,7 +45,6 @@ before(async () => {
 after(async () => {
   for (const http of [gameHttp, gyHttp]) if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   for (const store of [gameStore, gyStore]) if (store) await store.close();
-  if (database) await database.stop();
 });
 
 /** The CLI's authenticated request helper, against one control plane. */

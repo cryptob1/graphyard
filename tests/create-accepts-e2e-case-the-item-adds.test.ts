@@ -1,3 +1,4 @@
+import { freePort } from '../src/cli/test-isolation.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -33,10 +34,10 @@ const identity = {
 const gitIn = (cwd: string, ...args: string[]) =>
   execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
 
-const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2973;
-const serveUrl = `http://127.0.0.1:${port + 1}`;
+const port = await freePort();
+const serveUrl = `http://127.0.0.1:${port}`;
 const servePolicy = { ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking' as const, serve: { command: 'true', url: serveUrl, readySeconds: 1 } } };
-const serveScript = `require('node:http').createServer((request, response) => { response.writeHead(200, {'Content-Type':'application/json'}); response.end(JSON.stringify({ message: 'served' })); }).listen(${port + 1}, '127.0.0.1');\n`;
+const serveScript = `require('node:http').createServer((request, response) => { response.writeHead(200, {'Content-Type':'application/json'}); response.end(JSON.stringify({ message: 'served' })); }).listen(${port}, '127.0.0.1');\n`;
 const passingCase = {
   id: 'brand-new-case', title: 'The brand-new case runs', target: 'any', required: false,
   steps: [{ kind: 'http', method: 'GET', path: '/', status: 200, expect: [{ path: 'message', equals: 'served' }] }],
@@ -44,7 +45,7 @@ const passingCase = {
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let fixtureRoot: string, root: string, base: string, head: string, baseTip: string;
 
 const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
@@ -56,9 +57,8 @@ const trial = (mergeSha: string, changed: string[]) => runMergeTrial({
 
 before(async () => {
   setRepositoryPolicy(servePolicy);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('create-added-case-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('create_added_case_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/create_added_case_test`); await store.init();
+
+  store = await withDatabase('create-accepts-e2e-case-the-item-adds'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 
   // The fixture repository, whose head an e2e.serve declaration serves for the trial.
@@ -83,7 +83,6 @@ before(async () => {
 after(async () => {
   setRepositoryPolicy(defaultRepositoryPolicy);
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 

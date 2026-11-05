@@ -153,19 +153,17 @@ test('hard math snapshots read authoritative tracked documents for marked and ma
 });
 
 test('hard math real API creates/releases the frozen plan with revisions, binds worker sessions and cleans active epochs',async()=>{
-  const [{default:EmbeddedPostgres},{Store},{Engine},{server},{freePort},{createItems},{operator,credential},policy]=await Promise.all([
-    import('embedded-postgres'),import('../src/store.js'),import('../src/engine.js'),import('../src/server.js'),import('../src/cli/test-isolation.js'),
+  const [{withDatabase},{Store},{Engine},{server},{createItems},{operator,credential},policy]=await Promise.all([
+    import('./helpers/postgres.js'),import('../src/store.js'),import('../src/engine.js'),import('../src/server.js'),
     import('../benchmarks/hard-math/runner.js'),import('../benchmarks/hard-math/isolation.js'),import('../src/model-boundary/repository-policy.js'),
   ]);
   const {randomUUID}=await import('node:crypto');
-  const root=await temporaryDirectory('hard-math-api'),port=await freePort(),databaseDir=await temporaryDirectory('postgres',root);
-  const database=new EmbeddedPostgres({databaseDir,user:'graphyard',password:'testing-only',port,persistent:false,onLog:()=>{},onError:()=>{},postgresFlags:['-h','127.0.0.1']});
+  const root=await temporaryDirectory('hard-math-api');
   const previousPolicy=policy.repositoryPolicy();
   policy.setRepositoryPolicy({...previousPolicy,e2e:{pendingOutcomes:'non-blocking',serve:{command:'true',url:'http://127.0.0.1:9',readySeconds:1}}});
   let store:InstanceType<typeof Store>|undefined,http:ReturnType<typeof server>|undefined;
   try {
-    await database.initialise();await database.start();
-    store=new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/postgres`);await store.init();
+    store=await withDatabase('hard-math-api');await store.init();
     const admin=credential('api-admin','admin'),coordinator=credential('api-coordinator','coordinator'),producer=credential('api-proof','producer',['unit:workbench-contract','manual:certified-artifact']);
     const workers=[0,1,2].map(i=>credential(`api-worker-${i}`,'worker'));
     http=server(new Engine(store,120,'scratch/hard-math'),[admin,coordinator,producer,...workers]);
@@ -203,7 +201,7 @@ test('hard math real API creates/releases the frozen plan with revisions, binds 
     }
   } finally {
     await new Promise<void>(resolve=>http?http.close(()=>resolve()):resolve());
-    await store?.close();await database.stop();policy.setRepositoryPolicy(previousPolicy);
+    await store?.close();policy.setRepositoryPolicy(previousPolicy);
   }
 });
 
@@ -281,7 +279,7 @@ test('hard math real cycle cannot merge a final candidate arriving after the cer
   assert.equal(nextToMerge([submitted],{},now())?.id,'final','normal candidate is otherwise eligible before its benchmark certificate');
   const events:string[]=[];let freshReads=0;
   const effects={snapshot:async()=>{freshReads++;return {work:[submitted],now:at};},agents:()=>[],herdr:()=>({agents:[],available:true}),credentials:async()=>({}),closeSession:()=>{},dispatch:async()=>{},persist:async()=>{},
-    mergeWriter:{baseBranch:'main',retrials:0,batch:1,now,fetch:async()=>base,merge:async(sha:string)=>({mergeSha:sha,files:['src/solver.mjs']}),
+    mergeWriter:{baseBranch:'main',now,fetch:async()=>base,merge:async(sha:string)=>({mergeSha:sha,files:['src/solver.mjs']}),
       trial:async()=>({build:'pass',tests:{passed:1,failed:[],files:1},proofs:{'unit:workbench-contract':{executed:1,failed:0}},files:['tests/contract.test.mjs'],durationMs:1}),
       push:async(sha:string)=>{events.push(`push:${sha}`);return 'pushed';},holds:async()=>false,record:async()=>{},
     },

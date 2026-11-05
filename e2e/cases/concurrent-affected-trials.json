@@ -1,0 +1,15 @@
+{
+  "id": "concurrent-affected-trials",
+  "title": "Trial queued heads at once, each alone on main, and land each as soon as it passes",
+  "description": "The real loop's merge writer step starts the oldest queued heads at once, up to run.mergeWriter.parallel, each trialled alone on the current main tip with only its own affected tests. A head whose trial passes lands as soon as it passes — re-merged onto whatever the heads before it left, without a second trial — and a failing head is refused for rework while the heads beside it land uncancelled.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "concurrent trials land as each passes, re-merged onto the moved tip, with failures isolated",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=integration:concurrent-affected-trials tests/concurrent-affected-trials.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

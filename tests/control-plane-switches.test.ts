@@ -99,7 +99,7 @@ test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands s
   const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 120_000) }),
     item('control-plane', ['src/app.ts'], { id: 'w2', key: 'GY-2', gates: passed, stageEnteredAt: iso(start - 60_000), candidate: candidate2, observation: { ...observation('control-plane', ['src/app.ts']), candidate: candidate2 } })];
   const trialled: string[] = [];
-  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+  const reads = { baseBranch: 'main', now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
     trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'unit:item-works': { executed: 1, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } } }; },
     push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);
@@ -121,7 +121,7 @@ test('unit:upgrade-waits-for-trial — the merge writer reports a trial in fligh
   const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 60_000) })];
   let release: () => void = () => {};
   const held = new Promise<void>(resolve => { release = resolve; });
-  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+  const reads = { baseBranch: 'main', now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
     trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'unit:item-works': { executed: 1, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } } }; },
     push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);

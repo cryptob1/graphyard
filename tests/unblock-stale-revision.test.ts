@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
@@ -32,7 +32,7 @@ const credentials = roster.map(principal => ({ ...principal, token: `unblock-${p
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: [] };
 const root = fileURLToPath(new URL('..', import.meta.url));
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let masterRoot: string, credentialDirectory: string, config: MasterConfig;
 
 const api = async (credential: string, path: string, body?: unknown) => {
@@ -69,10 +69,7 @@ function racing(race: (read: number) => Promise<void>) {
 }
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 103;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('unblock-retry'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('unblock_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/unblock_test`); await store.init();
+  store = await withDatabase('unblock-stale-revision'); await store.init();
   engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -87,7 +84,7 @@ before(async () => {
   config = masterConfigSchema.parse({ version: 1, url, credentialFile: join(credentialDirectory, 'master.token'), cliPath: join(root, 'bin/graphyard.mjs'), repository, baseBranch: 'main', githubAppId: 1234, hostId: 'unblock-host', masterAgentName: 'graphyard-master-unblock',
     operatorAgent: { id: master.id, credentialFile: join(credentialDirectory, 'master-operator.token') } });
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); await rm(masterRoot, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); });
+after(async () => { http?.close(); await store?.close();  await rm(masterRoot, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); });
 
 test('unit:unblock-retries-stale-revision a heartbeat between the read and the write is retried on the reloaded revision and the blocker clears', async () => {
   const work = await blocked('heartbeat-race', undefined, true);

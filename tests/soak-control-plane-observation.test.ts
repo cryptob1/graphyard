@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -31,7 +31,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let pg: EmbeddedPostgres, store: Store, engine: Engine, fixtureRoot: string, checkout: string;
+let store: Store, engine: Engine, fixtureRoot: string, checkout: string;
 
 async function commit(cwd: string, path: string, text: string, message: string) {
   await mkdir(join(cwd, path, '..'), { recursive: true });
@@ -46,14 +46,12 @@ before(async () => {
   git(checkout, 'config', 'user.email', 't@example.com'); git(checkout, 'config', 'user.name', 'T');
   await commit(checkout, 'README.md', '# Fixture\n', 'base');
   git(checkout, 'push', '-q', 'origin', 'main');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1675;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-control-plane-observation-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('soak_control_plane_observation');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/soak_control_plane_observation`); await store.init();
+
+  store = await withDatabase('soak-control-plane-observation'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
+after(async () => { if (store) await store.close(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 /** An item claimed by the worker on its own linked worktree, with one commit there. */
 async function claimed(n: number, file = `src/item-${n}.ts`) {
@@ -187,4 +185,3 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   } finally { stop = true; await workers; }
   await store.pool.query('UPDATE jobs SET available_at=now()');
 });
-

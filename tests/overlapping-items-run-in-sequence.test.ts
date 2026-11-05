@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -11,7 +11,6 @@ import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -29,7 +28,7 @@ const workers: Principal[] = ['a', 'b', 'c', 'd'].map(name => ({ id: `worker-${n
 const credentials = [operator, coordinator, ...workers].map(principal => ({ ...principal, token: `overlap-${principal.id}-${'x'.repeat(32)}` }));
 const token = (id: string) => credentials.find(credential => credential.id === id)!.token;
 let agentToken: string;
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (bearer: string, method: 'GET' | 'POST', path: string, body?: unknown, headers: Record<string, string> = {}) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -59,13 +58,7 @@ const masterConfig = (): MasterConfig => masterConfigSchema.parse({
 });
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3101;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('overlap-sequence-db'), user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('overlap_sequence');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/overlap_sequence`);
+  store = await withDatabase('overlap-sequence');
   await store.init();
   engine = new Engine(store, 300, repository);
   http = server(engine, credentials);
@@ -75,7 +68,7 @@ before(async () => {
   await ok(token(operator.id), 'POST', 'operator-agents', { id: loopId, displayName: 'Master loop', capabilities: [],
     scope: { repositories: [repository], workItems: ['*'] }, token: agentToken, reason: 'the loop applies its decisions under its own identity' });
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('integration:overlapping-items-run-in-sequence — of two backlog items declaring the same file only one is released and dispatched while it is in flight (claimed or submitted), the other goes once it lands, and items on other files or declaring none run beside them', async () => {
   const first = await file('Refactor engine A', ['src/engine.ts']);

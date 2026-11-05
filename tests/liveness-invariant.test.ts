@@ -2,7 +2,7 @@ import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -12,7 +12,6 @@ import { actionStallMaxMs, claimAction, settleAction } from '../src/model/action
 import { nextAction } from '../src/model-boundary/next-action.js';
 import { livenessCarry, livenessOf } from '../src/model-boundary/liveness.js';
 import { livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -33,19 +32,15 @@ const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: [PROOF] };
 const base = 'b'.repeat(40);
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let serial = 0;
 
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 201;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('liveness_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/liveness_test`); await store.init();
+  store = await withDatabase('liveness-invariant'); await store.init();
   engine = new Engine(store, 120, repository);
   engine.principals = [operator, worker, coordinator, producer];
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const id = () => randomUUID();
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;

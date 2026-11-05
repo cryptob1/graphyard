@@ -61,7 +61,7 @@ function harness(work: Work[], slowKeys: readonly string[]): Harness {
   // The record route (server/merge-record.ts): the payload it stores drops `kind`, an intent gains the item's key, a refusal records kind 'merge', and a reconciliation delivers the item.
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 1, now: () => start,
+    baseBranch: 'main', now: () => start,
     fetch: async () => base,
     merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     trial: async (_mergeSha, _files, picked) => {

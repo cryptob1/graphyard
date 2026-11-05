@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl as createDatabaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -14,7 +14,6 @@ import { views } from '../web/pages/index.js';
 import WorkDetails from '../web/pages/work-details.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { unknownFeatures } from '../web/features.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-422. On 2026-09-25, after a day of 2,000+ sessions, 180 new items and 137 closures, the routes
@@ -34,7 +33,7 @@ const tokens = { coordinator: 'c'.repeat(32), admin: 'a'.repeat(32) };
 const EVENTS = 200_000, SETTLED = 600, OPEN = 170, SESSIONS_PER_SETTLED = 5;
 const hour = 3_600_000, day = 24 * hour;
 
-let database: EmbeddedPostgres; let store: Store; let engine: Engine; let databaseUrl: string;
+let store: Store; let engine: Engine; let databaseUrl: string;
 let http: ReturnType<typeof server>; let url: string;
 let seededAt: number;
 
@@ -54,7 +53,7 @@ function document(index: number, settled: boolean, now: number): Work {
   const candidate = { sha: sha(index, 'c'), baseSha: sha(index, 'b'), pr: 1000 + index };
   const base = {
     id: uuid(index), key, title: `Item ${key} of the seeded history`, description: `What ${key} was for. `.repeat(20), type: 'feature', priority: 2, dependencies: index > 2 ? [uuid(index - 1)] : [],
-    criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true }, 
+    criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true },
     revision: 40, policyRevision: 1, createdAt: iso(created), updatedAt: iso(created + 5 * hour), stageEnteredAt: iso(created + 5 * hour), ready: true, epoch: SESSIONS_PER_SETTLED,
     workspaces: Array.from({ length: 2 }, (_, w) => ({ host: 'machine-a', path: `/srv/worktrees/${key}-${w + 1}`, epoch: w + 1, owner: 'graphyard-worker-1', branch: `graphyard/${key.toLowerCase()}-${w + 1}` })),
     candidate, submission: { epoch: SESSIONS_PER_SETTLED, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [],
@@ -74,10 +73,7 @@ function document(index: number, settled: boolean, now: number): Work {
 // Keep individual proof names and bind the complete suite to GY-3035's regression proof.
 describe('unit:server-scale', () => {
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 422;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scale'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_scale');
-  databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_scale`;
+  databaseUrl = await createDatabaseUrl('server-scale');
   store = new Store(databaseUrl);
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
@@ -111,7 +107,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (database) await database.stop();
 });
 
 async function read(path: string, token = tokens.coordinator) {
@@ -191,5 +186,4 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   const page = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work, now), item: history.body as Work }));
   assert.match(page, new RegExp(delivered.key));
 });
-
 });

@@ -1,11 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -24,14 +23,12 @@ const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 const executor: Principal = { id: 'executor-a', role: 'coordinator' };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const queries: string[] = [];
 before(async () => {
   // Stay inside the runner's reserved 200-port window, so concurrent trials cannot collide.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 197;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-ledger-delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+
+  store = await withDatabase('merge-ledger-delivery');
   store.pool.on('connect', client => {
     const target = client as { query: (...args: any[]) => any };
     const query = target.query.bind(client);
@@ -44,7 +41,7 @@ before(async () => {
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 let sequence = 0;
 async function submitted() {
@@ -92,8 +89,6 @@ test('unit:merge-ledger — the merge writer\'s record is the one delivery: reco
   assert.equal(delivered, 1, 'exactly one delivery is recorded');
   const jobs = Number((await store.pool.query('SELECT count(*) AS n FROM jobs WHERE work_id=$1', [work.id])).rows[0].n);
   assert.equal(jobs, 0, 'nothing retries against the delivery');
-
-
 });
 
 test('unit:five-step-cycle — reconciliation never reads retired merge windows on cold or repeated passes', async () => {

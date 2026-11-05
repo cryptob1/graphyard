@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
@@ -23,7 +22,7 @@ import { runCases } from '../src/e2e/runner.js';
 
 const servePolicy = { ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking' as const, serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } };
 
-let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 const operator: Principal = { id: 'operator', role: 'admin' };
 const id = () => randomUUID();
 const item = (overrides: Record<string, unknown> = {}) => ({ title: 'A change', criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['unit:works'] }], ...overrides });
@@ -35,10 +34,7 @@ const refusalOf = async (input: Record<string, unknown>) => {
 };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 402;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('user-facing-e2e'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('user_facing_e2e_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/user_facing_e2e_test`); await store.init();
+  store = await withDatabase('user-facing-e2e-proof'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
   setRepositoryPolicy(servePolicy);
@@ -46,7 +42,7 @@ before(async () => {
   await defineScenario(store, operator, { id: 'home-shows-change', title: 'The home page shows the change', purpose: 'The home page shows the change',
     steps: ['open /'], expected: ['the change is shown'], environment: 'any', runner: 'graphyard-e2e', testPath: 'e2e/cases/home-shows-change.json' }, id());
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('unit:every-item-owes-e2e-proof — the shipped E2E cases exercise filing against the served API', async () => {
   const token = 'e2e-filing-test-'.padEnd(40, 'x');

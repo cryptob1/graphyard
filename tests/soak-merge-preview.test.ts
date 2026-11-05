@@ -28,7 +28,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * score (a failing required case: refused, reworked once, resubmitted), some builds hang past the
  * budget (cancelled, the head queued and previewed again), some required cases run a command that
  * hangs past the budget (its process group killed, the head previewed again), some pushes are rejected on a moved tip
- * (re-trialled and previewed again on the new tip), and some merges change only docs (never
+ * (GY-3120: the passing head is re-merged onto the new tip and lands without another trial or preview), and some merges change only docs (never
  * previewed). Every item must be delivered exactly once, no preview checkout, slot or late build
  * may outlive its preview, and the writer's state stays bounded.
  */
@@ -37,7 +37,7 @@ const start = Date.parse('2030-06-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
 const site: PreviewSite = { directory: 'dist', build: 'build the site' };
 
@@ -137,7 +137,7 @@ class World {
   ports(): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now,
+      baseBranch: 'main', now: this.now,
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         // commit-tree stamps the time, so a head merged again on the same tip (a timed-out preview's retry) is a fresh merge commit.
@@ -148,7 +148,7 @@ class World {
       trial: async (mergeSha, _files, item) => {
         world.trials += 1;
         const n = Number(item.key.slice(3));
-        // A foreign commit lands on main during the first trial of a moving item: the push below is rejected and the merge is re-trialled.
+        // A foreign commit lands on main during the first trial of a moving item: the push below is rejected and the head re-merged without another trial.
         if (tipMoves(n) && !world.moved.has(n)) { world.moved.add(n); world.main.unshift(sha(`foreign:${n}`)); }
         return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
       },
@@ -182,7 +182,7 @@ class World {
   };
 }
 
-test('unit:soak-merge-preview — a simulated day on the real loop with the real preview: passing previews land, failing required cases are refused and reworked once, timed-out previews are cancelled and retried, moved tips are re-trialled and previewed again, docs-only merges skip it, every item lands exactly once, and no preview checkout, slot or late build outlives its preview while the state stays bounded', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-preview — a simulated day on the real loop with the real preview: passing previews land, failing required cases are refused and reworked once, timed-out previews are cancelled and retried, moved tips land without another trial or preview, docs-only merges skip it, every item lands exactly once, and no preview checkout, slot or late build outlives its preview while the state stays bounded', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-merge-preview')); made.push(root);
   const base = join(root, 'worktrees'), marks = join(root, 'marks'); await mkdir(base); await mkdir(marks);
   let now = start;
@@ -217,7 +217,8 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
   const ofItem = (n: number) => world.previews.filter(entry => entry.n === n).map(entry => entry.verdict.result);
   // Docs-only merges are never previewed; every other landed merge was previewed and passed on the commit it landed.
   for (const n of all.filter(docsOnly)) assert.deepEqual(ofItem(n), [], `GY-${n} changes only docs`);
-  for (const item of final.filter(item => !docsOnly(Number(item.key.slice(3))))) assert.ok(world.previews.some(entry => entry.verdict.mergeSha === item.delivery!.mergeSha && entry.verdict.result === 'pass'), `${item.key} landed on a passing preview of its merge commit`);
+  // A moved tip re-merges the passing head without previewing again (GY-3120): its passing preview is of the commit its trial ran on.
+  for (const item of final.filter(item => !docsOnly(Number(item.key.slice(3))))) assert.ok(world.previews.some(entry => entry.n === Number(item.key.slice(3)) && entry.verdict.result === 'pass' && (entry.verdict.mergeSha === item.delivery!.mergeSha || tipMoves(entry.n))), `${item.key} landed on a passing preview of its head`);
   // Failures: refused under the trial-failure ground naming the case, reworked exactly once, landed on the new head.
   const breaking = all.filter(breaksScore);
   assert.deepEqual([...world.decided].sort((a, b) => a - b), breaking, 'each failing preview grounded exactly one rework');
@@ -240,8 +241,9 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
     assert.equal(existsSync(join(marks, `survived-${n}`)), false);
     assert.ok(!world.decided.includes(n), 'a timeout grounds no rework');
   }
-  // Retrials: a moved tip re-trialled the merge and previewed the new merge commit again.
-  for (const n of all.filter(tipMoves)) assert.ok(new Set(world.previews.filter(entry => entry.n === n).map(entry => entry.verdict.mergeSha)).size >= 2, `GY-${n} was previewed again on the moved tip`);
+  // GY-3120: a moved tip re-merged the passing head and landed it without another preview.
+  const landedUnpreviewed = all.filter(tipMoves).filter(n => !world.previews.some(entry => entry.verdict.mergeSha === final.find(item => item.key === `GY-${n}`)!.delivery!.mergeSha));
+  assert.ok(landedUnpreviewed.length > 0, 'a head whose tip moved landed on its re-merge, not previewed again');
   assert.ok(world.trials > items);
   assert.ok(previewConcurrency >= 1 && world.slots.running === 0);
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);

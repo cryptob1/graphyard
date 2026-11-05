@@ -7,7 +7,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { pipelineTimeline } from '../src/pipeline-speed.js';
@@ -331,14 +331,11 @@ function gitPath(cwd: string, name: string) {
 }
 
 // The engine tests above run against a temporary real Postgres, isolated from every other file's.
-let database: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_BRANCH_LOCK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 860);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('branch-lock-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store = await withDatabase('worktree-branch-lock');
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [{ id: 'human-operator', role: 'admin', sessionKind: 'human' as const }, { id: 'engineer-a', role: 'worker', sessionKind: 'ai' as const }];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
