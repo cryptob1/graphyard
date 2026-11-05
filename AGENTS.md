@@ -10,7 +10,7 @@ Autonomy is the default: agents act without asking. The human operator keeps exa
 
 Domain mutations must be transactional, append history, and enforce principal identity and lease epochs. Never add a client-controlled arbitrary lifecycle-state endpoint. Do not grant implementation workers trusted evidence-producer credentials. Never weaken a task's requirements to make its implementation pass.
 
-Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Tests create every temporary directory with `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
+Run `npm run build` and `npm run test:affected -- <your bound proof test files>` for domain/API changes: it runs the tests your change affects plus those files; `npm test` is for whole-suite runs by hand. Tests run a temporary real Postgres database; do not substitute production data. Tests create every temporary directory with `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
 No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile and `compose.yaml`. Preview infrastructure changes with `graphyard install --plan` before applying (no GitHub App, branch protection or Actions gates; the merge writer deploy key is the only GitHub access).
 
