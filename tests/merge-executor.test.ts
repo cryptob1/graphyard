@@ -101,7 +101,7 @@ function fakePorts(options: { pushes?: ('pushed' | 'rejected')[]; holds?: (sha: 
   let fetches = 0, trials = 0, pushed = 0;
   const pushes = options.pushes ?? ['pushed'];
   const fails = (mergeSha: string) => typeof options.failTrial === 'function' ? options.failTrial(mergeSha) : !!options.failTrial;
-  const trialRun = (mergeSha: string): MergeTrialRun => ({ build: 'pass', tests: fails(mergeSha) ? { passed: 1, failed: ['tests/item.test.ts'], files: 2 } : { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts', 'tests/other.test.ts'], proofs: { 'integration:item-holds': { executed: 1, failed: 0 }, 'unit:item-works': { executed: 1, failed: fails(mergeSha) ? 1 : 0 } } });
+  const trialRun = (mergeSha: string): MergeTrialRun => ({ build: 'pass', tests: fails(mergeSha) ? { passed: 1, failed: ['tests/item.test.ts'], files: 2 } : { passed: 2, failed: [], files: 2 }, durationMs: 1000, logTail: '', files: ['tests/item.test.ts', 'tests/other.test.ts'], proofs: { 'integration:item-holds': { executed: 1, failed: 0 }, 'unit:item-works': { executed: 1, failed: fails(mergeSha) ? 1 : 0 } } });
   const ports: MergePorts = {
     baseBranch: 'main', now: () => start,
     fetch: async () => { calls.push('fetch'); const tips = options.tips ?? [tip]; return tips[Math.min(fetches++, tips.length - 1)]!; },
@@ -286,7 +286,7 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');
   assert.deepEqual([verdict.build, verdict.tests], ['pass', { passed: 1, failed: ['tests/a.test.ts'], files: 2 }]);
   assert.deepEqual(verdict.files, ['tests/a.test.ts', 'tests/proof.test.ts']);
-  assert.equal(trialFailureReason({ run: verdict }), `${trialFailurePrefix}: tests tests/a.test.ts`);
+  assert.match(trialFailureReason({ run: verdict })!, new RegExp(`^${trialFailurePrefix}: tests tests/a\\.test\\.ts\nfailing tests: integration:beta-holds — more\nlog tail:\n`));
   assert.deepEqual(countProofCases(tap, 'integration:beta-holds'), { executed: 1, failed: 1, skipped: 0 });
   assert.deepEqual(countProofCases('ok 1 - unit:x # SKIP later\n', 'unit:x'), { executed: 0, failed: 0, skipped: 1 });
   const phases = runner.calls.map(call => `${call.command} ${call.args.slice(0, 2).join(' ')}`);
