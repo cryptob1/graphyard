@@ -1,7 +1,6 @@
 // Concern: disk headroom (GY-3122) — the close step measures the volumes Graphyard writes; below the
 // floor it reclaims only its own leftovers, and while still below it no new merge trial or worker starts.
 import { stat } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { freeBytes } from '../master/worktrees.js';
@@ -75,8 +74,8 @@ export async function graphyardVolumes(paths: string[]): Promise<Volume[]> {
  */
 export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporary?: string[]; checkouts?: string[] } = {}): Promise<string[]> {
   const removed: string[] = [];
-  for (const root of roots.temporary ?? trialTemporaryRoots(tmpdir(), homedir())) removed.push(...await reclaimTrialCheckouts(root, [trialTemporaryPrefix, 'gy-h']));
-  for (const root of roots.checkouts ?? trialCheckoutRoots(homedir())) removed.push(...await reclaimTrialCheckouts(root, [trialCheckoutPrefix]));
+  for (const root of roots.temporary ?? trialTemporaryRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialTemporaryPrefix, 'gy-h']));
+  for (const root of roots.checkouts ?? trialCheckoutRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialCheckoutPrefix]));
   const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 120_000 })).split('\n').map(line => line.trim()).filter(Boolean);
   try {
     const containers = await docker(['ps', '--all', '--filter', 'name=^graphyard-trial-', '--filter', 'status=exited', '--filter', 'status=dead', '--format', '{{.Names}}']);
