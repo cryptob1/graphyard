@@ -192,12 +192,13 @@ const environmentLogSchema = z.object({
   // Attribution and diagnostics only; legacy exhausted entries are discarded on read.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
   exhausted: z.unknown().optional(),
+  released: z.unknown().optional(),
 }).strict();
 /** A runtime limit notice reported to the registry, with its reset or a one-hour fallback. */
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
-export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion>; /** When an operator last released each account's hold (GY-3100): no notice read before it holds the account again. */ released?: Record<string, string> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
 export const profileAccount = (profile: string) => `profile:${profile}`;
 /**
@@ -253,6 +254,13 @@ export async function observedExhaustions(config: Pick<MasterConfig, 'credential
     at: account.quota.observedAt ?? new Date(now).toISOString(), until: account.quota.resetsAt ?? new Date(now + unknownResetHoldMs).toISOString(),
     resetsAt: account.quota.resetsAt, reason: account.quota.reason ?? 'quota exhausted', role: 'worker', profile: '', work: null,
   }]));
+}
+/** Whether an operator set `account` available at or after `instant` (GY-3100, GY-3117): a notice printed by then is already overruled and never applied again. */
+export async function releasedSince(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, account: string, instant: string, registry?: Pick<FleetClient, 'document'>) {
+  const client = registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }) : null);
+  const entry = client && (await client.document()).accounts.find(candidate => candidate.name === account && (!config.hostId || candidate.credential.host === config.hostId));
+  const decision = entry ? entry.quotaDecision ?? (entry.quota.source === 'operator' ? { state: entry.quota.state, at: entry.quota.observedAt ?? '' } : null) : null;
+  return decision?.state === 'available' && Date.parse(decision.at) >= Date.parse(instant);
 }
 export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string; group?: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
@@ -337,7 +345,9 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
  */
 export function registryLaunchArgs(account: FleetLaunchAccount) {
   const { contract, policy, modelId } = account.fleet, args = [...contract.args, ...(policy?.args ?? [])];
-  const model = contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
+  // OpenCode's interactive TUI refuses --model (only `run` takes it), so its model rides in
+  // OPENCODE_CONFIG_CONTENT instead (GY-3118), whatever flag a stored runtime still names.
+  const model = contract.kind !== 'opencode' && contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
   return [...args, ...model, ...registryToolsArgs(account)];
 }
 
@@ -375,6 +385,8 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
     const variable = contract?.homeVariable ?? (Object.hasOwn(environmentVariable, account.kind) ? environmentVariable[account.kind as EnvironmentKind] : null);
     if (!variable && account.home) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: its home ${account.home} cannot be applied because ${contract && 'fleet' in account ? `runtime ${account.fleet.runtime}` : 'its environment'} names no login-home variable and the ${account.kind} kind has none known, so the session would run on the default login instead of ${account.name}. Set the runtime's home variable with master registry runtime set NAME --home-variable VAR.`);
     if (variable && account.home) environment[variable] = account.home;
+    const modelId = 'fleet' in account ? account.fleet.modelId : null;
+    if (kind === 'opencode' && modelId) environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...(environment.OPENCODE_CONFIG_CONTENT ? JSON.parse(environment.OPENCODE_CONFIG_CONTENT) : {}), model: modelId });
     // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
     if (variable === 'XDG_DATA_HOME' && account.home) {
       const mise = process.env.MISE_DATA_DIR ?? resolve(process.env.XDG_DATA_HOME ?? resolve(homedir(), '.local/share'), 'mise');

@@ -11,7 +11,7 @@ import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';
 import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
-import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../supervisor.js';
+import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../install/loop-unit.js';
 import type { ChildRun } from '../../child-runner.js';
 import { masterConfinementVariable } from '../../master/launch.js';
 

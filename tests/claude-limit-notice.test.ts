@@ -6,7 +6,8 @@ import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, recordObservedExhaustion, selectAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { FleetClient } from '../src/fleet.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**

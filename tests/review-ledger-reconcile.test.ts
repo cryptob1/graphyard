@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, sessionHarnessPlan, setupMaster, type MasterConfig } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import type { Observation, Work } from '../src/model.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

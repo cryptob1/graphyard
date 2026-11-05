@@ -1,5 +1,6 @@
 
-import { dispatchCauses, deploymentCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
+import { gateRecordPath, readGateRecord } from '../batch-gate.js';
+import { dispatchCauses, deploymentCauses, batchGateCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
 import { readDispatchCursor } from '../auto-dispatch.js';
 import { servingReport } from '../deploy-watch.js';
 import { dirname } from 'node:path';
@@ -146,7 +147,8 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
   pendingCauses: async work => {
     const current = config();
     const [cursor, serving] = await Promise.all([readDispatchCursor(root, current), servingReport(root, current.repository, current.baseBranch)]);
-    return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy)];
+    // GY-3119: a held batch gate and a revert rate above 1 in 5 wake the master.
+    return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy), ...batchGateCauses(readGateRecord(gateRecordPath(root)))];
   },
   wake: (target, text, continuity) => deliverPrompt(target, text, run, {
     beforeSubmit: (text, attempt) => graphyardInput(continuity?.current.origins ?? masterInputs(root, config().masterAgentName), attempt === 1 ? 'wake' : 'retry', text),

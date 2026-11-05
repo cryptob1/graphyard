@@ -8,7 +8,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 import { launchSpecCheck } from '../src/spec-check.js';
 import { loadMasterConfig } from '../src/master.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient } from '../src/fleet.js';
 
 async function claudeLogin(name: string) {

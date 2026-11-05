@@ -1,11 +1,12 @@
-import { isClosed, type Gate, type Work } from '../model.js';
+import { isClosed } from './closure.js';
+import type { Gate, Work } from './work.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
-import { noServe, plainStage, type ServeView } from './plain-stage.js';
+import { noServe, plainStage, waitingLabel, type ServeView } from './plain-stage.js';
 
 /**
  * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
@@ -92,11 +93,14 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       if (ready !== undefined) {
         // A dependency waits for the other item to ship; a blocker is named, never restated: the row's
         // own line carries its one-sentence summary (GY-1739), the item page's details its text.
-        if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready').text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
+        if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready', now).text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
         return { detail: 'held by a recorded blocker', who: 'Master agent' };
       }
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
-      return assignment(work, now).active ? { detail: 'the builder is writing the code', who: 'Builder agent' } : { detail: 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
+      if (assignment(work, now).active) return { detail: 'the builder is writing the code', who: 'Builder agent' };
+      // At build with nobody on it (GY-3095): the row names why it waits when that is known.
+      const reason = work.stage === 'build' ? waitingLabel(work) : null;
+      return { detail: reason ? `waiting for a builder: ${reason}` : 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
     }
     case 'validate': {
       const first = reasons[0] ?? '';
@@ -143,10 +147,10 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       // beside those refusals (src/model/gates.ts), so they are read first: waiting a turn in line
       // is automatic only when nothing else holds the merge.
       const master = reasons.find(reason => mergeMasterClears.test(reason));
-      if (master) return { detail: plainReason(master, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
+      if (master) return { detail: plainReason(master, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
       const builder = reasons.find(reason => mergeBuilderClears.test(reason));
-      if (builder) return { detail: plainReason(builder, 'merge').text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
-      const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
+      if (builder) return { detail: plainReason(builder, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
+      const stuck = reasons.map(reason => plainReason(reason, 'merge', now)).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
   }
@@ -159,7 +163,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * names what it waits on. Work closed without merging has no current state, and nobody acts.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
-  const plain = plainStage(work, release, serve);
+  const plain = plainStage(work, release, serve, now);
   const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
     label: current && current !== 'done' ? `${plain} · ${detail}` : detail, detail, who,

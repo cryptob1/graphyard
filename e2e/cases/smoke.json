@@ -1,0 +1,11 @@
+{
+  "id": "smoke",
+  "title": "The deploy smoke: the built candidate serves and answers healthy",
+  "description": "The batch gate's smoke before any deploy: the candidate, built and served in the private trial container, answers GET /healthz?ready&strict with 200 and healthy.",
+  "tags": ["api", "deployment"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "http", "name": "the served candidate answers ready", "method": "GET", "path": "/healthz?ready&strict", "status": 200, "expect": [{ "path": "healthy", "equals": true }] }
+  ]
+}

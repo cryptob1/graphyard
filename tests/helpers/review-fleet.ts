@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../../src/model.js';
-import { reconcileAutoDispatch } from '../../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../../src/model-boundary/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
 import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/auto-dispatch.js';

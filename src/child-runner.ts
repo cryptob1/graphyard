@@ -38,6 +38,8 @@ export interface ChildRunOptions {
   group?: boolean;
   /** Words run before the command — a sandbox such as the merge writer trial's bubblewrap mask (GY-2997) — which then runs as their final arguments. */
   wrapper?: readonly string[];
+  /** Kill the child (its group with `group`) once this aborts, as at the timeout: a merge trial whose head is refused or replaced (GY-3099). */
+  signal?: AbortSignal;
 }
 /**
  * The dependency every runtime-calling helper takes. A test hands in a synchronous stub that
@@ -95,6 +97,8 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
     const signal = (name: NodeJS.Signals) => { try { if (options.group && child.pid) process.kill(-child.pid, name); else child.kill(name); } catch { /* already gone */ } };
     const kill = () => { signal('SIGTERM'); killTimer = setTimeout(() => signal('SIGKILL'), childKillGraceMs); killTimer.unref?.(); };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    const aborted = () => { if (!settled) kill(); };
+    if (options.signal?.aborted) aborted(); else options.signal?.addEventListener('abort', aborted, { once: true });
     // GY-2437: a caller that can tell the child has begun its work (`started`) refuses one that has
     // not at the startup bound, instead of holding its own window open for the full timeout.
     const startupTimer = options.started ? setTimeout(() => { if (options.started!()) return; startupTimedOut = true; kill(); }, startupTimeoutMs) : undefined;
@@ -102,6 +106,7 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
     const finish = (status: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
+      options.signal?.removeEventListener('abort', aborted);
       clearTimeout(timer); if (startupTimer) clearTimeout(startupTimer); if (killTimer) clearTimeout(killTimer);
       const stdout = Buffer.concat(out).toString('utf8'), stderr = Buffer.concat(err).toString('utf8');
       if (spawnFailure !== undefined) reject(new ChildProcessError(command, args, { stdout, stderr, status, signal, timedOut, timeoutMs, cause: spawnFailure }));

@@ -42,17 +42,19 @@ const watched = new Set<Run<unknown>>();
 
 const prune = (now = Date.now()) => { for (const [name, entry] of runs) if (entry.endedAt !== null && now - entry.endedAt > retentionMs) runs.delete(name); };
 
-export function registerRun(entry: Omit<RegisteredRun, 'record' | 'endedAt'>) {
+/** Register a run under its session name; `watch` also counts it among the runs a stop leaves running, detached (`detachRuns`). */
+export function registerRun(entry: Omit<RegisteredRun, 'record' | 'endedAt'>, watch = false) {
   prune();
   const live = runs.get(entry.name);
   if (live && live.endedAt === null) throw new Error(`A ${live.role} run named ${entry.name} is already running for ${live.work}`);
   const registered: RegisteredRun = { ...entry, record: null, endedAt: null };
   runs.set(entry.name, registered);
+  if (watch) watched.add(entry.run);
   return registered;
 }
 export function endRun(name: string, record: RunRecord) {
   const entry = runs.get(name);
-  if (entry) Object.assign(entry, { record, endedAt: Date.now() });
+  if (entry) { watched.delete(entry.run); Object.assign(entry, { record, endedAt: Date.now() }); }
 }
 export const registeredRun = (name: string) => { prune(); return runs.get(name) ?? null; };
 export const liveRun = (name: string) => { const entry = registeredRun(name); return entry && entry.endedAt === null ? entry : null; };

@@ -1,5 +1,6 @@
 import type { FleetClient } from '../../src/fleet.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetRoleName, type FleetSession } from '../../src/model/registry.js';
+import { applyRegistryMutation } from '../../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetRoleName, type FleetSession } from '../../src/model/registry.js';
 
 /**
  * An in-memory control-plane registry for tests that launch a session: the registry is the only

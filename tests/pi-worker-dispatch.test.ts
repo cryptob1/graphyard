@@ -9,7 +9,8 @@ import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { coordinatorConfinementRefusal } from '../src/master/confinement.js';
 import { runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError } from '../src/worker-sandbox.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 
@@ -35,7 +36,7 @@ function fleet(): AgentRegistry {
   }, { actor: 'operator', at: new Date().toISOString() }).registry;
 }
 // Imported when a case runs, so a checkout without the rule fails the case rather than the file.
-const { workerPreference } = await import('../src/model/worker-preference.js').then(module => module as unknown as { workerPreference?: (work: object, startFailures?: number) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
+const { workerPreference } = await import('../src/model-boundary/worker-preference.js').then(module => module as unknown as { workerPreference?: (work: object, startFailures?: number) => 'fast' | 'strong' }).then(module => ({ workerPreference: module.workerPreference ?? (() => 'fast' as const) }));
 const pick = (registry: AgentRegistry, work: object, exclude: string[] = []) =>
   chooseSession(registry, { role: 'worker', host, prefer: workerPreference(work, exclude.length), exclude } as never, Date.now());
 
@@ -207,7 +208,7 @@ test('unit:pi-coordination-view-attempts — the coordination view keeps the att
 
 test('unit:pi-coordination-projection-attempts — the saved-document projection keeps the attempt count a worker preference reads', async () => {
   const { coordinationProjection } = await import('../src/store/locked-read.js');
-  const { workerPreference } = await import('../src/model/worker-preference.js');
+  const { workerPreference } = await import('../src/model-boundary/worker-preference.js');
   const projected = coordinationProjection({ key: 'GY-1', lane: 'low', stage: 'ready', evidence: [], criteria: [{ id: 'AC-1', text: 'Edits src/master/dispatch.ts', proofs: ['unit:x'] }], pipeline: { reworkRounds: 0, attempts: [{}, {}] } } as any) as any;
   assert.equal(projected.attemptCount, 2);
   assert.deepEqual(projected.criteria.map((criterion: { text: string }) => criterion.text), ['Edits src/master/dispatch.ts'], 'the projection keeps the criteria the preference reads (GY-1772)');

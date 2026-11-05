@@ -91,6 +91,10 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree (never forced); whether one was removed. */
   removeWorktree?: (path: string) => Promise<boolean>;
+  /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
+  diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
+  /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */
+  reclaimDisk?: () => Promise<string[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;

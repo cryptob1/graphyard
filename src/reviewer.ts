@@ -31,7 +31,7 @@ import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type Sandb
 import { withVerificationPath } from './master/verification-slots.js';
 import { findingLocation } from './review-cap.js';
 import { postReview, verdictStateOf, writeReviewBinding } from './review-post.js';
-import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessExec } from './headless-session.js';
+import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { liveRun } from './runner/registry.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
@@ -644,6 +644,33 @@ export function headlessVerdictPost(answer: z.infer<typeof headlessVerdictSchema
   const event = answer.verdict === 'APPROVE' ? 'APPROVE' as const : answer.verdict === 'REJECT' ? 'REJECT' as const : 'REQUEST_CHANGES' as const;
   return { event, body: [answer.body, ...answer.findings.map(finding => `BLOCKING: ${finding.replace(/^BLOCKING:\s*/i, '')}`)].join('\n') };
 }
+/** What posting and settling a headless review's answer needs (GY-3113): read back by a restarted loop, so paths and names only, never a credential. */
+export type HeadlessReviewContext = { id: string; sha: string; reviewer: string; kind: string; cliPath: string; GH_CONFIG_DIR: string; GRAPHYARD_REVIEW: string; GRAPHYARD_URL: string };
+/** Posts a headless answer through review post's own route, under the launch binding its session directory holds. */
+export function postHeadlessReview(root: string, context: HeadlessReviewContext, output: string, run: ChildRun = defaultChildRun) {
+  const environment = { GH_CONFIG_DIR: context.GH_CONFIG_DIR, GRAPHYARD_REVIEW: context.GRAPHYARD_REVIEW, GRAPHYARD_URL: context.GRAPHYARD_URL };
+  return postReview({ ...headlessVerdictPost(jsonAnswer(output, headlessVerdictSchema)), cliPath: context.cliPath, environment }, { run: (command, args) => run(command, args, { cwd: root }) });
+}
+/**
+ * The posted answer is the record's verdict, which the next reconcile settles; a run with no
+ * accepted answer (`failure`) settles as a session that finished without one, and the request relaunches.
+ */
+export function settleHeadlessReview(root: string, context: HeadlessReviewContext, outcome: Awaited<ReturnType<typeof postReview>> | string, dependencies: { run?: ChildRun; now?: () => Date } = {}) {
+  const now = dependencies.now ?? (() => new Date());
+  return updateReviewLedger(root, async ledger => {
+    const entry = ledger.reviews.find(candidate => candidate.id === context.id);
+    if (entry?.state !== 'pending' || entry.verdict) return;
+    if (typeof outcome !== 'string') { if (outcome.reviewId !== null) entry.verdict = { state: verdictStateOf(outcome.event), reviewer: context.reviewer, reviewId: outcome.reviewId, submittedAt: now().toISOString() }; return; }
+    await closeReviewSession(root, entry, { run: dependencies.run, now }, { state: 'failed', force: true,
+      resolution: `the reviewer session finished (headless ${context.kind}: ${outcome}) without posting a verdict on ${context.sha.slice(0, 12)}`.slice(0, 900) });
+  });
+}
+/** A restarted loop's adoption of a headless review run (GY-3113): the same post and settlement as its launch. */
+export const headlessReviewAdopter = (root: string): HeadlessAdopter => session => {
+  const context = session.context as HeadlessReviewContext;
+  let posted: Awaited<ReturnType<typeof postReview>> | null = null;
+  return { answer: async output => { posted = await postHeadlessReview(root, context, output); return posted; }, settle: failure => settleHeadlessReview(root, context, failure ?? posted!) };
+};
 /** Bound on the diff a headless request carries, so the request stays one command-line argument; the rest is read with git diff. */
 export const reviewDiffBytes = 80_000;
 /** The exact change a headless reviewer judges, head against the base its launch binds, for its request; empty when the object store cannot show it (the request still names git diff). */
@@ -989,7 +1016,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       const runHeadless = headless && headlessKind(launch.kind) ? headless : null;
       const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
-      let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null;
+      let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
@@ -997,6 +1024,9 @@ export async function launchReview(root: string, work: Work, profileName: string
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
         const own = withVerificationPath(harness.environment, launch.environment);
         const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
+        // What posting and settling a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
+        headlessContext = { id, sha: binding.sha, reviewer: reviewerIdentity, kind: launch.kind!, cliPath: config.cliPath ?? launcherPath,
+          GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: environment.GRAPHYARD_REVIEW, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
@@ -1007,8 +1037,7 @@ export async function launchReview(root: string, work: Work, profileName: string
             contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
             holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
-            answer: output => postReview({ ...headlessVerdictPost(jsonAnswer(output, headlessVerdictSchema)), cliPath: config.cliPath ?? launcherPath, environment },
-              { run: (command, args) => (dependencies.run ?? defaultChildRun)(command, args, { cwd: root }) }) }));
+            answer: output => postHeadlessReview(root, headlessContext!, output, dependencies.run), root, route: 'review', context: headlessContext }));
         } else {
           startedTab = true;
           ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: request(), workspace: config.herdrWorkspace, label: `${binding.key} review · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } }));
@@ -1047,14 +1076,8 @@ export async function launchReview(root: string, work: Work, profileName: string
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no
       // accepted answer settles as a session that finished without one, and the request relaunches.
-      if (answered) void answered.finally(() => selected.release?.(`the headless review of ${work.key} finished`)).then(({ reviewId, event }) => reviewId === null ? undefined : updateReviewLedger(root, ledger => {
-        const entry = ledger.reviews.find(candidate => candidate.id === id);
-        if (entry?.state === 'pending' && !entry.verdict) entry.verdict = { state: verdictStateOf(event), reviewer: reviewerIdentity, reviewId, submittedAt: now().toISOString() };
-      }), failure => updateReviewLedger(root, async ledger => {
-        const entry = ledger.reviews.find(candidate => candidate.id === id);
-        if (entry?.state === 'pending' && !entry.verdict) await closeReviewSession(root, entry, { run: dependencies.run, now }, { state: 'failed', force: true,
-          resolution: `the reviewer session finished (headless ${launch.kind}: ${failure instanceof Error ? failure.message : String(failure)}) without posting a verdict on ${binding.sha.slice(0, 12)}`.slice(0, 900) });
-      })).catch(() => { /* reconciliation settles a record this could not write */ });
+      if (answered) void answered.finally(() => selected.release?.(`the headless review of ${work.key} finished`)).then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
+        .catch(() => { /* reconciliation settles a record this could not write */ });
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,

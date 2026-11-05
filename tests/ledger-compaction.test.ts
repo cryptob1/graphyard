@@ -13,7 +13,7 @@ import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 /**
@@ -245,6 +245,69 @@ test('unit:ledger-compaction-preserves-reconstruction — compaction removes onl
   assert.equal(configuredLedgerRetentionMs({}), ledgerRetentionMs);
   assert.equal(configuredLedgerRetentionMs({ GRAPHYARD_LEDGER_RETENTION_DAYS: '30' }), 30 * 24 * 60 * 60 * 1000);
   assert.equal(configuredLedgerRetentionMs({ GRAPHYARD_LEDGER_RETENTION_DAYS: '0' }), ledgerRetentionMs, 'less than a day is refused');
+});
+
+test('integration:ledger-compaction-completes — on a generated ledger of hundreds of thousands of routine rows across many items, each batch finishes in under 5 seconds, successive runs advance from a saved position, and every surviving row resolves as before', async () => {
+  // GY-3111: a candidate query over the whole ledger ordered by age ran past the statement timeout and
+  // rolled back every batch. Generated here, never production data: items with a create row, then
+  // segments of three whole routine rows (the first two extended by nothing) and deltas on the third.
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 979;
+  await pg.createDatabase('ledger_compaction_scale');
+  const scale = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_scale`);
+  try {
+    await scale.init();
+    const itemCount = 400, segments = 6, deltas = 120;
+    await scale.pool.query(`DO $gen$ DECLARE item uuid; base bigint; rev int; doc jsonb; BEGIN
+      FOR n IN 1..${itemCount} LOOP
+        item := gen_random_uuid(); rev := 0;
+        doc := jsonb_build_object('id', item, 'key', 'GY-S' || n, 'title', 'Scale ' || n, 'type', 'chore', 'stage', 'build', 'ready', true, 'priority', 3,
+          'epoch', 1, 'evidence', '[]'::jsonb, 'criteria', jsonb_build_array(jsonb_build_object('id', 'AC-1', 'text', repeat(md5(n::text), 32))), 'revision', rev);
+        INSERT INTO work_items(id, document) VALUES(item, doc);
+        INSERT INTO events(work_id, actor, kind, payload, created_at) VALUES(item, 'graphyard', 'create', jsonb_build_object('work', doc), now() - interval '30 days');
+        FOR s IN 1..${segments} LOOP
+          FOR w IN 1..3 LOOP
+            rev := rev + 1;
+            INSERT INTO events(work_id, actor, kind, payload, created_at) VALUES(item, 'graphyard', 'reconciled', jsonb_build_object('work', doc || jsonb_build_object('revision', rev)), now() - interval '30 days') RETURNING seq INTO base;
+          END LOOP;
+          INSERT INTO events(work_id, actor, kind, payload, created_at)
+            SELECT item, 'graphyard', (ARRAY['heartbeat','reconciled','github.observed','session'])[1 + d % 4],
+              jsonb_build_object('delta', jsonb_build_object('base', base, 'revision', rev + d, 'updatedAt', '2026-10-01T00:00:00.000Z', 'lease', null, 'submission', null,
+                'ops', jsonb_build_array(jsonb_build_array(jsonb_build_array('observation'), jsonb_build_object('pass', d))))), now() - interval '30 days'
+            FROM generate_series(1, ${deltas}) d;
+          rev := rev + ${deltas};
+        END LOOP;
+      END LOOP; END $gen$`);
+    await scale.pool.query('ANALYZE events');
+    const routineRows = Number((await scale.pool.query('SELECT count(*) AS n FROM events WHERE kind <> $1', ['create'])).rows[0].n);
+    assert.ok(routineRows >= 250_000, `the generated ledger holds ${routineRows} routine rows`);
+    const fingerprint = async () => new Map((await scale.pool.query(`SELECT e.seq, md5((${resolvedPayloadSql('e')})::text) AS doc FROM events e WHERE e.work_id IS NOT NULL`)).rows.map(row => [String(row.seq), row.doc as string]));
+    const before = await fingerprint();
+
+    // One batch per run: each finishes inside the bound and starts where the previous one saved. A pass
+    // ends past the newest old row; a whole row whose deltas went in one pass goes in the next.
+    let passes = 0, runs = 0, slowest = 0;
+    for (let removed = -1; removed; passes++) {
+      let saved = 0; removed = 0;
+      for (;;) {
+        const started = performance.now();
+        const run = await compactLedger(scale.pool, { batches: 1 });
+        const ms = performance.now() - started;
+        slowest = Math.max(slowest, ms); runs++; removed += run.total;
+        assert.ok(ms < 5_000, `run ${runs} took ${Math.round(ms)} ms`);
+        assert.equal(Number((await scale.pool.query('SELECT seq FROM ledger_compaction_cursor')).rows[0].seq), run.cursor, 'the position is saved');
+        if (!run.cursor) break;
+        assert.ok(run.cursor > saved, `run ${runs} advanced from ${saved} to ${run.cursor}`);
+        saved = run.cursor;
+      }
+      assert.ok(passes < 4, `the ledger settles within a few passes (slowest run ${Math.round(slowest)} ms)`);
+    }
+    // Everything the rules allow went: each item keeps its create row, its newest whole row and its newest save.
+    const left = (await scale.pool.query('SELECT work_id, count(*)::int AS n FROM events WHERE work_id IS NOT NULL GROUP BY work_id')).rows;
+    assert.equal(left.length, itemCount);
+    assert.ok(left.every(row => row.n === 3), `each item keeps three rows: ${JSON.stringify(left.filter(row => row.n !== 3).slice(0, 5))} passes ${passes} runs ${runs}`);
+    const after = await fingerprint();
+    for (const [seq, doc] of after) assert.equal(doc, before.get(seq), `row ${seq} resolves as before`);
+  } finally { await scale.close(); }
 });
 
 test('unit:database-bound-reads-volume — the database bound is the configured size, else the database volume\'s own size when the plane can read it, else the advisory default', async () => {

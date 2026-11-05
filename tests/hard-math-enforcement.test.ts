@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { assertTrialHealth, comparisonPreflight, enforceUsage, knownUsage } from '../benchmarks/hard-math/enforcement.js';
-import { foldMergeLedger } from '../src/model/merge-ledger.js';
+import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
 import { baseFailureReason } from '../src/merge-writer/executor.js';
 import { configSchema } from '../benchmarks/hard-math/receipt-schema.js';
 

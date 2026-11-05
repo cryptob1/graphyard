@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -109,8 +110,8 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     const full = ['claude-a', 'claude-b', 'claude-c', 'codex', 'cursor-a', 'opencode-a', 'opencode-b'];
     assert.deepEqual(roles.worker, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.reviewer, full);
     assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
-    // The master role is proposed beside the others (GY-2939): the reviewer's accounts in the same order, so the loop's master session launches.
-    assert.deepEqual(roles.master, full);
+    // The master role is proposed beside the others (GY-2939) — carrying only the runtimes the master session can run (GY-3093): the claude and codex accounts, in the same order, so the loop's master session launches.
+    assert.deepEqual(roles.master, ['claude-a', 'claude-b', 'claude-c', 'codex']);
     assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles);
 
     // Nothing a credential home holds beyond what the readiness probe decides reaches the proposal.
@@ -183,7 +184,9 @@ test('unit:registry-propose-dedupes-symlinked-homes — a login home that is a s
     assert.deepEqual(names, ['claude-a', 'opencode-a'], 'one account per login, named after the real directory');
     for (const role of preview.proposal.roles) {
       for (const alias of ['claude', 'opencode']) assert.ok(!role.accounts.includes(alias), `role ${role.name} never names the symlink alias ${alias}`);
-      assert.deepEqual(role.accounts.filter((name: any) => names.includes(name)), names, `role ${role.name} names each login once`);
+      // The master role names only the logins whose runtime it can run (GY-3093); every other role names each login once.
+      const expected: string[] = role.name === 'master' ? names.filter((name: string) => name === 'claude-a') : names;
+      assert.deepEqual(role.accounts.filter((name: any) => names.includes(name)), expected, `role ${role.name} names each supported login once`);
     }
     assert.ok(!preview.discovered.some((login: any) => login.source === 'default-home'), 'a symlinked default home is not discovered as a second login');
   } finally {

@@ -172,7 +172,7 @@ export function producerGroupDecisions(work: Work, all: Work[], now: Date, outco
 export interface UnexercisedFinding { proof: string; finding: string; criteria: string[]; behaviour: string | null }
 /** What a `manual:` record with no case executed is: a judgement never made (GY-868). */
 export const unexecutedManualFinding = (proof: string) => `the record carries executed = 0: no test case or check ran, so the criterion was never judged and there is no failure of the change to fix`;
-export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): UnexercisedFinding[] {
+export function unexercisedFindings(work: Work, now: Date, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): UnexercisedFinding[] {
   if (!sha) return [];
   const findings = new Map<string, UnexercisedFinding>();
   for (const entry of work.evidence ?? []) {
@@ -189,7 +189,7 @@ export function unexercisedFindings(work: Work, sha: string | undefined = work.c
       findings.set(entry.proof, { proof: entry.proof, finding: `${entry.proof} ${unexecutedManualFinding(entry.proof)}`, criteria, behaviour: entry.exercise?.behaviour ?? null });
   }
   // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
-  return [...findings.values()].filter(({ proof }) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass'));
+  return [...findings.values()].filter(({ proof }) => !(sha === work.candidate?.sha && currentEvidence(work, proof, now)?.result === 'pass'));
 }
 /** One finding as a rework names it: the proof, the criterion, and the mutation that survived. */
 export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
@@ -201,9 +201,9 @@ export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
  * is never launched again for the head (auto-dispatch.ts); on 2026-09-26 GY-421 was named a proof
  * dispatch nobody would run for 51 minutes, until a master requested the rework by hand.
  */
-export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[]): string | null {
+export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[], now: Date): string | null {
   if (!work.candidate) return null;
-  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof));
+  const findings = unexercisedFindings(work, now).filter(entry => mechanicalProof(entry.proof));
   const groups = decisions.filter(decision => decision.state === 'request' && decision.group !== 'manual' && decision.unproven.length
     && decision.unproven.every(proof => findings.some(entry => entry.proof === proof)));
   if (!groups.length) return null;

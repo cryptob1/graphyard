@@ -17,7 +17,7 @@ import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
 import { removeAttemptWorktree } from '../master/worktrees.js';
-import { profileAccount, recordObservedExhaustion } from '../master/environments.js';
+import { releasedSince, profileAccount, recordObservedExhaustion } from '../master/environments.js';
 import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
@@ -32,6 +32,9 @@ import { loopRunAdoption } from './run-adoption.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
+import { graphyardVolumes, reclaimGraphyardLeftovers } from './disk-headroom.js';
+import { dataDirectory } from '../install/worktree-root.js';
+import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 
@@ -101,7 +104,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const profile = config.workers.find(candidate => candidate.principal === session.principal);
       const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
       const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
-      if (stall.notice) await recordObservedExhaustion(config, account ?? profileAccount(name), { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
+      // GY-3100: a notice the session printed before an operator released the account is already applied.
+      const charged = account ?? profileAccount(name);
+      if (stall.notice && !await releasedSince(config, charged, session.updatedAt)) await recordObservedExhaustion(config, charged, { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
       const space = item.workspaces?.find(entry => entry.epoch === epoch);
       const partialWork = space && space.host === config.hostId
         ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped: ${stall.reason}`, run)
@@ -166,6 +171,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
+    diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
+    reclaimDisk: () => reclaimGraphyardLeftovers(run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
       const directory = installDirectory(installIdFor(current().repository));
@@ -206,6 +213,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        gate: { root, repository: config.repository },
       };
     },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

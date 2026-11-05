@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
-import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
-import { actionJudgment, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction } from '../src/model/next-action.js';
+import { actionIdleMs, idleActionable, queueSnapshot } from '../src/model/actions.js';
+import { reconcileActions } from '../src/model-boundary/actions.js';
+import { actionJudgment, executorRunnableKinds, humanNeeded, humanNeededActions } from '../src/model/next-action.js';
+import { nextAction } from '../src/model-boundary/next-action.js';
 // Time-bomb allowance (GY-1694): 2026-09-21 `at` is the fixed now handed to nextAction.
 
 /**

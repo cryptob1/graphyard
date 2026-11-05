@@ -27,7 +27,7 @@ import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { z } from 'zod';
 import { postSpecCheck, writeSpecCheckBinding } from './spec-check-post.js';
-import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessExec } from './headless-session.js';
+import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
 
@@ -70,6 +70,19 @@ const readOnly = 'This session is read-only: do not edit, stage, commit, push, r
 export const headlessSpecCheckAnswer = 'Answer in one JSON object, the last thing you print: {"verdict": "ready" or "gaps", "paraphrase": "YOUR PARAPHRASE", "gaps": ["ONE GAP", …]}, with gaps empty for ready and at least one for gaps. '
   + 'Graphyard posts that answer as this launch\'s spec check, so run no spec-check post. Decide on your own: never ask a human or wait on input.';
 export const headlessSpecCheckSchema = z.object({ verdict: z.enum(['ready', 'gaps']), paraphrase: z.string().trim().min(1).max(20_000), gaps: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]) });
+
+/** What posting a headless spec check's answer needs (GY-3113): paths and names only, never a credential. */
+export type HeadlessSpecCheckContext = { cliPath: string; GH_CONFIG_DIR: string; GRAPHYARD_URL: string; GRAPHYARD_SPEC_CHECK: string };
+/** Posts a headless answer as the launch's report, under the binding its session directory holds. */
+export function postHeadlessSpecCheck(context: HeadlessSpecCheckContext, output: string) {
+  const { cliPath, ...environment } = context;
+  return postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath, environment });
+}
+/** A restarted loop's adoption of a headless spec-check run (GY-3113): the same post, then its binding goes. */
+export const headlessSpecCheckAdopter: HeadlessAdopter = session => {
+  const context = session.context as HeadlessSpecCheckContext;
+  return { answer: output => postHeadlessSpecCheck(context, output), settle: () => rm(context.GH_CONFIG_DIR, { recursive: true, force: true }) };
+};
 
 /** What a launch hands the loop back, recorded beside the launch action. */
 export interface SpecCheckLaunchResult { launch: string; work: string; profile: string; agentName: string; reviewer: string; pane: string | null; checkout: string | null; tokenExpiresAt: string;
@@ -141,11 +154,13 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const vendor = await readVendorPrompts();
       if (runHeadless) {
+        // What posting a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
+        const context: HeadlessSpecCheckContext = { cliPath: config.cliPath, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
           contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
           holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
-          answer: async output => postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath: config.cliPath, environment }) });
+          answer: output => postHeadlessSpecCheck(context, output), root, route: 'spec-check', context });
         // The binding and the registry slot go with the run, whatever it answered.
         const ended = settled.then(() => null, (failure: unknown) => failure instanceof Error ? failure.message : String(failure)).then(async failure => {
           await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});

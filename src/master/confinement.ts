@@ -244,10 +244,14 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
   // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
   // only that public resolver file back, never systemd's directory or sockets.
   const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
+  // GY-3108: Antigravity (agy) ignores AGY_CONFIG_DIR and reads its login only from
+  // `$HOME/.gemini/antigravity-cli`, so the account's login home is bound there.
+  const home = variable('HOME', '/tmp/home'), agy = variable('AGY_CONFIG_DIR', '')[2];
+  const agyHome = agy && join(home[2], '.gemini', 'antigravity-cli') !== agy ? ['--bind', agy, join(home[2], '.gemini', 'antigravity-cli')] : [];
   return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
     '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
-    '--dir', '/tmp/home', ...variable('HOME', '/tmp/home'),
+    '--dir', '/tmp/home', ...home, ...agyHome,
     '--dir', '/tmp/runtime', ...variable('XDG_RUNTIME_DIR', '/tmp/runtime'),
     ...variable('XDG_CACHE_HOME', '/tmp/cache'), ...variable('npm_config_cache', '/tmp/npm-cache')];
 }

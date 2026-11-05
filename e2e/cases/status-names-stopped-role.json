@@ -1,0 +1,15 @@
+{
+  "id": "status-names-stopped-role",
+  "title": "master status says when the pipeline has stopped and why",
+  "description": "Runs the regression where the master role's one slot is held and the reviewer's only account is spent: master status names each stopped role under attention with its refusal, how long it has lasted and the next command, while a busy worker role, a refusal younger than one cycle and a healthy registry raise nothing.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "stopped role regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/status-names-stopped-role.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

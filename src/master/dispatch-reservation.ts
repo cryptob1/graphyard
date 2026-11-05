@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Work } from '../model.js';
-import { watchAssignment } from '../supervisor.js';
+import { watchAssignment } from '../session-watch.js';
 import type { WorkerProfile } from './profiles.js';
 import type { HerdrAgent } from './herdr.js';
 export class DispatchReservedError extends Error {

@@ -1,20 +1,24 @@
-import { appendEvidence } from '../model/append-evidence.js';
+import { appendEvidence } from '../model-boundary/append-evidence.js';
 import { once } from '../store/mutations.js';
 import { createCipheriv, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
-import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanDecisionLabel, humanOnlyRefusal, humanProofRule, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
-import { humanAnswerSchema, resolveHumanAnswer } from '../model/human-answer.js';
+import { capacityEventSchema } from '../model-boundary/capacity.js';
+import { capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
+import { describeHumanRequest, humanDecisionLabel, humanOnlyRefusal, humanProofRule, humanRequestBlocker, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { humanRequestSchema } from '../model-boundary/human-request.js';
+import { humanAnswerSchema } from '../model-boundary/human-answer.js';
+import { resolveHumanAnswer } from '../model/human-answer.js';
 import { answerableHumanProof, requestFor } from '../model/human-proof.js';
-import { proofSchema } from '../model/proof.js';
+import { proofSchema } from '../model-boundary/proof.js';
 import { productScreenshotBytesMax, screenshotUpload } from './review-verdict.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
 import { decisionWork } from '../store/decision-read.js';
+import { recordLimitNoticeHold } from '../agent-registry.js';
 
 /**
  * The two waits that must stall nothing but the item that has them (GY-89): a session whose
@@ -232,9 +236,11 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
         if (work!.lease?.epoch === report.epoch) await endLease(services, db, work!, all, report.epoch, now, report.cause === 'interrupted' ? 'capacity.interrupted' : 'capacity.exhausted');
       }
       const record: ExhaustionRecord = { ...report, at: now.toISOString(), owner, recordedBy: actor.id };
-      work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       // A worker that died is not a spent account: the same record, its own history entry.
       const interrupted = report.cause === 'interrupted';
+      // GY-3096: a session spent on its provider's limit is held in the registry in this same transaction.
+      if (!interrupted) await recordLimitNoticeHold(db, actor, { role: report.role, work: work!.key, principal: owner, account: report.account, reason: report.reason, resetsAt: report.resetsAt }, now);
+      work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' });
     }
     const standing = capacity.spent.find(entry => entry.role === data.role);
