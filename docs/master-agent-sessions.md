@@ -51,7 +51,7 @@ Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches sp
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using reviewer accounts. The loop or `master start` adopts `masterAgentName` or replaces it. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
+`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using the claude and codex accounts (the only runtimes the master session can run). The loop or `master start` adopts `masterAgentName` or replaces it. The role refuses an account whose runtime it cannot run — the master's supported runtimes are claude and codex — naming the runtime and the supported runtimes, changing nothing; selection passes over one already stored, recording the skip with its reason, and selects the next eligible account. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
