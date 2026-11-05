@@ -8,7 +8,7 @@ test('e2e:signin-session-survives-restart — login link remains signed in after
   // The dashboard first renders only after the sign-in link is redeemed and the status, work
   // snapshot and board reads have answered — four sequential round trips behind a dev server that
   // transforms the app on first load. On a loaded host that takes more than Playwright's 5 s
-  // expect default (the batch gate's flaky failure), so each wait gets half the test's own budget.
+  // expect default, so each wait gets half the test's own budget.
   const settled = { timeout: 15_000 };
   try {
     // The UI is served by Vite; all API requests reach the real, restartable control plane. Every
