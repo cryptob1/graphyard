@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { detectExhaustion, providerLimit } from '../src/model/capacity.js';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
-import { observedExhaustions, recordEnvironmentLog, recordObservedExhaustion, releaseOperatorClearedHolds, releasedSince, selectionKey, type MasterConfig } from '../src/master/environments.js';
+import { observedExhaustions, recordEnvironmentLog, recordObservedExhaustion, selectionKey, type MasterConfig } from '../src/master/environments.js';
 import { holdRepeatedLimitAccount, sessionAccount } from '../src/master/launch-account.js';
 import type { AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -19,6 +19,8 @@ test('unit:limit-notice-charged-to-session-account — a notice holds only its s
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   const config = { credentialFile, hostId: 'host-a' } as Pick<MasterConfig, 'credentialFile' | 'hostId'>;
   const now = Date.now(), iso = (at: number) => new Date(at).toISOString();
+  // Imported here so the file loads on a tree without them, failing as this test case.
+  const { releaseOperatorClearedHolds, releasedSince } = await import('../src/master/environments.js') as unknown as Record<string, (...args: any[]) => Promise<any>>;
 
   // The profile launched GY-1 on claude-c, then GY-2 on opencode-c: GY-1's notice is claude-c's.
   await recordEnvironmentLog(config, [], [], { key: selectionKey('worker', 'builder'), environment: 'claude-c', kind: 'claude', at: iso(now - 60_000), work: 'GY-1' });
