@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { dependencyMap, listTestFiles, selectAffected, shardFiles } from '../scripts/ci-tests.mjs';
-import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
+import { nestedFirst, nestedPortGap, nodeTestArgs, runTests, trialFileTimeoutMs } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
@@ -31,7 +31,10 @@ test('unit:ci-sharded — shards balanced by file count, every file on exactly o
   assert.deepEqual(nodeTestArgs(cwd, ['--shard', '1/1', '--durations', 'd.jsonl', '--files-from', 'list.txt']).args.slice(0, 2), ['--durations', join(cwd, 'd.jsonl')]);
   assert.equal(nodeTestArgs(cwd, ['--shard', '3/3', '--files-from', 'list.txt']).empty, true);
   assert.equal(nodeTestArgs(cwd, ['--files-from', 'none.txt']).empty, true);
-  assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']).args.some(arg => arg.endsWith('file-durations.mjs')));
+  // A targeted re-run of named files carries the merge trial's per-file bound; a selection from a list stays unbounded and records durations through the file-durations reporter.
+  const targeted = nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']);
+  assert.ok(targeted.bounded && targeted.args.includes(`--file-timeout=${trialFileTimeoutMs}`), 'a named-files run is bounded at the merge trial\'s per-file bound');
+  assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', '--files-from', 'list.txt']).args.some(arg => arg.endsWith('file-durations.mjs')));
 });
 
 async function fixture(files: Record<string, string>) {
