@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { accountLaunch } from '../src/master.js';
+import { accountLaunch } from '../src/master/environments.js';
 import { headlessArgs } from '../src/headless-session.js';
 import { proposedRuntimes } from '../src/model/registry-proposal.js';
 
