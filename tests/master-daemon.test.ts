@@ -296,7 +296,7 @@ test('an unhealthy profile is routed around', async () => {
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('a failed launch puts its profile in cool-off so the next cycle uses another profile', async () => {
+test('a failed launch backs its item off for a minute instead of cooling off the profile (GY-3103)', async () => {
   const { directory, token } = await privateDirectory();
   const first = join(directory, 'first.token'), second = join(directory, 'second.token');
   await writeFile(first, workerToken, { mode: 0o600 }); await writeFile(second, workerToken, { mode: 0o600 });
@@ -305,17 +305,22 @@ test('a failed launch puts its profile in cool-off so the next cycle uses anothe
     const state = emptyDaemonState(master);
     const attempted: string[] = [];
     const items = [work({ id: 'one', key: 'GY-61' })];
+    let at = clock;
     const deps = effects({
-      snapshot: async () => ({ work: items, now: iso(0) }),
+      snapshot: async () => ({ work: items, now: new Date(at).toISOString() }),
       dispatch: async (item, chosen) => { attempted.push(chosen.name); if (chosen.name === 'flaky') throw new Error('Herdr refused the operation: no capacity'); },
     });
-    await runCycle(master, state, deps, () => clock);
+    await runCycle(master, state, deps, () => at);
     assert.deepEqual(attempted, ['flaky']);
-    assert.equal(state.profiles.flaky.failures, 1);
-    assert.match(state.profiles.flaky.reason!, /no capacity/);
-    await runCycle(master, state, deps, () => clock + 20_000);
-    assert.deepEqual(attempted, ['flaky', 'spare'], 'the cooled-off profile is skipped and the work still goes out');
-    assert.equal(state.actions[dispatchKey(items[0])].state, 'done');
+    assert.equal(state.launchBackoff['any:one'].failures, 1, 'a failure before any runtime was chosen backs the item off on every runtime');
+    assert.match(state.launchBackoff['any:one'].reason, /no capacity/);
+    at = clock + 20_000;
+    await runCycle(master, state, deps, () => at);
+    assert.deepEqual(attempted, ['flaky'], 'inside its minute the item is not launched again by any profile');
+    at = clock + 61_000;
+    await runCycle(master, state, deps, () => at);
+    assert.deepEqual(attempted, ['flaky', 'flaky'], 'no profile cools off: the back-off is the item\'s');
+    assert.equal(state.launchBackoff['any:one'].failures, 2);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -418,11 +423,11 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     assert.equal(state.actions[dispatchKey(ready)].attempts, 1000, 'attempts are clamped to the bound, not reset');
     // A cursor that already holds over-long values — written by an older loop, or edited — is written within bounds.
     state.actions['legacy'] = { kind: 'merge', work: 'GY-8', principal: null, epoch: null, state: 'failed', detail: 'x'.repeat(5000), attempts: 5000, cycle: 0, at: iso(0) };
-    state.profiles.codex = { failures: 1, reason: 'y'.repeat(3000), cooldownUntil: null };
+    state.launchBackoff['codex:x'] = { failures: 1, reason: 'y'.repeat(3000), until: iso(0) };
     await writeDaemonState(master, state);
     const stored = JSON.parse(await readFile(daemonStatePath(master), 'utf8')) as DaemonState;
     assert.equal(stored.actions.legacy.attempts, 1000);
-    assert.ok(stored.actions.legacy.detail.length <= actionDetailMax && stored.profiles.codex.reason!.length <= 500);
+    assert.ok(stored.actions.legacy.detail.length <= actionDetailMax && stored.launchBackoff['codex:x'].reason.length <= 500);
     assert.ok(written.length > 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

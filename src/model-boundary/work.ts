@@ -43,6 +43,8 @@ export const createSchema = z.object({
   // responder against the bound candidate state instead of launching a producer session, and
   // records the answer as evidence. See model/closed-question.ts.
   closedQuestions: closedQuestionsSchema.optional(),
+  // A yard repair (GY-3102): a fix for Graphyard's own fault takes its own route past the release cap, the spec-check hold, the dispatch order and the merge queue.
+  yardRepair: z.boolean().optional(),
   // Retired (GY-2875): where Graphyard itself opened an item; one filed with it keeps parsing.
   origin: z.unknown().optional(),
   // A system-driven item moves only through the loop: the master CLI refuses the hand actions the

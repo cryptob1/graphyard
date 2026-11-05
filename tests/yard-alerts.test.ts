@@ -49,7 +49,7 @@ const failedDispatch = (at: number, reason: string) => ({ id: 'row-1', kind: 'di
 function cycle(config: MasterConfig, state: DaemonState, work: Work[], clock: number, posts: string[], webhook: (text: string) => Promise<void> = async text => { posts.push(text); }): Cycle {
   const effects = { alertWebhook: webhook, persist: async () => {} } as unknown as DaemonEffects;
   return { config, state, effects, now: () => clock, snapshot: { work, now: iso(clock) }, clock, herdr: { agents: [], available: true },
-    credentials: {}, performed: [], launcher: new Launcher(1), reservedProfiles: new Set() };
+    credentials: {}, performed: [], launcher: new Launcher(1), reservedProfiles: new Set(), log: () => {} };
 }
 
 const stateWith = (fields: Record<string, unknown> = {}) => {

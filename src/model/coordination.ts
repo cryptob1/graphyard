@@ -145,7 +145,7 @@ export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new S
  */
 export function dispatchSort(items: readonly Work[], hot: ReadonlySet<string> = new Set(), now?: number) {
   const starved = new Map(items.map(item => [item, starving(item, now)])), attemptedOnce = new Map(items.map(item => [item, attempted(item)]));
-  return [...items].sort((a, b) => a.priority - b.priority
+  return [...items].sort((a, b) => Number(!!b.yardRepair) - Number(!!a.yardRepair) || a.priority - b.priority
     || (attemptedOnce.get(a)! !== attemptedOnce.get(b)! ? (attemptedOnce.get(a)! ? -1 : 1) : 0)
     || dispatchRank(a, b, hot, starved.get(a)!, starved.get(b)!));
 }
