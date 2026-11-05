@@ -53,7 +53,7 @@ export async function diskHeadroomStep(cycle: { config: Pick<MasterConfig, 'run'
   performed.push(await record(state, diskHeadroomKey, { kind: 'attention', work: null, principal: null, state: 'failed', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle, detail }, now(), effects.persist));
 }
 
-/** The volumes Graphyard writes: its checkout, data directory, worktree root, trial roots and temporary root — one path per device. */
+/** The durable volumes Graphyard writes: its checkout, data directory, worktree root, trial checkout root and durable temporary root — one path per device. A memory-backed /tmp is never measured: its size is not disk headroom. */
 export async function graphyardVolumes(paths: string[]): Promise<Volume[]> {
   const seen = new Set<number>(), volumes: Volume[] = [];
   for (const path of paths) {
@@ -76,7 +76,7 @@ export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporar
   const removed: string[] = [];
   for (const root of roots.temporary ?? trialTemporaryRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialTemporaryPrefix, 'gy-h']));
   for (const root of roots.checkouts ?? trialCheckoutRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialCheckoutPrefix]));
-  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 120_000 })).split('\n').map(line => line.trim()).filter(Boolean);
+  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
   try {
     const containers = await docker(['ps', '--all', '--filter', 'name=^graphyard-trial-', '--filter', 'status=exited', '--filter', 'status=dead', '--format', '{{.Names}}']);
     for (const name of containers.filter(name => name.startsWith('graphyard-trial-'))) {
