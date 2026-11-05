@@ -724,11 +724,10 @@ async function endPreviousMasterSessions(cycle: Cycle, closedPane: string | null
   const recorded = state.master.session;
   const live = sessions.live ? (await sessions.live()).filter(session => session.id === recorded || cycle.now() - Date.parse(session.selectedAt) >= launchGraceMs).map(session => session.id)
     : recorded ? [recorded] : [];
-  const agent = state.master.agentName ?? config.masterAgentName;
+  const agent = state.master.agentName ?? config.masterAgentName, pane = closedPane ?? state.master.pane;
   for (const id of live) {
-    const pane = id === recorded ? closedPane ?? state.master.pane : null;
-    const reason = pane ? `the master session's pane ${pane} is absent from Herdr's inventory; the loop launches its replacement`
-      : `no pane in Herdr's inventory runs the master agent ${agent}; the loop launches its replacement`;
+    const reason = id === recorded && pane ? `the master session's pane ${pane} is absent from Herdr's inventory; the loop launches its replacement`
+      : `no pane in Herdr's inventory runs the master agent ${agent}${pane ? ` (the loop's last master pane ${pane} is absent)` : ''}; the loop launches its replacement`;
     try { await sessions.end(id, reason); }
     catch (error) { throw new Error(`Could not end the previous master registry session ${id} (${reason}): ${message(error)}`); }
   }

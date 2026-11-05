@@ -85,7 +85,7 @@ test('e2e:master-orphan-slot-released — a live master session the loop does no
   state.master = { ...state.master, agentName: MASTER, pane: 'pOld', runtime: 'codex', account: 'codex', session: 'session-ended-long-ago', startedAt: iso(clock - 10 * 3_600_000) };
   await runCycle(master, state, effects, () => clock);
 
-  assert.deepEqual(ended, [{ session: 'orphan-4e18', reason: `no pane in Herdr's inventory runs the master agent ${MASTER}; the loop launches its replacement` }],
+  assert.deepEqual(ended, [{ session: 'orphan-4e18', reason: `no pane in Herdr's inventory runs the master agent ${MASTER} (the loop's last master pane pOld is absent); the loop launches its replacement` }],
     'the unnamed session is ended with a reason naming the absent pane, and the unknown recorded session is not asked about');
   assert.equal(launched.length, 1, 'the master launches once the slot frees');
   assert.deepEqual(registry.live(), [launched[0]], 'only the replacement holds the role\'s slot');
