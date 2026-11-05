@@ -199,7 +199,9 @@ export async function executeSlowTickReceiptRuns(options: { runs?: number; root?
       for (let index = 1; index <= runs; index++) {
         const startedMs = Date.now();
         const run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', pinnedProofFile],
-          { cwd: tree, encoding: 'utf8', env: isolatedTestEnvironment({ ...process.env, TMPDIR: childTmp }, { ...testPortEnvironment(reservation.base), GRAPHYARD_REPOSITORY_ROOT: tree }), maxBuffer: 64 * 1024 * 1024, timeout: 300_000 });
+          // The frozen test adds 1777 to GRAPHYARD_TEST_PORT. Translate its base
+          // so its actual listener is the port we reserved, not an unreserved one.
+          { cwd: tree, encoding: 'utf8', env: isolatedTestEnvironment({ ...process.env, TMPDIR: childTmp }, { ...testPortEnvironment(reservation.base - 1777), GRAPHYARD_REPOSITORY_ROOT: tree }), maxBuffer: 64 * 1024 * 1024, timeout: 300_000 });
         const endedMs = Date.now();
         const tap = String(run.stdout ?? '');
         await writeFile(join(artifactDirectory, runLogName(index)), tap);

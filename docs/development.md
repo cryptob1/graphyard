@@ -58,6 +58,8 @@ Canonical checkouts can reuse identical-lockfile dependencies through a `node_mo
 
 Command E2E failures extract the failing test name and first error from fully redacted output before truncation, falling back to the final line when neither is present. The bounded reason and 50-line record retain those diagnostics alongside the output tail, so long trailing stacks cannot hide a native startup error. Exit status and timeout handling stay unchanged.
 
+The bounded test runner gives `slow-tick-repeat-receipt.test.ts` sixteen minutes: its twenty sequential pinned-source runs have a fifteen-minute test timeout, with one minute for startup and teardown. Other files retain the caller's deadline. The receipt wrapper translates the frozen test's port offset so its Postgres listener uses the reserved port.
+
 ### Golden eval
 
 `eval/golden/` has ten fixed items with criteria/proofs and scaffold archives under 1 MB, covering delivery and recovery cases.

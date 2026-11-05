@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
+import { basename } from 'node:path';
 
 // Node's --test-timeout cancels callbacks but does not bound a file process with
 // leaked handles. Each file here owns a process group and an external deadline.
@@ -26,6 +27,11 @@ let next = 0;
 await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async () => {
   while (next < files.length) {
     const file = files[next++], started = Date.now();
+    // This proof runs twenty pinned-source processes sequentially. Allow its declared
+    // 15-minute test timeout plus startup/teardown; the usual five-minute trial cap
+    // otherwise kills a valid execution before node:test can judge it.
+    const deadlineMs = basename(file) === 'slow-tick-repeat-receipt.test.ts'
+      ? Math.max(timeoutMs, 960_000) : timeoutMs;
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...reporter, ...flags, file], {
       detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -33,7 +39,7 @@ await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async 
     let output = '', timedOut = false;
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
-    const timer = setTimeout(() => { timedOut = true; kill(child); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; kill(child); }, deadlineMs);
     const code = await new Promise(resolve => {
       child.on('error', error => { output += `${error.message}\n`; });
       child.on('close', resolve);
@@ -44,7 +50,7 @@ await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async 
     process.stdout.write(output);
     if (!passed) {
       process.exitCode = 1;
-      console.log(`not ok - ${file}\n  test at ${file}:1:1\n  ${timedOut ? `test file timed out after ${timeoutMs}ms` : 'test file failed'}`);
+      console.log(`not ok - ${file}\n  test at ${file}:1:1\n  ${timedOut ? `test file timed out after ${deadlineMs}ms` : 'test file failed'}`);
     }
     if (durations) appendFileSync(durations, JSON.stringify({ file, durationMs: Date.now() - started, passed }) + '\n');
   }
