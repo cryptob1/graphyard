@@ -119,6 +119,8 @@ export interface MasterSessionEffects {
   exhaust?: (account: string, notice: ExhaustionSignal) => Promise<unknown>;
   /** Ends the agent-registry session a closed or vanished pane ran under, so the role's next account can be selected (GY-2949). */
   end?: (session: string, reason: string) => Promise<unknown>;
+  /** The live master-role registry sessions of this host and person, each ended before a launch whether or not the loop's state names it (GY-3091). */
+  live?: () => Promise<{ id: string; selectedAt: string }[]>;
 }
 export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
   initialize: async (master, handle, prompts = []) => {

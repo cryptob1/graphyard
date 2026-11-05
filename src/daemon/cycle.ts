@@ -18,6 +18,7 @@ import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
+import { launchGraceMs } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
@@ -710,15 +711,37 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   });
 }
 
+/**
+ * Before a launch, every live master-role registry session of this host (and person) is ended, not
+ * only the one the loop's state names (GY-3091): Herdr lists no master pane, so none of them runs.
+ * A session the state does not name is spared inside its launch grace, since its pane may still be
+ * starting. A failed end throws, so the launch records a failed action and the next cycle retries.
+ */
+async function endPreviousMasterSessions(cycle: Cycle, closedPane: string | null) {
+  const { state, config, effects } = cycle;
+  const sessions = effects.masterSession!;
+  if (!sessions.end) return;
+  const recorded = state.master.session;
+  const live = sessions.live ? (await sessions.live()).filter(session => session.id === recorded || cycle.now() - Date.parse(session.selectedAt) >= launchGraceMs).map(session => session.id)
+    : recorded ? [recorded] : [];
+  const agent = state.master.agentName ?? config.masterAgentName, pane = closedPane ?? state.master.pane;
+  for (const id of live) {
+    const reason = id === recorded && pane ? `the master session's pane ${pane} is absent from Herdr's inventory; the loop launches its replacement`
+      : `no pane in Herdr's inventory runs the master agent ${agent}${pane ? ` (the loop's last master pane ${pane} is absent)` : ''}; the loop launches its replacement`;
+    try { await sessions.end(id, reason); }
+    catch (error) { throw new Error(`Could not end the previous master registry session ${id} (${reason}): ${message(error)}`); }
+  }
+}
+
 /** The launch the absent or failed-over master session owes, handed to the launcher so a slow pane creation never stalls the cycle. The registry session the previous pane ran under is ended first, so the role's one slot frees for this launch. */
-function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string) {
+function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, closedPane: string | null = null) {
   const { config, state, effects, launcher } = cycle;
   const sessions = effects.masterSession!;
   const launchKey = config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey;
   if (launcher.busy(launchKey)) return;
   launcher.submit(launchKey, [], async sink => {
     try {
-      if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
+      await endPreviousMasterSessions(cycle, closedPane);
       const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
       const { recoveryFailures, ...oldMaster } = state.master;
       const failures = recoveryError ? [...recoveryFailures, { at: new Date(cycle.now()).toISOString(), error: recoveryError, master: oldMaster }] : recoveryFailures;
@@ -765,6 +788,6 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
       limitedUntil: notice?.resetsAt ?? null };
     await note(cycle, key, 'failover', null, 'done', `The master session ${master.agentName} is treated as absent (${reason}); the account it spent is held until its reset, and the master launches on the role's next account`);
   } catch (error) { await note(cycle, key, 'failover', null, 'failed', `Could not fail the master session over: ${message(error)}`); return true; }
-  submitMasterLaunch(cycle, open);
+  submitMasterLaunch(cycle, open, undefined, pane);
   return true;
 }

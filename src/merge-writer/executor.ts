@@ -636,7 +636,10 @@ export interface MergePorts {
   fetch(): Promise<string>;
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
-  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984). */
+  /**
+   * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
+   * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
+   */
   trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's

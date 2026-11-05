@@ -1,4 +1,4 @@
-Paths: src/master/**, src/master.ts, src/reviewer.ts
+Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 
 ## Tests
 
@@ -15,7 +15,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads the loop; tests inject preparers, probes and Herdr runners. `master restart` uses `systemctl --user restart` for this install's unit (ExecStart: `master run`) when up, stopping or restart-queued; it never starts a second loop.
+`node bin/graphyard.mjs master status` reads loop state; tests inject preparers, probes and Herdr runners, never panes. `master restart` uses `systemctl --user restart` for the install unit (ExecStart: `master run`) when up, stopping or restart-queued; never starts another loop.
 
 ## Invariants
 
@@ -23,10 +23,10 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 - A failed launch releases its claim; a pane that may hold a running supervisor is never closed under it.
 - Prompts are pure functions: inputs adding nothing leave requests byte-identical.
 - Workers never receive trusted evidence-producer credentials.
-- A standing control-plane change request's rework reason appends its BLOCKING findings (else its body), bounded by `reworkBriefMax`.
+- Control-plane rework appends BLOCKING findings (else body), bounded by `reworkBriefMax`.
 
 ## Gotchas
 
-- Only `src/cli/**` imports `src/master.ts`; other modules import owners directly. Daemon exports live in `src/daemon/*`, enforced by `tests/barrel-imports.test.ts`.
-- Prompt changes affect exact-text assertions; search for the sentence first.
+- `tests/barrel-imports.test.ts`: only CLI source may import `src/master.ts`; otherwise import owners directly. Daemon exports live in `src/daemon/*`; `src/master-daemon.ts` is removed.
+- Prompt changes break exact-text assertions; grep the sentence first.
 - A generated prompt never names `/tmp`.
