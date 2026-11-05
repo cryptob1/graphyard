@@ -10,7 +10,6 @@ import FleetPage from './fleet';
 import SetupPage from './setup';
 import WorkersPage from './workers';
 import ScenarioLibrary from '../scenarios';
-import ValidationView from '../validation';
 import ReleasesView from '../releases';
 import TestsPage from './tests';
 import { DeliveryDefaults } from '../components/delivery-slices';
@@ -59,7 +58,6 @@ export const views: readonly View[] = [
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
   // What waits on a release, beside what shipped.
-  { id: 'validation', icon: '↻', label: 'Validation', section: 'shipped', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'shipped', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   // Every test case with its latest trusted result and history (GY-162). It is shown even before the
   // first run, as never run, rather than hidden; operator agents' scoped API refuses its read.

@@ -6,7 +6,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { runChild } from '../src/child-runner.js';
-import { releaseHeldBranch, releaseUnderFailure, reserveReleasingHold } from '../src/master/worktrees.js';
+import { releaseHeldBranch, releaseUnderFailure, reserveReleasingHold } from '../src/master/branch-release.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 

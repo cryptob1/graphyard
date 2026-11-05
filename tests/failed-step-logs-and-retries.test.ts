@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

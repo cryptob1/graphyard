@@ -87,7 +87,7 @@ export interface HeadlessSession<T> {
   /** The session name the run is listed under, beside Herdr's panes, while it runs. */
   name: string; work: string; subject: string;
   kind: string; args: string[]; environment: Record<string, string>; directory: string;
-  contract?: RegisteredLaunch | null; credentialMask?: CredentialMask;
+  contract?: RegisteredLaunch | null; credentialMask?: CredentialMask; coordinatorRoot?: string;
   /** The session's role text (prepareSessionHarness), which a pane session reads from its role file: here it opens the request. */
   role?: string | null;
   prompt: string;
@@ -107,7 +107,7 @@ export interface HeadlessSession<T> {
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
   assertLaunchable(input.kind, input.contract);
   const trust = await nonInteractiveLaunch[input.kind]?.trust?.(input.directory, input.environment, input.args);
-  const confinement = await sessionConfinement(input.kind, input.args, { directory: input.directory, cwd: input.directory, environment: input.environment, ownGitHubCredential: true, credentialMask: input.credentialMask });
+  const confinement = await sessionConfinement(input.kind, input.args, { directory: input.directory, cwd: input.directory, environment: input.environment, ownGitHubCredential: true, credentialMask: input.credentialMask }, input.coordinatorRoot);
   if (trust) await nonInteractiveLaunch[input.kind]?.verify?.(trust);
   const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(input.kind, input.args) : input.args;
   const controller = new AbortController(), startedAt = new Date().toISOString();

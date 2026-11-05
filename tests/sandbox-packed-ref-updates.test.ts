@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { coordinatorConfinement, sessionMountNamespaceWorks } from '../src/master/profiles.js';
+import { coordinatorConfinement, sessionMountNamespaceWorks } from '../src/master/confinement.js';
 import { prepareConfinedGitPaths } from '../src/master/launch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

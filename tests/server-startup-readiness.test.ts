@@ -5,8 +5,8 @@ import { rm } from 'node:fs/promises';
 import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { main, refusedBeforeReady } from '../src/server/main.js';
-import { Validation } from '../src/validation.js';
 import { Delivery } from '../src/delivery.js';
+import { ProductionWatch } from '../src/production-watch.js';
 
 const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
 let database: EmbeddedPostgres;
@@ -46,240 +46,40 @@ after(async () => {
   if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
 });
 
-test('unit:server-listens-before-startup-validation — with startup artifact expiry and the startup validation reconcile each stubbed to take 5 minutes, the server process answers GET /healthz within 10 s of start: http.listen is no longer behind validation.expireArtifacts or validation.reconcile(true)', async () => {
-  const origExpire = Validation.prototype.expireArtifacts;
-  const origReconcile = Validation.prototype.reconcile;
+test('server serves liveness during initialization and gates mutations until production state loads', async () => {
+  const original = ProductionWatch.prototype.load;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  ProductionWatch.prototype.load = async () => { await pending; };
   try {
-    Validation.prototype.expireArtifacts = async () => new Promise<number>(resolve => {
-      const timer = setTimeout(() => resolve(0), 300_000);
-      if (typeof timer === 'object' && timer && 'unref' in timer) (timer as any).unref();
-    });
-    Validation.prototype.reconcile = async () => new Promise<void>(resolve => {
-      const timer = setTimeout(() => resolve(), 300_000);
-      if (typeof timer === 'object' && timer && 'unref' in timer) (timer as any).unref();
-    });
-
-    const startedAt = Date.now();
     const instance = await main({ port: 0 });
     try {
-      const serverPort = (instance.http.address() as any).port;
-      const res = await fetch(`http://127.0.0.1:${serverPort}/healthz`);
-      const elapsed = Date.now() - startedAt;
-      assert.ok(elapsed < 10_000, `answered GET /healthz within 10 s of start (took ${elapsed} ms)`);
-      assert.equal(res.status, 200);
-      const body = await res.json() as any;
-      assert.equal(body.ok, true);
-      assert.equal(body.readiness, false);
+      const url = `http://127.0.0.1:${(instance.http.address() as any).port}`;
+      assert.equal((await fetch(`${url}/healthz`)).status, 200);
       assert.equal(instance.isReady(), false);
-    } finally {
-      await instance.close();
-    }
-  } finally {
-    Validation.prototype.expireArtifacts = origExpire;
-    Validation.prototype.reconcile = origReconcile;
-  }
-});
-
-test('unit:startup-validation-gates-coordination — until the startup validation reconcile has completed, endpoints whose answer depends on it either wait for it or are refused with a retryable 503 naming startup validation, and GET /healthz reports readiness true once complete', async () => {
-  const origExpire = Validation.prototype.expireArtifacts;
-  const origReconcile = Validation.prototype.reconcile;
-  let resolveExpire!: (value: number) => void;
-  let resolveReconcile!: () => void;
-  const expirePromise = new Promise<number>(resolve => { resolveExpire = resolve; });
-  const reconcilePromise = new Promise<void>(resolve => { resolveReconcile = resolve; });
-
-  try {
-    Validation.prototype.expireArtifacts = async () => expirePromise;
-    Validation.prototype.reconcile = async function (includeCompleted?: boolean): Promise<void> {
-      if (includeCompleted) return reconcilePromise;
-      return origReconcile.call(this, includeCompleted);
-    };
-
-    const instance = await main({ port: 0 });
-    try {
-      const serverPort = (instance.http.address() as any).port;
-      const baseUrl = `http://127.0.0.1:${serverPort}`;
-
-      // 1. GET /healthz reports liveness throughout with readiness false
-      const healthBefore = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
-      assert.equal(healthBefore.ok, true);
-      assert.equal(healthBefore.readiness, false);
-      // A readiness probe asking ?ready is kept off this replica until startup validation completes.
-      assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 503);
-      // Only mutations are refused: a lease heartbeat passes, and so do reads (no GitHub webhook is served since GY-2010).
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/heartbeat'), false);
-      assert.equal(refusedBeforeReady('GET', '/api/work/GY-1'), false);
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/complete'), true);
-      assert.equal(refusedBeforeReady('POST', '/api/actions/0123456789abcdef0123456789abcdef/renew'), true);
-
-      // 2. Coordination mutation is refused with retryable 503 naming startup validation
-      const mutationRes = await fetch(`${baseUrl}/api/work`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${'a'.repeat(32)}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ title: 'Coordination test', criteria: [] }),
-      });
-      assert.equal(mutationRes.status, 503);
-      assert.equal(mutationRes.headers.get('retry-after'), '5');
-      const mutationBody = await mutationRes.json() as any;
-      assert.equal(mutationBody.retryable, true);
-      assert.match(mutationBody.error, /startup validation/i);
-
-      // 3. Delivery gate is refused with retryable 503 naming startup validation
-      const deliveryRes = await fetch(`${baseUrl}/api/delivery/select`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${'a'.repeat(32)}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      });
-      assert.equal(deliveryRes.status, 503);
-      assert.equal(deliveryRes.headers.get('retry-after'), '5');
-      const deliveryBody = await deliveryRes.json() as any;
-      assert.equal(deliveryBody.retryable, true);
-      assert.match(deliveryBody.error, /startup validation/i);
-
-      // 4. Now complete startup validation
-      resolveExpire(0);
-      resolveReconcile();
-
-      // Wait for instance to become ready
-      const waitStart = Date.now();
-      while (!instance.isReady() && Date.now() - waitStart < 5000) {
-        await new Promise(r => setTimeout(r, 20));
-      }
-      assert.ok(instance.isReady(), 'instance became ready after startup validation completed');
-
-      // 5. GET /healthz reports readiness true
-      const healthAfter = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
-      assert.equal(healthAfter.ok, true);
-      assert.equal(healthAfter.readiness, true);
-      assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 200);
-
-      // 6. Mutation is no longer refused with 503
-      const mutationAfter = await fetch(`${baseUrl}/api/work`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${'a'.repeat(32)}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ title: 'Coordination test 2', criteria: [] }),
-      });
-      assert.notEqual(mutationAfter.status, 503);
-    } finally {
-      await instance.close();
-    }
-  } finally {
-    Validation.prototype.expireArtifacts = origExpire;
-    Validation.prototype.reconcile = origReconcile;
-  }
+      assert.equal((await fetch(`${url}/api/work`, { method: 'POST' })).status, 503);
+      release();
+      for (let i = 0; i < 100 && !instance.isReady(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(instance.isReady(), true);
+      assert.equal((await fetch(`${url}/healthz?ready`)).status, 200);
+    } finally { release(); await instance.close(); }
+  } finally { ProductionWatch.prototype.load = original; }
 });
 
-test('unit:startup-validation-failure-retried — a startup validation failure is logged and retried by the reconciliation tick instead of exiting the process or leaving readiness false forever', async () => {
-  const origExpire = Validation.prototype.expireArtifacts;
-  const origReconcile = Validation.prototype.reconcile;
-  let reconcileAttempts = 0;
-  const errorLogs: string[] = [];
-  const origError = console.error;
-  console.error = (...args: unknown[]) => {
-    errorLogs.push(args.map(String).join(' '));
-    origError(...args);
-  };
-
-  try {
-    Validation.prototype.expireArtifacts = async () => 0;
-    Validation.prototype.reconcile = async function (includeCompleted?: boolean): Promise<void> {
-      if (includeCompleted) {
-        reconcileAttempts++;
-        if (reconcileAttempts === 1) {
-          throw new Error('transient startup validation DB error');
-        }
-      }
-      return origReconcile.call(this, includeCompleted);
-    };
-
-    const instance = await main({ port: 0 });
-    try {
-      const serverPort = (instance.http.address() as any).port;
-      const baseUrl = `http://127.0.0.1:${serverPort}`;
-
-      // 1. Verify failure was logged
-      const logStart = Date.now();
-      while (!errorLogs.some(l => /startup validation failed/i.test(l)) && Date.now() - logStart < 3000) {
-        await new Promise(r => setTimeout(r, 20));
-      }
-      assert.ok(errorLogs.some(l => /startup validation failed/i.test(l)), 'startup validation failure was logged');
-
-      // 2. Process did NOT exit, server is still listening
-      assert.equal(instance.http.listening, true);
-
-      // 3. Reconciliation tick retried and readiness turned true
-      const retryStart = Date.now();
-      while (!instance.isReady() && Date.now() - retryStart < 10_000) {
-        await new Promise(r => setTimeout(r, 20));
-      }
-      assert.ok(reconcileAttempts >= 2, `startup validation was retried (attempts: ${reconcileAttempts})`);
-      assert.ok(instance.isReady(), 'readiness turned true after tick retry');
-
-      // 4. GET /healthz reports readiness true
-      const health = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
-      assert.equal(health.ok, true);
-      assert.equal(health.readiness, true);
-    } finally {
-      await instance.close();
-    }
-  } finally {
-    console.error = origError;
-    Validation.prototype.expireArtifacts = origExpire;
-    Validation.prototype.reconcile = origReconcile;
-  }
-});
-
-test('close during startup validation stops cleanly without launching background work', async () => {
-  const origExpire = Validation.prototype.expireArtifacts;
-  const origReconcile = Validation.prototype.reconcile;
-  try {
-    Validation.prototype.expireArtifacts = async () => new Promise<number>(resolve => setTimeout(() => resolve(0), 5000));
-    const instance = await main({ port: 0 });
-    assert.equal(instance.isReady(), false);
-    await instance.close();
-    assert.equal(instance.isReady(), false);
-  } finally {
-    Validation.prototype.expireArtifacts = origExpire;
-    Validation.prototype.reconcile = origReconcile;
-  }
-});
-
-
-test('unit:server-startup-readiness — startup, routes and the reconciliation tick share one Validation and Delivery', async () => {
-  const originalExpire = Validation.prototype.expireArtifacts;
-  const originalReconcile = Validation.prototype.reconcile;
+test('unit:server-startup-readiness — routes and the reconciliation tick share the same services', async () => {
   const originalSweep = Delivery.prototype.sweep;
-  const validations = new Set<Validation>(), deliveries = new Set<Delivery>();
-  let startup = false, tick = false;
+  const deliveries = new Set<Delivery>();
   try {
-    Validation.prototype.expireArtifacts = async function () { validations.add(this); return 0; };
-    Validation.prototype.reconcile = async function (includeCompleted?: boolean) {
-      validations.add(this);
-      if (includeCompleted) startup = true; else tick = true;
-    };
     Delivery.prototype.sweep = async function (...args) { deliveries.add(this); return originalSweep.apply(this, args); };
     const instance = await main({ port: 0 });
     try {
       assert.equal(instance.validation, instance.http.services.validation);
       assert.equal(instance.http.services.delivery.validation, instance.validation);
       const deadline = Date.now() + 10_000;
-      while ((!tick || !deliveries.size) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-      assert.ok(startup && tick, 'startup and a periodic reconciliation both ran');
-      assert.deepEqual([...validations], [instance.http.services.validation]);
+      while (!deliveries.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
       assert.deepEqual([...deliveries], [instance.http.services.delivery]);
     } finally { await instance.close(); }
-  } finally {
-    Validation.prototype.expireArtifacts = originalExpire;
-    Validation.prototype.reconcile = originalReconcile;
-    Delivery.prototype.sweep = originalSweep;
-  }
+  } finally { Delivery.prototype.sweep = originalSweep; }
 });

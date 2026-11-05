@@ -7,7 +7,8 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';

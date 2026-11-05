@@ -21,9 +21,9 @@ Trials run [without credentials](master-agent-reference.md#merge-trial). Command
 
 Batches record each head’s merge intent before starting their shared trial. The board counts all heads in running positions as in flight; remaining heads show their waiting position and the flight ahead, while recorded blockers remain Blocked.
 
-Opening (including fallback/retrial) and landing re-read candidate, policy, rework, ownership and build/review gates. Obsolete flights requeue without pushing or disturbing replacement leases; incidental work revisions do not fence a valid flight. Already-pushed reconciliation retains its original intent and proof bindings. Current-candidate trial results remain in case history even when build or review gates hold landing; obsolete trials supply no replacement evidence.
+Opening (including fallback/retrial) and landing re-read candidate, policy, rework, ownership and build/review gates. Obsolete flights requeue without pushing or disturbing replacement leases; incidental work revisions do not fence a valid flight. Already-pushed reconciliation retains its original intent and proof bindings. Current-candidate trial results remain in case history even when build or review gates hold landing; obsolete trials supply no replacement evidence. The daemon summary shows standing merge refusals from the ledger; after an item lands, its earlier refusals remain in ledger history only.
 
-Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. Production and serve-revert unit tests share the revert sequence; the loop persists and schedules its trial beside the cycle. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
+Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. Production and serve-revert unit tests share the revert sequence; the loop persists and schedules its trial beside the cycle. Reverts, refused reverts and re-land filings are recorded transactionally as `merge.serve-revert` events on the culprit’s merge ledger, folded beside its merge state. The loop reads already-reverted merges and standing refusals from that ledger after restart or cursor archival; the cursor keeps in-flight work and legacy outcomes awaiting ledger migration. Upgrade writes retain those outcomes until the ledger acknowledges them, including outstanding re-land obligations. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
 
 ### E2E record credential
 
@@ -51,7 +51,7 @@ Registered builders build; admins or promoters select releases; observers acquir
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries all service instances with host-attested digests, never self-reports. `observe-sha` marks contained merges Deployed with an exact 40-hex SHA and every service. Smoke-required work also needs an `e2e:deploy-smoke` pass naming that SHA. Complete listings verify through `notify`; `graphyard delivery sweep` runs at `freshnessSeconds`. `/api/validation/result` binds signatures, manifests and measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries all service instances with host-attested digests, never self-reports. `observe-sha` marks contained merges Deployed with an exact 40-hex SHA and every service. Smoke-required work also needs an `e2e:deploy-smoke` pass naming that SHA. Complete listings verify through `notify`; `graphyard delivery sweep` runs at `freshnessSeconds`.
 
 `release GY-N EPOCH` leases release work. `release status` and `graphyard delivery` show ledger and pipeline.
 

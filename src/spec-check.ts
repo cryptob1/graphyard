@@ -12,12 +12,14 @@ import { fileURLToPath } from 'node:url';
 import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
-import {
-  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
-  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, profileAccount, recordObservedExhaustion, prepareSessionHarness, readCredentialFile,
-  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
-  type PromptDelivery, type StartBounds,
-} from './master.js';
+import { accountLaunch, profileAccount, recordObservedExhaustion, onSelectedSession, selectAccount } from './master/environments.js';
+import { allocateManagedCheckout } from './master/worktrees.js';
+import { autonomousSession } from './master/dispatch.js';
+import { closeHerdrPane } from './master/herdr.js';
+import { launchStartMs, launchSession, type PromptDelivery, type StartBounds } from './master/launch.js';
+import { loadMasterConfig, readCredentialFile } from './master/config.js';
+import { prepareSessionHarness } from './master/harness.js';
+import { profileAtLimit, profileSessions, sessionAgentName } from './master/profiles.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
 import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
@@ -81,7 +83,8 @@ export interface SpecCheckLaunchResult { launch: string; work: string; profile: 
  * reads named files from, and starts the reviewer session with the vendored EGM prompts.
  */
 export async function launchSpecCheck(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
-  run?: ChildRun; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  run?: ChildRun;
+  coordinatorRoot?: string; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   registerLaunch?: (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string; policyRevision: number }) => Promise<{ launch: string }>;
   /** How a headless check's one child runs (headless-session.ts); the host's by default. */
   headless?: HeadlessExec | null;
@@ -136,13 +139,13 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
       // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
       const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
-      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
+      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
       const own = withVerificationPath(harness.environment, launch.environment);
       const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const vendor = await readVendorPrompts();
       if (runHeadless) {
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-          contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
           holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
           answer: async output => postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath: config.cliPath, environment }) });
@@ -154,12 +157,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         });
         return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane: null, checkout: checkout.directory, tokenExpiresAt: expiresAt, settled: ended };
       }
-      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
-        '--label', `${work.key} spec check · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], run));
-      pane = created.pane;
-      await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
-        specCheckPrompt(config, work, vendor, checkout.worktree, baseTip), run,
-        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
+      await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip), workspace: config.herdrWorkspace, label: `${work.key} spec check · ${agentName}`, run, onPane: nextPane => { pane = nextPane ?? null; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } });
       return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.

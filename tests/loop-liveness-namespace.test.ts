@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopLiveness, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { loopLiveness } from '../src/daemon/liveness.js';
 import { hostPidProbe } from '../src/daemon/liveness.js';
-// A namespace import, so the symbols GY-1370 adds read as missing test cases on a base without them, not a failed load.
-import * as daemon from '../src/master-daemon.js';
+import { pidNamespace, initialPidNamespace } from '../src/daemon/state.js';
+import { pidProbeable } from '../src/daemon/liveness.js';
 // Time-bomb allowance (GY-1694): the 2026-10-06 instants are the explicit `now` of each loopLiveness call and a legacy lock the schema only parses; Date.now() just stamps the lock acquireDaemonLock writes.
 
 const interval = 20_000;
@@ -50,7 +51,7 @@ test('unit:loop-liveness-foreign-namespace — a reader outside the lock\'s PID 
 test('unit:loop-liveness-foreign-namespace — the lock records the namespace it was taken in, and the cursor keeps it', () => {
   const state = emptyDaemonState(config);
   const lock = acquireDaemonLock(state, { pid: process.pid, host: 'machine-a' }, Date.now(), interval);
-  assert.equal(lock.pidNamespace, daemon.pidNamespace());
+  assert.equal(lock.pidNamespace, pidNamespace());
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).lock, lock, 'the namespace survives a cursor round trip');
   // A cursor written before GY-1370 still parses.
   const legacy = { ...emptyDaemonState(config), lock: { id: 'old', pid: 1, host: 'machine-a', startedAt: '2026-10-06T00:00:00Z', heartbeatAt: '2026-10-06T00:00:00Z' } };
@@ -60,12 +61,12 @@ test('unit:loop-liveness-foreign-namespace — the lock records the namespace it
 test('unit:loop-liveness-foreign-namespace — a lock written before the namespace was recorded is probed on the host and unprobeable from a sandbox', () => {
   const now = Date.parse('2026-10-06T10:51:00Z');
   const legacy = () => { const state = cursor({}, now - 5_000); delete state.lock!.pidNamespace; return state; };
-  assert.equal(daemon.pidProbeable({}, daemon.initialPidNamespace), true);
-  assert.equal(daemon.pidProbeable({}, null), true, 'a reader with no /proc (not Linux) probes as it always did');
-  assert.equal(daemon.pidProbeable({}, foreign), false);
-  assert.equal(daemon.pidProbeable({ pidNamespace: foreign }, null), false, 'a reader that cannot name its namespace cannot match a recorded one');
+  assert.equal(pidProbeable({}, initialPidNamespace), true);
+  assert.equal(pidProbeable({}, null), true, 'a reader with no /proc (not Linux) probes as it always did');
+  assert.equal(pidProbeable({}, foreign), false);
+  assert.equal(pidProbeable({ pidNamespace: foreign }, null), false, 'a reader that cannot name its namespace cannot match a recorded one');
 
-  const host = loopLiveness(legacy(), now, interval, 'machine-a', from(daemon.initialPidNamespace));
+  const host = loopLiveness(legacy(), now, interval, 'machine-a', from(initialPidNamespace));
   assert.equal(host.state, 'absent', 'on the host a gone pid is still an absent loop');
   const sandboxed = loopLiveness(legacy(), now, interval, 'machine-a', from(foreign));
   assert.equal(sandboxed.state, 'running', 'a sandboxed reader files no loop fault from an invisible pid');

@@ -12,6 +12,8 @@ import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
+import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
+
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
  * (cli/verify.ts `countProofCases`, which this mirrors: the CLI module is not imported into the loop).
@@ -80,6 +82,7 @@ export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly 
   ({ files: flaked.files.slice(0, 100), tests: flaked.tests.slice(0, 100), at });
 /** What `POST /api/work/:id/merge-record` takes: one of the five steps, with its ledger payload. */
 export type MergeRecordEvent =
+  | ({ kind: 'serve-revert' } & MergeServeRevert)
   | { kind: 'intent'; head: string; baseTip: string; mergeSha: string; risk: string; at: string }
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
     /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
@@ -106,7 +109,7 @@ export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview; sit
 export const previewRecordEvent = (preview: ItemPreview, site?: PreviewSiteFile[]) => ({ kind: 'preview', preview, ...(site ? { site } : {}) } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
 const previewEvent = (event: MergeRecordEvent): PreviewRecordEvent | null => (event as { kind: string }).kind === 'preview' ? event as unknown as PreviewRecordEvent : null;
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
-export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial', 'trial-step': 'merge.trial-step' } as const;
+export const mergeRecordKinds = { ...mergeLedgerKinds, 'serve-revert': mergeServeRevertKind, trial: 'merge.trial', 'trial-step': 'merge.trial-step' } as const;
 /**
  * GY-1852: the attempt a record belongs to: an id the loop persists before the attempt's first
  * write, and the write's place in it. A retry of that write replays its exact first input under the
@@ -123,6 +126,7 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
   // A preview's record is keyed by the preview and its state: a retry replays it, a later state is a new write.
   const preview = previewEvent(event);
   if (preview) return `preview-record:${work.id}:${preview.preview.id}:${preview.preview.state}`;
+  if (event.kind === 'serve-revert') return `merge-record:${work.id}:revert:${event.mergeSha}:${event.serve}:${event.outcome}:${event.reland ?? 'pending'}`;
   if (work.mergeAttempt) return `merge-record:${work.id}:${work.mergeAttempt.id}:${work.mergeAttempt.write}:${event.kind}`;
   if (event.kind === 'pushed' || event.kind === 'reconciled') return `merge-record:${work.id}:${event.kind}:${event.mergeSha}`;
   const attempt = work.mergeLedger?.events ? `#${work.mergeLedger.events}` : '';
@@ -640,7 +644,7 @@ export interface MergePorts {
    * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
    * `share` is how many trials run at once (batch.ts `mergeStack`): each takes that share of the host's cores.
    */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, share?: number): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
@@ -725,7 +729,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     let run: MergeTrialRun;
-    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep); }
+    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
     catch (error) {
       // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
       const attempts = trialAttempts(error), last = attempts.at(-1)!;

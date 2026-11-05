@@ -244,7 +244,7 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
   return written(root, { key: work.key, head, clean, at: now().toISOString(), ran: ran.map(({ run }) => run), outstanding, ...(preserves.length ? { preserves } : {}) });
 }
 
-async function written(root: string, record: VerifyRecord) {
+export async function written(root: string, record: VerifyRecord) {
   await mkdir(join(root, '.graphyard', 'verify'), { recursive: true });
   await writeFile(recordPath(root, record.key), JSON.stringify(record, null, 2));
   return record;
@@ -278,7 +278,7 @@ export const verifyCommand: CliCommand = {
   scope: 'work',
   help: [
     '  verify GY-N                  Run exactly the unit and integration proofs the item\'s',
-    '                                criteria name against this working tree, name the rest as',
+    '                                criteria name on committed HEAD in a private trial, name others as',
     '                                outstanding, and record the result complete reports.',
     '                                A passing proof is run again against the base\'s sources',
     '                                with this change\'s tests; one that still passes there is',
@@ -288,11 +288,10 @@ export const verifyCommand: CliCommand = {
     '                                the change: it is not run against the base (repeatable)',
   ],
   run: async (context, work) => {
-    let baseBranch = 'main';
-    try { baseBranch = String((await context.api('status')).baseBranch ?? 'main'); } catch { /* the default base branch */ }
     const { values } = parseArgs({ args: context.args, options: { preserves: { type: 'string', multiple: true } }, allowPositionals: false });
     const preserves = (values.preserves ?? []).flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean);
-    const record = await verifyWorkingTree(work, context.repositoryRoot(), undefined, { baseBranch, preserves });
+    const { requestWorkerVerification } = await import('./worker-verification.js');
+    const { record } = await requestWorkerVerification(context, work, { mode: 'verify', preserves });
     context.print(record);
     if (record.ran.some(entry => (entry.result !== 'pass' && !leftToCiRun(entry)) || entry.unexercised)) process.exitCode = 1;
   },

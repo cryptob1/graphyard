@@ -92,7 +92,7 @@ export async function hostSuiteBreadth(environment: NodeJS.ProcessEnv = process.
   const reading = await memory();
   if (!reading) return null;
   const directory = environment[slotsDirectoryVariable];
-  const otherFiles = directory ? othersDeclaredFiles(directory, pid) : 0;
+  const otherFiles = directory ? await othersDeclaredFiles(directory, pid) : 0;
   const budgetBytes = reading.availableBytes - hostMemoryFloor(reading.totalBytes) - memoryRecoveryMarginBytes;
   return suiteBreadth({ budgetBytes, otherFiles, cpus: availableParallelism() });
 }

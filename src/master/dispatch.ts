@@ -21,8 +21,8 @@ import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import { simplicityParagraph } from '../review-prompt.js';
-import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
-import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
+import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
+import { closeHerdrPane, type HerdrAgent } from './herdr.js';
 import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
@@ -414,7 +414,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask }, coordinatorRoot);
         sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
       }
-      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...(process.env.XDG_RUNTIME_DIR ? ['--env', `XDG_RUNTIME_DIR=${process.env.XDG_RUNTIME_DIR}`] : []), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? ['--env', `DBUS_SESSION_BUS_ADDRESS=${process.env.DBUS_SESSION_BUS_ADDRESS}`] : []), ...Object.entries(withVerificationPath(sessionHarness.environment, launch.environment)).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+
       // GY-2971: the previous attempt's runtime session is resumed when this launch runs on the same
       // runtime and account and that attempt recorded its id; the brief is the same complete brief, so
       // only the conversation carries over. Otherwise the launch is fresh, and the log says why.
@@ -430,9 +430,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
       // launched without a minter has no GitHub credential at all, never the host's login.
       const open = async () => {
-        const created = createdHerdrTab(await herdrJson(plan.resume ? [...tabArgs.slice(0, -1), '--env', `${resumeLaunchVariable}=1`, '--no-focus'] : tabArgs, run)); pane = created.pane; tabId = created.tab;
-        return startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...plan.args, ...sessionHarness.args], prompt, run,
-          { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(coordinatorRoot ? { coordinatorRoot } : {}) });
+        return launchSession({ name: profile.agentName, kind: launch.kind!, args: [...args, ...plan.args, ...sessionHarness.args], text: prompt,
+          workspace: config.herdrWorkspace, label: `${work.key} · ${profile.agentName}`,
+          environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment), ...(plan.resume ? { [resumeLaunchVariable]: '1' } : {}) },
+          run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(coordinatorRoot ? { coordinatorRoot } : {}) } });
       };
       const initialHead = await Promise.resolve().then(() => defaultChildRun('git', ['-C', prepared.path, 'rev-parse', 'HEAD'])).then(value => /^[0-9a-f]{40,64}$/.test(String(value).trim()) ? String(value).trim() : null, () => null);
       let started: Awaited<ReturnType<typeof open>>;
@@ -441,8 +442,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         // A resume that exits or never comes up within its start bound closes its pane and launches
         // the same attempt fresh, under the lease it already holds.
         if (!plan.resume || !(error instanceof SessionStartError)) throw error;
-        await closeFailedLaunch(pane, tabId, run);
-        pane = tabId = undefined;
+        // launchSession closed the failed resume before returning its start error.
         plan = freshLaunch(launch.kind, `the resume of attempt ${plan.from}'s session failed at start (${error.startCase}): ${failureText(error).slice(0, 300)}`);
         log(`graphyard: ${work.key} attempt ${prepared.epoch} launches a fresh session: ${plan.why}`);
         started = await open();

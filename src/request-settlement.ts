@@ -1,5 +1,5 @@
 
-import { herdrErrorCode } from './master.js';
+import { herdrErrorCode } from './master/launch.js';
 
 /**
  * Settling a reviewer or producer request whose session is over (GY-137).

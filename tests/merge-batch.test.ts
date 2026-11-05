@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { timedMergePorts } from '../src/daemon/trial-timings.js';
+import { emptyMergeWriterState } from '../src/daemon/merge-writer-state.js';
 import { mergeBatch, mergeStack } from '../src/merge-writer/batch.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergePorts, MergeRecordEvent, MergeTrialRun } from '../src/merge-writer/executor.js';
@@ -133,6 +135,19 @@ test('integration:merge-requires-executed-proofs — absent, zero and failing co
   }
 });
 
+
+test('integration:trial-step-timings — batch fallbacks retain their own covered heads', async () => {
+  const run = recording({ failing: [2] });
+  const writer = emptyMergeWriterState();
+  const timed = timedMergePorts(run.ports, writer, async () => {});
+  await mergeBatch(timed, [1, 2].map(queued));
+  assert.deepEqual(writer.trials!.map(trial => trial.heads), [
+    [1, 2].map(n => ({ key: `GY-${n}`, head: head(n) })),
+    [{ key: 'GY-1', head: head(1) }], [{ key: 'GY-2', head: head(2) }],
+  ]);
+  assert.deepEqual(writer.trials!.map(trial => trial.steps.map(step => step.step)), [[], ['push'], []]);
+});
+
 for (const batched of [false, true]) for (const predecessorFails of [false, true]) {
   test(`stacked ${batched ? 'batch' : 'single'} conflicts wait for a ${predecessorFails ? 'failed' : 'landed'} predecessor`, async () => {
     const run = recording({ failing: predecessorFails ? [1] : [] });
@@ -174,4 +189,38 @@ test('a conflict with a failed head in the same batch is retried against landed 
   const results = await mergeBatch(run.ports, [1, 2, 3].map(queued));
   assert.ok(results.some(entry => entry.work.key === 'GY-2' && 'outcome' in entry && entry.outcome.outcome === 'merged'));
   assert.ok(!run.kinds('GY-2').includes('refused'));
+});
+
+test('parallel trials keep preview, push and completion timings with their own merge commit', async () => {
+  const run = recording(), writer = emptyMergeWriterState();
+  let clock = start, release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const trial = run.ports.trial, push = run.ports.push;
+  run.ports.now = () => clock;
+  run.ports.trial = async (...args) => {
+    if (args[2].key === 'GY-1') await pending;
+    else release();
+    args[5]?.('build', args[2].key === 'GY-1' ? 11 : 22);
+    return trial(...args);
+  };
+  run.ports.preview = async (_sha, _files, item) => {
+    clock += item.key === 'GY-1' ? 100 : 200;
+    return null;
+  };
+  run.ports.push = async (...args) => {
+    clock += run.contains.get(args[0])!.length === 1 ? 10 : 20;
+    return push(...args);
+  };
+  const results = await mergeStack(timedMergePorts(run.ports, writer, async () => {}), [[queued(1)], [queued(2)]]);
+  assert.ok(results.every(result => 'outcome' in result && result.outcome.outcome === 'merged'));
+  for (const [index, durations] of [[100, 10], [200, 20]].entries()) {
+    const record = writer.trials!.find(entry => entry.heads[0]?.key === `GY-${index + 1}`)!;
+    assert.deepEqual(record.heads, [{ key: `GY-${index + 1}`, head: head(index + 1) }]);
+    assert.deepEqual(record.steps, [
+      { step: 'build', durationMs: index === 0 ? 11 : 22 },
+      { step: 'preview', durationMs: durations[0] },
+      { step: 'push', durationMs: durations[1] },
+    ]);
+    assert.equal(record.finishedAt, new Date(start + (index === 0 ? 110 : 330)).toISOString());
+  }
 });
