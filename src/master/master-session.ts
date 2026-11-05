@@ -1,7 +1,7 @@
 
 import { gateRecordPath, readGateRecord } from '../batch-gate.js';
 import { dispatchCauses, deploymentCauses, batchGateCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
-import { readDispatchCursor } from '../auto-dispatch.js';
+import { readDispatchCursor } from '../dispatch/cursor.js';
 import { servingReport } from '../deploy-watch.js';
 import { dirname } from 'node:path';
 import { type ChildRun } from '../child-runner.js';

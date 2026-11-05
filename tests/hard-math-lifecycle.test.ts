@@ -251,7 +251,7 @@ test('hard math receipt independently requires approval, certification and posit
 });
 
 test('hard math fixture polling waits for authoritative offers, stops at its poll bound and cancels its wait',async()=>{
-  const {runWorkerPull}=await import('../src/auto-dispatch.js');
+  const {runWorkerPull}=await import('../src/dispatch/worker-pull.js');
   let calls=0;
   const offered=await runWorkerPull(async()=>({assigned:++calls===3?{id:'work',key:'GY-1'} as any:null,offered:calls===3?1:0}),{intervalMs:1,maxPolls:4});
   assert.equal(offered.assigned?.id,'work');assert.equal(offered.polls,3);

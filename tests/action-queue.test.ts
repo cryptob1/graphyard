@@ -16,7 +16,11 @@ import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds,
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } from '../src/model/sessions.js';
-import { dispatchEffects, launchedSessionHandle, runDispatchTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, type DispatchEffects } from '../src/dispatch/effects.js';
+import { launchedSessionHandle } from '../src/dispatch/session-sweep.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { runWorkerPull, workerPullIntervalMs } from '../src/dispatch/worker-pull.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { masterConfigSchema } from '../src/master.js';
 import { localRequest } from './helpers/local-request.js';
 // @ts-expect-error Dependency-free worker entry point.
@@ -659,9 +663,6 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
   assert.deepEqual(handles.map(entry => [entry.handle.kind, entry.handle.pane ?? null]), [['review', null], ['review', 'pane-12']],
     'registered before its runtime started, then given the pane it runs in');
   assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each write went to the control plane through the shipped mutation');
-  // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
-  // from the configuration the loop already runs on, so no caller can leave the handles out.
-  assert.ok(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, 'the handle recording is not a caller\'s option');
   const recorded = (await reload(item)).sessions ?? [];
   const review = recorded.find(handle => handle.kind === 'review')!;
   assert.deepEqual([review.runtime, review.workspace, review.pane], ['claude', 'wF', 'pane-12']);

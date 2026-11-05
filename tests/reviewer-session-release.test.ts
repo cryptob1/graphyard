@@ -62,7 +62,7 @@ function memoryRegistry(host: string, home: string) {
   return { registry, client, live: () => registry.sessions.filter(session => !session.endedAt) };
 }
 
-/** The session handle the dispatcher records for a launched review or proof session (auto-dispatch.ts). */
+/** The session handle the dispatcher records for a launched review or proof session (dispatch/session-sweep.ts). */
 const handle = (requestId: string, kind: 'review' | 'proof', host: string, launched: { pane?: string | null; agentName?: string | null }, head: string) => ({
   id: requestId, kind, runtime: 'claude', host, role: kind, head,
   ...(launched.agentName ? { agentName: launched.agentName } : {}),

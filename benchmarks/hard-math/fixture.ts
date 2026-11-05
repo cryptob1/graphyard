@@ -1,5 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { emptyDispatchCursor, runDispatchTick, runWorkerPull } from '../../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../../src/dispatch/cursor.js';
+import { runDispatchTick } from '../../src/dispatch/tick.js';
+import { runWorkerPull } from '../../src/dispatch/worker-pull.js';
 import { masterConfigSchema } from '../../src/master.js';
 import { atomicPrivateWrite, atomicPrivateText } from '../../src/master/config.js';
 import { launchReview, reconcileReviews } from '../../src/reviewer.js';

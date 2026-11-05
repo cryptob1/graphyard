@@ -8,7 +8,9 @@ import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, d
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
-import { readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { readDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
