@@ -42,7 +42,7 @@ test('unit:served-app-verified-case — the release line names the served commit
     await database.initialise(); await database.start(); await database.createDatabase('served_app_verified');
     store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/served_app_verified`); await store.init();
     const engine = new Engine(store, 120, '');
-    http = server(engine, [{ ...operator, token }], null, {});
+    http = server(engine, [{ ...operator, token }], {});
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${(http!.address() as { port: number }).port}`;
 

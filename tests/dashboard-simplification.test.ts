@@ -147,7 +147,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Delivered', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
+  for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -155,7 +155,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
   assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
@@ -175,7 +175,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
   assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
-  assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
+  assert.deepEqual(failing.features, { releases: null, validation: false, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.
   assert.equal(probed.operatorAgentsError, null);
   assert.equal(failing.operatorAgentsError, 'unavailable');
@@ -184,7 +184,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.doesNotMatch(text(unread), /safe bootstrap default/);
   assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
   assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
-  assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, true, 'a scenario requirement means validation is in use');
+  assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, false, 'repository cases do not enable the retired validation runner');
   // Delivery slices are about who works on what: on the Workers page once a slice has a lead, never on Work.
   const led = fixtureStatus('admin'); led.delegation.slices[0].lead = { id: 'lead', displayName: 'Pine', sessionKind: 'ai' } as any;
   assert.doesNotMatch(home(dashboard({ status: led })), /Delivery slices/);
