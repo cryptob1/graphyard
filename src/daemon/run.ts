@@ -95,10 +95,10 @@ export async function restartThroughUnit() {
 /**
  * GY-3148: how long a restart the deploy unit's served release owes may wait for the merge trials
  * in flight to settle on their own. Past the bound the loop cancels the trials (no head refused,
- * each stays queued) and restarts anyway, so a newly served release is adopted within minutes even
- * while merge trials run — with concurrent per-head trials the writer is otherwise never idle.
+ * each stays queued) and restarts anyway — with concurrent per-head trials the writer is otherwise
+ * never idle. Four minutes, since the loop looks between cycles and owes the restart within five.
  */
-export const releaseAdoptionBoundMs = 5 * 60_000;
+export const releaseAdoptionBoundMs = 4 * 60_000;
 
 /** What runs in the deploy unit (GY-3136): the commit its watch process loaded, and whether a deploy pass is in progress (any process besides the watch). */
 export interface DeployUnitProcess { unit: string; commit: string | null; busy: boolean }
@@ -258,7 +258,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const checkpointed = trialsInFlight ? cancelMergeWriterTrials(state, 'the loop restarts onto the release the deploy unit now serves') : [];
           log(`[graphyard-master] restarting through the supervisor unit${checkpointed.length ? `, checkpointing the merge trial(s) of ${checkpointed.join(', ')} that could not settle inside the bound` : ''}: ${cause}`);
           try { rmSync(loopRestartRequestPath(config), { force: true }); await (options.restartLoop ?? restartThroughUnit)(); }
-          catch (error) { log(`[graphyard-master] the restart could not be asked: ${message(error)}`); }
+          catch (error) { restartWaitedFrom = null; log(`[graphyard-master] the restart could not be asked: ${message(error)}`); }
         }
         if (options.once || stopping) break;
         try { await sleep(wait); } catch { /* woken to stop */ }

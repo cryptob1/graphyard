@@ -704,13 +704,13 @@ export async function mergeWriterStep(cycle: Cycle) {
     }
   }
   if (flight?.settled) { flights.delete(state); writer.inFlight = null; delete writer.inFlights; }
-  // GY-3148: in-flight entries a restart left behind name trials no process runs: the next loop
-  // adopts or cleanly restarts them from the recorded ledger state (reconcileIntents settles the
-  // open intents, the queue re-trials the heads), so the entries are a report — and one whose item
-  // got a new head or no longer awaits a merge names a trial nothing will ever replace or clear.
-  // It is dropped here instead of aging into a stall; an entry whose item still awaits its merge
-  // stays until the fresh flight for that head replaces it.
-  if (!flights.has(state) && !writer.inFlight?.revert && (writer.inFlight || writer.inFlights?.length)) {
+  // GY-3148: an in-flight entry whose item got a new head or no longer awaits a merge names a trial
+  // that will never report again: a restart left it behind, or its trial was cancelled above while
+  // the flight's other heads run on. It is dropped here instead of aging into a stall. An entry
+  // whose item still awaits its merge stays: after a restart the next loop adopts it from the
+  // recorded ledger state (reconcileIntents settles the open intent, the queue re-trials the head)
+  // and the fresh flight replaces it. A live flight's last entry names the flight until it settles.
+  if (!writer.inFlight?.revert && (writer.inFlight || writer.inFlights?.length)) {
     const ledger = snapshotLedger(snapshot.work);
     const staleWhy = (entry: { key: string; head: string }) => {
       const replaced = carriedHeadStale(snapshot.work, entry.key, entry.head);
@@ -718,14 +718,13 @@ export async function mergeWriterStep(cycle: Cycle) {
       const item = snapshot.work.find(work => work.key === entry.key);
       return item && awaitsMerge(item, ledger, now()) ? null : `${entry.key} no longer awaits a merge`;
     };
-    const judged = (writer.inFlights ?? (writer.inFlight ? [writer.inFlight] : [])).map(entry => [entry, staleWhy(entry)] as const);
+    const judged = (writer.inFlights ?? [writer.inFlight!]).map(entry => [entry, staleWhy(entry)] as const);
     const dropped = judged.filter(([, why]) => !!why), kept = judged.filter(([, why]) => !why).map(([entry]) => entry);
-    if (dropped.length) {
+    if (dropped.length && (kept.length || !flights.has(state))) {
       performed.push(storeAction(state, 'merge-writer-inflight-adopted', { kind: 'merge', work: null, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-        detail: `Dropped the in-flight trial ${dropped.length > 1 ? 'entries' : 'entry'} a restart left for ${dropped.map(([entry, why]) => `${entry.key} head ${entry.head.slice(0, 12)}: ${why}`).join('; ')}; the entries whose heads still await a merge stand for the next loop's fresh trials`.slice(0, 1900) }));
-      if (kept.length) {
-        if (writer.inFlights) { writer.inFlights = writer.inFlights.filter(entry => kept.includes(entry)); writer.inFlight = { ...writer.inFlights[0]! }; }
-      } else { writer.inFlight = null; delete writer.inFlights; }
+        detail: `Dropped the in-flight trial ${dropped.length > 1 ? 'entries' : 'entry'} of ${dropped.map(([entry, why]) => `${entry.key} head ${entry.head.slice(0, 12)}: ${why}`).join('; ')}`.slice(0, 1900) }));
+      if (kept.length) { writer.inFlights = writer.inFlights!.filter(entry => !dropped.some(([gone]) => gone === entry)); writer.inFlight = { ...writer.inFlight!, ...writer.inFlights[0]! }; }
+      else { writer.inFlight = null; delete writer.inFlights; }
       changed = true;
     }
   }
@@ -824,10 +823,11 @@ export async function mergeWriterStep(cycle: Cycle) {
         const recorder = attemptRecorder(writer, reads.record, attempt, at);
         // Each step a trial reports is where its head is: on the in-flight entries master status reads, persisted at once, and on the item's ledger the pipeline and Work page read.
         const onStep = (index: number, step: string) => {
-          const position = writer.inFlights?.[index], first = heads[index]!;
+          // By key, not index: a stale entry may have been dropped from the list (GY-3148).
+          const first = heads[index]!, place = writer.inFlights?.findIndex(entry => entry.key === first.key) ?? -1, position = writer.inFlights?.[place];
           if (writer.inFlight?.attempt !== attempt || !position) return;
-          writer.inFlights![index] = { ...position, step, stepStartedAt: at() };
-          if (index === 0) writer.inFlight = { ...writer.inFlight, step, stepStartedAt: at() };
+          writer.inFlights![place] = { ...position, step, stepStartedAt: at() };
+          if (place === 0) writer.inFlight = { ...writer.inFlight, step, stepStartedAt: at() };
           void effects.persist(state).catch(() => {});
           void recorder(first, { kind: 'trial-step', head: position.head, step, at: at() }).catch(() => {});
         };

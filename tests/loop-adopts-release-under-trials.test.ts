@@ -108,7 +108,7 @@ const harness = (world: World, loadedRelease?: { commit: string; dirty: boolean 
 const kinds = (world: World, n: number) => (world.recorded.get(n) ?? []).map(event => event.kind);
 
 test('unit:loop-adopts-release-under-trials — the deploy unit serves a release the loop did not load, and the loop restarts onto it within the bound while its concurrent trials run, cancelling them without refusing a head; the next loop adopts the trials from the ledger and drops the entries whose items moved on', { timeout: 60_000 }, async () => {
-  assert.equal(releaseAdoptionBoundMs, 5 * 60_000, 'the bound the acceptance criterion names');
+  assert.ok(releaseAdoptionBoundMs + 60_000 <= 5 * 60_000, 'the bound plus a slow cycle stays inside the five minutes the criterion names');
 
   // The loop's checkout: a git repository whose HEAD is the commit the deploy unit serves.
   const root = await temporaryDirectory('loop-adopts-release');
@@ -175,4 +175,21 @@ test('unit:loop-adopts-release-under-trials — the deploy unit serves a release
   assert.match(dropped?.detail ?? '', /GY-2 head [0-9a-f]+: .* returned for rework/, 'the drop names the reworked item and why');
   assert.match(dropped?.detail ?? '', /GY-3 head [0-9a-f]+: .* was replaced by/, 'the drop names the replaced head');
   assert.match(dropped?.detail ?? '', /GY-4 head [0-9a-f]+: GY-4 no longer awaits a merge/, 'the drop names the delivered item');
+
+  // The same inside a live flight: the head returned to a worker loses its entry at once, while the
+  // flight's other head runs on and keeps reporting its steps under its own entry.
+  const live = new World(2);
+  const ports = live.ports({ trial: async (mergeSha, _files, _item, _baseTip, onStep) => { const n = live.heads.get(mergeSha)!; steps.set(n, onStep!); return new Promise(() => {}); } });
+  const steps = new Map<number, (step: string) => void>();
+  const { state: flying, effects: flyingEffects } = harness(live);
+  const step = (work: Work[]) => mergeWriterStep({ state: flying, effects: { ...flyingEffects, mergeWriter: ports }, now: () => start, snapshot: { work, now: iso(start) }, performed: [] } as unknown as Cycle);
+  await step(live.snapshot());
+  for (let waited = 0; steps.size < 2 && waited < 5_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5));
+  live.overrides[1] = { reworkRequested: true };
+  await step(live.snapshot());
+  assert.deepEqual(flying.mergeWriter.inFlights?.map(entry => entry.key), ['GY-2'], 'the reworked head loses its entry while the flight still runs');
+  assert.equal(flying.mergeWriter.inFlight?.key, 'GY-2', 'the flight is named by the head still running');
+  steps.get(2)!('tests');
+  assert.equal(flying.mergeWriter.inFlights?.[0]?.step, 'tests', 'the surviving head reports under its own entry');
+  assert.equal(flying.mergeWriter.inFlight?.step, 'tests');
 });
