@@ -87,9 +87,9 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
 export function AlertsLine({ status }: { status: any }) {
   const alerts = status?.setup?.alerts;
   return <p data-alerts={alerts === true ? 'on' : alerts === false ? 'off' : 'unknown'}>
-    {alerts === true ? <span className="green">Alerts are on: the loop tells you directly when queued work cannot start or merge.</span>
-      : alerts === false ? <span className="amber">Alerts are off: set run.alertUrl in .graphyard/master.json and the loop will tell you directly when queued work cannot start or merge.</span>
-        : 'Whether the loop alerts you is not known yet.'}
+    {alerts === true ? <span className="green">Alerts are on: you are told when queued work cannot start or merge.</span>
+      : alerts === false ? <span className="amber">Alerts are off: set an alert address to be told when queued work cannot start or merge.</span>
+        : 'Whether alerts are on is not known yet.'}
   </p>;
 }
 
