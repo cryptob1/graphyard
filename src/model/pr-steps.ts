@@ -5,7 +5,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
-import { noServe, plainStage, type ServeView } from './plain-stage.js';
+import { noServe, plainStage, waitingReason, type ServeView } from './plain-stage.js';
 
 /**
  * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
@@ -96,7 +96,10 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
         return { detail: 'held by a recorded blocker', who: 'Master agent' };
       }
       if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
-      return assignment(work, now).active ? { detail: 'the builder is writing the code', who: 'Builder agent' } : { detail: 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
+      if (assignment(work, now).active) return { detail: 'the builder is writing the code', who: 'Builder agent' };
+      // At build with nobody on it (GY-3095): the row names why it waits when that is known.
+      const reason = work.stage === 'build' ? waitingReason(work) : null;
+      return { detail: reason ? `waiting for a builder: ${reason}` : 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
     }
     case 'validate': {
       const first = reasons[0] ?? '';
@@ -159,7 +162,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * names what it waits on. Work closed without merging has no current state, and nobody acts.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
-  const plain = plainStage(work, release, serve);
+  const plain = plainStage(work, release, serve, now);
   const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
     label: current && current !== 'done' ? `${plain} · ${detail}` : detail, detail, who,

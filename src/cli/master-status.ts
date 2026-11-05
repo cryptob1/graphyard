@@ -10,17 +10,19 @@ import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
-import { plainStage } from '../model/plain-stage.js';
+import { noServe, plainStage, waitingReason } from '../model/plain-stage.js';
+import { noRelease } from '../model/release.js';
 import { specCheckCurrent } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
-/** One open item's line: its plain stage (GY-2988), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
+/** One open item's line: its plain stage (GY-2988; Waiting with its reason, GY-3095), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
 export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  return { key: item.key, title: item.title, stage: plainStage(item), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
+  const stage = plainStage(item, noRelease, noServe, now);
+  return { key: item.key, title: item.title, stage, ...(stage === 'Waiting' ? { waiting: waitingReason(item) } : {}), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
