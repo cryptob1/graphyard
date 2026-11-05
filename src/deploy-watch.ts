@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { GitRunner } from './merge-writer/local-observation.js';
 import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
+import { servedVerified } from './batch-gate.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -59,7 +60,8 @@ export const rollbackAttempts = 5;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /**
- * One pass: fetch, and when the base tip is new, deploy it. A failure at any step rolls back to the
+ * One pass: fetch, and when the base tip (the batch gate's latest verified commit, once the gate
+ * names this repository) is new, deploy it. A failure at any step rolls back to the
  * previous tip through the same steps and records the failed tip, which waits for the next one —
  * unless the failed deploy may have migrated the database, which the previous tip would refuse: a
  * failure from the restart on whose tip's code migrates past the previous tip's is kept and recorded
@@ -68,7 +70,9 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  * succeeds; a new base tip is deployed in its place.
  */
 export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line), owner: string | null = null): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
-  const tip = await ports.fetch();
+  // GY-3119: once the loop's batch gate names this repository, only its latest verified commit serves, never the fetched main tip.
+  const fetched = await ports.fetch();
+  const tip = servedVerified(join(dirname(file), 'main-gate.json'), owner) ?? fetched;
   const stored = readDeployRecord(file);
   const record = stored ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
   const write = (entry: Omit<DeployRecord, 'at' | 'repository'>) => writeDeployRecord(file, { ...entry, repository: owner });

@@ -13,6 +13,10 @@ The control plane always merges passing heads; Delivery names it as the merge wr
 
 The deploy unit runs `graphyard upgrade --watch --checkout <install>/deploy/src`: fetch, build, restart and verify health at the expected commit. It retains serving/previous images. Failed deploys restore when safe; migrations may require roll-forward. `.graphyard/deploy.json` names the serving tip and repository; the loop reloads newly served code. For managed apps, see [serve configuration and live checks](deployment.md#serving-the-managed-repositorys-app).
 
+### Batch gate on main
+
+The deploy unit serves only the latest verified commit in `.graphyard/main-gate.json`, never main's fetched tip; at rollout the loop records the served commit as the first verified one. With merges past it and no gate in flight, the loop gates main's tip in the trial container: build, the merged items' bound cases, `gate.core` in graphyard.json (`create-work-item` and the `smoke` case) and the affected tests, or the whole catalog when it measured under 45 minutes. A failing check reruns once (a pass files a flake); an affected test that also fails on the verified commit files a known red and is exempt. A confirmed failure reruns that check on the batch's prefixes; the smallest failing prefix's last item is reverted and re-landed, and the batch recut. A failing recut or a second timeout holds and wakes the master, as does a revert rate above 1 in 5 over 20 merges (`master status` → `batchGate`). Daily, the full suite and catalog run against the verified commit and file items without blocking.
+
 ## Merge trials
 
 Trials run [without credentials](master-agent-reference.md#merge-trial). Commands prefer the running Node installation over host version-manager shims, so the fresh HOME needs no host mise trust setup. A successful merge trials before pushing and schedules no advisory trial afterwards; older cursors discard that retired ledger. `mergeWriter.inFlight` names the step/start; 30 minutes without advancement or exit without verdict reports a stall. Logs include durations; abandoned checkouts are reclaimed.

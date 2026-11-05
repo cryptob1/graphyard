@@ -50,6 +50,8 @@ export interface MergeWriterReads extends MergePorts {
    * its re-land until a loop that can file adopts it.
    */
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
+  /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
+  gate?: { root: string; repository: string };
 }
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
