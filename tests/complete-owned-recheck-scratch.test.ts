@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { rerunTrialFiles } from '../src/cli/complete.js';
+import { completionRerun, rerunTrialFiles } from '../src/cli/complete.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -91,14 +91,24 @@ test('integration:complete-owned-recheck-scratch selected case', async () => {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture head');
   const head = git('rev-parse', 'HEAD');
   const submissions: { epoch: number; head: string; rerunUnjudged?: { note: string } }[] = [];
+  const work = {
+    id: 'work-1', key: 'GY-1', criteria: [{ proofs: ['integration:complete-owned-recheck-scratch'] }],
+    mergeLedger: { refusal: { kind: 'merge', reason: `trial failed: tests ${selected}: integration:complete-owned-recheck-scratch selected case, tests/missing.test.mjs, ../outside.test.mjs` } },
+  };
   const server = createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/healthz') return response.end('{}');
-    if (request.method === 'GET' && request.url === '/api/work/GY-1') return response.end(JSON.stringify({
-      id: 'work-1', key: 'GY-1', criteria: [{ proofs: ['integration:complete-owned-recheck-scratch'] }],
-      mergeLedger: { refusal: { kind: 'merge', reason: `trial failed: tests ${selected}: integration:complete-owned-recheck-scratch selected case, tests/missing.test.mjs, ../outside.test.mjs` } },
-    }));
+    if (request.method === 'GET' && request.url === '/api/work/GY-1') return response.end(JSON.stringify(work));
     let body = ''; for await (const chunk of request) body += chunk;
+    if (request.method === 'POST' && request.url === '/api/work/work-1/worker-verification') {
+      // The host runner's part, outside the worker's confinement: the trial's rerun of the
+      // refused selection on the requested head, answered as the server relays it.
+      const input = JSON.parse(body);
+      try {
+        const rerun = await completionRerun(root, work);
+        return response.end(JSON.stringify({ record: { key: 'GY-1', head: input.head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun }));
+      } catch (error: any) { response.statusCode = 422; return response.end(JSON.stringify({ error: error.message })); }
+    }
     if (request.method === 'POST' && request.url === '/api/work/work-1/submit') {
       submissions.push(JSON.parse(body)); return response.end(JSON.stringify({ key: 'GY-1', submission: { head } }));
     }
@@ -122,18 +132,18 @@ test('integration:complete-owned-recheck-scratch selected case', async () => {
     const ran = JSON.parse(await readFile(join(root, 'selected.ran'), 'utf8'));
     assert.equal(ran.head, head);
     assert.equal(existsSync(ran.home), false); assert.equal(existsSync(ran.tmp), false);
-    assert.equal(existsSync(join(root, '.graphyard/verify')), false);
+    assert.deepEqual(await readdir(join(root, '.graphyard/verify')), ['GY-1.json'], 'only the returned record, never rerun scratch');
     await writeFile(join(root, 'fail'), 'fail');
     await assert.rejects(confined([launcher, 'complete', 'GY-1', '1', '--head', head]),
       (error: any) => /complete refused:.*failing tests still fail/.test(error.stderr) && /genuine selected failure/.test(error.stderr));
     assert.equal(submissions.length, 1, 'a real selected failure must not submit');
-    assert.equal(existsSync(join(root, '.graphyard/verify')), false);
+    assert.deepEqual(await readdir(join(root, '.graphyard/verify')), ['GY-1.json'], 'only the returned record, never rerun scratch');
     // A runner fault retains the existing unjudged-note policy instead of becoming a pass.
     await writeFile(join(root, 'fault'), 'fault');
     await confined([launcher, 'complete', 'GY-1', '1', '--head', head]);
     assert.equal(submissions.length, 2);
     assert.match(submissions[1]!.rerunUnjudged!.note, /failed without naming a failing case/);
-    assert.equal(existsSync(join(root, '.graphyard/verify')), false);
+    assert.deepEqual(await readdir(join(root, '.graphyard/verify')), ['GY-1.json'], 'only the returned record, never rerun scratch');
     assert.equal(await readFile(join(operator, 'sentinel'), 'utf8'), 'operator untouched');
     assert.deepEqual(await readdir(join(operator, '.gy/tmp')), []);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }

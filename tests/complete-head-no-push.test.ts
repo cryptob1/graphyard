@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { chmod, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import type { WorkerVerificationResult } from '../src/cli/worker-verification.js';
 import type { CliContext } from '../src/cli/context.js';
 
 // GY-1925: explicit --head submission attempts no git push, so a worker sandbox that cannot
@@ -30,7 +31,9 @@ async function repository(branch: string) {
   const hook = join(work, '.git', 'hooks', 'pre-push');
   await writeFile(hook, `#!/bin/sh\nprintf 'attempt\\n' >> ${JSON.stringify(attempts)}\nexit 1\n`);
   await chmod(hook, 0o755);
-  git(work, 'commit', '-q', '--allow-empty', '-m', 'two');
+  await writeFile(join(work, '.gitignore'), '.graphyard/\n');
+  git(work, 'add', '.gitignore');
+  git(work, 'commit', '-q', '-m', 'two');
   return { attempts, head: git(work, 'rev-parse', 'HEAD'), work };
 }
 
@@ -38,8 +41,21 @@ test('unit:complete-explicit-head-no-push — complete GY-N EPOCH --head SHA att
   const { completeCommand } = await import('../src/cli/complete.js');
   const { attempts, head, work } = await repository('graphyard/gy-1-1');
   const calls: { path: string; body: unknown }[] = [], printed: any[] = [];
-  const context = { args: ['1', '--head', head], api: async (path: string, body: unknown) => { calls.push({ path, body }); return { key: 'GY-1', submission: { epoch: 1, pr: 7 } }; }, print: (value: unknown) => printed.push(value), repositoryRoot: () => work } as unknown as CliContext;
+  const requests: unknown[] = [];
+  let rerun: WorkerVerificationResult['rerun'] = { flaked: [], baseFailures: [] };
+  const context = {
+    args: ['1', '--head', head],
+    api: async (path: string, body: unknown) => {
+      if (path.endsWith('/worker-verification')) {
+        requests.push({ path, body });
+        return { record: { key: 'GY-1', head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun };
+      }
+      calls.push({ path, body }); return { key: 'GY-1', submission: { epoch: 1, pr: 7 } };
+    },
+    print: (value: unknown) => printed.push(value), repositoryRoot: () => work,
+  } as unknown as CliContext;
   await completeCommand.run(context, { id: 'id-1', key: 'GY-1' } as never);
+  assert.deepEqual(requests, [{ path: 'work/id-1/worker-verification', body: { mode: 'complete', head, epoch: 1 } }]);
   // The submission went out with the named head ...
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
   assert.equal(printed[0].submission.pr, 7);
@@ -47,7 +63,10 @@ test('unit:complete-explicit-head-no-push — complete GY-N EPOCH --head SHA att
   assert.equal(existsSync(attempts), false, 'complete --head attempted a git push');
   // The bare `--head` form reads the worktree's HEAD and submits it under the same no-push rule.
   calls.length = 0;
+  rerun = { flaked: [{ case: 'unit:flaked', file: 'tests/flaked.test.ts', line: 1, durationMs: 5 }],
+    baseFailures: [{ case: 'unit:base', file: 'tests/base.test.ts', line: 2, durationMs: 5 }],
+    note: { note: 'base comparison unavailable', output: 'runner unavailable' } };
   await completeCommand.run({ ...context, args: ['1', '--head'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never);
-  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
+  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head, flaked: rerun.flaked, baseFailures: rerun.baseFailures, rerunUnjudged: rerun.note } }]);
   assert.equal(existsSync(attempts), false, 'complete --head attempted a git push');
 });

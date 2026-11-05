@@ -36,7 +36,7 @@ test('unit:plain-status-words-case — the Work page shows In review and Live an
     await database.initialise(); await database.start(); await database.createDatabase('plain_status_words');
     store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/plain_status_words`); await store.init();
     const engine = new Engine(store, 120, '');
-    http = server(engine, [{ ...operator, token }], null, {});
+    http = server(engine, [{ ...operator, token }], {});
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${(http!.address() as { port: number }).port}`;
 

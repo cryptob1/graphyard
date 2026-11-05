@@ -128,6 +128,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:a0047ee2fd35c862cfd4e38f8bf33620933ea67ebe26f5092acca63f83eb9a5b',
   // GY-3088: the work index and work tables' session, queue and pane definitions.
   'sha256:661c3ea67aac115ddefbbbe929990108ae67c6a8f2bb22d34ce583be417b6274',
+  // GY-3018: retire validation runner and attribution tables after sign-in and work-index updates.
+  'sha256:a127cbeeb6417fece94948bf7e28c43443b9c1f66a39c2023d15779b9935e0d8',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
