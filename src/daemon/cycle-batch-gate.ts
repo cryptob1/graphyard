@@ -2,6 +2,7 @@
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
 import { bootstrapGate, gateLimitMs, gateOutcomeReason, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
+import { appendReleaseNote, releaseNote, releaseNotesPath } from '../release-notes.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -120,9 +121,15 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         // Each mid-flight write keeps the diagnostics' fields, as the settled gate's own write does:
         // the batch it carries — tip, files, checks, finished steps — is what the next loop adopts
         // after a restart (GY-3135).
+        const before = current.verified;
         const outcome = await runGate({ ...ports, checkpoint: () => mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt })) }, current);
         // The diagnostics' fields are theirs: a gate's write keeps what they recorded meanwhile.
         await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt }));
+        if (outcome.outcome === 'verified' && before) {
+          const landings = await ports.landings(before, outcome.tip);
+          const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+          await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
+        }
         if (outcome.outcome !== 'idle') {
           const reason = gateOutcomeReason(outcome);
           note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}`);

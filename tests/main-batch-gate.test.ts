@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { bootstrapGate, catalogBudgetMs, catalogFits, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -554,4 +555,30 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     assert.equal(record.inFlight?.tip, realTip, 'the failed run leaves its batch standing for the next loop to adopt');
     assert.ok(lines.some(line => line.includes('The batch gate failed and runs again next cycle') && line.includes('the trial container is gone')), 'the journal names the error outcome');
   }
+});
+
+test('unit:verified-batch-release-note — a verified batch appends a release note of its items with their summaries and bound cases, the reverted listed apart, the latest 20 kept', async () => {
+  const { coordinator, verified, tip, work } = await fixture('batch-gate-release-note', 'GY-2');
+  await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+  await writeFile(deployRecordPath(coordinator), JSON.stringify({ tip: verified, failed: null, reason: null, at: new Date().toISOString(), repository }));
+  work[0]!.summary = 'GY-1 summary';
+  work[0]!.description = 'First sentence. Second sentence.';
+  work[2]!.criteria = [{ id: 'AC-1', text: 'works', proofs: ['unit:y'] }] as Work['criteria'];
+  const loop = reads(coordinator, { gate: { root: coordinator, repository }, failing: commit => (commit === tip ? ['e2e:case-2'] : []) });
+  const first = await batchGateStep(cycleWith(loop.value, work));
+  await first!.gate; await first!.diagnostics;
+  assert.equal(readGateRecord(gateRecordPath(coordinator))!.lastOutcome?.outcome, 'reverted');
+  await (await batchGateStep(cycleWith(loop.value, work)))!.gate; // the recut batch verifies
+  const notes = readReleaseNotes(releaseNotesPath(coordinator));
+  const note = notes.at(-1)!;
+  assert.equal(note.commit, readGateRecord(gateRecordPath(coordinator))!.verified);
+  assert.ok(note.reverted.some(entry => entry.key === 'GY-2'));
+  assert.equal(note.items.find(entry => entry.key === 'GY-1')?.summary, 'GY-1 summary');
+  assert.deepEqual(note.items.find(entry => entry.key === 'GY-1')?.cases, ['e2e:case-1']);
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: work[0]! }], new Set()).items.length, 1);
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: { ...work[0]!, summary: '' } }], new Set()).items[0]!.summary, 'First sentence.');
+  assert.equal(releaseNote('c', 'now', [{ sha: 'a', item: work[2]! }], new Set()).items[0]!.cases.length, 0);
+  for (let n = 0; n < 25; n++) await appendReleaseNote(releaseNotesPath(coordinator), note);
+  assert.equal(readReleaseNotes(releaseNotesPath(coordinator)).length, 20);
+  assert.match(latestReleaseNote(releaseNotesPath(coordinator))!.items.join('\n'), /GY-3.*no E2E case/);
 });

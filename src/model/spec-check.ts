@@ -46,7 +46,7 @@ declare module './work.js' {
 export const specCheckLaunchMs = 3_600_000;
 
 /** Who owes one: every feature item; bugs and chores skip it, as EGM skips small clear fixes. */
-export const needsSpecCheck = (work: Pick<Work, 'type'>): boolean => work.type === 'feature';
+export const needsSpecCheck = (work: Pick<Work, 'type' | 'yardRepair'>): boolean => work.type === 'feature' && !work.yardRepair;
 
 /** The check that judged the item's current requirements, or null: master requirements bumped the revision, so one more check runs before dispatch. */
 export const specCheckCurrent = (work: Pick<Work, 'specCheck' | 'policyRevision'>): SpecCheck | null =>

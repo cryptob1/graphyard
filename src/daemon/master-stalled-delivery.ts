@@ -55,6 +55,8 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   for (const [key, action] of Object.entries(actions)) {
     // GY-3122: a disk shortage the loop could not reclaim names no item, and holds every trial and worker.
     if (key === 'disk-headroom') { if (action.state === 'failed') causes.push(cause('disk-headroom', action.detail)); continue; }
+    // GY-3103: a failed runtime canary names its runtime, not an item the master would see open.
+    if (key.startsWith('runtime-canary:')) { if (action.state === 'failed') causes.push(cause(key, action.detail)); continue; }
     const item = open.find(item => item.key === action.work);
     const earlyExit = key.startsWith('early-exit:');
     if (!item || (!earlyExit && action.epoch !== null && action.epoch !== item.epoch)) continue;
