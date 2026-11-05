@@ -194,11 +194,12 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
  * The git half of the deploy unit's ports: fetch Graphyard's own main (GY-2982) — never the managed
  * repository's base branch, which Graphyard's origin may not have — read HEAD, check a commit out detached.
  */
-export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout'> {
+export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout' | 'contains'> {
   const git = async (...args: string[]) => String(await run('git', ['-C', cliRoot, ...args])).trim();
   return {
     fetch: async () => { await git('fetch', '--quiet', 'origin', graphyardBaseBranch); return git('rev-parse', `refs/remotes/origin/${graphyardBaseBranch}`); },
     head: () => git('rev-parse', 'HEAD'),
+    contains: async (ancestor, commit) => { try { await git('merge-base', '--is-ancestor', ancestor, commit); return true; } catch { return false; } },
     checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
   };
 }

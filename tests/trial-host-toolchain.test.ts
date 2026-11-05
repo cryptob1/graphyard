@@ -108,7 +108,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
       return defaultChildRun(command, args, options);
     };
     const ports: MergePorts = {
-      baseBranch: 'main', retrials: 0, now: Date.now, fetch: async () => input.mergeSha,
+      baseBranch: 'main', now: Date.now, fetch: async () => input.mergeSha,
       merge: async () => ({ mergeSha: input.mergeSha, files: input.changedFiles }),
       trial: async () => ({ ...await runTrial({ ...input, run, retries: 1 }), files: [], proofs: {} }),
       holds: async () => false, push: async () => { throw Error('must not push'); },
@@ -142,7 +142,7 @@ test('unit:trial-build-failure-names-cause — a real build failure refuses with
   assert.ok(reason.length <= 2000);
   const events: MergeRecordEvent[] = [];
   const refused = await mergeOne({
-    baseBranch: 'main', retrials: 0, now: Date.now, fetch: async () => broken.mergeSha,
+    baseBranch: 'main', now: Date.now, fetch: async () => broken.mergeSha,
     merge: async () => ({ mergeSha: broken.mergeSha, files: broken.changedFiles }),
     trial: async () => ({ ...result, files: [], proofs: {} }),
     holds: async () => false, push: async () => { throw Error('must not push'); },
@@ -163,7 +163,7 @@ test('unit:trial-build-failure-names-cause — a real build failure refuses with
     assert.equal(missingResult.build, 'fail', diagnostic);
     const missingEvents: MergeRecordEvent[] = [];
     const missingRefusal = await mergeOne({
-      baseBranch: 'main', retrials: 0, now: Date.now, fetch: async () => missing.mergeSha,
+      baseBranch: 'main', now: Date.now, fetch: async () => missing.mergeSha,
       merge: async () => ({ mergeSha: missing.mergeSha, files: missing.changedFiles }),
       trial: async () => ({ ...missingResult, files: [], proofs: {} }),
       holds: async () => false, push: async () => { throw Error('must not push'); },

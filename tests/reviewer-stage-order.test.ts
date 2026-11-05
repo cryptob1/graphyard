@@ -54,7 +54,7 @@ test('integration:reviewer-stage-order — approval starts the GY-3044 trial wit
       })),
     };
     const ports: MergePorts = {
-      baseBranch: 'main', retrials: 0, now: () => 0, fetch: async () => base,
+      baseBranch: 'main', now: () => 0, fetch: async () => base,
       merge: async trialHead => { assert.equal(trialHead, head); return { mergeSha: head, files: run.files }; },
       trial: async (sha, _files, item) => {
         assert.equal(sha, head); assert.deepEqual(item.criteria, criteria); order.push('trial'); return run;
