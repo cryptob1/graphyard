@@ -5,10 +5,18 @@ import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
-import { endRegistrySlot, endRegistrySessionById } from '../master/registry-slot.js';
+import { endRegistrySlot, endRegistrySessionById, liveMasterSessions } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
-import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, preservePartialWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
+import { type MasterConfig } from '../master/profiles.js';
+import { agentToken } from '../master/autonomy.js';
+import { listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson } from '../master/herdr.js';
+import { readSessionScreen, preservePartialWork } from '../master/launch.js';
+import { inspectWorkerCredentials } from '../master/config.js';
+import { dispatchWork } from '../master/dispatch.js';
+import { removeAttemptWorktree } from '../master/worktrees.js';
+import { profileAccount, recordObservedExhaustion } from '../master/environments.js';
+import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeCandidateHold } from '../merge-writer/executor.js';
@@ -164,6 +172,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     personalMasterSession: config => ({
       ...masterSessionEffects(root, () => config, run),
       end: (session, reason) => endRegistrySessionById(config, session, reason),
+      live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
     masterSession: {
@@ -175,6 +184,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       },
       // The registry session the closed or vanished pane ran under is ended, so the role's one slot frees for the next account; the registry's end is idempotent.
       end: (session, reason) => endRegistrySessionById(current(), session, reason),
+      live: () => liveMasterSessions(current()),
     },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
     // GY-2990: it also reads the served commit's required-cases verdict beside the checkout, and

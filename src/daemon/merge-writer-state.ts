@@ -36,6 +36,8 @@ const revertFlightSchema = z.object({ serve: shaField, mergeSha: shaField, rever
 export type RevertFlight = z.infer<typeof revertFlightSchema>;
 /** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first (a trial-timeout yield last, GY-2079), the merge in flight, the newest refusals, the reworks still to be confirmed, and the heads yielding their queue turn. */
 export const mergeWriterStateSchema = z.object({
+  trials: z.array(z.object({ mergeSha: shaField, startedAt: instant, finishedAt: instant, heads: z.array(z.object({ key: z.string(), head: shaField }).strict()),
+    steps: z.array(z.object({ step: z.string(), durationMs: z.number().min(0) }).strict()) }).strict()).max(20).optional(),
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
   /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */

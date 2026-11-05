@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import { emptyDaemonState, runDaemon, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, writeDaemonState } from '../src/daemon/state.js';
+import { runDaemon } from '../src/daemon/run.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
