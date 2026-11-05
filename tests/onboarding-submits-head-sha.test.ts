@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -26,7 +26,7 @@ const token = 'o'.repeat(40);
 const git = (args: readonly string[], cwd?: string) => execFileSync('git', cwd ? ['-C', cwd, ...args] : [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 let fixtureRoot: string, checkout: string, baseTip: string;
-let pg: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
   // The operator's checkout and its origin, laid out as a fresh repository is: main pushed, and the
@@ -47,10 +47,7 @@ before(async () => {
   await writeFile(join(checkout, '.gitignore'), '.graphyard/\n');
   await writeFile(join(checkout, 'graphyard.json'), '{}\n');
 
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 938;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('onboarding-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('onboarding_head_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/onboarding_head_test`); await store.init();
+  store = await withDatabase('onboarding-submits-head-sha'); await store.init();
   // The control plane is the merge writer: it observes submitted heads from this checkout's own object store.
   engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
@@ -62,7 +59,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (pg) await pg.stop();
   if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true });
 });
 

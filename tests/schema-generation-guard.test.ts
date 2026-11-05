@@ -1,27 +1,21 @@
-import { before, after, test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { schemaGenerations, schemaVersion } from '../src/store/schema-lineage.js';
 import { currentSchemaCode, runStartupMigration, schemaGenerationDigest, type SchemaCode } from '../src/store/migration-locks.js';
 import { retiredTables } from '../src/store/schema.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1961: the schema generation follows the table definitions, so a release whose definitions are
 // older than the ones that migrated the database refuses before any statement runs, instead of
 // re-running its older DDL over the newer schema and overwriting the recorded digests.
-let postgres: EmbeddedPostgres, port: number;
-const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:${port}/${database}`;
+
+const urls = new Map<string, string>();
+const url = (database: string) => urls.get(database)!;
 
 before(async () => {
-  port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1961;
-  const scratch = await temporaryDirectory('schema-generation-guard');
-  postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await postgres.initialise(); await postgres.start();
-  await postgres.createDatabase('guard');
+  urls.set('guard', await databaseUrl('schema-generation-guard' + '-' + 'guard'));
 });
-after(async () => { if (postgres) await postgres.stop(); });
 
 /** The code a later release carries: one table's definition changed, so its generation is one newer. */
 const later = (code: SchemaCode, release: string, index: string): SchemaCode => {

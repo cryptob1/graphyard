@@ -2,25 +2,28 @@ Paths: src/store/**, src/store.ts, src/engine.ts
 
 ## Tests
 
-- `tests/store-locks.test.ts`: advisory locks and the coordination index matching the documents.
+- `tests/test-postgres-helper.test.ts`: shared-cluster lifecycle, isolation, fixture scan.
+- `tests/store-locks.test.ts`: advisory locks and the coordination index.
 - `tests/per-item-locking.test.ts`: fleet-then-item lock order, renewals never overwritten.
 - `tests/locked-read.test.ts`, `tests/snapshot-bounded-reads.test.ts`: bounded snapshot reads.
 - `tests/ledger-compaction.test.ts`, `tests/store-init.test.ts`, `tests/store-close.test.ts`.
 
 ## Drive
 
-Run one file with `node --import tsx tests/helpers/run-tests.ts` followed by its path; it starts an embedded Postgres on a reserved port, so never point a test at production data. Set `TMPDIR` to a scratch directory if `/tmp` is short of quota.
+Run one file: `node --import tsx tests/helpers/run-tests.ts tests/store-locks.test.ts`. The runner owns one shared Postgres for the run; never point a test at production data. Set `TMPDIR` to scratch if `/tmp` is short of quota.
 
 ## Invariants
 
-- Every domain mutation is one transaction that appends history and checks principal identity and lease epoch.
-- Locks are taken fleet first, then item (`src/store/item-lock.ts`); a heartbeat takes only its item lock.
-- The coordination index is written in the same transaction as the document it summarizes.
+- Every domain mutation is one transaction appending history, checking principal identity and lease epoch.
+- Locks go fleet first, then item (`src/store/item-lock.ts`); a heartbeat takes only its item lock.
+- The coordination index is written with the document it summarizes, in one transaction.
 - External I/O (GitHub, git, Herdr) never runs inside a coordination transaction.
 
 ## Gotchas
 
-- A test that stops its Postgres awaits `store.close()`, never `store.pool.end()`.
-- Temporary directories come from `temporaryDirectory()` in `tests/helpers/temp-dirs.ts`, never a bare `mkdtemp`.
+- `await withDatabase(label)`, then `store.init()` and `store.close()` in teardown. Labels may repeat: every allocation is its own database; no fixture assigns a Postgres port.
+- Migration, backup and child-server tests keep `databaseUrl(label)` URLs for replicas. Outage tests use `databaseAvailable(url, false)`, which disconnects only their own clients. Scope `pg_locks`/`pg_stat_activity` probes to the current database.
+- Direct `node --test` runs get one cluster per process from the same helper; private-root checks start it in their isolated process.
+- Temporary directories come from `temporaryDirectory()` (`tests/helpers/temp-dirs.ts`), never a bare `mkdtemp`.
 - Each advisory lock id in `src/store/locks.ts` belongs to one concern; never reuse one.
-- A stale write retries on a fresh transaction: keep transaction bodies free of side effects.
+- A stale write retries on a fresh transaction: keep transaction bodies side-effect free.

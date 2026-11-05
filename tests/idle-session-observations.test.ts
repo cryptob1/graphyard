@@ -8,7 +8,7 @@ import { proposedRuntimes } from '../src/model/registry.js';
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -35,7 +35,7 @@ const workerA: Principal = { id: 'worker-a', role: 'worker', sessionKind: 'ai' }
 const credentials = [operator, coordinator, workerA].map(principal => ({ ...principal, token: `${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -61,13 +61,7 @@ const item = async (key: string, title: string) => {
 };
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3074;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('idle-stall-db'), user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('idle_stall');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/idle_stall`);
+  store = await withDatabase('idle-session-observations');
   await store.init();
   // A two-hour lease keeps every fixture lease live under the clock, which runs 45 minutes ahead.
   engine = new Engine(store, 7200, repository);
@@ -75,7 +69,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:idle-session-after-reprompt-is-ended — real observations preserve both idle windows, progress prevents closure, and stall recovery keeps the commit and frees the registry slot', async t => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');

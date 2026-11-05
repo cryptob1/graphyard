@@ -46,7 +46,7 @@ function fixture(free: number[], reclaimed: string[] = []) {
   ];
   const seen = { dispatched: [] as string[], trials: 0, reclaims: 0, readings: 0 };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 3, now: () => start, fetch: async () => tip,
+    baseBranch: 'main', now: () => start, fetch: async () => tip,
     merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     trial: async () => { seen.trials += 1; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }; },
     push: async () => 'pushed', holds: async () => false, record: async () => {},

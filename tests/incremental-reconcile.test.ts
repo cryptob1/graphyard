@@ -1,11 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -19,7 +18,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-1', role: 'worker' };
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 /**
  * Documents of work_items read whole by any query, counted from the rows each result returned, and
  * apart from them the compact projections the opening's locked read (GY-1027) builds in SQL for the
@@ -30,12 +29,7 @@ const projectionQuery = (text: unknown) => typeof text === 'string' && text.incl
 const documentQuery = (text: unknown) => typeof text === 'string' && !projectionQuery(text) && /\bfrom\s+work_items\b/i.test(text) && /\bdocument\b/i.test(text.split(/\bfrom\b/i)[0]) && /^\s*select/i.test(text);
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 125;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('incremental-reconcile'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store = await withDatabase('incremental-reconcile');
   for (const pool of [store.pool, store.leasePool]) pool.on('connect', client => {
     const query = client.query.bind(client) as (...args: unknown[]) => Promise<{ rowCount: number | null }>;
     (client as unknown as { query: (...args: unknown[]) => unknown }).query = async (...args: unknown[]) => {
@@ -55,7 +49,6 @@ before(async () => {
 
 after(async () => {
   await store?.close();
-  await database?.stop();
 });
 
 let created = 0;

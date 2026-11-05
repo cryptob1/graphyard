@@ -26,8 +26,7 @@ const dispatch = (history: { event: string; reason: string; result?: string | nu
 
 test('unit:build-without-session-reads-waiting — an item at build with no lease and no running session reads Waiting with its reason, never Building', async () => {
   // Imported when called, so the regression fails as a test case on a base without the stage label.
-  const { plainStage, stageLabel, noServe } = await import('../src/model/plain-stage.js');
-  const { noRelease } = await import('../src/model/release.js');
+  const { plainStage, stageLabel } = await import('../src/model/plain-stage.js');
   const refused = 'role worker is at its concurrency limit (2 of 2 live: claude-a on GY-1, codex on GY-2)';
   const cases: [string, Work, string | null][] = [
     ['no reason known', item(), null],
@@ -37,13 +36,13 @@ test('unit:build-without-session-reads-waiting — an item at build with no leas
     ['its lease expired and its session ended', item({ lease: { epoch: 1, owner: 'w', expiresAt: '2026-11-05T01:00:00Z' }, sessions: [{ id: 's', kind: 'implementation', state: 'ended' }] }), null],
   ];
   for (const [name, work, reason] of cases) {
-    assert.equal(plainStage(work, noRelease, noServe, now), 'Waiting', name);
+    assert.equal(plainStage(work, now), 'Waiting', name);
     const line = itemLine(work, now);
     assert.equal(line.stage, 'Waiting', `master status: ${name}`);
     assert.equal(line.waiting, reason, `master status names the reason: ${name}`);
     // The dashboard points at a recorded blocker rather than repeating it; the item page shows it once (GY-1739).
     const shown = work.blocker ? 'held by its recorded blocker' : reason;
-    assert.equal(stageLabel(work, noRelease, noServe, now), shown ? `Waiting: ${shown}` : 'Waiting', `dashboard stage label: ${name}`);
+    assert.equal(stageLabel(work, now), shown ? `Waiting: ${shown}` : 'Waiting', `dashboard stage label: ${name}`);
     assert.equal(prSteps(work, now).label, shown ? `Waiting · waiting for a builder: ${shown}` : 'Waiting · waiting for a builder', `dashboard row: ${name}`);
   }
 
@@ -52,10 +51,10 @@ test('unit:build-without-session-reads-waiting — an item at build with no leas
     ['a live lease', item({ lease: { epoch: 1, owner: 'w', expiresAt: '2026-11-05T03:00:00Z' } })],
     ['a running session', item({ sessions: [{ id: 's', kind: 'implementation', state: 'running' }] })],
   ] as const) {
-    assert.equal(plainStage(work, noRelease, noServe, now), 'Building', name);
+    assert.equal(plainStage(work, now), 'Building', name);
     const line = itemLine(work, now);
     assert.equal(line.stage, 'Building', name);
     assert.equal('waiting' in line, false, `a building item carries no wait: ${name}`);
-    assert.equal(stageLabel(work, noRelease, noServe, now), 'Building', name);
+    assert.equal(stageLabel(work, now), 'Building', name);
   }
 });

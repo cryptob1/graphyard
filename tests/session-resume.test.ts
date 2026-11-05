@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
@@ -227,14 +227,11 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
 });
 
 for (const proof of ['integration:pre-submit-master-guidance', 'e2e:pre-submit-master-guidance']) test(`${proof} — applied guidance reaches a real never-submitted retry through fresh and resumed launch requests`, async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 112;
-  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pre-submit-guidance'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   let store: Store | undefined;
   const policy = repositoryPolicy();
   setRepositoryPolicy({ ...policy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
   try {
-    await pg.initialise(); await pg.start(); await pg.createDatabase('guidance');
-    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/guidance`); await store.init();
+    store = await withDatabase('session-resume'); await store.init();
     const engine = new Engine(store, 7200, 'owner/project');
     engine.operatorAuthorizer = async (_db, _now, actor) => actor;
     const master: Principal = { id: 'graphyard-master-project-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: ['*'] } };
@@ -272,6 +269,6 @@ for (const proof of ['integration:pre-submit-master-guidance', 'e2e:pre-submit-m
     assertGuidance(fresh.launches[0], 3);
   } finally {
     setRepositoryPolicy(policy);
-    await store?.close(); await pg.stop();
+    await store?.close();
   }
 });

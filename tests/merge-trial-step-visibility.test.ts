@@ -82,7 +82,7 @@ function harness(): StepHarness {
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   let clock = start, settle: (() => void) | null = null;
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => clock,
+    baseBranch: 'main', now: () => clock,
     fetch: async () => base,
     merge: async () => ({ mergeSha: sha('merge'), files: ['src/app.ts'] }),
     trial: async (_mergeSha, _files, _picked, _baseTip, onStep, onTiming) => {
@@ -184,7 +184,7 @@ async function fixtureRepo() {
   gitIn(root, 'init', '-q', '-b', 'main');
   const write = (path: string, content: string) => writeFileSync(join(root, path), content);
   write('package.json', JSON.stringify({ name: 'fixture', scripts: { build: 'node -e ""' } }));
-  write('graphyard.json', JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } } }));
+  write('graphyard.json', JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] } } }));
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
   const baseTip = gitIn(root, 'rev-parse', 'HEAD');
   gitIn(root, 'checkout', '-q', '--detach', baseTip);
@@ -216,7 +216,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 0, now: () => Date.now(),
+    baseBranch: 'main', now: () => Date.now(),
     fetch: async () => repo.baseTip,
     merge: (mergeHead, mergeBase) => trialMerge(repo.git, { head: mergeHead, baseTip: mergeBase }).then(merged => ('conflict' in merged ? merged : { mergeSha: merged.mergeSha, files: ['src.ts'] })),
     trial: async (mergeSha, files, picked, _baseTip, onStep, onTiming) => {
@@ -284,8 +284,8 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.deepEqual(first.steps, [{ step: 'install', durationMs: 100 }, { step: 'build', durationMs: 300 }, { step: 'push', durationMs: 0 }]);
 
   let clock = start, duration = 0;
-  const ports = timedMergePorts({ baseBranch: 'main', retrials: 0, fetch: async () => base,
-    merge: async () => ({ mergeSha: head, files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
+  const ports = timedMergePorts({ baseBranch: 'main', fetch: async () => base,
+    merge: async (mergeHead, baseTip) => ({ mergeSha: sha(`merge:${mergeHead}:${baseTip}`), files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
     step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
     return {} as never;
   }, push: async () => { clock += 20; return 'pushed'; }, preview: async () => { clock += 30; return null; } } as MergePorts,
@@ -301,13 +301,24 @@ test('integration:trial-step-timings — finished steps survive the flight and m
   assert.equal(summary.trials![0]!.mergeSha, sha('1'));
   assert.deepEqual(summary.trials![0]!.heads, heads);
   assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, preview: 30, push: 20 });
+
+  // GY-3120: a landing that re-merges onto a moved tip still records its push on the head's own trial record.
+  const remergeHead = sha('ninth');
+  await ports.trial(sha('nine'), [], item(), base, undefined, undefined, [{ key: 'GY-9', head: remergeHead }]);
+  const landing = await ports.merge(remergeHead, sha('moved'));
+  if (!('mergeSha' in landing)) throw new Error('the re-merge conflicts with its own base');
+  await ports.push(landing.mergeSha, sha('moved'));
+  const record = mergeWriterSummary(made.state.mergeWriter).trials!.find(entry => entry.mergeSha === sha('nine'))!;
+  assert.deepEqual(record.steps.at(-1), { step: 'push', durationMs: 20 });
 });
 
 test('integration:trial-step-timings — parallel test shards report their own durations', async () => {
   const repo = await fixtureRepo();
   await mkdir(join(repo.root, 'scripts'));
   await writeFile(join(repo.root, 'scripts/ci-tests.mjs'), '// fixture selection\n');
-  gitIn(repo.root, 'add', 'scripts/ci-tests.mjs');
+  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({ delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'node tests/helpers/run-tests.ts', source: 'script', reason: 'fixture',
+    selection: { command: 'node scripts/ci-tests.mjs affected', pattern: '^tests/[\\w./-]+\\.test\\.ts$' } }], perCandidate: [] } } }));
+  gitIn(repo.root, 'add', 'scripts/ci-tests.mjs', 'graphyard.json');
   gitIn(repo.root, 'commit', '-q', '-m', 'test selector');
   const mergeSha = gitIn(repo.root, 'rev-parse', 'HEAD');
   const scratch = await temporaryDirectory('timed-shards');
@@ -338,7 +349,7 @@ test('integration:trial-step-timings — bound E2E success and failure have sepa
   await writeFile(join(repo.root, 'e2e/cases/timed.json'), '{}');
   await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({
     e2e: { serve: { command: 'node server.js', url: 'http://127.0.0.1:8080', readySeconds: 10 } },
-    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } },
+    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] } },
   }));
   gitIn(repo.root, 'add', '-A');
   gitIn(repo.root, 'commit', '-q', '-m', 'bound E2E fixture');

@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import type { ServeCheck } from '../serve-app.js';
-import { servedFor, type ReleaseView } from './release.js';
+import { noRelease, servedFor, type ReleaseView } from './release.js';
 
 /**
  * Plain words for an item's derived stage (GY-2988). The control plane still derives
@@ -65,9 +65,9 @@ export function waitingReason(work: Work): string | null {
 /** The wait a dashboard shows: a recorded blocker is pointed at, never repeated, since the item page shows it once (GY-1739). */
 export const waitingLabel = (work: Work) => work.blocker ? 'held by its recorded blocker' : waitingReason(work);
 
-/** The stage label a page shows: the plain stage, and for Waiting its reason when known (GY-3095). */
-export function stageLabel(work: Work, release: ReleaseView, serve: ServeView, now: number): string {
-  const plain = plainStage(work, release, serve, now), reason = plain === 'Waiting' ? waitingLabel(work) : null;
+/** The stage label a page shows: the plain stage, and for Waiting its reason when known (GY-3095). The caller supplies the clock. */
+export function stageLabel(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): string {
+  const plain = plainStage(work, now, release, serve), reason = plain === 'Waiting' ? waitingLabel(work) : null;
   return reason ? `Waiting: ${reason}` : plain;
 }
 
@@ -76,7 +76,7 @@ export function stageLabel(work: Work, release: ReleaseView, serve: ServeView, n
  * only refine a delivered item. A verdict on the served commit names an item only when that
  * commit is the item's own merge, or the failing case is one of the item's proofs.
  */
-export function plainStage(work: Work, release: ReleaseView, serve: ServeView, now: number): PlainStage {
+export function plainStage(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PlainStage {
   switch (work.stage) {
     case 'backlog': case 'ready': return 'Not started';
     case 'build': return building(work, now) ? 'Building' : 'Waiting';

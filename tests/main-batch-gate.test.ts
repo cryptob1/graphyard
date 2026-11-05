@@ -66,7 +66,7 @@ function reads(coordinator: string, options: { gate?: { root: string; repository
   const brokenCases = (commit: string) => run('ls-tree', '-r', '--name-only', commit, 'src').split('\n').filter(Boolean)
     .filter(file => run('show', `${commit}:${file}`) === 'broken').map(file => `e2e:case-${/f(\d+)/.exec(file)![1]}`);
   const value: MergeWriterReads = {
-    baseBranch: 'main', retrials: 0, now: Date.now,
+    baseBranch: 'main', now: Date.now,
     fetch: async () => { run('fetch', '-q', 'origin', 'main'); return run('rev-parse', 'origin/main'); },
     git: async (args, extra) => execFileSync('git', ['-C', coordinator, ...args], { encoding: 'utf8', env: { ...env, ...extra } }),
     merge: async () => { throw new Error('unused'); },

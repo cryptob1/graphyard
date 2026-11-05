@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Every fixture item carries an E2E proof and declares the serve its trial needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -144,7 +143,6 @@ async function exercise(url: string, principals: unknown[], inventory = createIn
     [[stopped!.actor.id, reserved.host, reserved.path, 1], [replacement!.actor.id, own.host, own.path, 2]]);
   inventory.pass('isolated-worktrees');
 
-
   assert.deepEqual(inventory.cases, requiredCases.map(id => ({ id, result: 'pass' })));
   return inventory.cases;
 }
@@ -156,21 +154,19 @@ const leaseSeconds = 5;
 const shortFences = { leaseMs: leaseSeconds * 1000 };
 const operator: Principal = { id: 'recovery-operator', role: 'admin' };
 const machines = [1, 2].map(n => ({ id: `recovery-machine-${n}`, role: 'worker' as const, token: `test-machine-${n}-${'x'.repeat(32)}` }));
-let pg: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let url: string;
+let store: Store; let http: ReturnType<typeof server>; let url: string;
 const identities = () => [{ ...operator, token: 'r'.repeat(32) }, ...machines];
 const run = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => exercise(target, principals, inventory, fences);
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_HERDR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7);
   // The suite connects over TCP, so no Unix-domain socket is needed (GY-3001): disabling it
 // lets this run where socket creation is unavailable while changing nothing over TCP.
-pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1', '-k', ''] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
+
+  store = await withDatabase('herdr-recovery'); await store.init();
   http = server(new Engine(store, leaseSeconds, 'owner/project'), [{ ...operator, token: 'r'.repeat(32) }, ...machines]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
 // Proxy the real server and weaken exactly one refusal, proving each case is not vacuous.
 // `preserve` passes that many genuine refusals on the route through untouched first, so a later

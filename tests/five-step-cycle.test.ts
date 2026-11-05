@@ -18,7 +18,7 @@ const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const tip = sha('main-tip');
 const worker = { name: 'w1', principal: 'w1-principal', agentName: 'agent-w1', mode: 'launch', kind: 'claude', credentialFile: '/outside/w1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [worker], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [worker], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const gates = (passed: string[]) => ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: passed.includes(name), reasons: passed.includes(name) ? [] : [`${name} refused`] }));
 const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
@@ -44,7 +44,7 @@ function store() {
 function mergePorts() {
   const events: { key: string; kind: string }[] = [];
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 3, now: () => start,
+    baseBranch: 'main', now: () => start,
     fetch: async () => tip,
     merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     trial: async () => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),
@@ -104,7 +104,7 @@ test('unit:five-step-cycle — merging a head runs exactly one trial for it and 
   let trials = 0, now = start, baseTip = tip;
   const mergedSha = sha(`merge:${candidate.sha}`), events: MergeRecordEvent[] = [];
   const ports: MergePorts = {
-    baseBranch: 'main', retrials: 3, now: () => now,
+    baseBranch: 'main', now: () => now,
     fetch: async () => baseTip,
     merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     trial: async () => { trials += 1; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }; },

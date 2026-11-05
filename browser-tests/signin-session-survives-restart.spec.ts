@@ -3,7 +3,7 @@ import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { signInProcess } from '../tests/helpers/sign-in-process';
 
 test('e2e:signin-session-survives-restart — login link remains signed in after server restart and sign-out revokes it', async ({ page }) => {
-  const database = await signInDatabase(3079);
+  const database = await signInDatabase();
   let http = await signInProcess(database.url);
   try {
     // The UI is served by Vite; all API requests reach the real, restartable control plane.

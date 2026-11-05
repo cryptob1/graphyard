@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { AgentRegistry } from '../src/agent-registry.js';
@@ -12,14 +12,10 @@ import { recordObservedExhaustion, selectAccount, masterConfigSchema, readEnviro
 import type { FleetClient } from '../src/fleet.js';
 
 const actor = { id: 'executor', role: 'coordinator' as const }, hostId = 'registry-test-host';
-let database: EmbeddedPostgres, store: Store, registry: AgentRegistry, root: string;
+let store: Store, registry: AgentRegistry, root: string;
 before(async () => {
   root = await temporaryDirectory('registry-slot-authority');
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 46;
-  database = new EmbeddedPostgres({ databaseDir: join(root, 'pg'), user: 'graphyard', password: 'test', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('slots');
-  store = new Store(`postgres://graphyard:test@127.0.0.1:${port}/slots`); await store.init();
+  store = await withDatabase('registry-slot-authority'); await store.init();
   registry = new AgentRegistry(store);
   await registry.mutate(actor, 'apply', {
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'opus', id: 'opus' }],
@@ -27,7 +23,7 @@ before(async () => {
     roles: [{ name: 'worker', accounts: ['account-a', 'account-b'], concurrency: 1 }], reason: 'slot test',
   }, randomUUID());
 });
-after(async () => { await store?.close(); await database?.stop(); });
+after(async () => { await store?.close(); });
 const client = (): FleetClient => ({
   document: () => registry.document(actor),
   select: request => registry.select(actor, request, randomUUID()) as ReturnType<FleetClient['select']>,

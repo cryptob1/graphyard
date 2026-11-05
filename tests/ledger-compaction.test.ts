@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, save, applyWorkDelta, documentBefore, resolvedPayloadSql, routineSaveKinds, snapshotEvery, type WorkDelta } from '../src/store.js';
 import { compactLedger, ledgerCompactedKind, ledgerRetentionMs, configuredLedgerRetentionMs } from '../src/store/compaction.js';
 import { DELIVERY_EVENT_PREDICATE } from '../src/store/tables/production.js';
@@ -10,7 +10,6 @@ import { Engine } from '../src/engine.js';
 import { defaultDatabaseMaxBytes, readDatabaseCapacity } from '../src/server/plane-health.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -23,17 +22,14 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
  */
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let serial = 0;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 979;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('ledger-compaction'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('ledger_compaction_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_test`); await store.init();
+  store = await withDatabase('ledger-compaction'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -47,7 +43,7 @@ const atRevision = async (id: string, revision: number) => (await store.pool.que
 async function seeded(): Promise<Work> {
   const id = randomUUID(); const n = ++serial;
   const work = { id, key: `GY-C${n}`, title: `Compaction ${n}`, type: 'feature', priority: 3, stage: 'build', ready: true, revision: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    epoch: 1, lease: { epoch: 1, owner: 'implementer', expiresAt: new Date().toISOString() }, submission: null, workspaces: [], dependencies: [], evidence: [], 
+    epoch: 1, lease: { epoch: 1, owner: 'implementer', expiresAt: new Date().toISOString() }, submission: null, workspaces: [], dependencies: [], evidence: [],
     criteria: [{ id: 'AC-1', text: randomBytes(1500).toString('hex'), proofs: ['integration:x'] }], actionQueue: { actions: [] as any[] }, gates: [] } as unknown as Work;
   await store.pool.query('INSERT INTO work_items(id, document) VALUES($1,$2)', [id, JSON.stringify(work)]);
   await write(work, 'create');
@@ -251,9 +247,7 @@ test('integration:ledger-compaction-completes — on a generated ledger of hundr
   // GY-3111: a candidate query over the whole ledger ordered by age ran past the statement timeout and
   // rolled back every batch. Generated here, never production data: items with a create row, then
   // segments of three whole routine rows (the first two extended by nothing) and deltas on the third.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 979;
-  await pg.createDatabase('ledger_compaction_scale');
-  const scale = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_scale`);
+  const scale = await withDatabase('ledger-compaction-scale');
   try {
     await scale.init();
     const itemCount = 400, segments = 6, deltas = 120;

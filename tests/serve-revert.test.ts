@@ -274,7 +274,7 @@ test('unit:serve-revert — the loop step drives the production path: the served
   // The loop's own ports over the temporary origin: real git and the served.json fixture through
   // the serve record the deploy unit writes, a capturing trial, and a leased push to the origin.
   const reads: MergeWriterReads = {
-    baseBranch: 'main', retrials: 1, now: () => start,
+    baseBranch: 'main', now: () => start,
     git: async (args, extra) => gitEnv(coordinator, ['-C', coordinator, ...args], extra ?? {}),
     fetch: async () => { git(coordinator, 'fetch', '-q', '--no-tags', 'origin', 'main'); return git(coordinator, 'rev-parse', 'origin/main'); },
     merge: async () => { throw new Error('no merge in the serve-revert loop test'); },
@@ -337,7 +337,7 @@ test('unit:serve-revert — the loop step drives the production path: the served
 function loopReads(coordinator: string, origin: string, servedFile: string, state: { nowMs: number; fetches: number },
   trial: (item: unknown) => Promise<MergeTrialRun> | MergeTrialRun, tried: unknown[], filed: RelandInput[]): MergeWriterReads {
   return {
-    baseBranch: 'main', retrials: 1, now: () => state.nowMs,
+    baseBranch: 'main', now: () => state.nowMs,
     git: async (args, extra) => gitEnv(coordinator, ['-C', coordinator, ...args], extra ?? {}),
     fetch: async () => { state.fetches++; git(coordinator, 'fetch', '-q', '--no-tags', 'origin', 'main'); return git(coordinator, 'rev-parse', 'origin/main'); },
     merge: async () => { throw new Error('no merge in the serve-revert retry test'); },

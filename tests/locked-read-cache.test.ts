@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { boundLockedCache, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, type Queryable } from '../src/store/locked-read.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -16,17 +15,13 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'engineer-a', role: 'worker', runtime: 'claude', sessionKind: 'ai' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_FOLLOWUPS_1042_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1042);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('followups-1042'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('followups_1042');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/followups_1042`); await store.init();
+  store = await withDatabase('locked-read-cache'); await store.init();
   engine = new Engine(store, 120, 'owner/followups');
   engine.principals = [operator, worker];
 });
-after(async () => { boundLockedCache(); if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { boundLockedCache(); if (store) await store.close(); });
 
 const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x', 'e2e:fixture'] }] }, randomUUID());
 /** `db` with every query's text recorded. */
@@ -118,5 +113,4 @@ test('unit:projection-contract — an open item\'s projection leaves out its per
   const whole = (await withWhole(store.pool, await lockedWork(store.pool, []), item => item.stage !== 'done' && !!item.submission)).find(item => item.id === peer.id)!;
   assert.ok(!isStandIn(whole));
   assert.deepEqual(whole.observation?.scopeFiles, scopeFiles, 'read whole, the peer carries its scope for the landing check');
-
 });

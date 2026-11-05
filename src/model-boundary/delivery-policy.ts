@@ -7,6 +7,12 @@ export const gateCheckSchema = z.object({
   check: z.string().trim().min(1).max(100),
   command: z.string().max(500).nullable(),
   source: z.enum(['script', 'workflow', 'framework']),
+  paths: z.array(z.string().min(1)).optional(),
+  selection: z.object({
+    command: z.string().min(1),
+    pattern: z.string().min(1),
+    durations: z.string().min(1).optional(),
+  }).strict().optional(),
   reason: z.string().max(300),
 }).strict();
 

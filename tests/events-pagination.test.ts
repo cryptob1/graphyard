@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -21,7 +21,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
 const tokens = { operator: 'o'.repeat(32), worker: 'w'.repeat(32) };
 
-let database: EmbeddedPostgres; let store: Store; let engine: Engine;
+let store: Store; let engine: Engine;
 let http: ReturnType<typeof server>; let url: string; let item: Work;
 
 // Enough routine rows that the whole lifecycle sits well beyond a 300-row window, as it does on a
@@ -29,10 +29,7 @@ let http: ReturnType<typeof server>; let url: string; let item: Work;
 const NOISE = 600;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_EVENTS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 25);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('events'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_events');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_events`);
+  store = await withDatabase('events-pagination');
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   http = server(engine, [{ ...operator, token: tokens.operator }, { ...worker, token: tokens.worker }]);
@@ -43,7 +40,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (database) await database.stop();
 });
 
 /** Routine rows exactly as the control plane writes them: the whole document, one row per pass. */
@@ -58,8 +54,8 @@ async function noise(work: Work, rows = NOISE) {
 
 /** One item's whole life: three attempts, a blocked report that ended the first, a rework round and two submissions. */
 async function lifecycle() {
-  let work = await engine.execute(operator, 'create', null, { type: 'chore', 
-    title: 'An item whose history outlives one page', 
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',
+    title: 'An item whose history outlives one page',
     criteria: [{ id: 'AC-1', text: 'History is readable at any age', proofs: ['integration:events-pagination', 'e2e:fixture'] }],
   }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());

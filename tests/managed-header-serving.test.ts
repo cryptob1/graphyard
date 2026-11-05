@@ -5,7 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -22,7 +22,7 @@ const game = 'owner/openworld', plane = 'f'.repeat(40);
 const operator: Principal = { id: 'operator', role: 'admin' };
 const tokens = new Map([[operator.id, `operator-${'t'.repeat(32)}`]]);
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, root: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, root: string;
 let tipB = '', main = '';
 
 const git = (args: string[], cwd = root) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
@@ -46,10 +46,8 @@ before(async () => {
   tipB = await commit('second');
   main = await commit('third');
   process.env.GRAPHYARD_REPOSITORY_ROOT = root;
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3012;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('managed-header-serving'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('managed_header_serving');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_header_serving`); await store.init();
+
+  store = await withDatabase('managed-header-serving'); await store.init();
   engine = new Engine(store, 120, game);
   // The control plane's own build identity, which is never the managed repository's serving commit.
   http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], { env: { GRAPHYARD_BUILD_SHA: plane } });
@@ -59,7 +57,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (database) await database.stop();
   delete process.env.GRAPHYARD_REPOSITORY_ROOT;
 });
 

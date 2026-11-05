@@ -86,5 +86,47 @@
     "ui": [
       "web/"
     ]
+  },
+  "delivery": {
+    "mode": "local",
+    "mergeGate": {
+      "preMerge": [
+        {
+          "check": "browser-tests/",
+          "command": "npm run test:browser",
+          "source": "script",
+          "reason": "Dashboard changes run the browser suite",
+          "paths": [
+            "web/",
+            "browser-tests/",
+            "src/server/routes/",
+            "src/server/routes.ts",
+            "src/model/board.ts",
+            "scripts/dashboard-fixture.mjs",
+            "playwright.config.ts",
+            "vite.config.ts"
+          ]
+        },
+        {
+          "check": "test",
+          "command": "node --import tsx tests/helpers/run-tests.ts",
+          "source": "script",
+          "reason": "Run affected pre-merge tests in bounded shards",
+          "selection": {
+            "command": "node scripts/ci-tests.mjs affected",
+            "pattern": "^tests/[\\w./-]+\\.test\\.ts$",
+            "durations": "tests/helpers/timing-baseline.json"
+          }
+        }
+      ],
+      "perCandidate": []
+    },
+    "candidateSchedule": null,
+    "deploy": {
+      "adapter": "command",
+      "project": null,
+      "uat": null,
+      "production": null
+    }
   }
 }

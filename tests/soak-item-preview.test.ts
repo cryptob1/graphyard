@@ -36,7 +36,7 @@ const start = Date.parse('2030-06-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 1 } } });
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the item preview soak called GitHub (${String(name)})`); } });
 const delivery: ProjectDelivery = { mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true, source: 'graphyard.json',
   applications: [{ id: 'site', kind: 'static', directory: 'dist', build: 'build the site' }], cases: { 'site-home': 'site' } };
@@ -160,7 +160,7 @@ class World {
     const fail = async () => { throw new Error('the item preview soak runs under the GitHub merger'); };
     const itemPreviews: ItemPreviewPorts = { root: this.root, base: this.base, timeoutMs: 30_000, delivery: () => delivery, baseTip: async () => sha('base'), record: this.record,
       run: this.run, shell: this.shell, slots: this.slots, stepTimeoutMs: 5_000, now: this.now, open: this.open };
-    return { baseBranch: 'main', retrials: 1, now: this.now, merger: async () => 'github', fetch: fail, merge: fail, trial: fail, preview: fail, push: fail, holds: fail, record: fail, itemPreviews } as unknown as MergeWriterReads;
+    return { baseBranch: 'main', now: this.now, merger: async () => 'github', fetch: fail, merge: fail, trial: fail, preview: fail, push: fail, holds: fail, record: fail, itemPreviews } as unknown as MergeWriterReads;
   }
   /** Waits until every preview started has been confirmed, opened and settled, and its outcome was sent to the server. */
   async settle() {

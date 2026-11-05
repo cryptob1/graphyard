@@ -2,21 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
-import { Store } from '../src/store.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import type { Work } from '../src/model.js';
 import { observationClaim } from '../src/observation-priority.js';
 import { processControlPlaneJob } from '../src/server/control-plane-observation.js';
 import { observationWorkers } from '../src/server/main.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 test('integration:observation-idle-no-fleet-scan — idle workers read only jobs; due work retains priority, locks and cadence', async t => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3080;
-  const postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('observation-idle-db'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await postgres.initialise(); await postgres.start(); await postgres.createDatabase('observation_idle');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/observation_idle`);
+  const store = await withDatabase('observation-idle');
   const originalQuery = pg.Client.prototype.query;
   let statements: string[] = [];
   try {
@@ -109,6 +103,6 @@ test('integration:observation-idle-no-fleet-scan — idle workers read only jobs
     } finally { await holder.query('ROLLBACK'); holder.release(); }
   } finally {
     pg.Client.prototype.query = originalQuery;
-    await store.close(); await postgres.stop();
+    await store.close();
   }
 });

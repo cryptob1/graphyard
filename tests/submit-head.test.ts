@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine, renewalFaultEvent } from '../src/engine.js';
 import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
@@ -34,7 +34,7 @@ const repository = 'owner/project';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 /** A checkout laid out like the coordinator's: an origin, the clone whose refs/remotes/origin/main is the base tip, and a worker's commit in the shared object store. */
 let checkout: string, baseTip: string, head: string, staleHead: string, fixtureRoot: string;
 
@@ -64,14 +64,11 @@ before(async () => {
   git(stale, 'config', 'user.email', 't@example.com'); git(stale, 'config', 'user.name', 'T');
   staleHead = await commit(stale, 'src/other.ts', 'export const other = 1;\n', 'stale');
 
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1523;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('submit-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('submit_head_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/submit_head_test`); await store.init();
+  store = await withDatabase('submit-head'); await store.init();
   engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
+after(async () => { if (store) await store.close(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 /** An item claimed by the worker with its workspace registered on `branch`, ready to submit. */
 async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -89,13 +89,11 @@ const worker: Principal = { id: 'push-rights-worker', role: 'worker', sessionKin
 const host: Principal = { id: 'push-rights-host', role: 'coordinator' };
 const credentials = [operator, worker, host].map(principal => ({ ...principal, token: `push-rights-${principal.id}-${'x'.repeat(32)}` }));
 let stopHost = () => {};
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, scratch: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, scratch: string;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_WORKER_PUSH_RIGHTS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 61);
   scratch = await temporaryDirectory('push-rights');
-  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+
+  store = await withDatabase('worker-push-rights'); await store.init();
   engine = new Engine(store, 120, 'owner/push-rights');
   engine.principals = [operator, worker];
   http = server(engine, credentials);
@@ -107,7 +105,7 @@ before(async () => {
 after(async () => {
   stopHost();
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
-  if (store) await store.close(); if (database) await database.stop();
+  if (store) await store.close();
   if (scratch) await rm(scratch, { recursive: true, force: true });
 });
 

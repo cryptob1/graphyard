@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -33,7 +33,7 @@ const coordinator: Principal = { id: 'master-loop', role: 'coordinator', session
 const credentials = [operator, workerA, coordinator].map(principal => ({ ...principal, token: `bounds-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, home: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, home: string;
 
 const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, {
@@ -51,14 +51,7 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 179;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('capacity-bounds-db'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('capacity_bounds');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_bounds`);
+  store = await withDatabase('capacity-hold-respects-machine-bounds');
   await store.init();
   engine = new Engine(store, 300, repository);
   http = server(engine, credentials);
@@ -70,7 +63,7 @@ before(async () => {
   await writeFile(join(home, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
   await writeFile(join(home, 'env-b/auth.json'), JSON.stringify({ tokens: { access_token: 'x' } }));
 });
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
+after(async () => { http?.close(); await store?.close(); });
 
 test('unit:capacity-hold-respects-machine-bounds — a held account is not re-selected, a finished agent whose lease ended frees its profile, and the spent epoch is counted once', async () => {
   const capacity = await import('../src/model/capacity.js') as {

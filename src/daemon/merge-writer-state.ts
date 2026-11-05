@@ -43,13 +43,13 @@ export const mergeWriterStateSchema = z.object({
   /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(),
     step: z.string().max(100).optional(), stepStartedAt: instant.optional(), revert: revertFlightSchema.optional() }).strict().nullable().default(null),
-  /** Every queue position the merge in flight trials at once (batch.ts `mergeStack`), in queue order, each named by its oldest head with its own trial step; `inFlight` is the first. Absent while nothing merges. */
+  /** Every queue position the merge in flight trials at once (GY-3120 `mergeHeads`), in queue order, each with its own trial step; `inFlight` is the first. Absent while nothing merges. */
   inFlights: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, step: z.string().max(100), stepStartedAt: instant }).strict()).max(maxMergeWriterParallel).optional(),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
   /** GY-2053: the newest attempt progress — a retrial's intent, a trial verdict, a push, a reconcile — recorded beside every ledger write a flight or reconcile makes, so the movement the summary reports advances inside a long flight. Absent until a write records it. */
   progress: attemptProgressSchema.optional(),
-  /** GY-2053: the writer's own motion bound, its configured worst case for one flight ((retrials + 1) × the trial timeout plus a cycle); the owed-decision readers hold a held head inside it. Absent until the writer step first runs. */
+  /** GY-2053: the writer's own motion bound, its worst case for one flight (one trial timeout plus a cycle); the owed-decision readers hold a held head inside it. Absent until the writer step first runs. */
   motionBoundMs: z.number().int().min(0).optional(),
   /** GY-2079: the heads whose merge trial timed out, yielding their queue turn until they leave the queue; absent until one does. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
   timeouts: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, at: instant, count: z.number().int().min(1).max(100_000), othersPassed: z.boolean(), reason: z.string().max(2000).nullable() }).strict()).max(mergeWriterKeptTimeouts).optional(),

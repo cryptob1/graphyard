@@ -2,12 +2,11 @@ import { claimFixture, settleFixture, renewFixture } from './helpers/action-fixt
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, save } from '../src/store.js';
 import { Engine, sameBesideBookkeeping } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -36,17 +35,13 @@ const executor: Principal = { id: 'executor-a', role: 'coordinator' };
 const PROOF = 'unit:resync-fixture';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 before(async () => {
-  // An offset no other file takes: two files sharing a port fail whichever starts second.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 137;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('claim-observation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('action-claim-observation'); await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 const reload = async (id: string) => (await store.list()).find(entry => entry.id === id)!;
 const resyncRow = (item: Work) => item.actionQueue!.actions.find(row => row.kind === 'resync')!;

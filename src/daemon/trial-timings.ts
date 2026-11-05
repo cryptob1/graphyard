@@ -4,7 +4,7 @@ import type { MergeWriterState } from './merge-writer-state.js';
 
 type Trial = NonNullable<MergeWriterState['trials']>[number];
 
-/** One record per trial invocation, including batch fallbacks and rejected-push retrials. */
+/** One record per trial invocation, one per head in flight. */
 export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, persist: () => Promise<void>): MergePorts {
   const trials = new Map<string, Trial>();
   const save = () => { void persist().catch(() => {}); };
@@ -34,6 +34,16 @@ export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, per
       }
     },
     ...(ports.preview ? { preview: (...args: Parameters<NonNullable<MergePorts['preview']>>) => timed(args[0], 'preview', () => ports.preview!(...args)) } : {}),
+    // GY-3120: a landing re-merges the head onto a moved tip, making a merge commit no trial ran on;
+    // aliasing it to the head's own trial record keeps the landing's push duration on that record.
+    merge: async (mergeHead, baseTip, item) => {
+      const merged = await ports.merge(mergeHead, baseTip, item);
+      if (!('conflict' in merged)) {
+        const trial = [...trials.values()].find(entry => entry.heads.some(covered => covered.head === mergeHead));
+        if (trial) trials.set(merged.mergeSha, trial);
+      }
+      return merged;
+    },
     push: (...args) => timed(args[0], 'push', () => ports.push(...args)),
   };
 }

@@ -1,13 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store, StaleWrite, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { definiteRenewalRefusal } from '../src/session-watch.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { Refusal, unknownWorkCode } from '../src/model/refusal.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -21,16 +20,11 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 const operator: Principal = { id: 'operator', role: 'admin' };
 const workers: Principal[] = Array.from({ length: 22 }, (_, i) => ({ id: `worker-${i}`, role: 'worker' }));
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 let queryLatencyMs = 0;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 124;
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('per-item-locking'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise();
-  await database.start();
-  await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store = await withDatabase('per-item-locking');
   // Every statement on every connection waits `queryLatencyMs` first: the round trip to a hosted
   // database, which a local one lacks. Registered before any connection opens; zero unless a test sets it.
   for (const pool of [store.pool, store.leasePool]) pool.on('connect', client => {
@@ -45,7 +39,6 @@ before(async () => {
 
 after(async () => {
   await store?.close();
-  await database?.stop();
 });
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -170,7 +163,6 @@ test('unit:per-item-locking mixed fleet and item locks under concurrent load nev
   }
   assert.equal(await within(Promise.all(operations), 30_000), 'settled', 'every operation committed');
 });
-
 
 const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
 /** An item submitted for review, whose observation job saves a fresh provider observation every poll. */

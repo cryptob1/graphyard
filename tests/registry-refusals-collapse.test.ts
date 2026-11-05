@@ -1,11 +1,10 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import type { Principal } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-3095 AC-3: on 2026-11-04 the loop asked the registry for two launches every cycle, each refused
@@ -17,16 +16,13 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const HOST = 'machine-a';
-let pg: EmbeddedPostgres, store: Store, registry: AgentRegistry;
+let store: Store, registry: AgentRegistry;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3095;
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('refusals-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('refusals_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/refusals_test`); await store.init();
+  store = await withDatabase('refusals'); await store.init();
   registry = new AgentRegistry(store);
 });
-after(async () => { await store?.close(); await pg?.stop(); });
+after(async () => { await store?.close(); });
 
 const select = (role: string, work: string) => registry.select(coordinator, { role, host: HOST, work }, randomUUID());
 

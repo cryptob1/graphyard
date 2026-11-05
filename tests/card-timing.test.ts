@@ -5,11 +5,10 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
@@ -195,23 +194,20 @@ test('integration:overdue-legible-without-colour — an overdue duration is mark
 const operator: Principal = { id: 'card-timing-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'card-timing-worker', role: 'worker', sessionKind: 'ai' };
 const executor: Principal = { id: 'card-timing-executor', role: 'coordinator' };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+let store: Store, engine: Engine;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_CARD_TIMING_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 52);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('card-timing'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = await withDatabase('card-timing'); await store.init();
   // A generous claim lease: this case reads the same recorded item at synthetic observation
   // times, and a lease that lapses between them would change the status under the reading.
   engine = new Engine(store, 3600, 'owner/project');
   engine.principals = [operator, worker, executor];
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => { if (store) await store.close(); });
 
 test('integration:status-duration-tracks-real-progress — a retry loop, a heartbeat and an observation leave the clock running; only entering a new status restarts it', async () => {
   const id = () => randomUUID();
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Card timing', 
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Card timing',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] }, id());
   item = await engine.execute(operator, 'ready', item.id, {}, id());
 

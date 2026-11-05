@@ -4,8 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import EmbeddedPostgres from './helpers/warm-postgres.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -33,17 +32,10 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const tokens = new Map([[operator.id, `operator-${'t'.repeat(32)}`]]);
 const root = new URL('..', import.meta.url).pathname;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+let store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 175;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('scenario-capacity-redispatch'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch`);
+  store = await withDatabase('scenario-capacity-limit-redispatch-registered');
   await store.init();
   // The shipped scenarios are Graphyard's own repository's cases (GY-2964): this install manages
   // that repository, which is the one whose fresh install materializes them.
@@ -55,7 +47,6 @@ before(async () => {
 after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
-  if (database) await database.stop();
 });
 
 const api = async (path: string, data?: unknown, key: string = randomUUID()) => {
@@ -175,14 +166,8 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
 
 test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun materializes a shipped revision when the table is still empty', async () => {
   const id = capacityLimitRedispatchScenario;
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 176;
-  const database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('scenario-capacity-redispatch-record'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch_record');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch_record`);
+
+  const store = await withDatabase('scenario-capacity-limit-redispatch-registered');
   try {
     await store.init();
     assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0);
@@ -206,21 +191,14 @@ test('unit:scenario-capacity-limit-redispatch-registered — recordCaseRun mater
     )).rows[0].n, 1, 'materializing appends scenario.defined');
   } finally {
     await store.close();
-    await database.stop();
   }
 });
 
 test('unit:scenario-capacity-limit-redispatch-registered — listing materializes through one transaction: a failed scenario.defined rolls the revision back', async () => {
   const id = capacityLimitRedispatchScenario;
   // Offset 16: free in the reserved 200-port window (177 collides with event-ledger-delta).
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 16;
-  const database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('scenario-capacity-redispatch-tx'),
-    user: 'graphyard', password: 'testing-only', port, persistent: false,
-    onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
-  });
-  await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch_tx');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch_tx`);
+
+  const store = await withDatabase('scenario-capacity-limit-redispatch-registered');
   try {
     await store.init();
     assert.equal((await store.pool.query('SELECT 1 FROM scenarios WHERE id=$1', [id])).rowCount, 0);
@@ -252,6 +230,5 @@ test('unit:scenario-capacity-limit-redispatch-registered — listing materialize
     )).rows[0].n, 1);
   } finally {
     await store.close();
-    await database.stop();
   }
 });
