@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { runCycle } from '../src/daemon/cycle.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { mergeWriterIdle, mergeWriterSummary, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
 import { processPidNamespace, processStartTicks } from '../src/tmp-reclaim.js';
 import type { MergePorts } from '../src/merge-writer/executor.js';
@@ -103,6 +103,52 @@ test('unit:disk-headroom-floor — below the floor after reclaiming, no trial or
   assert.equal(state.actions[diskHeadroomKey]?.state, 'done');
   assert.ok(!masterCauses(roomy.work, state.actions).some(cause => cause.key === 'disk-headroom'));
   assert.deepEqual(roomy.seen.dispatched, ['GY-1']);
+  assert.equal(roomy.seen.trials, 1);
+});
+
+test('unit:disk-headroom-floor — below the floor a failing serve starts no revert trial and an owed retrial keeps its place; once room returns the revert flies', async () => {
+  const served = sha('served-serve'), landing = sha('merge:landing');
+  // The checkout's first-parent range between the verified baseline and the failing serve: one
+  // landing, GY-2's merge — exactly what naming a culprit needs.
+  const git = async (args: string[]) => {
+    if (args[0] === 'log') return `${landing}\0${tip}\0Merge GY-2: Submitted\n`;
+    if (args[0] === 'merge-tree') return `${sha('tree')}\0\n`;
+    if (args[0] === 'commit-tree') return `${sha('revert')}\n`;
+    if (args[0] === 'diff') return 'src/app.ts\n';
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  };
+  const failingServe = { commit: served, check: { verified: false, case: 'case-item', step: 'step 1', reason: 'wanted 200, got 404' } };
+  const tried: unknown[] = [];
+  const revertFixture = (free: number[]) => {
+    const built = fixture(free);
+    const reads = built.effects.mergeWriter as MergeWriterReads;
+    reads.git = git;
+    reads.serveRecord = async () => failingServe;
+    const inner = reads.trial.bind(reads);
+    reads.trial = async (mergeSha, files, item, ...rest) => { tried.push(item); return inner(mergeSha, files, item, ...rest); };
+    return built;
+  };
+  // What a passing serve left (the baseline), and a revert attempt that settled owing a retrial an hour ago.
+  const state = emptyDaemonState(config);
+  state.mergeWriter.serveRevert = { lastVerified: tip, reverts: [], held: null,
+    retry: { serve: served, culprit: 'GY-2', mergeSha: landing, baseTip: tip, reason: 'the base tip fails the same checks', at: iso(start - 3_600_000) }, answered: null };
+
+  const short = revertFixture([12, 14]);
+  await runCycle(config, state, short.effects, () => start);
+  await mergeWriterIdle(state);
+  assert.equal(short.seen.trials, 0, 'no revert trial starts below the floor');
+  assert.equal(state.mergeWriter.inFlight, null);
+  assert.equal(state.mergeWriter.serveRevert?.retry?.serve, served, 'the owed retrial keeps its place while the shortage stands');
+  assert.ok(state.diskHeadroom);
+
+  // Room again: the retrial flies — one trial, the revert's proofless pseudo-item under the culprit's key.
+  const roomy = revertFixture([100]);
+  await runCycle(config, state, roomy.effects, () => start + 60_000);
+  await mergeWriterIdle(state);
+  assert.equal(state.diskHeadroom, null);
+  assert.equal(state.mergeWriter.serveRevert?.retry, null, 'the retrial the room released is taken');
+  assert.deepEqual(tried, [{ key: 'GY-2', criteria: [] }], 'the revert flew through the writer\'s own trial');
+  assert.equal(mergeWriterSummary(state.mergeWriter).inFlight?.revert?.revertSha, sha('revert'), 'the revert flight is admitted');
   assert.equal(roomy.seen.trials, 1);
 });
 

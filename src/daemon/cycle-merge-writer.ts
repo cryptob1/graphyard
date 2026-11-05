@@ -450,6 +450,9 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   if (revertState.reverts.some(entry => entry.serve === serve)) return false;
   if (snapshot.work.some(item => item.mergeLedger?.serveReverts?.some(entry => entry.serve === serve && entry.outcome === 'refused'))) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
+  // GY-3122: below the disk floor no new trial starts — the revert flight's trial is the loop's
+  // most disk-heavy one — and an owed retrial keeps its place until room returns.
+  if (state.diskHeadroom) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
   // An owed retrial waits the base-failure hold like a base-held head (executor.ts GY-1834)
