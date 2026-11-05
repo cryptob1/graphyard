@@ -73,7 +73,7 @@ export function validateReceipt(value:unknown):Receipt {
       if(w.repairs>2) throw new Error('Repair bound exceeded');
     }
     const finalRecord=r.work.at(-1)!.record as Work;
-    const certificate=currentEvidence(finalRecord,'manual:certified-artifact');
+    const certificate=currentEvidence(finalRecord,'manual:certified-artifact',new Date());
     if(!certificate || !evidenceProves('manual:certified-artifact',certificate) || certificate.executed<1) throw new Error('Missing independent final candidate certification');
     if(r.artifact.sha!==r.work.at(-1)!.merge) throw new Error('Artifact is not the pushed final merge');
     if(r.mode==='team' && !r.overlaps.length) throw new Error('No three distinct overlapping implementation sessions');

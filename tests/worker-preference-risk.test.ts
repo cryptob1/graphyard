@@ -8,9 +8,11 @@ import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from 
 import { readProfileLaunchRecords } from '../src/master/dispatch.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
-import { sensitiveRules } from '../src/model/risk-class.js';
-import { piAttempts, workerPreference } from '../src/model/worker-preference.js';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { sensitiveRules } from '../src/model-boundary/risk-class.js';
+import { piAttempts } from '../src/model/worker-preference.js';
+import { workerPreference } from '../src/model-boundary/worker-preference.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 
@@ -79,7 +81,7 @@ test('unit:worker-preference-by-risk — a normal named change is fast on its fi
 
 test('unit:worker-preference-by-risk — every sensitive rule has a surface that its own pattern matches, so a directory scope is judged against the whole rule set; an exact path is still judged by the rule itself', async () => {
   // Imported dynamically so a tree without these exports fails this case, not the file's load.
-  const { entrySensitive, sensitiveSurfaces } = await import('../src/model/worker-preference.js') as Partial<typeof import('../src/model/worker-preference.js')>;
+  const { entrySensitive, sensitiveSurfaces } = await import('../src/model-boundary/worker-preference.js') as Partial<typeof import('../src/model-boundary/worker-preference.js')>;
   assert.ok(entrySensitive && sensitiveSurfaces, 'the preference exports the per-entry judgement and the rules\' surfaces');
   for (const { rule, pattern } of sensitiveRules) {
     const surfaces = sensitiveSurfaces[rule];
@@ -197,7 +199,7 @@ test('unit:dispatch-hands-planned-files — a real dispatch hands the item to th
   // The source hands the item itself to the preference, so its criteria and description reach it, and the lane is not what it reads.
   const source = await readFile(new URL('../src/master/dispatch.ts', import.meta.url), 'utf8');
   assert.match(source, /prefer = workerPreference\(work, startFailures\.length\)/, 'dispatch.ts hands the item, criteria and description included, to workerPreference');
-  const preference = await readFile(new URL('../src/model/worker-preference.ts', import.meta.url), 'utf8');
+  const preference = await readFile(new URL('../src/model-boundary/worker-preference.ts', import.meta.url), 'utf8');
   assert.ok(!/work\.lane/.test(preference), 'the preference never reads the lane');
   assert.match(preference, /work\.description \?\? '', \.\.\.\(work\.criteria/, 'the preference reads the paths the item names');
 });

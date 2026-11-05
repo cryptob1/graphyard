@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { evaluate } from '../src/model/gates.js';
-import { nextAction } from '../src/model/next-action.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { nextAction } from '../src/model-boundary/next-action.js';
 import { plainReason, plainStatus } from '../src/model/plain-status.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-import { setProjectDelivery } from '../src/project-applications.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
+import { setProjectDelivery } from '../src/model-boundary/project-applications.js';
 import { e2eProofRefusal, type Work } from '../src/model.js';
 
 // GY-2981: open items catch up to the filing rules an upgrade adds. An item written straight to

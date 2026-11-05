@@ -122,7 +122,7 @@ test('unit:session-request-carries-project-memory — the digest renders each se
   recordChangeInMemory(memory, { key: 'GY-2', sha: 'a'.repeat(40), files: ['src/a.ts'], mergedAt: '2026-10-02T08:00:00Z' });
   assert.equal(projectMemoryDigest(memory, 'worker'),
     `Shared project memory: Recent notes: - GY-1 (scope): Widen to src/a.ts [by approver-1] Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
-  assert.equal(projectMemoryDigest(emptyProjectMemory(), 'worker'), '');
+  assert.equal(projectMemoryDigest(emptyProjectMemory(new Date().toISOString()), 'worker'), '');
   assert.equal(projectMemoryDigest(null, 'reviewer'), '');
 });
 
@@ -191,7 +191,7 @@ test('unit:session-request-carries-project-memory — piProducerPrompt carries r
 });
 
 test('unit:session-request-carries-project-memory — fixed word budget truncates overflow and prioritizes role-relevant entries', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
   for (let i = 0; i < 50; i++) {
     recordNoteInMemory(memory, {
       id: `dec-${i}`,
@@ -209,7 +209,7 @@ test('unit:session-request-carries-project-memory — fixed word budget truncate
 });
 
 test('unit:session-request-carries-project-memory — memory updates from operator answers and merges only', async () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // 1. Settled operator answers
   const work: Work[] = [
@@ -279,7 +279,7 @@ test('unit:session-request-carries-project-memory — memory updates from operat
 });
 
 test('unit:session-request-carries-project-memory — an unanswered human request records nothing', () => {
-  const memory = emptyProjectMemory();
+  const memory = emptyProjectMemory(new Date().toISOString());
 
   // Unsettled human request (no answer provided)
   const unfinishedWork: Work[] = [

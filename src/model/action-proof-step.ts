@@ -32,7 +32,7 @@ export function proofStep(work: Work, all: Work[], now: Date): ProofStep | null 
   const candidate = work.candidate;
   const decisions = producerGroupDecisions(work, all, now);
   const failed = decisions.find(decision => decision.state === 'failed');
-  const detail = failed?.reason ?? unexercisedRework(work, decisions);
+  const detail = failed?.reason ?? unexercisedRework(work, decisions, now);
   if (detail) return { step: 'failed', detail, mechanical: !failed || failed.failed.every(entry => mechanicalProof(entry.proof)) };
   let stopped: string | null = null;
   for (const decision of decisions.filter(entry => entry.state === 'request')) {

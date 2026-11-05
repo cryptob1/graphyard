@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '../src/model/human-request.js';
+import { humanRequestSchema } from '../src/model-boundary/human-request.js';
+import { parkRefusal, requirementsQuestionRefusal } from '../src/model/human-request.js';
 
 // GY-1818: GY-1816 guarded the goals-and-priorities park route with a phrasing regex over the ask,
 // needed text and reason (verb-then-criterion, criterion-then-verb, a compound scanner, a matcher

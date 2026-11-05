@@ -7,12 +7,14 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { NextAction } from '../src/model/action-kinds.js';
-import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction } from '../src/model/actions.js';
-import { nextAction } from '../src/model/next-action.js';
-import { livenessCarry, livenessOf, livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
+import { actionId, reconcileActions } from '../src/model-boundary/actions.js';
+import { actionStallMaxMs, claimAction, settleAction } from '../src/model/actions.js';
+import { nextAction } from '../src/model-boundary/next-action.js';
+import { livenessCarry, livenessOf } from '../src/model-boundary/liveness.js';
+import { livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): t0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) handed to settleDelivered and the retry rows; the Postgres half stamps and judges everything with the real clock.

@@ -1,4 +1,4 @@
-import { observationWindowHold, type Gate, type Work } from '../model.js';
+import { observationWindowHold, type Gate, type Work } from './work.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern } from './gates.js';
@@ -38,7 +38,7 @@ export interface PlainStatus { sentence: string; tone: Tone; phase: Phase; who: 
  * somebody has to decide or fix something. A reason nobody anticipated falls back to a
  * sentence about its gate, never to the raw internal text.
  */
-export function plainReason(reason: string, gate: string, now = Date.now(), work?: Work): { text: string; stuck: boolean; known: boolean } {
+export function plainReason(reason: string, gate: string, now: number, work?: Work): { text: string; stuck: boolean; known: boolean } {
   const rules: [RegExp, (m: RegExpMatchArray) => string, boolean?][] = [
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],

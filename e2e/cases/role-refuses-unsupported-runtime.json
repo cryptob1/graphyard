@@ -1,0 +1,16 @@
+{
+  "id": "role-refuses-unsupported-runtime",
+  "title": "The master role refuses runtimes it cannot run, and selection passes over them",
+  "description": "Asserts the declared master-runtime capability: master registry role set refuses an account whose runtime the master session cannot run, naming the runtime and the supported runtimes and changing nothing, and selection passes over one already stored, recording the skip with its reason and selecting the next eligible account.",
+  "tags": ["registry"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "role refuses and selection skips the unsupported runtime",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/role-refuses-unsupported-runtime.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

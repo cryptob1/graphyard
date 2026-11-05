@@ -1,7 +1,8 @@
 import { once } from './store/mutations.js';
 import { z } from 'zod';
 import type pg from 'pg';
-import { admin, demand, proofSchema, type Principal } from './model.js';
+import { admin, demand, type Principal } from './model.js';
+import { proofSchema } from './model-boundary/proof.js';
 import { Engine } from './engine.js';
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const revision = z.number().int().positive();
