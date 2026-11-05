@@ -76,7 +76,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   return Object.defineProperties({
     snapshot: async () => {
       const snapshot = await deps.snapshot();
-      await verifyWorkers();
+      // Never holds up or fails the cycle; a missed take is retried on the next snapshot.
+      void verifyWorkers().catch(() => {});
       return snapshot;
     },
     sessionHistory: deps.sessionHistory,
