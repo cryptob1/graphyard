@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tempOwnerMarker, writeTempOwner } from '../../src/tmp-reclaim.js';
-import { liveServersUnder, stopServersUnder } from '../../src/postgres-stop.js';
+import { livePostmasters, liveServersUnder, stopServersUnder } from '../../src/postgres-stop.js';
 
 // The one shared helper for a test that needs a temporary directory (GY-421): an embedded-Postgres
 // data dir, a worktree, a store, a home. Every test in the suite creates its directories here and
@@ -44,9 +44,9 @@ export async function temporaryDirectory(label: string, parent?: string): Promis
  * live server still runs in is kept for the exit pass unless `force` is set.
  */
 export async function disposeTemporaryDirectories(options: { force?: boolean } = {}): Promise<string[]> {
-  const removed: string[] = [];
+  const removed: string[] = [], postmasters = options.force ? [] : livePostmasters();
   for (const directory of [...created]) {
-    if (!options.force && liveServersUnder(directory).length) continue;
+    if (liveServersUnder(directory, postmasters).length) continue;
     created.delete(directory);
     try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); }
     catch { /* a directory another pass already took is no leak */ }

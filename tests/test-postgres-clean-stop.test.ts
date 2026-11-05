@@ -9,7 +9,7 @@ import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 
 test('integration:test-postgres-clean-stop — a cluster inside a suite temporary directory stops, never aborted, before that directory goes, and test and trial runs disable core dumps', async () => {
   const scratch = await temporaryDirectory('clean-stop'), report = join(scratch, 'report.json');
-  const run = await runTests({ args: ['tests/fixtures/leaves-postgres-running.ts'], stdio: 'pipe', environment: { ...process.env, CLEAN_STOP_REPORT: report } });
+  const run = await runTests({ args: ['tests/fixtures/postgres-in-scratch.ts'], stdio: 'pipe', environment: { ...process.env, CLEAN_STOP_REPORT: report } });
   assert.equal(run.code, 0, run.stdout + run.stderr);
   const { data, pid, core } = JSON.parse(await readFile(report, 'utf8')) as { data: string; pid: number; core: string };
   assert.equal(core, '0', 'the runner starts the test files, and every Postgres they start, with core dumps off');

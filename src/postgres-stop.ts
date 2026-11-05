@@ -5,21 +5,25 @@ import { readdirSync, readFileSync } from 'node:fs';
 // used to be removed before the file's own after hook stopped the cluster: the checkpointer then
 // PANICked on its shutdown checkpoint and dumped core, hundreds of times an hour.
 
-/** The live postmasters whose data directory (`-D`) is `directory` or lies inside it, read from /proc. */
-export function liveServersUnder(directory: string): number[] {
-  const pids: number[] = [];
+/** Every live postmaster on the host with its data directory (`-D`), read from /proc. */
+export function livePostmasters(): { pid: number; data: string }[] {
+  const found: { pid: number; data: string }[] = [];
   let entries: string[];
-  try { entries = readdirSync('/proc'); } catch { return pids; }
+  try { entries = readdirSync('/proc'); } catch { return found; }
   for (const name of entries) {
     if (!/^\d+$/.test(name)) continue;
     try {
-      const args = readFileSync(`/proc/${name}/cmdline`, 'utf8').split('\0'), data = args[args.indexOf('-D') + 1];
-      if (!args.includes('-D') || !data || (data !== directory && !data.startsWith(`${directory}/`))) continue;
-      if (readFileSync(`/proc/${name}/stat`, 'utf8').replace(/^.*\) /s, '').startsWith('Z')) continue;
-      pids.push(Number(name));
+      const args = readFileSync(`/proc/${name}/cmdline`, 'utf8').split('\0'), at = args.indexOf('-D');
+      if (at < 0 || !args[at + 1] || readFileSync(`/proc/${name}/stat`, 'utf8').replace(/^.*\) /s, '').startsWith('Z')) continue;
+      found.push({ pid: Number(name), data: args[at + 1] });
     } catch { /* the process exited between listing and reading */ }
   }
-  return pids;
+  return found;
+}
+
+/** The live postmasters whose data directory is `directory` or lies inside it. */
+export function liveServersUnder(directory: string, postmasters = livePostmasters()): number[] {
+  return postmasters.filter(({ data }) => data === directory || data.startsWith(`${directory}/`)).map(({ pid }) => pid);
 }
 
 /**
