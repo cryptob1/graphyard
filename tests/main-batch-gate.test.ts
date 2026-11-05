@@ -408,3 +408,27 @@ test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minut
     assert.deepEqual(timeouts, [gateLimitMs, trialTimeoutMinutes * 60_000]);
   }
 });
+
+test('integration:batch-gate-catalog-applications — the catalog leaves out the cases that exercise a declared application (tagged preview) on a commit that declares none, so the diagnostics never run the fixture project\'s cases against the head itself; a commit declaring an application keeps them', async () => {
+  const { base, coordinator } = await fixture('batch-gate-catalog');
+  const pusher = join(base, 'pusher');
+  const commit = async (files: Record<string, string>) => {
+    for (const [name, text] of Object.entries(files)) await writeFile(join(pusher, name), text);
+    git(pusher, 'add', '.'); git(pusher, 'commit', '-q', '-m', 'catalog'); git(pusher, 'push', '-q', 'origin', 'HEAD:main');
+    return git(pusher, 'rev-parse', 'HEAD');
+  };
+  const bare = await commit({ 'e2e/cases/fixture-compose-app.json': JSON.stringify({ tags: ['fixture', 'preview'] }), 'e2e/cases/board.json': JSON.stringify({ tags: ['dashboard'] }) });
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const loop = reads(coordinator);
+  await loop.value.fetch();
+  const ports = batchGatePorts({ ...loop.value, git: loop.value.git! }, []);
+  const catalog = await ports.catalog(bare);
+  assert.ok(catalog.includes('board') && catalog.includes('smoke'), 'every other case stays');
+  assert.ok(!catalog.includes('fixture-compose-app'), 'no declared application: the preview case is left out');
+  const declared = await commit({ 'graphyard.json': JSON.stringify({ gate: { core: ['smoke'] }, delivery: { mode: 'local', applications: [{ id: 'app', kind: 'compose', file: 'compose.yml', service: 'web', port: 80 }] } }) });
+  await loop.value.fetch();
+  assert.ok((await ports.catalog(declared)).includes('fixture-compose-app'), 'a declared application keeps the preview case');
+  // Graphyard's own repository declares no application: its fixture cases leave its catalog.
+  const own = await batchGatePorts({ ...loop.value, git: async args => execFileSync('git', args, { encoding: 'utf8' }) }, []).catalog('HEAD');
+  assert.ok(own.includes('create-work-item') && !own.includes('fixture-compose-app') && !own.includes('fixture-static-home'));
+});

@@ -1,6 +1,7 @@
 // Concern: the loop's batch gate on main (GY-3119): one gate at a time beside the cycle, the
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
+import { exercisesApplications } from '../e2e/runner.js';
 import { bootstrapGate, gateLimitMs, gateRecordPath, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
@@ -31,16 +32,29 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       criteria: [{ id: 'AC-1', text: `${input.title} is fixed at its cause, not skipped or weakened`.slice(0, 2000), proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] }],
       reason: `Filed by the batch gate on ${reads.baseBranch}` }, input.key);
   };
-  const catalog = async (commit: string) => lines(await git(['ls-tree', '--name-only', `${commit}:e2e/cases`])).filter(name => name.endsWith('.json')).map(name => name.slice(0, -5));
+  const policy = async (commit: string) => { try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])); } catch { return {}; } };
+  // GY-3125: a case that exercises a declared application (tagged `preview`, like the fixture project's
+  // own site and app) has nothing to run against on a commit that declares none: its trial serves the
+  // head itself. The catalog leaves those out, the rule a release run pends them by (GY-2217).
+  const catalog = async (commit: string) => {
+    const ids = lines(await git(['ls-tree', '--name-only', `${commit}:e2e/cases`])).filter(name => name.endsWith('.json')).map(name => name.slice(0, -5));
+    const delivery = (await policy(commit)).delivery;
+    if (delivery?.previews !== 'off' && delivery?.applications?.length) return ids;
+    const kept: string[] = [];
+    for (const id of ids) {
+      let tags: unknown = [];
+      try { tags = JSON.parse(await git(['show', `${commit}:e2e/cases/${id}.json`])).tags; } catch { /* an unreadable case stays: its run names why */ }
+      if (!exercisesApplications({ tags: Array.isArray(tags) ? tags : [] })) kept.push(id);
+    }
+    return kept;
+  };
   return {
     now: reads.now,
     fetch: reads.fetch,
     landings: async (from, to) => serveLandings(await serveRangeCommits(git, from, to), work),
     files: async (from, to) => lines(await git(['diff', '--name-only', from, to])),
     catalog,
-    core: async commit => {
-      try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
-    },
+    core: async commit => (await policy(commit)).gate?.core ?? [],
     run: (commit, checks, files, timeoutMs) => trialChecks(reads, commit, checks, files, timeoutMs),
     revert: async (landing, gated, check) => {
       // Merges may have landed while the gate ran: the revert goes onto main as it stands now.
