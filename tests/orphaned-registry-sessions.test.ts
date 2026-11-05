@@ -372,3 +372,36 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.equal(exactApproval(done), null, 'COMMENTED cannot supply independent approval');
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
 });
+
+// GY-3116: on 2026-11-05 the post-merge reviews of GY-3090 and GY-3098 completed (their ledger
+// records closed with no pane recorded) and both items merged and left the open-work snapshot,
+// yet their reviewer registry sessions held two of four slots for up to 38 minutes: the close step
+// never saw the done items, and the orphan sweep needed a pane to miss.
+test('unit:review-session-released-after-merge — a closed review record with no pane releases its registry session on the next tick, though its item is done and absent', async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude', concurrency: 1 }, 'review-a');
+  try {
+    const config = await loadMasterConfig(host.root);
+    const registry = memoryRegistry(config.hostId, await claudeLogin('released-after-merge'), 1);
+    const done = requested(1), waiting = requested(2);
+    const requestId = done.autoDispatch!.review!.id;
+    await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId, probe: { registry: registry.client, quota: false, cacheMs: 0 } });
+    const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.session!;
+    // A still-running review whose record names no pane is left alone.
+    const document = await registry.client.document();
+    const running = [{ session: sessionId, pane: null, state: 'pending', agentName: 'review-a' }];
+    assert.deepEqual(orphanedRegistrySessions(document, config.hostId, [], running, Date.now() + 6 * 60_000), []);
+    await updateReviewLedger(host.root, ledger => {
+      const record = ledger.reviews.find(entry => entry.requestId === requestId)!;
+      record.state = 'completed'; record.pane = null; record.closedAt = new Date().toISOString();
+    });
+    host.agents.length = 0;
+    done.stage = 'done';
+    const from = Date.now();
+    // The done item is not in the snapshot; one tick ends the session and frees the slot.
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects(host, config, registry, () => [waiting], 6, from));
+    assert.deepEqual(tick.registryClosed, [{ work: done.key, id: sessionId, role: 'reviewer', pane: null }]);
+    assert.match(registry.registry.sessions.find(session => session.id === sessionId)!.endReason!, /review record is completed/);
+    assert.deepEqual(tick.launched.map(entry => entry.work), [waiting.key], 'the freed slot takes the waiting review');
+    assert.notEqual(registry.live()[0].id, sessionId);
+  } finally { await host.cleanup(); }
+});
