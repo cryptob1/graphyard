@@ -94,7 +94,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
-    // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight, a held batch and the revert rate over the last 20 merges.
+    // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
     batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
     sessions,
     // GY-2994: a spec checker that ended without a report, named with its reason until the item's check reports.

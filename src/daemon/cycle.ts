@@ -107,6 +107,8 @@ export interface Cycle {
   herdr: { agents: RuntimeSession[]; available: boolean };
   credentials: Awaited<ReturnType<DaemonEffects['credentials']>>;
   performed: DaemonAction[]; launcher: Launcher; reservedProfiles: Set<string>;
+  /** The loop's journal line writer: steps that settle beside the cycle log through it (GY-3141). */
+  log: (line: string) => void;
 }
 
 /**
@@ -143,7 +145,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   for (const [key] of inFlight) delete state.actions[key];
   performed.push(...reconcilePendingActions(state, read.snapshot.work, clock));
   for (const [key, action] of inFlight) state.actions[key] = action;
-  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches, reservedProfiles: launches.held() };
+  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches, reservedProfiles: launches.held(), log };
 
   if (!config.forPerson) await step('close', () => closeStep(cycle));
   await step('dispatch', async () => {

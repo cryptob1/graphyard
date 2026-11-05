@@ -11,6 +11,7 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 - `tests/five-step-cycle.test.ts`: snapshot, close, dispatch, merge writer, persist.
 - `tests/trial-merge.test.ts`: failed trials trigger candidate rework without base-break refresh waits.
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
+- `tests/main-batch-gate.test.ts`: the batch gate on main — verification, reverts, holds, the record's `lastOutcome`, the in-flight run's current step and its journal lines (GY-3141).
 - `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve work and name its commit to the next account; `e2e:worker-credit-handoff`.
 
 ## Drive
