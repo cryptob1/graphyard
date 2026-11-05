@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { foldMergeLedger } from '../src/model/merge-ledger.js';
+import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
 import { mergeWriterIdle, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
