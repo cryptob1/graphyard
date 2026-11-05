@@ -39,7 +39,7 @@ function earlierMerge(n: number) {
   };
 }
 
-/** Runs the case `runs` times in a row on one control plane, an earlier case's merge landing before each run; each run's verdict. */
+/** Runs the case `runs` times in a row on one control plane, an earlier case's merge landing before each run; each run's verdict, up to the first failure. */
 async function runCase(runs: number) {
   const operator: Principal = { id: 'e2e-operator', role: 'admin' }, token = `trial-${randomUUID()}`;
   const root = await temporaryDirectory('plain-status-words-root');
@@ -77,6 +77,7 @@ async function runCase(runs: number) {
       }).run(origin, null);
       const outcome = (report as E2eReport | null)?.cases.find(entry => entry.id === 'plain-status-words');
       verdicts.push(outcome?.verdict === 'passed' ? 'passed' : `run ${n}: ${JSON.stringify(outcome?.failingStep ?? outcome)}`);
+      if (outcome?.verdict !== 'passed') break;
     }
     return verdicts;
   } finally {
