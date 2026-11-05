@@ -290,8 +290,10 @@ export const observedExhaustions = async (config: Pick<MasterConfig, 'credential
  */
 export async function releaseOperatorClearedHolds(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'hostId'>>, held: Record<string, ObservedExhaustion>, registry: Pick<AgentRegistry, 'accounts'> | null | undefined, now = Date.now()) {
   const cleared = Object.entries(held).filter(([name, hold]) => {
-    const quota = registry?.accounts.find(entry => entry.name === name && (!config.hostId || entry.credential.host === config.hostId))?.quota;
-    return quota?.source === 'operator' && quota.state === 'available' && Date.parse(quota.observedAt ?? '') > Date.parse(hold.at);
+    const account = registry?.accounts.find(entry => entry.name === name && (!config.hostId || entry.credential.host === config.hostId));
+    // The decision itself, kept through later probes and account changes (GY-3117), else an operator mark still standing.
+    const decision = account?.quotaDecision ?? (account?.quota.source === 'operator' ? { state: account.quota.state, at: account.quota.observedAt ?? '' } : null);
+    return decision?.state === 'available' && Date.parse(decision.at) > Date.parse(hold.at);
   });
   if (!cleared.length) return held;
   const log = await readEnvironmentLog(config), at = new Date(now).toISOString();
