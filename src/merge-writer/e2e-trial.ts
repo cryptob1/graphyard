@@ -97,9 +97,9 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
 
 /**
  * Every bound case of `proofs` run against the head served in `worktree`: the case file each
- * `e2e:NAME` proof names must exist on the head (`e2e/cases/NAME.json`), the head is served by its
- * own `e2e.serve` declaration, or else each case against the application delivery.cases binds it to
- * (the only one, when one is declared), and every case runs with the existing E2E runner. Never throws for the merge's own failures — those come back as
+ * `e2e:NAME` proof names must exist on the head (`e2e/cases/NAME.json`), each case runs against the
+ * application delivery.cases binds it to, and every unbound case against the head's own `e2e.serve`
+ * (the only application, when no serve and one application is declared), and every case runs with the existing E2E runner. Never throws for the merge's own failures — those come back as
  * `missing` or `failingStep` — so the trial's verdict carries them as a refusal.
  */
 export async function runTrialE2eCases(input: {
@@ -127,12 +127,16 @@ export async function runTrialE2eCases(input: {
     for (const proof of pending) cases.push({ proof, case: proof.slice(4), executed: 0, failed: 1, failingStep: noServeRefusal });
     return cases;
   }
-  // `e2e.serve` serves the whole head; otherwise each case runs against the application delivery.cases binds it to.
+  // GY-3145: a case delivery.cases binds to an application runs against it; every other case runs
+  // against `e2e.serve`, or, with no serve declared, against the only application.
   const groups = new Map<string, { target: E2eServe | Application; proofs: string[] }>();
   for (const proof of pending) {
     const name = proof.slice(4);
-    const id = declared.serve ? 'serve' : declared.bindings[name] ?? (declared.applications.length === 1 ? declared.applications[0]!.id : null);
-    const target = declared.serve ?? declared.applications.find(application => application.id === id);
+    const bound = declared.applications.find(application => application.id === declared.bindings[name]);
+    const fallback = declared.serve ? null : declared.applications.length === 1 ? declared.applications[0]! : null;
+    const application = bound ?? fallback;
+    const id = application ? `application:${application.id}` : declared.serve && !declared.bindings[name] ? 'serve' : null;
+    const target = application ?? (id ? declared.serve : null);
     if (!target) {
       cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: `case "${name}" is bound to no declared application: bind it in delivery.cases to one of ${declared.applications.map(application => application.id).join(', ')}` });
       continue;
