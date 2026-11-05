@@ -19,6 +19,8 @@ import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
 
+import { foldServeReverts, mergeServeRevertKind, mergeServeRevertSchema } from '../merge-writer/serve-revert-ledger.js';
+
 /**
  * GY-1524. The merge writer's ledger, written by the loop's coordinator identity through
  * `POST /api/work/:id/merge-record`: one event per step of a merge (model/merge-ledger.ts) —
@@ -41,6 +43,7 @@ const trialAttempts = z.array(z.object({ outcome: trialNoVerdictOutcome, phase: 
 /** Every e2e result one trial can owe: a full batch of items, each with create's 50 criteria of 20 proofs. */
 const trialE2eResultLimit = defaultMergeBatch * 50 * 20;
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
+  mergeServeRevertSchema.extend({ kind: z.literal('serve-revert') }),
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),
   // GY-1832: a trial is a verdict, with its phases' times and the attempts before it that reached none, or a final no-verdict outcome naming its phase and reason.
   z.discriminatedUnion('outcome', [
@@ -81,9 +84,10 @@ function gitRunner(engine: Engine): GitRunner {
 /** The item's ledger, folded from its own rows; a refusal no intent opened (a conflicting merge has no commit to intend) stands as the state alone. */
 async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBody): Promise<MergeLedgerState | null> {
   // The executor's trial rows fold too (GY-1528): their proof counts are what control-plane acceptance reads. A trial's step rows fold beside them (GY-2963).
-  const kinds = [...Object.values(mergeLedgerKinds), mergeTrialKind, mergeTrialStepKind];
+  const kinds = [...Object.values(mergeLedgerKinds), mergeServeRevertKind, mergeTrialKind, mergeTrialStepKind];
   const rows = (await db.query(`SELECT kind, payload FROM events WHERE work_id=$1 AND kind = ANY($2::text[]) ORDER BY seq`, [work.id, kinds])).rows as { kind: string; payload: unknown }[];
-  const folded = foldMergeLedger(rows.map(row => ({ kind: row.kind, payload: row.payload, work: work.key })))[work.key];
+  const events = rows.map(row => ({ ...row, work: work.key }));
+  const folded = foldServeReverts(foldMergeLedger(events), events)[work.key];
   if (folded) return folded;
   if (data.kind !== 'refused') return null;
   return { key: work.key, state: 'refused', head: data.head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: data.reason }, events: 1 };
@@ -146,6 +150,10 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null, recoveryHeld: boolean | null = null;
+  if (data.kind === 'serve-revert' && data.outcome === 'reverted') {
+    demand(data.revertSha, 'A pushed revert must name its commit', 400);
+    held = (await gitRunner(engine)(['merge-base', '--is-ancestor', data.revertSha!, `refs/remotes/origin/${base}`])).status === 0;
+  }
   if (data.kind === 'reconciled') held = (await gitRunner(engine)(['merge-base', '--is-ancestor', data.mergeSha, `refs/remotes/origin/${base}`])).status === 0;
   // Recovery requires first-parent containment; ordinary reconciliation retains its ancestry contract.
   if (data.kind === 'pushed' || data.kind === 'reconciled') recoveryHeld = await firstParentHolds(async args => {
@@ -169,7 +177,12 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     // head refused so the ledger leaves its blocking state and the current candidate queues; only
     // a refusal or late trial naming the ledger's own open head is retained as history.
     // A late obsolete trial cannot supply evidence for the replacement below.
-    if ('head' in data) {
+    if (data.kind === 'serve-revert') {
+      demand(work!.delivery?.mergeSha.toLowerCase() === data.mergeSha,
+        'A serve revert must name this item’s delivered merge', 409);
+      if (data.outcome === 'reverted') demand(held, 'The base branch must hold the revert commit', 409);
+      else demand(data.reason && !data.revertSha && !data.reland, 'A revert refusal needs its reason and no pushed commit or re-land', 400);
+    } else if ('head' in data) {
       if (data.head !== candidate) {
         demand(data.kind === 'refused' || data.kind === 'trial' || data.kind === 'trial-step', otherHeadRefusal(work!.key, data.head, candidate), 409);
         const ledger = await foldItemLedger(db, work!, data);
