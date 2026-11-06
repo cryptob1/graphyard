@@ -15,6 +15,7 @@ import type { HumanRequestRow } from '../src/model/human-request.js';
 import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
 import { lockedWork } from '../src/store/locked-read.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // Every filed fixture owes an E2E proof and the serve declaration its trial needs.
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -59,10 +60,10 @@ const observation = (sha: string) => ({ source: 'control-plane', at: new Date().
 /** A submitted, observed head whose only owed thing is the person's check. */
 async function submitted(key: string): Promise<Work> {
   const now = new Date().toISOString();
-  const work = { id: randomUUID(), key, title: `Item ${key}`, description: 'No user-facing change: a test item.', type: 'chore', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text, proofs: [proof] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 1, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true, epoch: 1, lease: null,
-    workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker-1' }], candidate: head(H), submission: { epoch: 1, pr: 0 }, reworkRequested: false,
-    scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['worker-1'], observation: observation(H) } as unknown as Work;
+  const work = workFixture({ id: randomUUID(), key, title: `Item ${key}`, description: 'No user-facing change: a test item.', type: 'chore', priority: 1,
+    criteria: [{ id: 'AC-1', text, proofs: [proof] }], stage: 'review', revision: 3, createdAt: now, updatedAt: now, stageEnteredAt: now, epoch: 1,
+    workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker-1' }], candidate: head(H), submission: { epoch: 1, pr: 0 },
+    gates: [], implementers: ['worker-1'], observation: observation(H) });
   Object.assign(work, evaluate(work, [work], new Date()));
   await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
   return work;
