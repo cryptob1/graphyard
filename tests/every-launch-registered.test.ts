@@ -12,7 +12,9 @@ import type { Principal, Work } from '../src/model.js';
 import type { SessionHandleInput } from '../src/model/sessions.js';
 import { registeredLaunch } from '../src/model/session-state.js';
 import { masterConfigSchema, registeredReview, type MasterConfig } from '../src/master.js';
-import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
+import { dispatchEffects } from '../src/dispatch/effects.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';

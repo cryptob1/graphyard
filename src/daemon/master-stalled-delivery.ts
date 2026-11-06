@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { specCheckCurrent } from '../model/spec-check.js';
 import type { DaemonState } from './state.js';
-import type { DispatchCursor } from '../auto-dispatch.js';
+import type { DispatchCursor } from '../dispatch/cursor.js';
 import type { ServingReport } from '../deploy-watch.js';
 import type { Work } from '../model.js';
 import { parseBaseFailureReason } from '../merge-writer/executor.js';

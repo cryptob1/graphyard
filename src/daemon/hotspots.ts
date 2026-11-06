@@ -18,8 +18,8 @@ import { pathScopeContains, pathScopesOverlap } from '../model/documentation-glo
 export interface Hotspot { file: string; claimedBy: string[] }
 
 /**
- * The narrower of two overlapping scopes, so a `docs/` claim colliding with
- * `docs/protocol/leases.md` names the file, not the tree. `pathScopesOverlap` is true only on
+ * The narrower of two overlapping scopes, so a `src/` claim colliding with
+ * `src/master/dispatch.ts` names the file, not the tree. `pathScopesOverlap` is true only on
  * equality or prefix containment, so the narrower of a pair is always well-defined; equal paths
  * name the scope itself.
  */

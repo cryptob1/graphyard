@@ -186,7 +186,7 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
       review.observation!.candidate.sha = head; review.observation!.candidate.baseSha = head;
       review.observation!.baseTip = head;
       Object.assign(review.autoDispatch!.review!, { sha: head, baseSha: head });
-      const tick = await effects.dispatchTick!({ work: [review], now: new Date().toISOString() }) as import('../src/auto-dispatch.js').DispatchTick;
+      const tick = await effects.dispatchTick!({ work: [review], now: new Date().toISOString() }) as import('../src/dispatch/tick.js').DispatchTick;
       assert.equal(tick.launched.length, 1, JSON.stringify(tick));
       assert.ok(readinessPolls >= 2, 'review readiness must wait for pi after the wrapper');
       const binding = join(reviewDirectory, 'review-binding.json');

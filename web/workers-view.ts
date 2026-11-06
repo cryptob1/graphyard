@@ -19,7 +19,7 @@ import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release';
  * one freshness bound every reader applies (GY-172, src/model/session-state.ts). The loop observes
  * every session it can see on each dispatch tick and refreshes the record well inside the bound, so
  * an open session not seen for a quarter of an hour is one no observer is reporting, and the reader
- * is told so rather than shown a live session. `docs/dashboard.md` states the threshold.
+ * is told so rather than shown a live session.
  */
 export const sessionStaleThresholdMs = sessionObservationFreshMs;
 

@@ -11,7 +11,9 @@ import { launchAuthorization, managedInstructions } from '../src/repository-setu
 import { guideText } from '../src/guide.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit } from '../src/producer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { repositoryClaudeConfig } from '../src/harness.js';
 import { autonomyContract } from '../src/autonomy.js';
@@ -477,7 +479,7 @@ await t.test('integration:unacknowledged-session-recovery — the loop detects a
   } finally { await cleanup(); }
 });
 
-await t.test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line, guide claim prints it, and docs/onboarding.md states what is generated and why', async () => {
+await t.test('manual:launch-authorization-onboarding-review — a Claude Code role session carries the launch authorization on its command line and guide claim prints it', async () => {
   for (const fragment of ['receives its instruction as the', 'session\'s own first request, on the runtime\'s command line, never as pasted text', 'no human\nsends "go"', 'The one message such a session may later receive as a paste comes from that\nsame launcher', 'act on it without waiting for confirmation', 'Nothing else pasted into a\nsession carries that authority']) assert.ok(launchAuthorization.includes(fragment), `the authorization states: ${fragment}`);
   // GY-2972: the generated AGENTS.md block stays short and names the guide topics; the
   // authorization's paste rule prints from guide claim, and the autonomy contract that ends it
@@ -489,9 +491,6 @@ await t.test('manual:launch-authorization-onboarding-review — a Claude Code ro
   assert.match(managedInstructions('# Rules\n'), /guide TOPIC/);
   const agents = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
   assert.match(agents, /guide TOPIC/, 'this repository\'s own AGENTS.md names the guide topics');
-  const onboarding = await readFile(join(repositoryRoot, 'docs/onboarding.md'), 'utf8');
-  assert.match(onboarding, /### What the generated instructions authorize/);
-  for (const fragment of ['every session Graphyard launches receives its instruction as the session\'s own first request', 'bracketed paste', 'untrusted data', '--append-system-prompt', 'Role files under `.graphyard/harness/` hold permissions, not instructions']) assert.ok(onboarding.includes(fragment), `docs/onboarding.md states ${fragment}`);
 
   // A Claude Code session launched under a role file loads only the user settings, which leaves
   // the repository's AGENTS.md out: the launcher carries the authorization on the command line.

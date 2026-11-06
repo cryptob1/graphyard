@@ -124,7 +124,8 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
  */
 export function claimAction(all: Work[], executor: { id: string; host: string; principal: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow; yielded: Work[] } | null {
   const open = openActions(all, now, options.kinds).filter(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
-  const entry = open.find(candidate => !yieldsTo(candidate.row, executor.id)) ?? open[0];
+  // A row yields only to rows of its own priority: a freed slot never goes to lower-priority work (GY-3149).
+  const entry = open.find(candidate => !yieldsTo(candidate.row, executor.id) && (candidate.work.priority ?? 2) <= (open[0].work.priority ?? 2)) ?? open[0];
   if (!entry) return null;
   // Rows ahead of the one taken stepped aside for this executor: each is marked so it does so once.
   const passed = open.slice(0, open.indexOf(entry));

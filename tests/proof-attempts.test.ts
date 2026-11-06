@@ -8,7 +8,9 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { lostRun, producerIdleGraceMs, readProducerLedger, reconcileProducers, sessionRetry, type ProducerRecord } from '../src/producer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 
 // GY-496: GY-421 waited over seventy minutes in review with its unit proofs missing. All four of
 // its unit-producer runs were headless Pi runs a loop restart killed (exit 143); each counted as an

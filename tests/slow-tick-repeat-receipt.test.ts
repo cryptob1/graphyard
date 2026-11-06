@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -127,11 +126,18 @@ test('unit:slow-tick-independent-execution-retained — the retained output of t
   assert.ok(includesFault(verifyIndependentExecution(local, receiptDigest).faults, 'not run on a CI runner'), 'a run on a non-CI host is refused');
 });
 
-// Twenty sequential runs take ~110-330 s: past a CI shard's 6-minute bound and the merge trial's
-// 5-minute file bound, so both leave the execution to the proof producer, which runs the whole file.
-const sharded = process.env.SHARD || existsSync('/etc/graphyard-trial') ? 'a CI shard or merge trial leaves the twenty-run execution to the proof producer' : false;
+// CI's sharded suite sits at its 6-minute bound per shard, and this execution takes ~110 s of
+// twenty sequential runs (far more on a slower disk), so a shard leaves it to the proof producer,
+// which runs the whole file. A bounded runner — the merge trial bounds a file at five minutes —
+// cannot host the 900 s this test declares either, and defers the same way; the runner that
+// enforces a bound names it to the file (GRAPHYARD_FILE_TIMEOUT_MS, tests/helpers/bounded-tests.mjs).
+const deferred = process.env.SHARD
+  ? 'a CI shard leaves the twenty-run execution to the proof producer'
+  : Number(process.env.GRAPHYARD_FILE_TIMEOUT_MS ?? Infinity) < 900_000
+    ? `a runner bounding this file at ${process.env.GRAPHYARD_FILE_TIMEOUT_MS} ms leaves the twenty-run execution to the proof producer`
+    : false;
 
-test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: sharded }, async t => {
+test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: deferred }, async t => {
   const execution = await executeSlowTickReceiptRuns();
   try {
     const verdict = verifySlowTickReceipt(execution.receipt);

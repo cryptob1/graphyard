@@ -15,16 +15,16 @@ import { installIdFor } from './install/types.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 
 /**
- * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
+ * The prerequisites the README's setup steps depend on that `graphyard doctor` can check from this
  * machine (GY-1352). Each is a named pass/fail line naming the checklist step that fixes it, so an
  * agent setting Graphyard up from nothing reads the next step off doctor's output instead of guessing.
  */
 export const setupSteps = {
-  install: 'docs/setup-from-zero.md step 3 (install the control plane)',
-  environments: 'docs/setup-from-zero.md step 8 (agent environments)',
-  sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
-  loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
-  unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
+  install: 'README setup step 2 (install with graphyard up)',
+  environments: 'README setup step 3 (connect agent accounts)',
+  sandbox: 'README setup step 1 (install bubblewrap for the worker sandbox)',
+  loopCode: 'rerun graphyard up --agent from this checkout (README setup step 2, start the master)',
+  unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
 } as const;
 

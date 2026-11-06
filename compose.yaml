@@ -1,4 +1,4 @@
-# Local evaluation and small self-hosted installations. See docs/deployment.md.
+# Local evaluation and small self-hosted installations.
 #
 # The server runs the latest promoted release (the `stable` image tag) by default; `--build`
 # builds the same image from this checkout instead. Set GRAPHYARD_IMAGE to pin a dated release

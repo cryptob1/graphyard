@@ -198,7 +198,7 @@ export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
 /**
  * The rework detail for a head one of whose unit or integration groups has nothing left but proofs
  * the producer recorded as not exercising their criterion, or null (GY-817). Such a group's request
- * is never launched again for the head (auto-dispatch.ts); on 2026-09-26 GY-421 was named a proof
+ * is never launched again for the head (dispatch/tick.ts); on 2026-09-26 GY-421 was named a proof
  * dispatch nobody would run for 51 minutes, until a master requested the rework by hand.
  */
 export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[], now: Date): string | null {

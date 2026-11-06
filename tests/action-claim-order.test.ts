@@ -104,7 +104,7 @@ test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed 
   // The failing row is first in every order — highest priority and oldest — so neither priority nor
   // age lets the others ahead of it; only its backoff and the executor's last failure do.
   const failing = item({ priority: 0, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 7_200_000) });
-  const others = Array.from({ length: 2 }, (_unused, index) => item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 3_600_000 + index * 1_000) }));
+  const others = Array.from({ length: 2 }, (_unused, index) => item({ priority: 0, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 3_600_000 + index * 1_000) }));
   const all = [failing, ...others];
 
   const first = claimAction(all, executor, start, { kinds: ['dispatch'] });
@@ -142,7 +142,7 @@ test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed 
   // steps aside once and is then taken, not left behind each further row the executor fails.
   const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
   const resync = item({ priority: 0, stage: 'merge', kind: 'resync', requestedAt: minutesAgo(30) });
-  const stalled = [0, 1, 2].map(index => item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: minutesAgo(600 - index) }));
+  const stalled = [0, 1, 2].map(index => item({ priority: 0, stage: 'ready', kind: 'dispatch', requestedAt: minutesAgo(600 - index) }));
   const fleet = [resync, ...stalled];
   const kinds: NextActionKind[] = ['dispatch', 'resync'];
   const backOff = (work: Work) => { rowOf(work).retryAt = new Date(Date.now() + 3_600_000).toISOString(); };

@@ -1,13 +1,25 @@
+import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import Term from '../components/term';
+
+const source = 'https://github.com/cryptob1/graphyard/blob/main/';
+/** The README without its GIF link: the page plays the video itself. Relative links open on GitHub. */
+const readmeLink = (href?: string) => !href || /^(https?:|#|\/)/.test(href) ? href : source + href;
 
 /**
  * "How Graphyard works" in under 300 words, opened from Help at the foot of the sidebar. It uses
  * the dashboard's own words — the five groups and the six pull-request steps — and nothing else.
- * The long, precise version is docs/how-graphyard-works.md; this one is for a first visit.
+ * The walkthrough video and the README follow, loaded once the page is open.
  */
 export default function GuidePage() {
+  const [media, setMedia] = useState<{ video: string; readme: string } | null>(null);
+  useEffect(() => {
+    Promise.all([import('../../docs/diagrams/how-graphyard-works.mp4?url'), import('../../README.md?raw')])
+      .then(([video, readme]) => setMedia({ video: video.default, readme: readme.default.split('\n').filter(line => !line.includes('how-graphyard-works.gif')).join('\n') }));
+  }, []);
   return <article className="guide">
     <div className="page-heading"><h1>How Graphyard works</h1></div>
+    {media && <video className="guide-video" src={media.video} controls preload="metadata"/>}
     <p>AI agents build software work here, and nothing ships until someone who did not build it has checked it.</p>
     <h2>Every open item is in one group</h2>
     <ul>
@@ -27,6 +39,7 @@ export default function GuidePage() {
       <li><strong>Prove</strong>: each requirement gets a passing <Term term="proof">proof</Term>.</li>
       <li><strong>Merge</strong>: it joins the main branch.</li>
     </ol>
-    <p>Open any item to see its step, why it is there and who acts next. <a href="/docs/how-graphyard-works">The full guide ↗</a></p>
+    <p>Open any item to see its step, why it is there and who acts next.</p>
+    {media && <ReactMarkdown components={{ a: ({ href, children }) => <a href={readmeLink(href)}>{children}</a> }}>{media.readme}</ReactMarkdown>}
   </article>;
 }

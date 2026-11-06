@@ -1,40 +1,38 @@
 # Graphyard
 
-Graphyard coordinates AI coding agents on a repository. The **master** decides what to do; the **loop** observes state and starts sessions. **Workers** implement items in assigned worktrees. Graphyard owns leases, history and gates; Herdr runs sessions and reports their state.
+Graphyard runs AI coding agents on your repository and takes each goal from a sentence to production. The human keeps three decisions: goals and priorities, money and accounts, and credentials for people. The **master** (AI) decides everything else. The **loop** (plain code) dispatches **workers**, requests spec checks, independent review and proof, and drives the **merge writer**, which trials every change on the latest main before it merges. Main deploys on its own, a failing release is reverted automatically, and every failure goes back to the master.
 
-The human keeps exactly three decisions: goals and priorities, spending money or opening accounts, and issuing credentials to people. The master handles other decisions, review, proof and repairs automatically.
+[![How Graphyard works: a 90-second walkthrough](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
-[![How Graphyard works: a two-minute walkthrough](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
+## Setup
 
-## Start here: setup and docs
-
-1. Prepare Node 24+, Git, GitHub CLI and a clean Graphyard CLI checkout with dependencies installed and `bin/` on your PATH. Use Linux with systemd user services and bubblewrap. Install Docker Engine and Compose; alternatively, the local provider runs the control plane on embedded Postgres (merge trials still use Docker). Herdr runs agent sessions; setup installs it if missing. Run `gh auth login --scopes repo` as an administrator of your repository.
-2. In the repository checkout, replace `OWNER/NAME` and run:
+1. Prepare a Linux host with systemd user services, bubblewrap, Node 24+, Git, the GitHub CLI and Docker Engine with Compose. Clone Graphyard, run `npm ci` and put its `bin/` on your PATH. Run `gh auth login --scopes repo` as an administrator of your repository.
+2. In your repository's checkout, install:
 
    ```sh
    graphyard up --repo OWNER/NAME --provider compose --master claude
    ```
 
-   Choose `--provider local` for embedded Postgres, or `--master codex` for Codex. Setup installs services, registers the merge writer's deploy key, and configures agents. Rerun the same command to resume.
-3. Open the printed Setup link. Connect AI coding accounts for worker and reviewer roles (the same account can serve both), using API keys or subscription sign-ins; approve browser logins. Host logins are discovered automatically. Wait for the checklist to turn green and onboarding changes to merge.
-4. After “Everything is green”, run `graphyard master status` to inspect sessions and work. Open the final sign-in link within ten minutes.
-5. File your first goal in the dashboard's **New work item** form: give it a title, description, checkable acceptance criteria and required proof names. The master handles planning and dispatch.
-6. Later, preview updates with `graphyard upgrade --plan`, then apply with `graphyard upgrade` on the configured host.
+   Use `--provider local` for embedded Postgres instead of Docker, or `--master codex` for Codex. Rerun the same command to resume; `graphyard doctor` prints one PASS or FAIL line per prerequisite.
+3. Open the printed Setup link and connect AI coding accounts for the worker and reviewer roles (one account can serve both). Wait until the checklist is green.
+4. File a goal in the dashboard's **New work item** form with a title, description, acceptance criteria and required proof names. Watch it move with `graphyard master status`.
+5. Update later with `graphyard upgrade --plan`, then `graphyard upgrade`.
 
-Details: [setup checklist](docs/setup-from-zero.md), [install guide](docs/install.md), [onboarding](docs/onboarding.md), [documentation index](docs/README.md). Contributors: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
+## Help
 
-## How it works
+- `graphyard guide` lists the procedures agents follow; `graphyard guide TOPIC` prints one.
+- `graphyard master guide` prints the master's complete operating loop.
+- `graphyard --help` lists every command. Contributors read [AGENTS.md](AGENTS.md).
 
-Workers submit commits under leases. Graphyard requests proofs and review; sensitive changes need pre-merge approval. The merge writer tests and pushes main, and the deploy supervisor serves it. The master handles failures.
+## The walkthrough video
 
-```mermaid
-flowchart LR
-  M[Master: reasons and decides] --> W[Work items]
-  L[Loop: observes and acts] --> A[Worker implements]
-  W --> A --> G[Graphyard gates and merge writer]
-  G --> D[Deploy supervisor] --> V[Serving commit and test results]
-  G -. failure .-> M
-  V -. failure .-> M
+The video is rendered from `scripts/walkthrough/how-graphyard-works.html`. After editing it, with Playwright Chromium, ffmpeg and uv installed:
+
+```sh
+frames=$(mktemp -d)
+node scripts/walkthrough/render.mjs "$PWD/scripts/walkthrough/how-graphyard-works.html" "$frames" 10
+ffmpeg -y -framerate 10 -i "$frames/f%05d.png" -vf scale=1200:-2:flags=lanczos,format=yuv420p -c:v libx264 -crf 24 -preset slow -movflags +faststart docs/diagrams/how-graphyard-works.mp4
+uv run --no-project --with pillow python -I scripts/walkthrough/makegif.py "$frames" 10 800 docs/diagrams/how-graphyard-works.gif
 ```
 
-[Delivery](docs/delivery.md) describes trials, deploys and recovery; `graphyard.json` sets sensitive paths in `risk.sensitive`.
+Licence: [Apache 2.0](LICENSE).
