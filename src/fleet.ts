@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { nonInteractiveLaunch } from './harness.js';
+import { launchRecipe } from './harness.js';
+import { runtimeAdapter } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -273,10 +274,6 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
 // ---------------------------------------------------------------------------
 
 export interface HostLogin { name: string; runtime: string; home: string | null; loggedIn: boolean | null; quota: EnvironmentHealth['quota']; reason: string | null; login: string | null; source: 'environment' | 'default-home' | 'executable' }
-const defaultHomes: Record<EnvironmentKind, (home: string) => string> = {
-  claude: home => resolve(home, '.claude'), codex: home => resolve(home, '.codex'), cursor: home => resolve(home, '.cursor'),
-  opencode: home => process.env.XDG_DATA_HOME ?? resolve(home, '.local/share'),
-};
 const onPath = (executable: string) => { try { execFileSync('which', [executable], { stdio: 'ignore' }); return true; } catch { return false; } };
 const output = (command: string, args: string[]) => { try { return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0] || null; } catch { return null; } };
 
@@ -295,7 +292,7 @@ export function installDirectory(program: string): string | null {
 
 /** A proposed runtime launched from its resolved install directory, with mise kept off every config. */
 export function pinRuntime(runtime: FleetRuntime, install: (program: string) => string | null = installDirectory): FleetRuntime {
-  const directory = install(nonInteractiveLaunch[runtime.launch.kind]?.program ?? runtime.launch.kind);
+  const directory = install(launchRecipe(runtime.launch.kind)?.program ?? runtime.launch.kind);
   if (!directory) return runtime;
   const path = [directory, ...(process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin').split(':').filter(entry => entry && entry !== directory)].join(':');
   return { ...runtime, launch: { ...runtime.launch, environment: { ...runtime.launch.environment, PATH: path, MISE_NO_CONFIG: '1' } } };
@@ -317,7 +314,7 @@ export async function discoverHostLogins(options: { directory?: string; home?: s
   };
   for (const environment of environments) await check(environment, 'environment');
   for (const kind of environmentKinds) {
-    const location = defaultHomes[kind](home);
+    const location = runtimeAdapter(kind)!.home!.default(home);
     if (await loginAlreadyFound(found, kind, location)) continue;
     const name = found.some(entry => entry.name === kind) ? `${kind}-default` : kind;
     const health = await checkAgentEnvironment({ name, kind, home: location }, probe);

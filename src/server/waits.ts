@@ -1,4 +1,5 @@
 import { appendEvidence } from '../model-boundary/append-evidence.js';
+import { recordDispatch } from '../engine/evaluate.js';
 import { once } from '../store/mutations.js';
 import { createCipheriv, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
 import type pg from 'pg';
@@ -38,7 +39,7 @@ async function commit(services: Services, db: Db, now: Date, work: Work, all: Wo
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
   // engine's own transactions, and this is one of them.
-  await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
+  await recordDispatch(db, work, now);
   await save(db, work, actor.id, kind, now, details);
   return work;
 }

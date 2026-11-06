@@ -1,4 +1,5 @@
 import { decisionWork } from '../store/decision-read.js';
+import { recordDispatch } from '../engine/evaluate.js';
 import { once, record } from '../store/mutations.js';
 import type pg from 'pg';
 import { demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
@@ -58,7 +59,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     // Nothing closed may be merged, whatever its last gates said.
     Object.assign(work!, { mergeAuthorization: null });
     // The engine's own ledger entries for this evaluation (see waits.ts); internal to its transactions.
-    await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+    await recordDispatch(db, work!, now);
     for (const request of settled.cancelled) await record(db, work!, 'graphyard', 'dispatch.cancelled', { details: { ...request, at: now.toISOString() } });
     await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests });
     return work!;

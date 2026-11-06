@@ -7,7 +7,8 @@ import { slotsDirectoryVariable } from './verification-slots.js';
 import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
-import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
+import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, launchRecipe } from '../harness.js';
+import { runtimeAdapter } from './runtimes.js';
 import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
@@ -70,15 +71,8 @@ export async function preservePartialWork(path: string, label: string, run: Chil
  * typed line holds only the runtime, its flags and one path, and is bounded by
  * `launchCommandLimit` whatever the request is.
  */
-export const launchRequestContracts: Record<string, (reference: string) => string> = {
-  claude: reference => reference, codex: reference => reference, cursor: reference => reference, opencode: reference => `--prompt ${reference}`,
-  pi: reference => reference, muse: reference => reference, gemini: reference => `--prompt-interactive ${reference}`, qwen: reference => `--prompt-interactive ${reference}`, copilot: reference => `--interactive ${reference}`,
-  agy: reference => `--prompt-interactive ${reference}`,
-};
-/** How a runtime loads the launch authorization from a file; only Claude Code, which leaves AGENTS.md out under a role file, needs one. */
-export const launchRoleContracts: Record<string, (reference: string) => string> = { claude: reference => `--append-system-prompt-file ${reference}` };
 export type RequestDelivery = 'request' | 'paste';
-export const launchDelivery = (kind: string | undefined, args: string[] = []): RequestDelivery => kind && (launchRequestContracts[kind] || args.includes(requestPlaceholder)) ? 'request' : 'paste';
+export const launchDelivery = (kind: string | undefined, args: string[] = []): RequestDelivery => kind && (runtimeAdapter(kind)?.request || args.includes(requestPlaceholder)) ? 'request' : 'paste';
 /**
  * A session's instruction is its own first request, on the runtime's command line, never a paste
  * (GY-93): a runtime without a way to take it there is refused before launch, naming the runtime
@@ -249,12 +243,12 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
   return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap, environment, ...(credentialMask ? { credentialMask } : {}) });
 }
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
-export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
+export const launchProgram = (kind: string) => launchRecipe(kind)?.program ?? kind;
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = [], environment: Record<string, string> = {}) {
   if (wrap.length) args = confinedRuntimeArgs(kind, args);
-  const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
-  const own = launchRequestContracts[kind];
+  const role = files.role ? runtimeAdapter(kind)?.role?.(roleReference) : undefined;
+  const own = runtimeAdapter(kind)?.request;
   const request = files.request && own ? own(requestReference) : undefined;
   // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
   const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
@@ -306,21 +300,6 @@ export const agentStartTimeoutMs = 60_000, agentStartCeilingMs = 120_000, startP
 export const defaultLaunchStartSeconds = agentStartTimeoutMs / 1000;
 export const launchStartMs = (config: { run: Pick<MasterRun, 'launchStartSeconds'> }) => (config.run.launchStartSeconds ?? defaultLaunchStartSeconds) * 1000;
 export const startedStates = ['idle', 'done', 'working'], promptableStates = ['idle', 'done'];
-/**
- * The runtime's own screen, per kind: its banner, its status line, or its spinner at the start of a
- * line (Claude Code's `∙ ✻ ✶ ✳ ✢` over the request it is working on). Nothing here matches the
- * echoed launch command — lowercase runtime names, no spaces inside `bypassPermissions` — or a
- * shell prompt, whose `❯` some shells draw at the start of a line too.
- *
- * OpenCode's own TUI never prints the capitalized word (GY-417): 1.18's start screen shows the
- * `Ask anything…` input prompt and a hint bar opening with `tab agents`. Those two are what the
- * check matches — not its block-character logo or a bare `ctrl+` hint, which a shell theme or a
- * MOTD can draw too; the echoed launch command holds the lowercase word alone, so it never counts.
- */
-export const runtimeScreens: Record<string, RegExp> = {
-  claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-  codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\btab agents\b|Ask anything…/, gemini: /\bGemini\b/,
-};
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent' | 'exited';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
 export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
@@ -434,7 +413,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // Herdr can assign an agent name to a shell or pre-runtime wrapper. Read its
   // screen and foreground before accepting even a reported working state.
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
-  const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
+  const showing = screen !== null && !!runtimeAdapter(kind)?.screen?.test(screen);
   let foreground: Awaited<ReturnType<typeof paneForeground>> | undefined;
   const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run, launchProgram(kind))));
   // A runtime that printed below its command and handed the terminal back to the shell has exited
@@ -465,7 +444,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // A wrapper/supervisor's argv can name the runtime before it executes it. For
   // known runtimes require their own screen as well; unknown runtimes have only
   // the foreground-process contract to judge by.
-  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '') && (showing || !runtimeScreens[kind] && holder === 'runtime')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '') && (showing || !runtimeAdapter(kind)?.screen && holder === 'runtime')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   // Blocked on a dialog nothing above recognises: the refusal names what the dialog asked (GY-1561).
   const dialog = agent?.agent === kind && agent.agent_status === 'blocked' ? screenDialog(screen) : null;
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: dialog ? `Herdr reports it blocked on a dialog the launcher does not recognise: "${dialog}"` : 'Herdr reports it blocked', line };
@@ -581,7 +560,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   if (delivery !== 'request') throw new LaunchRefusedError(kind, requestContractRefusal(kind));
   // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
   // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
-  const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
+  const trust = await launchRecipe(kind)?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
   // The coordinator checkout is unwritable for this session at the OS level (GY-888), or the
   // launch is refused with the reason named — never started unconfined. A failure here is a
   // launch failure like any other: the caller releases the claim and closes what it created.
@@ -590,7 +569,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
     : await sessionConfinement(kind, args, options, options.coordinatorRoot);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
-  const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
+  const carried = withAutonomyContract(!!runtimeAdapter(kind)?.role, { request: text, role: options.role });
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? [], options.environment);
@@ -598,7 +577,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // account's config is shared with its running sessions, and one that rewrote it since the trust
   // step dropped the record, so the launch is refused naming that config rather than started into
   // the runtime's folder-trust dialog.
-  if (trust) await nonInteractiveLaunch[kind]?.verify?.(trust);
+  if (trust) await launchRecipe(kind)?.verify?.(trust);
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));

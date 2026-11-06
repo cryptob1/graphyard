@@ -1,29 +1,13 @@
 // Concern: the provider login behind an account home, so accounts on one subscription are held together (GY-1573).
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { adapterIdentity } from './runtimes.js';
 import type { AgentRegistry, QuotaObservation } from '../model/registry.js';
 import type { AgentEnvironment } from './profiles.js';
 import type { ObservedExhaustion } from './environments.js';
 
-/**
- * The provider login an account home holds (GY-1573), as its kind and a digest of the provider's own
- * ids, so two homes logged in to one subscription read alike and nothing identifying leaves the host:
- * Claude Code's OAuth account and organization, Codex's ChatGPT account, Cursor's user. OpenCode and
- * Pi name no single login (each provider keeps its own), and an API-key login names no account, so
- * those read null: unknown, which holds nothing. A login file that exists but cannot be read or
- * parsed just now (a runtime mid-write) reads undefined: the login has not been seen to change.
- */
-export async function providerIdentity(kind: string, home: string): Promise<string | null | undefined> {
-  const file = kind === 'claude' ? '.claude.json' : kind === 'codex' ? 'auth.json' : kind === 'cursor' ? 'cli-config.json' : null;
-  if (!file) return null;
-  let login: any;
-  try { login = JSON.parse(await readFile(resolve(home, file), 'utf8')); }
-  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined; }
-  const ids = kind === 'claude' ? [login?.oauthAccount?.accountUuid, login?.oauthAccount?.organizationUuid] : kind === 'codex' ? [login?.tokens?.account_id] : [login?.authInfo?.userId];
-  if (!ids.every(id => typeof id === 'string' && id.trim() || typeof id === 'number')) return null;
-  return `${kind}:${createHash('sha256').update(ids.map(String).join('\0')).digest('hex').slice(0, 32)}`;
-}
+/** The provider login an account home holds (GY-1573), read through its runtime adapter's identity file (runtimes.ts `adapterIdentity`). */
+export const providerIdentity = (kind: string, home: string) => adapterIdentity(kind, home, ids => createHash('sha256').update(ids.join('\0')).digest('hex').slice(0, 32));
 
 export const describeObservedExhaustion = (environment: string, held: ObservedExhaustion) =>
   `${environment} exhausted its quota mid-session at ${held.at} (${held.reason}); ${held.resetsAt ? `it resets ${held.resetsAt}` : `its reset time is unknown, so it is tried again after ${held.until}`}`;

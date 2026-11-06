@@ -2,8 +2,8 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { getCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
-import type { AccountUsage, EnvironmentProbe, ProbedEnvironment } from './environments.js';
-import type { AgentEnvironment } from './profiles.js';
+import type { AccountUsage, EnvironmentProbe } from './environments.js';
+import type { ProbedHome } from './runtimes.js';
 
 /** One reading of a shared plan's quota, with the limit flag its provider reported (GY-1260). */
 export type PlanReading = ProviderUsageResult & { reached?: boolean };
@@ -18,7 +18,7 @@ export const windowName = (minutes: number) => minutes >= 1440 && minutes % 1440
 // is sent only to its own provider and never leaves this function. An account connected with a
 // pasted API key (GY-409) holds it in the environment's settings.json instead, which is a login
 // the health probe recognises even though no usage endpoint stands behind it.
-export async function claudeAccount(environment: AgentEnvironment, probe: EnvironmentProbe, now: number) {
+export async function claudeAccount(environment: ProbedHome, probe: EnvironmentProbe, now: number) {
   const oauth = (await readJsonFile(resolve(environment.home, '.credentials.json')))?.claudeAiOauth;
   if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) {
     const settings = await readJsonFile(resolve(environment.home, 'settings.json'));
@@ -66,7 +66,7 @@ export async function newestCodexRateLimits(home: string) {
   }
   return null;
 }
-export async function codexAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
+export async function codexAccount(environment: ProbedHome, probe: EnvironmentProbe) {
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
   const loggedIn = !!auth && (typeof auth.tokens?.access_token === 'string' || typeof auth.OPENAI_API_KEY === 'string' && !!auth.OPENAI_API_KEY);
   if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null, reached: false };
@@ -78,7 +78,7 @@ export async function codexAccount(environment: AgentEnvironment, probe: Environ
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
-export async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }> {
+export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }> {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
   // A named key file is read as Z.AI's only when it is Z.AI's by its variable or name: an OpenCode account whose
@@ -97,7 +97,7 @@ export async function zaiAccount(environment: ProbedEnvironment, probe: Environm
   // The key's presence decides, not its value: a caller that passes an optional plan as `declaredPlan: undefined` has
   // declared none, and must not fall back to the derived plan's default 'zai' kind (GY-1239).
   const declared = 'declaredPlan' in environment ? environment.declaredPlan : environment.plan;
-  const isZaiSpecific = (environment.kind as string) === 'pi'
+  const isZaiSpecific = environment.kind === 'pi'
     || /^zai/i.test(declared ?? '')
     || keyFileName !== 'zai.key';
 

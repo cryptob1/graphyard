@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/runtime-prompt.js';
+import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
 
 // GY-1817: a pi worker whose provider answered `429 code 1310 Weekly/Monthly Limit Exhausted`
 // was read as ordinarily idle. pi now has its own entry in the provider limit catalogs, and its
@@ -39,7 +40,7 @@ test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly 
     // A zone the provider names in parentheses is that zone's wall clock: 08:27:35 PDT is 15:27:35Z, not 08:27:35Z.
     const named = detectRuntimeExhaustion(piPane.replace('08:27:35"', '08:27:35 (America/Los_Angeles)"'), 'pi', at);
     assert.equal(named?.resetsAt, '2026-10-17T15:27:35.000Z', 'a parenthesized named zone survives the UTC default');
-    assert.ok(providerLimitNotices.pi, 'pi has its own entry in the catalogs');
+    assert.ok(runtimeAdapter('pi')?.limitNotices, 'pi has its own entry in the catalogs');
     // Another runtime's catalog does not read pi's banner.
     assert.equal(detectRuntimeExhaustion(piPane, 'claude', at), null, 'the notice is pi\'s catalog, not Claude\'s');
     assert.equal(detectRuntimeExhaustion(piPane, 'codex', at), null, 'the notice is pi\'s catalog, not the shared provider errors');

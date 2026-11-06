@@ -288,19 +288,18 @@ test('integration:trial-step-timings — finished steps survive the flight and m
     merge: async (mergeHead, baseTip) => ({ mergeSha: sha(`merge:${mergeHead}:${baseTip}`), files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
     step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
     return {} as never;
-  }, push: async () => { clock += 20; return 'pushed'; }, preview: async () => { clock += 30; return null; } } as MergePorts,
+  }, push: async () => { clock += 20; return 'pushed'; } } as MergePorts,
   made.state.mergeWriter, async () => {});
   const heads = [{ key: 'GY-1', head }, { key: 'GY-2', head: sha('second') }];
   for (let index = 0; index < 21; index++) {
     await ports.trial(sha(String(index)), [], item(), base, undefined, undefined, heads);
-    await ports.preview!(sha(String(index)), [], item());
     await ports.push(sha(String(index)), base);
   }
   const summary = mergeWriterSummary(made.state.mergeWriter);
   assert.equal(summary.trials!.length, 20);
   assert.equal(summary.trials![0]!.mergeSha, sha('1'));
   assert.deepEqual(summary.trials![0]!.heads, heads);
-  assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, preview: 30, push: 20 });
+  assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, push: 20 });
 
   // GY-3120: a landing that re-merges onto a moved tip still records its push on the head's own trial record.
   const remergeHead = sha('ninth');

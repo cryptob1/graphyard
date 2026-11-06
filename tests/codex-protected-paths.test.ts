@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync, readlinkSync, readFileSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { LaunchRefusedError, launchPlan, nonInteractiveLaunch } from '../src/harness.js';
+import { LaunchRefusedError, launchPlan } from '../src/harness.js';
+import { runtimeAdapters } from '../src/master/runtimes.js';
 import { startAgentSession } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -65,7 +66,7 @@ test('unit:codex-protected-paths-created — a codex launch creates the missing 
 });
 
 test('unit:codex-protected-paths-codex-only — no other runtime\'s launch creates .agents or .codex', async () => {
-  const others = Object.keys(nonInteractiveLaunch).filter(kind => kind !== 'codex');
+  const others = runtimeAdapters().filter(adapter => adapter.recipe && adapter.kind !== 'codex').map(adapter => adapter.kind);
   assert.ok(others.includes('claude'));
   for (const kind of others) {
     const cwd = await temporaryDirectory(`${kind}-cwd`);

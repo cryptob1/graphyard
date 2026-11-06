@@ -21,9 +21,9 @@ import { shellQuote } from '../shell-quote.js';
 import { heldObservation, describeObservedExhaustion, providerIdentity } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
-// The per-provider login and quota probes live in ./environment-quota.ts, imported here exactly as
-// they were private in this module: nothing about them is part of this path's export.
-import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
+// The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
+import type { PlanReading } from './environment-quota.js';
+import { runtimeAdapter, type AccountReading } from './runtimes.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -108,21 +108,12 @@ export type ProbedEnvironment = AgentEnvironment & { plan?: string | null; decla
 let latestZaiReading: PlanReading | null = null;
 export async function checkAgentEnvironment(environment: ProbedEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
-  const planId = environment.plan ?? (
-    environment.kind === 'opencode' || (environment.kind as string) === 'pi' || /zai|glm/i.test(environment.name)
-      ? (/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1]
-        ? `zai-${/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)![1].toLowerCase()}`
-        : 'zai')
-      : null
-  );
+  const adapter = runtimeAdapter(environment.kind), named = /^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1];
+  const planId = environment.plan ?? (adapter?.sharedPlan || /zai|glm/i.test(environment.name) ? named ? `zai-${named.toLowerCase()}` : 'zai' : null);
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
 
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading } =
-    environment.kind === 'claude' ? await claudeAccount(environment, probe, now)
-    : environment.kind === 'codex' ? await codexAccount(environment, probe)
-    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await zaiAccount(environment, probe, { id: planId, now })
-    : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+  const account: AccountReading = adapter?.usage ? await adapter.usage(environment, probe, { plan: planId, now }) : { loggedIn: false, usage: [], note: `Graphyard reads no login of the ${environment.kind} runtime` };
 
   if (/^zai\//i.test(environment.model ?? '') && !account.usage.length && latestZaiReading)
     Object.assign(account, { loggedIn: true, usage: latestZaiReading.windows, note: latestZaiReading.reason, reached: latestZaiReading.reached, shared: true });

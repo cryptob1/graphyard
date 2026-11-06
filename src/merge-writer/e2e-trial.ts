@@ -1,18 +1,16 @@
 // Concern: GY-2965 — the merge trial serves the head and runs its bound E2E cases (AC-2).
-import { spawn } from 'node:child_process';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
-import { projectCaseSuite, buildStaticSite, groupBuildShell } from '../release-project.js';
+import { projectCaseSuite } from '../release-project.js';
 import { exercisesApplications, type E2eReport } from '../e2e/runner.js';
 import { confinedSession } from '../e2e/steps.js';
-import { serveStaticSite } from './preview.js';
-import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
+import { composeProjectName } from '../compose-preview.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
-import { type E2eServe } from '../model/repository-policy.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { type Application } from '../project-applications.js';
+import { commandApplication, serveHead, type CommandApplication, type ServedApplication } from './serve-head.js';
 
 /** How one bound case came out of the trial's run against the served head. */
 export interface TrialE2eCase {
@@ -28,71 +26,18 @@ export interface TrialE2eCase {
 /** Why a case cannot run and the trial refuses the head: the declaration to add. */
 export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve": { "command", "url", "readySeconds" } } in graphyard.json, or declare a previewable application in delivery.applications';
 
-/** How long a stopped serve command has to end before its group is killed. */
-const closeGraceMs = 20_000;
-
 /** What serves the head while the cases run, and how it is stopped. */
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
-/** The checkout's own declarations, read from its graphyard.json and never from the process's. */
-function declaredServe(worktree: string): { serve: E2eServe | null; applications: Application[]; bindings: Record<string, string> } {
-  let serve: E2eServe | null = null;
-  try { serve = checkoutRepositoryPolicy(worktree).e2e.serve; } catch { /* a policy the head broke: no serve, the case run names it */ }
+/** The checkout's own declarations, read from its graphyard.json and never from the process's: its `e2e.serve` read as a command application (its migration source). */
+function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string> } {
+  let serve: CommandApplication | null = null;
+  try { const declared = checkoutRepositoryPolicy(worktree).e2e.serve; serve = declared ? commandApplication(declared) : null; } catch { /* a policy the head broke: no serve, the case run names it */ }
   try {
     const delivery = loadProjectDelivery({}, worktree);
     if (delivery.previews !== 'off') return { serve, applications: delivery.applications, bindings: delivery.cases };
   } catch { /* a delivery the head broke: the case run refuses naming why */ }
   return { serve, applications: [], bindings: {} };
-}
-
-/**
- * A head served by its own `e2e.serve` declaration: `command` run in the trial checkout (the trial
- * environment, no credential) until `url` answers, waited for at most `readySeconds` and the
- * budget's remainder; never past it. The group is killed on close.
- */
-async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = []): Promise<Served> {
-  const startedAt = Date.now(), deadline = startedAt + Math.min(serve.readySeconds * 1000, budgetMs);
-  // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
-  const occupied = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false);
-  if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
-  const [file, ...argv] = [...wrapper, 'sh', '-c', serve.command];
-  const child = spawn(file!, argv, { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const chunks: Buffer[] = [];
-  child.stdout.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
-  child.stderr.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
-  let exited: string | null = null;
-  child.on('error', error => { exited = error.message; });
-  child.on('close', (code, signal) => { exited = `the serve command ended (${signal ? `signal ${signal}` : `status ${code}`})`; });
-  // stdout/stderr stay open while any descendant that inherited them still runs (the shell may exit first under dash).
-  const whenClosed = (stream: NodeJS.ReadableStream | null) =>
-    !stream || (stream as NodeJS.ReadableStream & { closed?: boolean }).closed
-      ? Promise.resolve()
-      : new Promise<void>(accept => stream.once('close', () => accept()));
-  const descendantsGone = Promise.all([whenClosed(child.stdout), whenClosed(child.stderr)]);
-  // SIGTERM the group so the serve command can stop what it started and remove its files; wait for
-  // descendants (not the shell alone) to finish that cleanup before SIGKILL past the grace.
-  const close = async () => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      process.kill(-child.pid!, 'SIGTERM');
-      await Promise.race([descendantsGone, new Promise(accept => { timer = setTimeout(accept, closeGraceMs); })]);
-    } catch { /* already gone */ }
-    finally { clearTimeout(timer); }
-    try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
-  };
-  for (;;) {
-    if (exited) { await close(); throw new Error(`${exited}: ${Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500)}`); }
-    // Only a success answers: a server still starting up (503) is not yet the head served.
-    const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
-    if (answered) return { origin: new URL(serve.url).origin, close, ended: () => exited };
-    if (Date.now() >= deadline) {
-      await close();
-      const tail = Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500);
-      log(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s${tail ? `: ${tail}` : ''}`);
-      throw new Error(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s`);
-    }
-    await new Promise(accept => setTimeout(accept, 500));
-  }
 }
 
 /** Whether the head's case `name` exercises an item preview: its `preview` tag (GY-2217). A case that does not parse runs, and its run names why. */
@@ -134,7 +79,7 @@ export async function runTrialE2eCases(input: {
   }
   // GY-3145: a case delivery.cases binds to an application runs against it; every other case runs
   // against `e2e.serve`, or, with no serve declared, against the only application.
-  const groups = new Map<string, { target: E2eServe | Application; proofs: string[] }>();
+  const groups = new Map<string, { target: ServedApplication; proofs: string[] }>();
   for (const proof of pending) {
     const name = proof.slice(4);
     const bound = declared.applications.find(application => application.id === declared.bindings[name]);
@@ -163,28 +108,20 @@ export async function runTrialE2eCases(input: {
 }
 
 /** `proofs` run against `target` served from the head; every case comes back, failed naming why when it could not run. */
-export async function runTrialE2eGroup(target: E2eServe | Application, proofs: readonly string[], input: Parameters<typeof runTrialE2eCases>[0], origin?: string): Promise<TrialE2eCase[]> {
+export async function runTrialE2eGroup(target: ServedApplication, proofs: readonly string[], input: Parameters<typeof runTrialE2eCases>[0], origin?: string): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   let served: Served | null = null;
   // The cases' bearer token, handed to a serve command as GRAPHYARD_E2E_TOKEN so the head it serves can accept it.
   const token = `trial-${randomUUID()}`;
   try {
     if (origin) served = { origin, close: async () => {} };
-    else if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
-    else if (target.kind === 'static') {
-      const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, groupBuildShell(input.budgetMs, input.wrapper), undefined, input.env) : null;
-      if (build) throw new Error(build);
-      const static_ = await serveStaticSite(join(input.worktree, target.directory), input.mergeSha);
-      served = { origin: static_.url, close: () => static_.close() };
-    } else {
-      const stack = composeStack({
-        checkout: input.worktree, file: target.file, service: target.service, port: target.port,
-        project: composeProjectName(`trial-e2e-${target.id}`, input.mergeSha), environment: dockerEnvironment(input.env), variables: {},
-        bounds: composeBounds(), scratch: await mkdtemp(join(input.scratch, 'compose-')),
-      });
-      // The project is closed whatever happened while it came up: `served` holds it before it starts.
-      served = { origin: '', close: () => stack.close() };
-      served.origin = await stack.start(AbortSignal.timeout(input.budgetMs), input.budgetMs);
+    else {
+      // The cases' token reaches the head's processes, so a serve command's application can accept it.
+      const serving = serveHead(input.worktree, target, { sha: input.mergeSha, env: { ...input.env, GRAPHYARD_E2E_TOKEN: token }, budgetMs: input.budgetMs, wrapper: input.wrapper, log: input.log,
+        scratch: join(input.scratch, `compose-${target.id}`), project: composeProjectName(`trial-e2e-${target.id}`, input.mergeSha) });
+      // Whatever started is closed whatever happened while it came up: `served` holds it first.
+      served = { origin: '', close: serving.close, ended: serving.ended };
+      served.origin = await serving.ready;
     }
     // Every present case loads before any runs; one that does not parse fails as a failing step would.
     const loaded: { proof: string; caseFile: CaseFile }[] = [];
