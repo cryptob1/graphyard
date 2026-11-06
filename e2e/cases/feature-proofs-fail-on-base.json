@@ -1,0 +1,13 @@
+{
+  "id": "feature-proofs-fail-on-base",
+  "title": "A feature's proofs must fail on the base tip",
+  "description": "Real merge trials over a temporary Git repository: a feature or bug whose every proof already passes on the base tip is refused as not reproduced; a chore, or a feature whose proof is new on the head or fails on the base, merges.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "feature and bug proofs re-run on the base tip",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/bug-proof-fails-on-base.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

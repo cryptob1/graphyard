@@ -29,7 +29,7 @@ async function repository(label: string) {
 
 const specOf = (repository: { root: string; base: string; mergeSha: string }): TrialRunSpec =>
   ({ version: 1, key: 'GY-1', head: repository.mergeSha, mergeSha: repository.mergeSha, baseTip: null, changedFiles: ['file'],
-    proofs: [], e2eProofs: [], timeoutMs: 120_000, bug: false, cores: null, root: repository.root, base: repository.base, hidden: [], startedAt: new Date().toISOString() });
+    proofs: [], e2eProofs: [], timeoutMs: 120_000, reproduce: false, cores: null, root: repository.root, base: repository.base, hidden: [], startedAt: new Date().toISOString() });
 
 test('unit:trial-run-detached — a merge trial launched as a detached run records its steps and its verdict in its own directory, and the loop that watches it reads exactly that; the run a restart left is adopted from its recorded verdict without a new process', { timeout: 120_000 }, async () => {
   const fixture = await repository('trial-run-verdict');
