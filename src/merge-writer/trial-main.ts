@@ -20,7 +20,7 @@ try {
     root: spec.root, base: spec.base, mergeSha: spec.mergeSha, changedFiles: spec.changedFiles,
     proofs: spec.proofs, e2eProofs: spec.e2eProofs, proofFiles: [],
     discoverProofFiles: options => proofTestFiles(defaultChildRun, spec.root, spec.mergeSha, spec.proofs, options),
-    timeoutMs: spec.timeoutMs, key: spec.key, ...(spec.bug ? { bug: true } : {}), hidden: spec.hidden,
+    timeoutMs: spec.timeoutMs, key: spec.key, ...(spec.reproduce ? { reproduce: true } : {}), hidden: spec.hidden,
     ...(spec.baseTip ? { baseTip: spec.baseTip } : {}), ...(spec.cores ? { cores: spec.cores } : {}),
     onStep: step => void record({ step, at: new Date().toISOString() }),
     onTiming: (step, durationMs) => void record({ timing: step, durationMs }),

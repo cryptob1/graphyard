@@ -741,7 +741,7 @@ const launcherPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.u
  */
 export function reviewPostSection(cliPath: string, changes: string) {
   return `Post exactly one verdict, only through Graphyard, with the review body on standard input: node ${cliPath} review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead ${changes}). `
-    + 'It binds the verdict to the launched head and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. ';
+    + 'It binds the verdict to the launched head and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. ';
 }
 
 /**

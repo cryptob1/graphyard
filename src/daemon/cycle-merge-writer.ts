@@ -104,7 +104,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         // Trials running at once divide the host's cores, so their shards never oversubscribe it.
         ...(share && share > 1 ? { cores: Math.max(1, Math.floor(availableParallelism() / share)) } : {}) });
     },
@@ -604,7 +604,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
     if (!launch) return reads.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs);
     const launched = launch({ key: item.key, head: heads?.[0]?.head ?? mergeSha, mergeSha,
       baseTip: baseTip?.toLowerCase() ?? null, changedFiles: [...files], proofs: criterionProofs(item), e2eProofs: e2eProofsOf(item),
-      timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, bug: item.type === 'bug',
+      timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, reproduce: item.type !== 'chore',
       // Trials running at once divide the host's cores, so their shards never oversubscribe it.
       cores: share && share > 1 ? Math.max(1, Math.floor(availableParallelism() / share)) : null });
     // The run's directory is persisted on the in-flight entry before its verdict can land, so a restart after it adopts the run.

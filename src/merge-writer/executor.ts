@@ -88,7 +88,7 @@ export interface MergeTrialRun extends TrialRun {
   base?: { tip: string; files: string[]; tests: string[]; cases: string[];
     /** GY-2954: the crashed process the base run's output names — the run's database died under it — bounded. */ crash?: string;
     /** GY-2954: the first failing case's assertion text in the base run's TAP, bounded. */ assertion?: string };
-  /** GY-2984: a bug item's proofs that every one passed on the base tip too, with that tip: the head reproduces no bug. */
+  /** GY-2984, GY-3167: a feature or bug item's proofs that every one passed on the base tip too, with that tip: the head's proofs show nothing it changed. */
   notReproduced?: { proofs: string[]; tip: string };
 }
 /** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
@@ -206,7 +206,7 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
     if (run.failingCase) return withStepDetail(`${trialFailurePrefix}: tests ${files}: ${run.failingCase}`, run.logTail);
     return withStepDetail(`${trialFailurePrefix}: tests ${files}`, run.logTail);
   }
-  // GY-2984: a bug fix whose proofs already pass on the base proves no bug.
+  // GY-2984, GY-3167: a feature or bug fix whose proofs already pass on the base proves nothing it changed.
   if (run.notReproduced) return `${trialFailurePrefix}: not reproduced: ${run.notReproduced.proofs.join(', ')} ${run.notReproduced.proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${run.notReproduced.tip}`;
   return null;
 }
@@ -409,8 +409,8 @@ export interface MergeTrialInput extends RunTrialInput {
   proofFiles: readonly string[];
   /** GY-1834: false skips the rerun of failing files and their run on the base tip; on by default. */
   attribute?: boolean;
-  /** GY-2984: the item is a bug: a passing trial runs its proofs on the base tip, and at least one must fail there. */
-  bug?: boolean;
+  /** GY-2984, GY-3167: the item is a feature or bug: a passing trial runs its proofs on the base tip, and at least one must fail there. */
+  reproduce?: boolean;
   /** The tip the merge was made on, where the base run of GY-1834 runs: a fast-forwarded head's first parent is its own earlier commit, never the tip. Absent, the merge commit's first parent. */
   baseTip?: string;
   /**
@@ -490,12 +490,12 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   const ownProofFiles = discovered ?? input.proofFiles;
   // The proof files the selection discovered are held like those the input named.
   const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, selectFiles, proofFiles: ownProofFiles }, inner, retest);
-  if (!input.bug || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
+  if (!input.reproduce || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
   return reproduceOnBase(attributed, input, ownProofFiles, inner, retest);
 }
 
 /**
- * GY-2984: a bug item's passing trial runs its proofs' files on the base tip (`input.baseTip`, else
+ * GY-2984, GY-3167: a feature or bug item's passing trial runs its proofs' files on the base tip (`input.baseTip`, else
  * the merge commit's first parent), its E2E proofs' bound cases served from that tip. When every proof
  * ran there and none of its cases failed, the head is `notReproduced`. A proof file or case new on the
  * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
@@ -666,7 +666,7 @@ export interface MergePorts {
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
   /**
-   * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984).
+   * The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a feature or bug item's proofs also run on `baseTip` (GY-2984, GY-3167).
    * `share` is how many trials run at once (`mergeHeads`): each takes that share of the host's cores.
    * Aborting `signal` stops the trial's children (GY-3099). `timeoutMs` bounds the whole trial; absent, the merge-trial deadline (`trialTimeoutMinutes`).
    */

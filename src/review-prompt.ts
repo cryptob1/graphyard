@@ -57,7 +57,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
   }).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ` : '')
-    + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases`;
+    + `Every feature or bug needs at least one proof that fails without the change. Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases`;
 }
 /** What a verdict-posting reviewer adds to the criteria rule: nothing here is a worker's to do. */
 export const criteriaVerdictRule = '; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. ';

@@ -20,7 +20,7 @@ import type { MergeTrialRun } from './executor.js';
 export const trialRunsDirectory = (root: string) => join(root, '.graphyard', 'trial-runs');
 
 /** What one merge flight asks a detached trial run to do: everything `runMergeTrial` reads that is not a function; the launch fills where it runs. */
-export interface TrialRunRequest { key: string; head: string; mergeSha: string; baseTip: string | null; changedFiles: string[]; proofs: string[]; e2eProofs: string[]; timeoutMs: number; bug: boolean; cores: number | null }
+export interface TrialRunRequest { key: string; head: string; mergeSha: string; baseTip: string | null; changedFiles: string[]; proofs: string[]; e2eProofs: string[]; timeoutMs: number; reproduce: boolean; cores: number | null }
 /** The run's persisted input (GY-3159): the request plus where the trial checks out, what it must not read, and when it started. */
 export interface TrialRunSpec extends TrialRunRequest { version: 1; root: string; base: string; hidden: string[]; startedAt: string }
 

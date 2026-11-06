@@ -13,7 +13,7 @@ const criteria = [{ id: 'AC-1', text: 'Exports land intact', proofs: ['unit:expo
 const work = { key: 'GY-7', title: 'Exports', criteria, scenarioRequirements: [] };
 const brief = workerPrompt({ cliPath: cli }, work, { principal: 'graphyard-worker-1' }, 2);
 
-test('unit:worker-brief-has-review-checklist — the worker brief renders simplicity, the criteria rule for its own criteria, the repetition question and the product questions from reviewStandards, which the review requests read', () => {
+test('unit:tests/worker-review-checklist.test.ts unit:worker-brief-has-review-checklist — the worker brief renders simplicity, the criteria rule for its own criteria, the repetition question and the product questions from reviewStandards, which the review requests read', () => {
   const standards = reviewStandards(work);
   for (const [name, piece] of Object.entries(standards)) {
     assert.ok(piece.trim().length > 0, `${name} is not empty`);
@@ -21,6 +21,7 @@ test('unit:worker-brief-has-review-checklist — the worker brief renders simpli
   }
   assert.match(brief, /\[AC-1\] Exports land intact/, 'the brief lists the item\'s own criterion');
   assert.match(brief, /e2e\/cases\/export-run\.json/, 'and its bound proofs');
+  assert.equal(standards.criteria.split('Every feature or bug needs at least one proof that fails without the change').length, 2, 'the criteria section says, once, that a feature or bug needs a proof failing without the change');
   assert.match(brief, /at head HEAD from code and test coverage/, 'the head a brief cannot know yet is named as HEAD');
 
   const code = reviewPrompt({ repository: 'owner/project', cliPath: cli }, { key: 'GY-7', pr: 1, sha: head, baseSha: base, policyRevision: 1 }, undefined, undefined, criteria);
@@ -31,7 +32,7 @@ test('unit:worker-brief-has-review-checklist — the worker brief renders simpli
   assert.ok(product.includes(`Then judge: ${standards.product}`), 'the product review reads the same questions');
 });
 
-test('unit:worker-brief-self-check-before-complete — the brief\'s last step before complete checks the diff against those standards, and no verdict-posting text reaches the worker', () => {
+test('unit:tests/worker-review-checklist.test.ts unit:worker-brief-self-check-before-complete — the brief\'s last step before complete checks the diff against those standards, and no verdict-posting text reaches the worker', () => {
   const checklist = brief.indexOf('Reviewers judge your head by this checklist');
   const selfCheck = brief.indexOf('Last step before complete: check your diff against the reviewers\' standards');
   const autonomous = brief.indexOf('Decide and act on your own');
