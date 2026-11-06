@@ -9,7 +9,9 @@ import { ChildProcessError, childRunner, runChild } from '../src/child-runner.js
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runDaemon } from '../src/daemon/run.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { listHerdrAgents, masterConfigSchema, startAgentSession, type MasterConfig, type MasterRun, type ProducerProfile } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
@@ -95,7 +97,7 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   // its own import of node:child_process: the runner is the only way out of the process.
   // Include the owning modules under src/master/, src/daemon/ and src/cli/master/.
   const split = async (directory: string) => (await readdir(join(repository, directory))).filter(name => name.endsWith('.ts')).sort().map(name => `${directory}/${name}`);
-  const loop = ['src/master.ts', ...await split('src/master'), ...await split('src/daemon'), 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
+  const loop = ['src/master.ts', ...await split('src/master'), ...await split('src/daemon'), ...await split('src/dispatch'), 'src/producer.ts', 'src/reviewer.ts'];
   const reached = ['src/harness.ts', 'src/install/worktree-root.ts', 'src/cli/master.ts', ...await split('src/cli/master'), 'src/cli/master-status.ts'];
   // The single allow-listed CLI-startup path: `cliCommit` reads the CLI checkout's own commit for
   // the version-skew guard once, when a `master` command starts, before the loop runs a cycle.

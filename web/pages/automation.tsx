@@ -3,7 +3,7 @@ import { MoreDetails, PageHeader, PageSection } from '../components/page-layout'
 
 /** Scoped operator automation identities, read through the admin credential. Ids, fingerprints and revisions wait behind each identity's details (GY-978). */
 export default function AutomationPage({ operatorAgents, operatorAgentsError, setView }: Pick<Dashboard, 'operatorAgents' | 'operatorAgentsError'> & Partial<Pick<Dashboard, 'setView'>>) {
-  return <><PageHeader crumbs={['Settings', 'Operator automation']} guide="/docs/master-agent" eyebrow="SCOPED COORDINATION" title="Operator automation">
+  return <><PageHeader crumbs={['Settings', 'Operator automation']} eyebrow="SCOPED COORDINATION" title="Operator automation">
       Scoped coordination after bootstrap. Credentials are created, rotated, and revoked through the secret-safe CLI.
     </PageHeader>
     {setView && <p>The runtimes, accounts, models and roles these identities' sessions launch on are configured in the <button className="text-button" onClick={() => setView('agents')}>Agents ↗</button>.</p>}

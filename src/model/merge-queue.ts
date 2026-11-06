@@ -59,33 +59,39 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
     ? { reason: state.refusal.reason } : null;
 }
 /**
- * The control-plane candidates owed a merge, hotfixes and base-failure repairs first, then by priority (0 first, GY-3098), then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
- * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
- * and `review` gates passed as the control plane served them: its review gate fails a sensitive delta until its
- * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
- * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
- * trial; one refused for another cause (a push rejected on an unmoved tip, a hold) is queued again.
+ * Whether the item is owed a merge at its current head — the queue's own `due` test: submitted (a
+ * candidate the control plane observed itself, GY-1523), not done, not returned to a worker, with
+ * the `build` and `review` gates passed as the control plane served them: its review gate fails a
+ * sensitive delta until its approval, and passes a normal one reviewed after merge (GY-1525). A
+ * head the writer's own trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework
+ * rather than a second trial; one refused for another cause (a push rejected on an unmoved tip, a
+ * hold) is queued again. A head held for a base failure waits `baseFailureHoldMs` before it is
+ * trialled again on whatever the tip then is (GY-1834). The served review gate is the control
+ * plane's verdict under the deployment's policy, never this process's own reading of
+ * graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
+ */
+export function awaitsMerge(item: Work, ledger: Readonly<Record<string, MergeLedgerState>>, now: number): boolean {
+  const candidate = item.candidate;
+  if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
+  if (!gate(item, 'build') || !gate(item, 'review')) return false;
+  const state = ledger[item.key];
+  if (trialRefusalHeld(candidate, state)) return false;
+  if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
+  if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
+  return true;
+}
+
+/**
+ * The control-plane candidates owed a merge, hotfixes and base-failure repairs first, then by priority (0 first, GY-3098), then the oldest item (by `createdAt`, ties by submission) first.
  * An item whose ledger holds an open intent or an unreconciled push blocks the whole queue:
  * `reconcileIntents` settles it before any new flight starts.
  */
 export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
   const blocking = Object.values(ledger).find(open);
-  const owed = work.filter(item => {
-    const candidate = item.candidate;
-    if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
-    if (!gate(item, 'build')) return false;
-    // The served review gate is the control plane's verdict under the deployment's policy, never this process's
-    // own reading of graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
-    if (!gate(item, 'review')) return false;
-    const state = ledger[item.key];
-    if (trialRefusalHeld(candidate, state)) return false;
-    if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
-    // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
-    if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
-    return true;
   // The order dispatch releases in (GY-3098): highest priority first, then the oldest item, by when it was filed, not by its latest
   // submission: lead time runs from release, so a head redone after a refusal goes ahead of newer work instead of rejoining at the back.
-  }).sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || a.priority - b.priority || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
+  const owed = work.filter(item => awaitsMerge(item, ledger, now))
+    .sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || a.priority - b.priority || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
   return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
 }

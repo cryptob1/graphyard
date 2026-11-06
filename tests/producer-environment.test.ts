@@ -7,7 +7,9 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
-import { emptyDispatchCursor, runDispatchTick, dispatchFailureLimit, dispatchRetryMaxMs, dispatchRetryMinMs, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, dispatchFailureLimit, dispatchRetryMaxMs, dispatchRetryMinMs } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { ClosedQuestionsDecided, launchProducer, missingProducerEnv, needsProducerEnv, parseEnvValue, producerPrompt, producerSecretsPrefix, readProducerEnvironment, readProducerLedger } from '../src/producer.js';
 import { liveInstallProof, piProducerPrompt } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
@@ -196,7 +198,7 @@ test('integration:producer-environment a live-install launch on a host without i
     await writeFile(join(root, '.env'), 'HETZNER_SPEND_CAP_USD_MONTHLY=25\n');
     const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [];
     await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() }),
-      /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN is not set in .*\.env.*docs\/install\.md/);
+      /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN is not set in .*\.env on this coordinator; add it there and the request is launched again/);
     assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
     assert.deepEqual((await readProducerLedger(root)).producers, []);
   } finally { await cleanup(); }
@@ -321,7 +323,7 @@ test('unit:host-install-live-receives-producer-env a manual:host-install-live la
     await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc123\n');
     const item = work('GY-717', 'manual', ['manual:host-install-live']), calls: string[][] = [];
     await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable, probe: fleet() }),
-      /refuses to launch the GY-717 manual proofs \(manual:host-install-live\): HETZNER_SPEND_CAP_USD_MONTHLY is not set in .*\.env.*docs\/install\.md/);
+      /refuses to launch the GY-717 manual proofs \(manual:host-install-live\): HETZNER_SPEND_CAP_USD_MONTHLY is not set in .*\.env on this coordinator; add it there and the request is launched again/);
     assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
     assert.deepEqual((await readProducerLedger(root)).producers, []);
   } finally { await cleanup(); }

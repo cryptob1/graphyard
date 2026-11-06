@@ -32,7 +32,7 @@ import type { Services } from './routes.js';
  * source: 'control-plane' }` to `observation.reviews` so `exactApproval` and the review gate read it
  * unchanged, re-evaluates the item, and refuses a second verdict for the same launch. A post-merge
  * launch's verdict marks the delivered item `reviewed`; the item is never reopened, and the loop
- * files its findings (auto-dispatch.ts). Bearer authorization reads only committed launch facts:
+ * files its findings (dispatch/post-merge.ts). Bearer authorization reads only committed launch facts:
  * a save that fails leaves the token usable for the session's retry.
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());

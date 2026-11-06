@@ -143,7 +143,7 @@ export interface HeadlessSession<T> {
   /** The loop root whose run directory holds the run, and how a restarted loop posts its answer: the route's adopter and what it needs, never a credential (GY-3113). */
   root: string; route: HeadlessRoute; context: Record<string, string>;
   exec: HeadlessExec;
-  /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (auto-dispatch.ts `holdAccount`), so the request's next launch takes the next account. */
+  /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (dispatch/effects.ts `holdAccount`), so the request's next launch takes the next account. */
   holdAccount?: (notice: ExhaustionSignal) => Promise<unknown>;
 }
 
