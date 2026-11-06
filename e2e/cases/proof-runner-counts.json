@@ -1,0 +1,13 @@
+{
+  "id": "proof-runner-counts",
+  "title": "Vitest and pytest repositories get their proofs counted",
+  "description": "Native private-root command regression uses temporary Git, Postgres and the control plane over fixture repositories whose runner writes a JUnit report. A passing vitest proof lands; a failing or unnamed one is refused with its count or reason; pytest counts exact names only; a TAP repository is counted without a second runner run; graphyard verify counts the same way.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "real proof-runner count regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/proof-runner-counts.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

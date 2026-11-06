@@ -13,21 +13,9 @@ import type { TrialE2eCase } from './e2e-trial.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
+import { countByRunner, countProofCases, type RunnerCount } from '../proof-runner.js';
 
-/**
- * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
- * (cli/verify.ts `countProofCases`, which this mirrors: the CLI module is not imported into the loop).
- */
-export function countProofCases(tap: string, proof: string) {
-  const title = new RegExp(`^${proof.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`);
-  let executed = 0, failed = 0, skipped = 0;
-  for (const line of tap.split('\n')) {
-    const match = line.match(/^\s*(not ok|ok) \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
-    if (!match || !title.test(match[2]!)) continue;
-    if (match[3]) skipped++; else { executed++; if (match[1] === 'not ok') failed++; }
-  }
-  return { executed, failed, skipped };
-}
+export { countProofCases };
 
 // ---- The queue (model/merge-queue.ts) ------------------------------------------------------------
 import { baseFailurePrefix, gate, keptTrialAheadOfReview, open, trialAheadOfReviewReason } from '../model/merge-queue.js';
@@ -70,7 +58,7 @@ export function mergeCandidateHold(current: Work | undefined, selected: Work = c
 // ---- The ledger events the executor records --------------------------------------------------------
 
 /** The per-proof outcome of a trial: how many of the proof's cases ran on the merge commit, and how many failed. */
-export type ProofCounts = Record<string, { executed: number; failed: number }>;
+export type ProofCounts = Record<string, { executed: number; failed: number; /** GY-3170: why the repository's own runner counted none of its cases. */ reason?: string }>;
 /** The trial's verdict with the files it ran and the counts of every proof the item's criteria name. */
 export interface MergeTrialRun extends TrialRun {
   files: string[]; proofs: ProofCounts; /** The trial checkout left behind when its removal failed (trial.ts TrialCleanupError); the verdict stands. */ leftover?: string;
@@ -216,7 +204,7 @@ export function requiredProofFailure(work: Pick<Work, 'criteria'>, run: Pick<Mer
     if (!/^(unit|integration|e2e):/.test(proof)) continue;
     const counts = run.proofs[proof];
     if (counts && counts.executed > 0 && counts.failed === 0) continue;
-    const seen = counts ? `the trial ran ${counts.executed} and ${counts.failed} failed` : 'the trial counted none of its cases';
+    const seen = counts ? `the trial ran ${counts.executed} and ${counts.failed} failed${counts.reason ? `: ${counts.reason}` : ''}` : 'the trial counted none of its cases';
     return `${trialFailurePrefix}: ${criterion.id}: ${proof} needs executed > 0 and failed = 0; ${seen}`;
   }
   return null;
@@ -407,7 +395,7 @@ export async function proofTestFiles(run: ChildRun, root: string, mergeSha: stri
 }
 
 export interface MergeTrialInput extends RunTrialInput {
-  /** The item's `unit:`/`integration:` proof ids, counted per proof from the TAP stream. */
+  /** The item's `unit:`/`integration:` proof ids, counted per proof from the TAP stream, else the repository's runner (GY-3170). */
   proofs: readonly string[];
   /** GY-2965: the item's `e2e:` proofs, each bound to e2e/cases/NAME.json on the head, which the trial serves and runs. */
   e2eProofs?: readonly string[];
@@ -443,6 +431,12 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // in a fresh checkout, and only the attempt that answered is counted: each attempt starts its TAP
   // and files afresh, even one that stops before its tests run, and a runner child of an earlier attempt adds nothing.
   let epoch = 0, discovered: readonly string[] | null = input.discoverProofFiles ? null : input.proofFiles;
+  // GY-3170: a proof the TAP counted nothing for is counted by the repository's own runner, in the same checkout, once per attempt.
+  let byRunner: Record<string, RunnerCount> = {};
+  const countProofs: RunTrialInput['countProofs'] = async checkout => {
+    const uncounted = input.proofs.filter(proof => countProofCases(tap, proof).executed === 0);
+    if (uncounted.length) byRunner = await countByRunner({ ...checkout, proofs: uncounted });
+  };
   // A discovery that fails is a host failure of the selection (its `cause` set), never a failing selection: the attempt ends with no verdict and is retried.
   const proofFiles = async (options: { timeoutMs?: number } | undefined) => {
     if (discovered || !input.discoverProofFiles) return discovered ?? input.proofFiles;
@@ -472,10 +466,13 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     files = only ?? [...new Set([...selected, ...await proofFiles({ timeoutMs })])];
     return files;
   };
-  const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
+  const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => {
+    const runner = byRunner[proof], { executed, failed } = runner ?? countProofCases(tap, proof);
+    return [proof, { executed, failed, ...(runner?.reason ? { reason: runner.reason } : {}) }];
+  }));
   let verdict: TrialRun, leftover: string | undefined;
-  const onAttempt = (index: number) => { epoch++; tap = ''; files = []; input.onAttempt?.(index); };
-  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt }); }
+  const onAttempt = (index: number) => { epoch++; tap = ''; byRunner = {}; files = []; input.onAttempt?.(index); };
+  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt, countProofs }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
@@ -485,13 +482,14 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   const e2eCounts = Object.fromEntries((verdict.e2e ?? []).map(entry => [entry.proof, { executed: entry.executed, failed: entry.failed }]));
   const first: MergeTrialRun = { ...verdict, files, proofs: { ...counted(), ...e2eCounts }, ...(leftover ? { leftover } : {}) };
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
-  const rerunAttempt = () => { epoch++; tap = ''; };
+  const rerunAttempt = () => { epoch++; tap = ''; byRunner = {}; };
   // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
   const rerunInput = { ...input, e2eProofs: [] as const };
-  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = []) => {
+  // Only the run on the base tip reads counts: attribution reads failing files, so it spends no runner's time.
+  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = [], counting?: 'count') => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
-    catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
+    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt, ...(counting ? { countProofs } : {}) }); return { run: rerun, tap, proofs: counted() }; }
+    catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap, proofs: counted() } : null; }
   };
   const ownProofFiles = discovered ?? input.proofFiles;
   // The proof files the selection discovered are held like those the input named.
@@ -507,7 +505,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
  */
 async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], git: ChildRun,
-  retest: (sha: string, files: string[], e2eProofs?: readonly string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
+  retest: (sha: string, files: string[], e2eProofs: readonly string[], counting: 'count') => Promise<{ run: TrialRun; proofs: ProofCounts } | null>): Promise<MergeTrialRun> {
   let tip: string, files: string[];
   try {
     tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase();
@@ -515,10 +513,10 @@ async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proof
   } catch { return run; }
   if (proofFiles.length && !files.length) return run;
   const e2eProofs = input.e2eProofs ?? [];
-  const onBase = await retest(tip, files, e2eProofs).catch(() => null);
+  const onBase = await retest(tip, files, e2eProofs, 'count').catch(() => null);
   if (!onBase || onBase.run.build !== 'pass') return run;
   const passes = ({ executed, failed }: { executed: number; failed: number }) => executed > 0 && failed === 0;
-  const passing = input.proofs.every(proof => passes(countProofCases(onBase.tap, proof)))
+  const passing = input.proofs.every(proof => passes(onBase.proofs[proof]!))
     && e2eProofs.every(proof => { const ran = onBase.run.e2e?.find(entry => entry.proof === proof); return !!ran && passes(ran); });
   const proofs = [...input.proofs, ...e2eProofs];
   return passing ? { ...run, notReproduced: { proofs, tip } } : run;

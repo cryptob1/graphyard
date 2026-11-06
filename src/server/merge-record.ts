@@ -51,7 +51,7 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.discriminatedUnion('outcome', [
     z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: z.literal('verdict'), build: z.enum(['pass', 'fail']), tests,
       files: z.array(z.string().max(500)).max(1000),
-      proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0),
+      proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0), reason: z.string().max(200).optional() }).strict()), durationMs: z.number().int().min(0),
       phases: trialPhaseDurations.optional(), attempts: trialAttempts,
       // GY-2965: how each bound E2E case ran against the served head; a run of one becomes a trusted record on the item and a run in the case's history.
       e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(200), executed: z.number().int().min(0), failed: z.number().int().min(0),

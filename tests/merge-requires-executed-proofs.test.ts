@@ -27,7 +27,7 @@ const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 // The bound command case runs this same real regression inside the native private-root trial.
-test('integration:merge-requires-executed-proofs — the writer refuses absent, zero-count and failing proofs before pushing; explicit TAP lands through the ordinary control plane', { timeout: 600_000 }, async () => {
+test('unit:tests/merge-requires-executed-proofs.test.ts integration:merge-requires-executed-proofs — the writer refuses absent, zero-count and failing proofs before pushing; explicit TAP lands through the ordinary control plane', { timeout: 600_000 }, async () => {
   const root = await temporaryDirectory('required-proofs');
   const servePort = await freePort();
   let store: Store | undefined, http: ReturnType<typeof server> | undefined;
