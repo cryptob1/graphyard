@@ -27,7 +27,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const policy = { mode: 'local', mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fixture' }], perCandidate: [] }, candidateSchedule: null, deploy: { adapter: 'command', project: null, uat: null, production: null } };
 
-/** A repository whose test check prints the proof's case passing exactly when src/fixed exists; `fixedOnBase` puts the fix on the base, else the head adds it; `newProof` adds the proof file only on the head. */
+/** A repository whose test check prints the proof's case, when its file exists, passing exactly when src/fixed exists; `fixedOnBase` puts the fix on the base, else the head adds it; `newProof` adds the proof file only on the head. */
 async function repository(fixedOnBase: boolean, e2e = false, newProof = false) {
   const root = await temporaryDirectory('bug-proof-repo', tmpdir());
   const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
@@ -38,7 +38,8 @@ async function repository(fixedOnBase: boolean, e2e = false, newProof = false) {
     write('serve.js', `require('node:http').createServer((q, r) => { r.writeHead(200, {'Content-Type':'application/json'}); r.end(JSON.stringify({ message: 'fixed' })); }).listen(${servePort}, '127.0.0.1');\n`);
     write('e2e/cases/home-shows-fix.json', JSON.stringify(homeCase));
   }
-  write('test.js', `const ok = require('node:fs').existsSync('src/fixed');\nconsole.log((ok ? 'ok' : 'not ok') + ' 1 - ${proof} the fix holds');\nprocess.exit(ok ? 0 : 1);\n`);
+  // Like a real runner, the proof's case runs only where its test file exists.
+  write('test.js', `const { existsSync } = require('node:fs');\nif (!existsSync('tests/fix.test.ts')) process.exit(0);\nconst ok = existsSync('src/fixed');\nconsole.log((ok ? 'ok' : 'not ok') + ' 1 - ${proof} the fix holds');\nprocess.exit(ok ? 0 : 1);\n`);
   if (!newProof) write('tests/fix.test.ts', `// ${proof}\n`);
   if (fixedOnBase) write('src/fixed', '');
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
