@@ -8,7 +8,7 @@ import { writeInstallRecord } from '../src/install/secrets.js';
 import { publishOnboarding, runUp, upRequestFromArgs, upUsage, type UpDependencies } from '../src/up.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-test('up passes --base-branch to install; reruns retain it and onboarding uses its tip', async () => {
+test('unit:tests/up-base-branch.test.ts — up passes --base-branch to install; reruns retain it and onboarding uses its tip', async () => {
   const root = await temporaryDirectory('up-base-branch');
   const configHome = await temporaryDirectory('up-base-branch-config');
   const origin = await temporaryDirectory('up-base-branch-origin');
