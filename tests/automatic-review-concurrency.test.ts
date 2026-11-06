@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { chmod, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, sessionAgentName, withReviewerDefaults } from '../src/master.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
@@ -13,6 +12,7 @@ import { fleet as reviewFleet, requested, requestId, starts } from './helpers/re
 import { registryFixture } from './helpers/registry-fixture.js';
 import type { DispatchEffects } from '../src/dispatch/effects.js';
 import { hostname } from 'node:os';
+import { masterGuide } from '../src/master/guide.js';
 
 /**
  * GY-3030: the control-plane registry alone grants a reviewer its slot. Each fleet gets one
@@ -76,10 +76,9 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
   } finally { await host.cleanup(); }
 });
 
-test('unit:automatic-reviews-run-in-parallel — docs say the registry alone owns reviewer capacity', async () => {
-  // GY-3030: profile concurrency no longer grants slots, so the docs state the registry's ownership instead of the profile default.
-  const text = await readFile(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8');
-  assert.match(text, /The control-plane registry alone owns session capacity\. Configure every role there before launching; profile concurrency and Herdr names do not grant slots\./, 'docs/master-agent.md states that the registry owns session capacity');
+test('unit:automatic-reviews-run-in-parallel — master guide says the registry alone owns reviewer capacity', () => {
+  // GY-3030: profile concurrency no longer grants slots, so the guide states the registry's ownership instead of the profile default.
+  assert.match(masterGuide, /The control-plane registry alone owns session capacity\. Configure every role there before launching; profile concurrency and Herdr names do not grant slots\./, 'master guide states that the registry owns session capacity');
 });
 
 test('unit:settled-reviewer-releases-name — a reviewer whose request settled but whose pane was left idle is closed on the next pass and the next review launches', async () => {

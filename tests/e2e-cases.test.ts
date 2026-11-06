@@ -414,8 +414,6 @@ test('unit:pending-case-named-in-uat-record — the Tests page names each pendin
   assert.equal(runs.length, 1);
   assert.equal(runs[0].result, 'fail');
   assert.match(runs[0].e2e!.failingStep!.reason, /expected status 200, got 500: \{"error":"broken"\}; recorded pending: its outcome has no delivered item yet, so it does not block the candidate/);
-  // docs/validation.md states the pending verdict beside the required, flaky and unrun ones.
-  assert.match(await readFile(new URL('../docs/validation.md', import.meta.url), 'utf8'), /\*\*pending\*\* \(/);
 });
 
 // GY-1536: general cases. A `command` step runs the project's own test command, an `agent` step

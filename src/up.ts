@@ -1149,7 +1149,7 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
   return typeof token === 'string' && token.length >= 32 ? token : null;
 }
 
-/** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
+/** What `init --scan --apply` writes and the manual flow commits. */
 export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', onboardingCasePath] as const;
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */

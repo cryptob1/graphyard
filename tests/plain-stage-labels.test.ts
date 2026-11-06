@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { itemLine } from '../src/cli/master-status.js';
 import type { PlainStage, ServeView } from '../src/model/plain-stage.js';
 import { prSteps } from '../src/model/pr-steps.js';
@@ -76,7 +75,7 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
     closure: { kind: 'obsolete', ref: null, reason: 'gone', by: 'op', at: '2026-01-01T00:00:00Z', from: 'build' },
   } as Partial<Work>), now), 'Done');
 
-  // Every plain label is reached, and glossary names each once.
+  // Every plain label is reached.
   const examples: Record<PlainStage, () => string> = {
     'Not started': () => plainStage(item('ready'), now),
     Waiting: () => plainStage(item('build'), now),
@@ -104,10 +103,5 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
   assert.deepEqual(steps.steps.map(step => step.label), ['Not started', 'Building', 'Testing, review, merge', 'Done']);
   assert.match(steps.label, /^Not started · \S/);
 
-  // Glossary documents one line per plain label.
-  const glossary = await readFile(new URL('../docs/glossary.md', import.meta.url), 'utf8');
-  for (const label of plainStages) {
-    assert.ok(glossary.split('\n').includes(plainStageLines[label]), label);
-    assert.ok(plainStageLines[label].startsWith(label));
-  }
+  for (const label of plainStages) assert.ok(plainStageLines[label].startsWith(label));
 });

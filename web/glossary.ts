@@ -2,7 +2,7 @@
  * The one glossary behind every hover definition in the dashboard. A technical word that stays
  * visible is wrapped in <Term> (web/components/term.tsx), which reads its meaning from here, so a
  * definition is written once and reads the same everywhere. Plain words only: a definition
- * that needs another definition is too long. docs/glossary.md holds the precise versions.
+ * that needs another definition is too long.
  */
 export const glossary = {
   'work item': 'One piece of work with a goal and a list of things that must be true when it is done.',
