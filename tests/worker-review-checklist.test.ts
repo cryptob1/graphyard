@@ -21,6 +21,7 @@ test('unit:worker-brief-has-review-checklist — the worker brief renders simpli
   }
   assert.match(brief, /\[AC-1\] Exports land intact/, 'the brief lists the item\'s own criterion');
   assert.match(brief, /e2e\/cases\/export-run\.json/, 'and its bound proofs');
+  assert.equal(brief.split('A feature must add or change an e2e case its criteria name.').length, 2, 'the feature-case rule is in the criteria section, once');
   assert.match(brief, /at head HEAD from code and test coverage/, 'the head a brief cannot know yet is named as HEAD');
 
   const code = reviewPrompt({ repository: 'owner/project', cliPath: cli }, { key: 'GY-7', pr: 1, sha: head, baseSha: base, policyRevision: 1 }, undefined, undefined, criteria);

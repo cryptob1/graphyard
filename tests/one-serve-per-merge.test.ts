@@ -55,7 +55,7 @@ test('unit:one-serve-per-merge — one merge of a static-site head starts one se
     environment: { PATH: process.env.PATH!, GRAPHYARD_UAT_STATIC: 'dist', GRAPHYARD_UAT_BUILD: build }, trial: trial as never });
   const tip = mergeSha;
   let landed = false;
-  const ports: MergePorts = { ...reads, now: () => 1_893_456_000_000, fetch: async () => landed ? mergeSha : tip, merge: async () => ({ mergeSha, files: ['site/index.html', 'e2e/cases/home.json'] }),
+  const ports: MergePorts = { ...reads, now: () => 1_893_456_000_000, fetch: async () => landed ? mergeSha : tip, merge: async () => ({ mergeSha, files: ['site/index.html', 'e2e/cases/home.json'], addedOrModified: ['e2e/cases/home.json'] }),
     push: async () => { landed = true; return 'pushed'; }, holds: async () => false };
   const work = {
     id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'The home page answers', proofs: ['e2e:home'] }],

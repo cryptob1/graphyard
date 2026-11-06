@@ -57,6 +57,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
   }).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ` : '')
+    + 'A feature must add or change an e2e case its criteria name. '
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases`;
 }
 /** What a verdict-posting reviewer adds to the criteria rule: nothing here is a worker's to do. */
