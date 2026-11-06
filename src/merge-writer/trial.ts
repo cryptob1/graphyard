@@ -405,16 +405,15 @@ export function trialShardBreadth(cores: number, shards: number, affordableFiles
 }
 /**
  * The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be
- * read: available memory less the floor and the recovery margin,
- * `bytesPerSuiteFile` a file, less the files runs holding the host's verification slots under
- * `slots` declared and may not yet have allocated — as the runner's breadth
- * deducts them, since the shards' environment carries no slot of their own.
+ * read: available memory less the floor and the recovery margin, `bytesPerSuiteFile` a file. Files
+ * other runs declared on the host's verification slots are not deducted (GY-3184): available memory
+ * already shows what running suites hold, and a worker's declaration taken again cut a trial to one lane.
  */
-export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>, slots?: string): Promise<number | null> {
-  const resources = await import('../master/host-memory.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
+export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>): Promise<number | null> {
+  const resources = await import('../master/host-memory.js'), { bytesPerSuiteFile } = await import('../master/verification-slots.js');
   const reading = await (read ?? resources.readHostMemory)();
   if (!reading) return null;
-  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? await othersDeclaredFiles(slots) : 0);
+  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile);
 }
 /** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
 export const trialDeclarationSlot = 1000;
@@ -1055,7 +1054,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
     const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
     const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
-    const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
+    const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
+    input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
     let next = 0, stopped: unknown = null;
     const lane = async () => {
