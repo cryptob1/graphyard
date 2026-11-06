@@ -19,7 +19,7 @@ import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '..
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -77,7 +77,7 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * them in effects.ts; a test hands its own through `effects.mergeWriter`.
  */
 export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run' | 'repository'>, root: string, run: ChildRun,
-  options: { base: string; record: MergePorts['record']; hold?: MergePorts['hold']; trial?: typeof runMergeTrial; environment?: NodeJS.ProcessEnv; now?: () => number;
+  options: { base: string; record: MergePorts['record']; hold?: MergePorts['hold']; holdOpening?: MergePorts['holdOpening']; trial?: typeof runMergeTrial; environment?: NodeJS.ProcessEnv; now?: () => number;
     itemPreviews?: Partial<ItemPreviewPorts> }): MergeWriterReads {
   const git = async (...args: string[]) => String(await run('git', ['-C', root, ...args]));
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...(options.environment ?? process.env), ...env } } : undefined));
@@ -91,7 +91,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     return sha;
   };
   return {
-    baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}),
+    baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
     git: (args, env) => gitAs(args, env),
     fetch: async () => { await git('fetch', '--no-tags', 'origin', base); return tip(); },
     // The head itself when its first-parent chain holds the tip (main fast-forwards), else the merge commit `Merge GY-N: <title>`.
@@ -792,7 +792,11 @@ export async function mergeWriterStep(cycle: Cycle) {
             : `Reconciled ${itemKey} head ${head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
         } else {
           writer.refusals = [...writer.refusals.filter(entry => entry.key !== itemKey || entry.head !== head), { key: itemKey, head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
-          action('failed', outcome.outcome === 'requeued' ? `Merge of ${itemKey} head ${head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
+          // GY-3164: a settle whose marker keeps the passing trial for the head's review is a head
+          // waiting for approval, not one held in the queue: its result lands once the same head is approved.
+          action('failed', outcome.outcome === 'requeued' && outcome.reason.startsWith(trialAheadOfReviewPrefix)
+            ? `Merge of ${itemKey} head ${head} settled ahead of review: ${outcome.reason}; the trial's result is kept and the head lands once the same head is approved`
+            : outcome.outcome === 'requeued' ? `Merge of ${itemKey} head ${head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
             : `Merge of ${itemKey} head ${head} refused: ${outcome.reason}; the refusal is recorded on the ledger and the rework it grounds is requested`);
           // The trial failed the head (AC-3): the rework is owed until the server confirms it, and asked for below.
           if (outcome.outcome === 'refused' && !writer.reworks.some(entry => entry.key === itemKey && entry.head === head)) {

@@ -30,8 +30,8 @@ export function countProofCases(tap: string, proof: string) {
 }
 
 // ---- The queue (model/merge-queue.ts) ------------------------------------------------------------
-import { baseFailurePrefix, gate, open } from '../model/merge-queue.js';
-export { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, mergeQueue, nextToMerge, submittedAtOf, trialRefusalHeld, type MergeQueue, type QueuedMerge } from '../model/merge-queue.js';
+import { baseFailurePrefix, gate, keptTrialAheadOfReview, open, trialAheadOfReviewReason } from '../model/merge-queue.js';
+export { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, mergeQueue, nextToMerge, submittedAtOf, trialAheadOfReviewPrefix, trialAheadOfReviewReason, trialRefusalHeld, keptTrialAheadOfReview, type MergeQueue, type QueuedMerge } from '../model/merge-queue.js';
 
 /** Whether trial results still belong to this implementation and policy. */
 export function mergeCandidateObsolete(current: Work | undefined, selected: Work = current!): string | null {
@@ -46,10 +46,24 @@ export function mergeCandidateObsolete(current: Work | undefined, selected: Work
   return reason ? `${current.key}: ${reason}; obsolete merge stays queued` : null;
 }
 
-/** Opening and landing also require the current build and review gates. */
-export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
+/**
+ * GY-3164: opening a flight requires the build gate alone — the trial starts once worker
+ * verification is recorded, beside the review — plus the candidate/policy/ownership check.
+ */
+export function mergeOpeningHold(current: Work | undefined, selected: Work = current!): string | null {
   return mergeCandidateObsolete(current, selected)
-    ?? (!gate(current!, 'build') || !gate(current!, 'review') ? `${current!.key}: build or review gate no longer passes; obsolete merge stays queued` : null);
+    ?? (!gate(current!, 'build') ? `${current!.key}: build gate no longer passes; obsolete merge stays queued` : null);
+}
+
+/**
+ * Landing (the push to main) still requires the current build and review gates (GY-3164): a review
+ * gate that has not passed settles the flight with its marker (`trialAheadOfReviewReason`) — the
+ * passing trial is kept for the head and reused once the same head is approved — and any other
+ * failed gate keeps the merge queued as before.
+ */
+export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
+  return mergeOpeningHold(current, selected)
+    ?? (!gate(current!, 'review') ? trialAheadOfReviewReason(current!.key) : null);
 }
 
 
@@ -661,8 +675,13 @@ export interface MergePorts {
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
   holds(sha: string): Promise<boolean>;
-  /** Fresh authoritative candidate/policy/rework/ownership check at opening and landing. */
+  /** Fresh authoritative candidate/policy/rework/ownership check at landing: the build and review gates as the control plane serves them now. */
   hold?(item: Work): Promise<string | null>;
+  /**
+   * GY-3164: the same fresh check at opening, with the build gate alone — the trial starts beside
+   * review. Absent, the landing `hold` is asked at opening too (the stricter, older rule).
+   */
+  holdOpening?(item: Work): Promise<string | null>;
   /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`, under the attempt `item` names (GY-1852). */
   record(item: Pick<Work, 'id' | 'key'> & { mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent): Promise<unknown>;
   /** GY-2963: where the flight's trial is while it runs, recorded on the in-flight entry and the item's ledger; absent, the trial is not reported step by step. */
@@ -691,11 +710,20 @@ export type MergeOutcome =
  * while the tip stood still was rejected for another cause and is refused `unmovedTipReason`, queued
  * for a later cycle. A failed trial or a conflict is refused naming what failed, and the rework that
  * refusal grounds is the loop's to request.
+ *
+ * GY-3164: the trial runs beside review — the opening hold checks the build gate alone, and a head
+ * whose trial passed while its review gate had not settles with `trialAheadOfReviewReason`: the
+ * passing trial is kept on the ledger for exactly that head, the flight ends without pushing, and
+ * the head leaves the queue until the review gate passes. A later flight of the same head (the
+ * queue owes its landing exactly then) reuses the kept result — the merge is recorded and pushed
+ * with no second trial. A new head never carries the marker, so its flight trials afresh.
  */
 export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutcome> {
   const candidate = item.candidate;
   if (!candidate || !item.submission) throw new Error(`${item.key} has no submitted candidate to merge`);
   const head = candidate.sha.toLowerCase(), state = item.mergeLedger;
+  // GY-3164: this head already passed its trial ahead of review; this flight lands it on that kept result.
+  const kept = keptTrialAheadOfReview(candidate, state);
   const at = () => new Date(ports.now()).toISOString();
   const settle = async (mergeSha: string): Promise<MergeOutcome> => {
     const observedTip = await ports.fetch();
@@ -713,13 +741,15 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   }
   // Already-pushed reconciliation above retains its original intent and proof bindings.
   const held = async () => ports.hold ? ports.hold(item) : null;
+  // GY-3164: opening requires the build gate alone, so the trial runs beside review; a reads set without its own opening check keeps the landing one (the older, stricter rule).
+  const openingHold = async () => ports.holdOpening ? ports.holdOpening(item) : held();
   const conflicted = async (conflict: string[]): Promise<MergeOutcome> => {
     const reason = trialFailureReason({ conflict })!;
     await ports.record(item, { kind: 'refused', head, reason });
     return { outcome: 'refused', reason, trial: null, conflict };
   };
   let baseTip = await ports.fetch();
-  const opening = await held();
+  const opening = await openingHold();
   if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
   const merged = await ports.merge(head, baseTip, item);
   if ('conflict' in merged) return conflicted(merged.conflict);
@@ -727,34 +757,41 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   let { mergeSha } = merged;
   // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
   await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
-  let run: MergeTrialRun;
-  try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
-  catch (error) {
-    // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
-    const attempts = trialAttempts(error), last = attempts.at(-1)!;
-    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts,
-      durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
-    throw error;
+  let run: MergeTrialRun | null = null;
+  let baseHeld: string | null = null;
+  let failure: string | null = null;
+  if (!kept) {
+    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
+    catch (error) {
+      // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
+      const attempts = trialAttempts(error), last = attempts.at(-1)!;
+      await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: last.outcome, phase: last.phase, reason: last.reason, phases: last.phases, attempts, durationMs: Math.round(Object.values(last.phases).reduce((sum, value) => sum + value, 0)) });
+      throw error;
+    }
+    // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
+    baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
+    failure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
+    // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
+    const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
+    await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
   }
-  // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
-  const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
-  const failure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
-  // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
-  const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-  await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-    ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
   let pushes = 0;
   for (;;) {
-    // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing lands under it.
-    const landing = await held();
-    if (landing) {
-      await ports.record(item, { kind: 'refused', head, reason: landing });
-      return { outcome: 'requeued', reason: landing, pushes };
-    }
+    // A failed trial refuses before any landing hold (GY-3164): the ground it owes is the rework, never
+    // displaced by a review that has not passed — only a passing trial settles as kept below.
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
       if (baseHeld) return { outcome: 'requeued', reason: failure, pushes };
       return { outcome: 'refused', reason: failure, trial: run, conflict: [] };
+    }
+    // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing
+    // lands under it. GY-3164: a review gate that has not passed is that hold — its marker keeps this
+    // flight's passing trial for the head, which lands on it once the same head is approved.
+    const landing = await held();
+    if (landing) {
+      await ports.record(item, { kind: 'refused', head, reason: landing });
+      return { outcome: 'requeued', reason: landing, pushes };
     }
     pushes += 1;
     if (await ports.push(mergeSha, baseTip) === 'pushed') {

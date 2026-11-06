@@ -17,7 +17,7 @@ import type { DaemonEffects } from '../../src/daemon/effects.js';
 import { emptyDaemonState, type DaemonState } from '../../src/daemon/state.js';
 import { deployOnce, deployRecordPath, type DeployWatchPorts } from '../../src/deploy-watch.js';
 import { Engine } from '../../src/engine.js';
-import { mergeCandidateHold, runMergeTrial } from '../../src/merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold, runMergeTrial, trialAheadOfReviewPrefix } from '../../src/merge-writer/executor.js';
 import { gitRunnerFor } from '../../src/merge-writer/local-observation.js';
 import { masterConfigSchema, type MasterConfig } from '../../src/master.js';
 import type { Principal, Work } from '../../src/model.js';
@@ -61,8 +61,8 @@ export interface World {
   trialLog: { key: string; mergeSha: string; startedAt: number; endedAt?: number }[];
   /** Every item the loops in this process filed, with main-gate.json as it stood on disk at that moment. */
   filings: { key: string; gate: GateRecord | null }[];
-  /** Commits a branch from main's tip writing `files` (null deletes) and submits it as a reviewed item. */
-  submit(title: string, files: Record<string, string | null>): Promise<Work>;
+  /** Commits a branch from main's tip writing `files` (null deletes) and submits it as a reviewed item (`unreviewed`: a sensitive delta whose review gate holds). */
+  submit(title: string, files: Record<string, string | null>, options?: { unreviewed?: boolean }): Promise<Work>;
   /** Every item's current document. */
   work(): Promise<Work[]>;
   /** main's tip on the remote. */
@@ -105,7 +105,7 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
     root, origin, checkout, trials, url, database, config, store, engine, base, trialLog: [], filings: [],
     work,
     main: () => git(origin, 'rev-parse', 'main'),
-    submit: async (title, files) => {
+    submit: async (title, files, options: { unreviewed?: boolean } = {}) => {
       const branch = `graphyard/pipeline-${++branches}-1`;
       git(checkout, 'fetch', '-q', 'origin', 'main');
       git(checkout, 'checkout', '-qb', branch, 'origin/main');
@@ -118,7 +118,12 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
       item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
       await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'fixture', path: join(root, branch), branch }, randomUUID());
       item = await engine.execute(worker, 'submit', item.id, { epoch: item.epoch, head }, randomUUID());
-      if (!item.gates.every(gate => ['test', 'merge'].includes(gate.name) || gate.passed)) throw new Error(`${item.key} is not ready to merge: ${JSON.stringify(item.gates)}`);
+      // GY-3164: an unreviewed submission (a sensitive delta, whose review gate holds until an exact
+      // approval) still owes its build-passed head a trial; every other gate but test and merge passes.
+      const review = item.gates.find(gate => gate.name === 'review')!;
+      if (options.unreviewed ? review.passed || !item.gates.filter(gate => gate.name !== 'review' && gate.name !== 'test' && gate.name !== 'merge').every(gate => gate.passed)
+        : !item.gates.every(gate => ['test', 'merge'].includes(gate.name) || gate.passed))
+        throw new Error(`${item.key} is not ready to merge: ${JSON.stringify(item.gates)}`);
       return item;
     },
     close: async () => {
@@ -159,7 +164,9 @@ const post = async (url: string, token: string, path: string, body: unknown, key
 export function loopReads(where: Where, options: { gate: boolean }): MergeWriterReads {
   const reads = mergeWriterReads(where.config, where.checkout, fixtureRun, {
     base: where.trials,
+    // GY-3164: the build gate alone opens a flight (the trial runs beside review); both gates land it.
     hold: async work => mergeCandidateHold((await where.snapshot()).find(item => item.id === work.id), work),
+    holdOpening: async work => mergeOpeningHold((await where.snapshot()).find(item => item.id === work.id), work),
     // The trial reports a verdict at once: a failure is not re-run or attributed on the base.
     trial: input => runMergeTrial({ ...input, retries: 0, attribute: false }),
     record: (work, event) => post(where.url, coordinatorToken, `work/${work.id}/merge-record`, event, randomUUID()),
@@ -199,8 +206,10 @@ export async function cycleUntil(loop: ReturnType<typeof pipelineLoop>, what: st
   for (const start = Date.now(); ;) {
     await loop.cycle();
     if (await done()) return;
-    // A head the merge writer refused never lands: fail now, naming why.
-    const refused = loop.lastSnapshot.find(item => item.mergeLedger?.state === 'refused');
+    // A head the merge writer refused never lands: fail now, naming why. GY-3164: the settle that
+    // keeps a passing trial for its head's review (`trial passed ahead of review`) is a head waiting
+    // for approval, not a failed landing — its head lands once the same head is approved.
+    const refused = loop.lastSnapshot.find(item => item.mergeLedger?.state === 'refused' && !item.mergeLedger.refusal?.reason.startsWith(trialAheadOfReviewPrefix));
     if (refused) throw new Error(`${what}: ${refused.key} was refused: ${refused.mergeLedger!.refusal?.reason}`);
     if (Date.now() - start > deadlineMs) {
       const actions = Object.entries(loop.state.actions).slice(-15).map(([key, action]) => `${key} ${action.state}: ${action.detail ?? ''}`);
@@ -243,4 +252,4 @@ export function storeSnapshot(database: string) {
   return { snapshot: async () => (await Promise.all((await store.list()).map(async item => (await store.workDocument(item.id))!))), close: () => store.close() };
 }
 
-export { adminToken };
+export { adminToken, coordinatorToken };

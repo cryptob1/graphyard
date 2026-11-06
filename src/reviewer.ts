@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
@@ -76,6 +76,13 @@ export const reviewRecordSchema = z.object({
   state: z.enum(['pending', 'completed', 'expired', 'cancelled', 'failed']),
   /** When Herdr first reported the session finished or blocked without a verdict. */
   idleSince: z.string().min(1).max(40).optional(),
+  /**
+   * GY-3164: when the session's output last changed, for the silence bound of a session that
+   * reports running yet has posted no verdict — armed at the first screen read, reset by any
+   * change — with the digest of that screen (`silentScreen`).
+   */
+  silentSince: z.string().min(1).max(40).optional(),
+  silentScreen: z.string().min(1).max(64).optional(),
   /** How the request reached the session: on its command line, or as a paste for a runtime without that contract (GY-93). */
   delivery: z.enum(['request', 'paste']).optional(),
   /** The first-run consent prompts the launcher answered before the session took its request, with the option it chose (GY-130). */
@@ -1196,6 +1203,22 @@ export const reviewIdleGraceMs = reviewLedgerSpec.idleGraceMs;
  */
 export const reviewVerdictReminderMs = 120_000;
 /**
+ * GY-3164: how long a review session that reports running — the one case the idle grace above
+ * never reaches, since `idleSince` arms only for a session Herdr reports done, idle or blocked —
+ * may post no verdict and change no output before it is ended and its review relaunched once on
+ * another reviewer profile. Configured as `run.reviewSilenceMinutes` (default 10). The output the
+ * bound reads is the session's own screen with the runtime's frame stripped (`sessionWords`): a
+ * session stuck at a spinner or a menu shows no words change, while one at work does.
+ */
+export const defaultReviewSilenceMinutes = 10;
+export const reviewSilenceMs = (config: Pick<MasterConfig, 'run'>) => (config.run.reviewSilenceMinutes ?? defaultReviewSilenceMinutes) * 60_000;
+/**
+ * The settle of a silent review session (GY-3164): the resolution names the silent minutes, and
+ * the request's next attempt — the dispatch tick's relaunch, on another reviewer profile when one
+ * is configured (`preferFreshProfiles`; a single-profile install reuses it) — carries them.
+ */
+export const silentReviewReason = (minutes: number) => `silent for ${minutes} minute${minutes === 1 ? '' : 's'}: the reviewer session posted no verdict and changed no output, so it is ended and its review relaunched on another reviewer profile`;
+/**
  * How many times the settled-pane sweep in `reconcileReviews` closes one settled reviewer's pane
  * before it stops and reports the held name instead (GY-1072): a close Herdr keeps refusing costs
  * this many ledger writes, not one per tick for as long as it refuses.
@@ -1365,7 +1388,28 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
         else if (now.getTime() - Date.parse(record.idleSince) >= (record.acknowledgedAt ? reviewVerdictReminderMs : reviewIdleGraceMs) && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'
           ? `the reviewer session ended waiting on input (Herdr reports it blocked) instead of deciding on its own, without a verdict on ${record.sha.slice(0, 12)}`
           : `the reviewer session finished (${agent?.agent_status ?? 'gone from Herdr'}) without posting a verdict on ${record.sha.slice(0, 12)}`);
-      } else if (record.idleSince) { delete record.idleSince; changed++; }
+      } else {
+        if (record.idleSince) { delete record.idleSince; changed++; }
+        // GY-3164: a session that still reports running is the one the idle grace above never
+        // reaches. The silence bound reads its screen — the runtime's frame stripped, so a spinner
+        // or a menu counts as no output while real work does not — and a session that has posted no
+        // verdict and changed no output for run.reviewSilenceMinutes (default 10) is ended here and
+        // its review relaunched once on another reviewer profile by the dispatch tick, which reads
+        // the silent minutes this settle records. Any change to the screen resets the bound.
+        const silence = reviewSilenceMs(config);
+        if (Date.parse(record.requestedAt) <= now.getTime() - silence) {
+          const words = sessionWords(await screen());
+          if (words) {
+            const digest = screenDigest(words);
+            if (record.silentSince && record.silentScreen === digest) {
+              if (now.getTime() - Date.parse(record.silentSince) >= silence)
+                failed = silentReviewReason(Math.max(1, Math.round((now.getTime() - Date.parse(record.silentSince)) / 60_000)));
+            } else if (record.silentScreen !== digest || !record.silentSince) {
+              record.silentScreen = digest; record.silentSince = now.toISOString(); changed++;
+            }
+          }
+        }
+      }
     }
     if (verdict && !record.acknowledgedAt) { record.acknowledgedAt = now.toISOString(); changed++; }
     if (!verdict && !expired && !stale && !failed) continue;

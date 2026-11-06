@@ -59,22 +59,46 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
     ? { reason: state.refusal.reason } : null;
 }
 /**
+ * GY-3164: the settle of a flight whose trial passed while the review gate had not. It grounds no
+ * rework (it does not start `trialFailurePrefix`) and holds nothing: the fold keeps the passing
+ * trial on the refused state, the head is owed nothing while its review gate has not passed, and
+ * once it passes the next flight lands the head reusing that kept result — no second trial. A new
+ * head carries a different `head`, so the same marker on it never applies.
+ */
+export const trialAheadOfReviewPrefix = 'trial passed ahead of review';
+export const trialAheadOfReviewReason = (key: string) => `${trialAheadOfReviewPrefix}: ${key}'s review gate has not passed for this head; the trial that passed is kept and the head lands once the same head is approved`;
+/**
+ * The trial this head already passed ahead of its review, kept on its ledger (the settle's refusal
+ * marker plus the fold's kept trial for the same head), or null. Only a flight that found no
+ * failure records the marker, so a kept trial is a passing one.
+ */
+export function keptTrialAheadOfReview(candidate: Work['candidate'], state: MergeLedgerState | null | undefined): boolean {
+  const head = candidate?.sha.toLowerCase();
+  return !!head && !!state && state.state === 'refused' && state.head === head
+    && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialAheadOfReviewPrefix)
+    && state.trial?.head.toLowerCase() === head;
+}
+/**
  * Whether the item is owed a merge at its current head — the queue's own `due` test: submitted (a
  * candidate the control plane observed itself, GY-1523), not done, not returned to a worker, with
- * the `build` and `review` gates passed as the control plane served them: its review gate fails a
- * sensitive delta until its approval, and passes a normal one reviewed after merge (GY-1525). A
- * head the writer's own trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework
+ * the `build` gate passed as the control plane served it (GY-3164: the trial runs beside review,
+ * so the review gate no longer holds a head out of the queue; the landing still requires it).
+ * A head the writer's own trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework
  * rather than a second trial; one refused for another cause (a push rejected on an unmoved tip, a
- * hold) is queued again. A head held for a base failure waits `baseFailureHoldMs` before it is
- * trialled again on whatever the tip then is (GY-1834). The served review gate is the control
- * plane's verdict under the deployment's policy, never this process's own reading of
- * graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
+ * hold) is queued again. A head whose trial already passed ahead of review
+ * (`keptTrialAheadOfReview`) is owed its landing only once its review gate passes, and lands
+ * reusing the kept result. A head held for a base failure waits `baseFailureHoldMs` before it is
+ * trialled again on whatever the tip then is (GY-1834). The served gates are the control plane's
+ * verdict under the deployment's policy, never this process's own reading of graphyard.json,
+ * which an unapplied edit or an older checkout makes diverge (GY-1843).
  */
 export function awaitsMerge(item: Work, ledger: Readonly<Record<string, MergeLedgerState>>, now: number): boolean {
   const candidate = item.candidate;
   if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
-  if (!gate(item, 'build') || !gate(item, 'review')) return false;
+  if (!gate(item, 'build')) return false;
   const state = ledger[item.key];
+  // GY-3164: the trial already passed; only the review gate still stands between the head and its landing.
+  if (keptTrialAheadOfReview(candidate, state)) return gate(item, 'review');
   if (trialRefusalHeld(candidate, state)) return false;
   if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
   if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;

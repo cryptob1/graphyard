@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reviewPrompt, reviewStandard } from '../src/reviewer.js';
-import { mergeOne, mergeQueue, type MergePorts, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { mergeOne, mergeQueue, trialAheadOfReviewReason, type MergePorts, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import type { Work } from '../src/model.js';
 
-const head = 'a'.repeat(40), base = 'b'.repeat(40);
+const head = 'a'.repeat(40), base = 'b'.repeat(40), at = new Date(0).toISOString();
 // GY-3044 was held for results of these cases before the approval that starts their trial.
 const cases = ['create-work-item', 'board', 'work-item-detail'];
 const criteria = cases.map((name, i) => ({
@@ -39,9 +40,16 @@ test('integration:reviewer-stage-order — approval starts the GY-3044 trial wit
     observation: { source: 'control-plane', merged: false, candidate: { sha: head }, files: ['src/store/schema.ts'] }, evidence: [],
     gates: [{ name: 'build', passed: true }, { name: 'review', passed: false }, { name: 'test', passed: false }],
   } as unknown as Work;
-  assert.equal(mergeQueue([work], {}, 0).next, null, 'the review approval is needed first');
+  // GY-3164: the queue takes the head on its build gate alone, so its trial runs beside the review;
+  // the approval still gates the landing — a head whose trial already passed (kept on its ledger
+  // with the settle's marker) is owed nothing until the review gate passes for that head.
+  assert.equal(mergeQueue([work], {}, 0).next, work, 'the build-passed head is owed its trial beside its review');
+  const kept: MergeLedgerState = { key: binding.key, state: 'refused', head, baseTip: base, mergeSha: head, risk: 'sensitive', intentAt: at, pushedAt: null, observedTip: null,
+    refusal: { kind: 'merge', reason: trialAheadOfReviewReason(binding.key) }, trial: { head, mergeSha: head, proofs: {} }, events: 3 };
+  assert.equal(mergeQueue([work], { 'GY-3044': kept }, 0).next, null, 'the review approval is needed before the kept trial lands');
   work.gates.find(gate => gate.name === 'review')!.passed = true;
   assert.equal(mergeQueue([work], {}, 0).next, work, 'approval starts the trial with no trusted results yet');
+  assert.equal(mergeQueue([work], { 'GY-3044': kept }, 0).next, work, 'and returns the kept head to land on its trial');
 
   for (const badCase of [null, ...cases]) for (const missing of badCase ? [false, true] : [false]) {
     const order: string[] = [];

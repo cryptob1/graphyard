@@ -303,6 +303,9 @@ export const masterRunSchema = z.object({
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
   acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
+  // GY-3164: how long a review session that has posted no verdict and changed no output may run
+  // before it is ended and its review relaunched once on another reviewer profile; unset, 10.
+  reviewSilenceMinutes: z.number().int().min(1).max(240).optional(),
   // The loop-launched master session (GY-898): how long one master session may run before the
   // loop rotates it (default 240 minutes; the 12h coordination maximum stays as the surfaced-only
   // safety bound, and a rotation defers while a guarded merge is in flight), and how long the
