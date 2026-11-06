@@ -17,6 +17,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { expandTypedCommand, typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
+import { runtimeAdapters } from '../src/master/runtimes.js';
+import { freshLaunch } from '../src/master/session-resume.js';
 import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js';
 import { knownRuntimes } from '../src/install/runtimes.js';
 import { connectProvider, type FleetLaunchAccount } from '../src/fleet.js';
@@ -418,4 +420,23 @@ test('unit:runtime-exit-at-start-fails-fast — a runtime that exits back to the
     await assert.rejects(awaitRuntimeStart('w1V:pC1', 'cursor', cursorCommand, running.run, { ...running.bounds, timeoutMs: 5_000, ceilingMs: 8_000 }),
       (caught: unknown) => caught instanceof SessionStartError && caught.startCase === 'still starting' && caught.waitedMs >= 8_000, String(foreground));
   }
+});
+
+// GY-3034 AC-1, proof unit:launch-delivery: every runtime with a recipe takes its first request on
+// its command line through its adapter's request contract, its role file where its adapter names
+// one, and its adapter's program; Claude Code's adapter names the session id it will resume.
+test('unit:launch-delivery — each runtime launches with its request, role file and program from its adapter', async () => {
+  const directory = await temporaryDirectory('adapter-delivery');
+  try {
+    const files = writeLaunchFiles(directory, 'session', { role: 'Role', request: 'Implement GY-1' });
+    for (const adapter of runtimeAdapters().filter(entry => entry.recipe)) {
+      assert.equal(launchDelivery(adapter.kind), 'request', `${adapter.kind} takes its request on its command line`);
+      const command = launchCommand(adapter.kind, [], files);
+      assert.ok(command.includes(`${launchProgram(adapter.kind)} `), `${adapter.kind} starts its adapter program`);
+      assert.ok(command.endsWith(adapter.request!('"$(cat "$GY.request")"')), `${adapter.kind} places the request by its adapter contract: ${command}`);
+      assert.equal(command.includes('--append-system-prompt-file "$GY.role"'), !!adapter.role, `${adapter.kind} loads the role file only where its adapter names how`);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+  const fresh = freshLaunch('claude', null);
+  assert.deepEqual(fresh.args, ['--session-id', fresh.session], 'Claude Code\'s adapter names the id the session can be resumed by');
 });
