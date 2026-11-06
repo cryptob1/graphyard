@@ -48,27 +48,27 @@ async function merge(type: Work['type'], proofs: string[], change: (root: string
 const refusal = (...proofs: string[]) => `${trialFailurePrefix}: ${proofs.join(', ')}: a feature's head must add or change one of their cases under e2e/cases/`;
 const named = ['e2e:delivered', 'e2e:added'];
 
-test('unit:feature-names-untouched-case — a feature head that leaves every case it names untouched is refused naming its e2e proofs, even when it changes a case it does not name', async () => {
+test('unit:tests/feature-adds-e2e-case.test.ts — a feature head that leaves every case it names untouched is refused naming its e2e proofs, even when it changes a case it does not name', async () => {
   const outcome = await merge('feature', named, (_root, write) => write(other));
   assert.equal(outcome.outcome, 'refused', JSON.stringify(outcome));
   assert.equal((outcome as { reason: string }).reason, refusal(...named));
 });
 
-test('unit:feature-only-deletes-case — a head that deletes a bound case, or renames it away, is refused: neither adds nor modifies it', async () => {
+test('unit:tests/feature-adds-e2e-case.test.ts — a head that deletes a bound case, or renames it away, is refused: neither adds nor modifies it', async () => {
   const deleted = await merge('feature', ['e2e:delivered'], root => rmSync(join(root, delivered)));
   assert.equal((deleted as { reason: string }).reason, refusal('e2e:delivered'));
   const renamed = await merge('feature', ['e2e:delivered'], root => gitIn(root, 'mv', delivered, 'e2e/cases/moved.json'));
   assert.equal((renamed as { reason: string }).reason, refusal('e2e:delivered'));
 });
 
-test('unit:feature-grows-catalog — a feature head that adds or modifies one case it names merges', async () => {
+test('unit:tests/feature-adds-e2e-case.test.ts — a feature head that adds or modifies one case it names merges', async () => {
   const added = await merge('feature', named, (_root, write) => write('e2e/cases/added.json'));
   assert.equal(added.outcome, 'merged', JSON.stringify(added));
   const modified = await merge('feature', named, (_root, write) => write(delivered));
   assert.equal(modified.outcome, 'merged', JSON.stringify(modified));
 });
 
-test('unit:feature-case-rule-exempts — a bug or chore reusing a case unchanged merges, and so does a legacy feature naming no e2e proof', async () => {
+test('unit:tests/feature-adds-e2e-case.test.ts — a bug or chore reusing a case unchanged merges, and so does a legacy feature naming no e2e proof', async () => {
   for (const type of ['bug', 'chore'] as const) {
     const outcome = await merge(type, named, () => {});
     assert.equal(outcome.outcome, 'merged', JSON.stringify(outcome));
@@ -77,7 +77,7 @@ test('unit:feature-case-rule-exempts — a bug or chore reusing a case unchanged
   assert.equal(legacy.outcome, 'merged', JSON.stringify(legacy));
 });
 
-test('unit:guide-names-feature-case-rule — the master guide\'s e2e paragraph states the feature rule and who may reuse a delivered case', () => {
+test('unit:tests/feature-adds-e2e-case.test.ts — the master guide\'s e2e paragraph states the feature rule and who may reuse a delivered case', () => {
   const paragraph = masterGuide.split('\n').find(line => line.startsWith('Every item needs an'))!;
   assert.match(paragraph, /A feature's head must add or change one of its bound cases/);
   assert.match(paragraph, /reusing a delivered case unchanged is only for bugs, chores and loop repairs/);
