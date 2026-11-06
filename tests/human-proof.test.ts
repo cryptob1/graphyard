@@ -56,14 +56,14 @@ const stored = async (id: string) => {
 };
 const head = (sha: string) => ({ sha, baseSha: B, pr: 0, branch: 'graphyard/gy-1-1', author: 'worker-1' });
 const observation = (sha: string) => ({ source: 'control-plane', at: new Date().toISOString(), candidate: head(sha), checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false,
-  files: ['docs/notes.md'], scopeFiles: [{ path: 'docs/notes.md', status: 'modified' as const, sha: 'e'.repeat(40), additions: 1, deletions: 0, binary: false }], baseTip: B, baseTipContained: true, mergeBase: B });
+  files: ['docs/notes.md'], scopeFiles: [{ path: 'docs/notes.md', status: 'modified', sha: 'e'.repeat(40), additions: 1, deletions: 0, binary: false }], baseTip: B, baseTipContained: true, mergeBase: B });
 /** A submitted, observed head whose only owed thing is the person's check. */
 async function submitted(key: string): Promise<Work> {
   const now = new Date().toISOString();
   const work = workFixture({ id: randomUUID(), key, title: `Item ${key}`, description: 'No user-facing change: a test item.', type: 'chore', priority: 1,
     criteria: [{ id: 'AC-1', text, proofs: [proof] }], stage: 'review', revision: 3, createdAt: now, updatedAt: now, stageEnteredAt: now, epoch: 1,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker-1' }], candidate: head(H), submission: { epoch: 1, pr: 0 },
-    gates: [], implementers: ['worker-1'], observation: observation(H) });
+    gates: [], implementers: ['worker-1'], observation: observation(H) as Work['observation'] });
   Object.assign(work, evaluate(work, [work], new Date()));
   await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
   return work;
