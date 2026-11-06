@@ -11,6 +11,14 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonState } from '../src/daemon/state.js';
 import type { Work } from '../src/model.js';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
+import { defaultChildRun } from '../src/child-runner.js';
+import { trialMerge } from '../src/merge-writer/trial.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3159: a merge trial in progress when the loop restarts onto a new release reaches its own
 // verdict. The restart leaves each detached trial run alive; the next loop adopts it — the run's
@@ -52,7 +60,6 @@ class World {
   reworks: Work[] = [];
   constructor(readonly count: number) {}
   head(n: number) { return sha(`head${n}`); }
-  item(n: number) { return Array.from({ length: this.count }, (_, index) => index + 1).find(entry => this.head(entry) === this.head(n)); }
   fold() { return foldMergeLedger(this.ledgerEvents as never); }
   snapshot(): Work[] {
     const folded = this.fold();
@@ -179,4 +186,27 @@ test('unit:trial-survives-loop-restart — a restart that leaves no watchable ru
   const refusal = world.recorded.get(1)!.find(event => event.kind === 'refused');
   assert.ok(refusal?.kind === 'refused' && /was never pushed/.test(refusal.reason), 'the open intent settles refused unpushed, the fallback a dead run takes');
   assert.ok(Object.values(next.actions).some(action => /Settled an open intent/.test(action.detail ?? '')), 'the settle is the journal line it always was');
+});
+
+test('unit:trial-survives-loop-restart — the merge commit of a head onto an unmoved tip is the same commit when the next loop computes it again later, so the adopted trial still names it and is not cancelled', async () => {
+  const identity = { GIT_AUTHOR_NAME: 'Someone', GIT_AUTHOR_EMAIL: 'someone@example.com', GIT_COMMITTER_NAME: 'Someone', GIT_COMMITTER_EMAIL: 'someone@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const root = await temporaryDirectory('trial-restart-repo', tmpdir());
+  const run = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
+  run('init', '-q', '-b', 'main');
+  writeFileSync(join(root, 'a.txt'), 'one\n'); writeFileSync(join(root, 'b.txt'), 'two\n');
+  run('add', '-A'); run('commit', '-q', '-m', 'base');
+  const start = run('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'a.txt'), 'head\n'); run('commit', '-q', '-am', 'head');
+  const head = run('rev-parse', 'HEAD');
+  run('checkout', '-q', '--detach', start);
+  writeFileSync(join(root, 'b.txt'), 'main\n'); run('commit', '-q', '-am', 'main moved');
+  const baseTip = run('rev-parse', 'HEAD');
+  const git = async (args: string[], env: Record<string, string> = {}) => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity, ...env } }));
+  const before = await trialMerge(git, { head, baseTip, subject: 'Merge GY-1: Head' });
+  // The restart: the next loop recomputes the merge after the clock has moved past a second.
+  await delay(1_100);
+  const after = await trialMerge(git, { head, baseTip, subject: 'Merge GY-1: Head' });
+  assert.ok('mergeSha' in before && 'mergeSha' in after);
+  assert.notEqual(before.mergeSha, head, 'the head does not fast-forward the tip, so a merge commit is made');
+  assert.equal(after.mergeSha, before.mergeSha);
 });
