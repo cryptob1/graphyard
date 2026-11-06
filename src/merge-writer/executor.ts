@@ -172,7 +172,8 @@ function withStepDetail(reason: string, logTail: string | undefined): string {
   const names = failingTestNames(log).filter(name => !reason.includes(name));
   const head = `${reason}${names.length ? `\nfailing tests: ${boundedList(names, '; ', 600)}` : ''}`.slice(0, reasonBound);
   const room = reasonBound - head.length - '\nlog tail:\n'.length;
-  const tail = room > 0 ? maskSecrets(log).slice(-room).trim() : '';
+  const masked = maskSecrets(log);
+  const tail = room > 1 ? (masked.length > room ? `…${masked.slice(-(room - 1)).trim()}` : masked.trim()) : '';
   return tail ? `${head}\nlog tail:\n${tail}` : head;
 }
 /** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3), with the step's failing test names and log tail (GY-3150). */
