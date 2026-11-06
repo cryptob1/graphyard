@@ -56,7 +56,7 @@ const stored = async (id: string) => {
 };
 const head = (sha: string) => ({ sha, baseSha: B, pr: 0, branch: 'graphyard/gy-1-1', author: 'worker-1' });
 const observation = (sha: string) => ({ source: 'control-plane', at: new Date().toISOString(), candidate: head(sha), checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false,
-  files: ['docs/notes.md'], scopeFiles: [{ path: 'docs/notes.md', status: 'modified', sha: 'e'.repeat(40), additions: 1, deletions: 0, binary: false }], baseTip: B, baseTipContained: true, mergeBase: B });
+  files: ['docs/notes.md'], scopeFiles: [{ path: 'docs/notes.md', status: 'modified' as const, sha: 'e'.repeat(40), additions: 1, deletions: 0, binary: false }], baseTip: B, baseTipContained: true, mergeBase: B });
 /** A submitted, observed head whose only owed thing is the person's check. */
 async function submitted(key: string): Promise<Work> {
   const now = new Date().toISOString();
