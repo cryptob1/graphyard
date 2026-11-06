@@ -13,7 +13,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
-import { assertLaunchable, nonInteractiveLaunch, requestPlaceholder, type RegisteredLaunch } from './harness.js';
+import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
 import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
 import type { ExhaustionSignal } from './model/capacity.js';
@@ -155,9 +155,9 @@ export interface HeadlessSession<T> {
  */
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
   assertLaunchable(input.kind, input.contract);
-  const trust = await nonInteractiveLaunch[input.kind]?.trust?.(input.directory, input.environment, input.args);
+  const trust = await launchRecipe(input.kind)?.trust?.(input.directory, input.environment, input.args);
   const confinement = await sessionConfinement(input.kind, input.args, { directory: input.directory, cwd: input.directory, environment: input.environment, ownGitHubCredential: true, credentialMask: input.credentialMask }, input.coordinatorRoot);
-  if (trust) await nonInteractiveLaunch[input.kind]?.verify?.(trust);
+  if (trust) await launchRecipe(input.kind)?.verify?.(trust);
   const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(input.kind, input.args) : input.args;
   const controller = new AbortController(), detached = new AbortController(), startedAt = new Date().toISOString();
   const runDirectory = resolve(headlessRunsDirectory(input.root), randomUUID());

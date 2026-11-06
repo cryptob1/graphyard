@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/runtime-prompt.js';
+import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
 // Time-bomb allowance (GY-1694): the 2026-09-26 and 2026-10-03 instants are the fixed now handed to detectRuntimeExhaustion and the resets it parses from notices.
 
 // GY-421: mid-session exhaustion is recognized only from the runtime's own provider-authored
@@ -68,7 +69,7 @@ test('unit:agy-quota-notice-detected — agy\'s "Individual quota reached" notic
   assert.equal(signal.reason, 'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h31m31s.');
   assert.equal(signal.resetsAt, new Date(now + (3600 + 31 * 60 + 31) * 1000).toISOString(), 'the reset is 1h31m31s after the observation');
   assert.equal(signal.resetsAt, '2026-10-03T06:16:31.000Z');
-  assert.ok(providerLimitNotices.agy, 'agy has its own entry in the catalogs');
+  assert.ok(runtimeAdapter('agy')?.limitNotices, 'agy has its own entry in the catalogs');
   // An agent's prose about a quota, on agy, is still work, not a failover.
   for (const prose of [
     gy402Transcript,

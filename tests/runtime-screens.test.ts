@@ -5,7 +5,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords } from '../src/master/dispatch.js';
-import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, observeStart, runtimeScreens, SessionStartError, setupMaster, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, observeStart, SessionStartError, setupMaster, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
+const opencodeScreen = runtimeAdapter('opencode')!.screen!;
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
@@ -51,10 +53,10 @@ test('unit:opencode-start-recognized — the start check matches OpenCode 1.18\'
   // `herdr pane read` returns it. It holds no capitalized "OpenCode" anywhere.
   const screen = await readFile(fileURLToPath(new URL('fixtures/opencode-1.18-start-screen.txt', import.meta.url)), 'utf8');
   assert.equal(/\bOpenCode\b/.test(screen), false, 'the recorded 1.18 screen never prints the word the old check waited for');
-  assert.equal(runtimeScreens.opencode.test(screen), true, 'the start check recognizes the recorded screen');
-  assert.equal(runtimeScreens.opencode.test(echoLine), false, 'the echoed launch command is not a start screen');
-  assert.equal(runtimeScreens.opencode.test('❯ '), false, 'a bare shell prompt is not a start screen');
-  assert.equal(runtimeScreens.opencode.test('▄▄▀▀ welcome ▀▀▄▄\nctrl+r to search history\n❯ '), false, 'a MOTD drawn in block characters or a shell\'s ctrl+ hint is not a start screen');
+  assert.equal(opencodeScreen.test(screen), true, 'the start check recognizes the recorded screen');
+  assert.equal(opencodeScreen.test(echoLine), false, 'the echoed launch command is not a start screen');
+  assert.equal(opencodeScreen.test('❯ '), false, 'a bare shell prompt is not a start screen');
+  assert.equal(opencodeScreen.test('▄▄▀▀ welcome ▀▀▄▄\nctrl+r to search history\n❯ '), false, 'a MOTD drawn in block characters or a shell\'s ctrl+ hint is not a start screen');
 
   // The case every OpenCode launch died in: Herdr sees the runtime's process but has not classified
   // it, and the TUI is on screen — the session is adopted as started at once.
