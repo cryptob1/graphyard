@@ -12,7 +12,7 @@ export const e2eCasePath = (name: string) => `e2e/cases/${name}.json`;
  */
 export function e2eProofRefusal(input: { type: string; description?: string | null; criteria: readonly { proofs: readonly string[] }[] }): string | null {
   if (input.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('e2e:')))) return null;
-  return `a ${input.type} item owes an end-to-end proof: give a criterion an e2e:NAME proof bound to its case e2e/cases/NAME.json (docs/validation.md) — a new case or an existing one`;
+  return `a ${input.type} item owes an end-to-end proof: give a criterion an e2e:NAME proof bound to its case e2e/cases/NAME.json — a new case or an existing one`;
 }
 
 /** The sentences the filing validation words, so a reader can tell one from any other refusal. */

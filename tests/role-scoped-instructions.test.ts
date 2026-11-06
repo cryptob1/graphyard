@@ -10,6 +10,7 @@ import { managedInstructions } from '../src/repository-setup.js';
 import { agentsRenderers } from '../src/cli/workspace-generated.js';
 import { regenerateManagedBlocks } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { masterGuide } from '../src/master/guide.js';
 
 // GY-1493: the master's rules leave AGENTS.md, which every worker, reviewer and producer session
 // loads, and reach the master session through graphyard master guide instead.
@@ -57,12 +58,11 @@ test('unit:master-block-migrated — master init writes the worker block only an
   } finally { for (const root of [fresh, migrated, refused, credentialDirectory]) await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:master-guide-carries-role-instructions — graphyard master guide prints the master instructions before docs/master-agent.md', async () => {
+test('unit:master-guide-carries-role-instructions — graphyard master guide prints the master instructions before the master operating guide', async () => {
   const { masterInstructions } = await master();
   const { stdout } = await exec(process.execPath, [launcher, 'master', 'guide'], { cwd: repositoryRoot, maxBuffer: 16 * 1024 * 1024 });
-  const guide = (await readFile(join(repositoryRoot, 'docs/master-agent.md'), 'utf8')).replace(/^<!-- page:[^\n]*\n/, '');
   assert.ok(stdout.startsWith(masterInstructions), 'the role instructions lead the guide');
-  assert.equal(stdout, `${masterInstructions}\n${guide}\n`);
+  assert.equal(stdout, `${masterInstructions}\n${masterGuide}\n`);
   // Every rule the AGENTS.md block carried is in the text the master now reads.
   for (const rule of ['Autonomy is the default: act without asking.', 'graphyard master create|release|unblock|requirements|rework|attest|close', 'Keep cycling: status, dispatch ready work', 'An item is delivered at merge', 'GitHub merges nothing and no pull request is opened.', 'Never use an administrative merge bypass']) assert.ok(stdout.replace(/\s+/g, ' ').includes(rule), `master guide states: ${rule}`);
 });
