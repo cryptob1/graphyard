@@ -36,7 +36,7 @@ export function stepEnvironment(url: string, secrets: Record<string, string>, ho
 export interface ProcessResult { code: number | null; output: string; timedOut: boolean; notStarted?: boolean }
 /** A browser or step process that could not start (GY-3180): the host's failure, never the case's. */
 export class E2eHostError extends Error {}
-const started = (result: ProcessResult, what: string) => { if (result.notStarted) throw new E2eHostError(`${what} could not start: ${result.output}`); return result; };
+const started = (result: ProcessResult, failure: string) => { if (result.notStarted) throw new E2eHostError(`${failure}: ${result.output}`); return result; };
 /** `signal` cancels the process (GY-1718: a merge preview past its budget), killing it as its timeout does. */
 export type ProcessRunner = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; shell: boolean; signal?: AbortSignal }) => Promise<ProcessResult>;
 
@@ -205,7 +205,7 @@ export interface GeneralStepContext { url: string; root: string; env: Record<str
 
 /** A command step: pass on exit 0, fail otherwise, keeping failure identity/cause alongside the output tail. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
-  const result = started(await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal }), 'the step\'s command');
+  const result = started(await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal }), 'the step\'s command could not start');
   const sanitized = redact(result.output, context.secrets);
   const lines = sanitized.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
   const test = lines.find(line => /^\s*(?:✖ (?!failing tests:)|not ok \d+ - )/.test(line));
@@ -253,7 +253,7 @@ async function agentLeg(step: Extract<E2eStep, { kind: 'agent' }>, base: string,
   const target = new URL(step.path ?? '/', base).toString();
   const prefix = ['--session', session];
   // A cancelled run kills the step's invocations; only the session's own close still runs, bounded by its timeout.
-  const invoke = async (args: string[], timeoutMs: number, cancellable = true) => started(await context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined }), 'agent-browser');
+  const invoke = async (args: string[], timeoutMs: number, cancellable = true) => started(await context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined }), `agent-browser could not ${args[0]} ${target}`);
   const remaining = () => Math.max(1, deadline - Date.now());
   const transcript: string[] = [];
   let reason: string | null = null, verdict: string | undefined;
