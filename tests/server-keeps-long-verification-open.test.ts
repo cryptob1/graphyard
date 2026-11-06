@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { workerVerificationTimeoutMs } from '../src/merge-writer/worker-verification.js';
+import { verificationRequest, verificationRequestTimeoutMs } from '../src/cli/verification-request.js';
 import { withDatabase } from './helpers/postgres.js';
 
 test('unit:server-keeps-long-verification-open — a simulated verification past 300 seconds receives its HTTP reply', async t => {
@@ -43,8 +44,18 @@ test('unit:server-keeps-long-verification-open — a simulated verification past
     return response.json();
   };
   const head = 'a'.repeat(40);
-  const pending = api(`work/${work.id}/worker-verification`, { head, epoch: 1, mode: 'verify' }, worker.token)
-    .then(value => ({ value, error: null }), error => ({ value: null, error }));
+  // The waiting client is the one `complete` really sends: node:http behind verificationRequest,
+  // whose single wait (60 min) has no 300 s undici header deadline and covers the server hold
+  // (workerVerificationTimeoutMs + 60 s), which covers the host trial deadline in turn.
+  assert.ok(verificationRequestTimeoutMs > workerVerificationTimeoutMs + 60_000);
+  const pending = verificationRequest(`${url}/api/work/${work.id}/worker-verification`, { method: 'POST', headers: {
+    Authorization: `Bearer ${worker.token}`, 'Content-Type': 'application/json',
+  }, body: JSON.stringify({ head, epoch: 1, mode: 'verify' }) })
+    .then(async response => {
+      const value = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(value));
+      return { value, error: null };
+    }, error => ({ value: null, error }));
   let jobs: any[] = [];
   for (let i = 0; i < 100 && !jobs.length; i++) {
     jobs = await api('worker-verifications/take', { host: 'test' });
