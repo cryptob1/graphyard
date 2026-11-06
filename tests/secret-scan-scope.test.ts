@@ -34,7 +34,7 @@ async function repository() {
 const trial = (repo: Awaited<ReturnType<typeof repository>>, mergeSha: string) =>
   runTrialAttempt({ root: repo.root, base: repo.base, mergeSha, baseTip: repo.tip, changedFiles: ['notes.txt'], timeoutMs: 60_000, key: 'GY-3171', environment: { PATH: process.env.PATH! }, secretScan: runSecretScan });
 
-test('unit:secret-scan-scope — with a base tip the scan reads <tip>..HEAD; a leak only in the base history passes, one the change adds refuses', async () => {
+test('unit:tests/secret-scan-scope.test.ts — with a base tip the scan reads <tip>..HEAD; a leak only in the base history passes, one the change adds refuses', async () => {
   assert.ok(secretScanArgv('/workspace', 'gitleaks', false, 'abc123').includes('--log-opts=abc123..HEAD'));
   assert.ok(secretScanArgv('/workspace', 'gitleaks', false).includes('--log-opts=HEAD'));
 
@@ -47,7 +47,7 @@ test('unit:secret-scan-scope — with a base tip the scan reads <tip>..HEAD; a l
   assert.deepEqual(leaking.tests.failed, ['secret-scan'], leaking.logTail);
 });
 
-test('unit:secret-scan-scope — a trial failing only its secret scan is refused for the secret scan, never a build step', async () => {
+test('unit:tests/secret-scan-scope.test.ts — a trial failing only its secret scan is refused for the secret scan, never a build step', async () => {
   const repo = await repository();
   const run = await trial(repo, await repo.commit('new PLANTED-LEAK\n'));
   const reason = trialFailureReason({ run })!;
