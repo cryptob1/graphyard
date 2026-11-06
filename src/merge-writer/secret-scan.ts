@@ -34,6 +34,8 @@ export interface SecretScanInput {
   worktree: string;
   /** Where to cache the pinned binary: a durable directory (`secretScanCacheDirectory`) that outlives the trial. */
   cacheDirectory: string;
+  /** The tip the change merges onto: only the commits after it are scanned. */
+  baseTip?: string;
   run: ChildRun;
   /** Download the archive; tests substitute a fake. */
   download?: (url: string) => Promise<Buffer>;
@@ -45,9 +47,12 @@ export interface SecretScanInput {
   sha256?: string;
 }
 
-/** The argv the trial runs the scan with: HEAD's history, redacted, with the repository's ignore file when it has one. */
-export const secretScanArgv = (worktree: string, binary = 'gitleaks', ignore = existsSync(join(worktree, gitleaksIgnorePath))) =>
-  [binary, 'git', '--redact', '--log-opts=HEAD', ...(ignore ? ['--gitleaks-ignore-path', join(worktree, gitleaksIgnorePath)] : []), worktree];
+/**
+ * The argv the trial runs the scan with, redacted, with the repository's ignore file when it has one: the
+ * commits the change adds (`baseTip..HEAD`, GY-3171), or HEAD's whole history when no base tip is named.
+ */
+export const secretScanArgv = (worktree: string, binary = 'gitleaks', ignore = existsSync(join(worktree, gitleaksIgnorePath)), baseTip?: string) =>
+  [binary, 'git', '--redact', `--log-opts=${baseTip ? `${baseTip}..HEAD` : 'HEAD'}`, ...(ignore ? ['--gitleaks-ignore-path', join(worktree, gitleaksIgnorePath)] : []), worktree];
 
 /** Obtain the pinned binary in `cacheDirectory` once: a later trial finds it there and downloads nothing. */
 async function pinnedBinary(input: SecretScanInput, timeoutMs: number): Promise<string> {
@@ -78,7 +83,7 @@ async function pinnedBinary(input: SecretScanInput, timeoutMs: number): Promise<
 }
 
 /**
- * Obtain (once, cached) the pinned gitleaks binary and scan `worktree` at HEAD with the repository's
+ * Obtain (once, cached) the pinned gitleaks binary and scan the commits `worktree`'s HEAD adds to `baseTip` with the repository's
  * ignore file. Only gitleaks' findings status fails the scan; a binary that cannot be had (download,
  * digest or platform) is `unavailable`, and a run that ended any other way carries its `execution`:
  * the trial treats both as no verdict (a timeout or runner failure) rather than the merge's failure.
@@ -88,7 +93,7 @@ export async function runSecretScan(input: SecretScanInput): Promise<SecretScanR
   let binary: string;
   try { binary = await pinnedBinary(input, timeoutMs); }
   catch (error) { return { ok: false, unavailable: true, detail: `secret scan unavailable: ${error instanceof Error ? error.message : String(error)}` }; }
-  const [command, ...args] = secretScanArgv(input.worktree, binary);
+  const [command, ...args] = secretScanArgv(input.worktree, binary, undefined, input.baseTip);
   try {
     await input.run(command!, args, { cwd: input.worktree, timeoutMs });
     return { ok: true };
