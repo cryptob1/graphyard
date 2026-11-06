@@ -109,7 +109,7 @@ function loop(world: World, state: DaemonState, adopt: boolean, from: number) {
 }
 const waitFor = async (what: () => boolean, ms = 5_000) => { for (let waited = 0; !what() && waited < ms; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
 
-test('unit:merge-writer-refills-slots — with parallel 3 and one trial running, a head that becomes due starts its trial on the next cycle, the third fills the last slot, and a fourth waits for a slot: never more than 3 at once', { timeout: 60_000 }, async () => {
+test('unit:tests/merge-writer-refills-slots.test.ts — with parallel 3 and one trial running, a head that becomes due starts its trial on the next cycle, the third fills the last slot, and a fourth waits for a slot: never more than 3 at once', { timeout: 60_000 }, async () => {
   const world = new World(1), state = emptyDaemonState(config), cycle = loop(world, state, false, start);
   await cycle();
   await waitFor(() => world.launches.length === 1);
@@ -156,7 +156,7 @@ test('unit:merge-writer-refills-slots — with parallel 3 and one trial running,
   for (let n = 1; n <= 5; n++) assert.equal(world.recorded.get(n)!.filter(event => event.kind === 'trial').length, 1, `GY-${n} ran exactly one trial`);
 });
 
-test('unit:merge-writer-refills-slots — a loop restart while two independently started trials run adopts both runs', { timeout: 60_000 }, async () => {
+test('unit:tests/merge-writer-refills-slots.test.ts — a loop restart while two independently started trials run adopts both runs', { timeout: 60_000 }, async () => {
   const world = new World(1), first = emptyDaemonState(config), stepOne = loop(world, first, false, start);
   await stepOne();
   await waitFor(() => world.launches.length === 1);
