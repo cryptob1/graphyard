@@ -579,7 +579,7 @@ function reviewRecoverySection() {
 function reviewAutonomySection() {
   return `Decide and act on your own: finish judging the diff and post exactly one verdict, APPROVE or REQUEST_CHANGES. Never ask a human for confirmation or end waiting on input. `
     + reviewRecoverySection()
-    + `Record a genuine blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:).`;
+    + `Record a genuine blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:). After posting, stop; Graphyard closes the session.`;
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _legacy?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
   memory ??= projectMemory;
