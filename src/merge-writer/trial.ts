@@ -574,6 +574,8 @@ export interface RunTrialInput {
   /** The managed worktree root the trial checkout is made under. */
   base: string;
   mergeSha: string;
+  /** The tip the merge was made on, where the base run of GY-1834 runs and after which the secret scan reads commits: a fast-forwarded head's first parent is its own earlier commit, never the tip. Absent, the merge commit's first parent. */
+  baseTip?: string;
   changedFiles: readonly string[];
   timeoutMs: number;
   key?: string;
@@ -916,9 +918,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (scan) {
       enterStep('scan');
       // The binary is cached under the managed root, so only the first trial on a host downloads it.
-      const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
+      const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining(), ...(input.baseTip ? { baseTip: input.baseTip } : {}) });
       if (!scanned.ok) {
-        log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
+        log.push(`$ ${secretScanArgv(worktree, undefined, undefined, input.baseTip).join(' ')}\n${scanned.detail}`);
         // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
         if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
         // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is

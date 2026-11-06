@@ -188,7 +188,7 @@ function withStepDetail(reason: string, logTail: string | undefined): string {
   const tail = room > 1 ? (masked.length > room ? `…${masked.slice(-(room - 1)).trim()}` : masked.trim()) : '';
   return tail ? `${head}\nlog tail:\n${tail}` : head;
 }
-/** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3), with the step's failing test names and log tail (GY-3150). */
+/** The refusal a failed trial records: the conflicting paths, the secret scan's leaks, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3), with the step's failing test names and log tail (GY-3150). */
 export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Partial<Pick<TrialRun, 'logTail'>> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
@@ -198,6 +198,8 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
   if (missing) return `${trialFailurePrefix}: ${missing.proof} has no case at e2e/cases/${missing.case}.json`;
   const failedCase = run.e2e?.find(entry => entry.failingStep);
   if (failedCase) return withStepDetail(`${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`, run.logTail);
+  // GY-3171: the trial's secret scan fails as the test `secret-scan` before any build runs.
+  if (run.tests.failed[0] === 'secret-scan') return withStepDetail(`${trialFailurePrefix}: secret scan (gitleaks) found leaks`, run.logTail);
   if (run.build === 'fail') return withStepDetail(`${trialFailurePrefix}: build step npm run build`, run.logTail);
   if (run.tests.failed.length) {
     // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
@@ -417,8 +419,6 @@ export interface MergeTrialInput extends RunTrialInput {
   attribute?: boolean;
   /** GY-2984, GY-3167: the item is a feature or bug: a passing trial runs its proofs on the base tip, and at least one must fail there. */
   reproduce?: boolean;
-  /** The tip the merge was made on, where the base run of GY-1834 runs: a fast-forwarded head's first parent is its own earlier commit, never the tip. Absent, the merge commit's first parent. */
-  baseTip?: string;
   /**
    * How to discover more of them, run in each attempt's selection phase until one answers (GY-1832),
    * so a read that fails or times out is that attempt's no-verdict, timed and retried like any host failure.
