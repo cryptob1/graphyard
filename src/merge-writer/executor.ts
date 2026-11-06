@@ -829,9 +829,9 @@ export type HeadResult = { work: Work; outcome: MergeOutcome } | { work: Work; e
  * the host's cores shared among them. A head never waits on or cancels another head's trial: one
  * whose trial passes lands as soon as it passes, re-merged onto whatever tip the heads before it
  * left. The base reads and writes (fetch, merge, push) take turns, so two heads never write the
- * checkout's refs at once. `onStep` names each head's trial step.
+ * checkout's refs at once. `onStep` names each head's trial step; `share` is how many trials divide the cores (GY-3182).
  */
-export async function mergeHeads(ports: MergePorts, items: readonly Work[], onStep?: (index: number, step: string) => void): Promise<HeadResult[]> {
+export async function mergeHeads(ports: MergePorts, items: readonly Work[], onStep?: (index: number, step: string) => void, share = items.length): Promise<HeadResult[]> {
   let turn: Promise<unknown> = Promise.resolve();
   const serial = <A extends unknown[], T>(call: (...args: A) => Promise<T>) => (...args: A): Promise<T> => {
     const next = turn.then(() => call(...args));
@@ -839,7 +839,7 @@ export async function mergeHeads(ports: MergePorts, items: readonly Work[], onSt
     return next;
   };
   const shared: MergePorts = { ...ports, fetch: serial(ports.fetch), merge: serial(ports.merge), push: serial(ports.push),
-    trial: (mergeSha, files, item, baseTip, step, onTiming, heads, _share, signal) => ports.trial(mergeSha, files, item, baseTip, step, onTiming, heads, items.length, signal) };
+    trial: (mergeSha, files, item, baseTip, step, onTiming, heads, _share, signal) => ports.trial(mergeSha, files, item, baseTip, step, onTiming, heads, share, signal) };
   return Promise.all(items.map(async (work, index): Promise<HeadResult> => {
     try { return { work, outcome: await mergeOne({ ...shared, ...(onStep ? { onStep: (step: string) => onStep(index, step) } : {}) }, work) }; }
     catch (error) { return { work, error }; }
