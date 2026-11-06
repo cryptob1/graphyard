@@ -5,7 +5,6 @@
 // route. Agent work is scripted commits submitted as items; no AI runtime is launched.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -130,21 +129,21 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
 }
 
 /**
- * The trial children run directly when the host has no trial container: a worker has no Docker
- * socket and already inherits confinement. The trusted harness the confined runner names resolves
- * to this checkout.
+ * The nested trial's children run directly, never under its private-root wrapper: the trial that
+ * runs this test already confines them, and a nested bubblewrap is not available everywhere this
+ * test runs (a worker sandbox, the trial container). The trusted harness the confined runner names
+ * resolves to this checkout.
  */
+const harnessLoader = '/graphyard-harness/node_modules/tsx/dist/loader.mjs';
 const fixtureRun: ChildRun = async (command, args, options) => {
-  if (!existsSync('/etc/graphyard-trial') && options?.wrapper?.length) {
-    if (args.includes('/graphyard-harness/node_modules/tsx/dist/loader.mjs')) {
-      const script = args.at(-1)!;
-      const harness = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/, '');
-      await writeFile(script, (await readFile(script, 'utf8')).replaceAll('/graphyard-harness', harness));
-      args = args.map(arg => arg === '/graphyard-harness/node_modules/tsx/dist/loader.mjs' ? fileURLToPath(new URL(import.meta.resolve('tsx'))) : arg);
-    }
-    return defaultChildRun(command, args, { ...options, wrapper: [] });
+  if (args.includes(harnessLoader)) {
+    const script = args.at(-1)!;
+    const harness = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/, '');
+    await writeFile(script, (await readFile(script, 'utf8')).replaceAll('/graphyard-harness', harness));
+    args = args.map(arg => arg === harnessLoader ? fileURLToPath(new URL(import.meta.resolve('tsx'))) : arg);
   }
-  return defaultChildRun(command, args, { ...options, env: { ...process.env, ...identity, ...options?.env } });
+  if (command === 'git') return defaultChildRun(command, args, { ...options, env: { ...process.env, ...identity, ...options?.env } });
+  return defaultChildRun(command, args, { ...options, wrapper: [] });
 };
 
 type Where = Pick<World, 'checkout' | 'trials' | 'url' | 'config'> & { snapshot(): Promise<Work[]>; trialLog?: World['trialLog']; filings?: World['filings'] };
@@ -182,13 +181,14 @@ export function loopReads(where: Where, options: { gate: boolean }): MergeWriter
 export function pipelineLoop(where: Where, options: { gate: boolean }) {
   const state: DaemonState = emptyDaemonState(where.config);
   const lines: string[] = [];
-  let gate = options.gate;
+  let gate = options.gate, lastSnapshot: Work[] = [];
   const effects = () => ({ agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: await where.snapshot(), now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {},
+    snapshot: async () => ({ work: lastSnapshot = await where.snapshot(), now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {},
     decisions: async () => ({ decisions: [] }), persist: async () => {}, github: githubDouble, merge: githubDouble,
     mergeWriter: loopReads(where, { gate }), rework: async () => {} }) as unknown as DaemonEffects;
   return {
     state, lines,
+    get lastSnapshot() { return lastSnapshot; },
     gating: (on: boolean) => { gate = on; },
     cycle: () => runCycle(where.config, state, effects(), Date.now, undefined, line => { lines.push(line); }),
   };
@@ -199,6 +199,9 @@ export async function cycleUntil(loop: ReturnType<typeof pipelineLoop>, what: st
   for (const start = Date.now(); ;) {
     await loop.cycle();
     if (await done()) return;
+    // A head the merge writer refused never lands: fail now, naming why.
+    const refused = loop.lastSnapshot.find(item => item.mergeLedger?.state === 'refused');
+    if (refused) throw new Error(`${what}: ${refused.key} was refused: ${refused.mergeLedger!.refusal?.reason}`);
     if (Date.now() - start > deadlineMs) {
       const actions = Object.entries(loop.state.actions).slice(-15).map(([key, action]) => `${key} ${action.state}: ${action.detail ?? ''}`);
       throw new Error(`${what} did not happen within ${deadlineMs} ms\n${[...loop.lines.slice(-30), ...actions].join('\n')}`);

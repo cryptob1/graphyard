@@ -26,7 +26,10 @@ test('e2e:pipeline-gate-restart — a gate run in flight when the loop process i
     await rollout(world);
     const landed = await world.submit('A change the first loop lands', { 'first.txt': 'first\n' });
     for (const start = Date.now(); !(gate()?.inFlight?.step?.startsWith('running') && gate()?.inFlight?.tip === world.main() && world.main() !== world.base);) {
-      if (Date.now() - start > 120_000) throw new Error(`the first loop never started gating ${landed.key}'s landing\n${output.slice(-4000)}`);
+      if (Date.now() - start > 120_000) {
+        const ledgers = (await world.work()).map(item => `${item.key} ${item.stage} ${item.mergeLedger?.state ?? 'no ledger'}: ${item.mergeLedger?.refusal?.reason ?? ''}`);
+        throw new Error(`the first loop never started gating ${landed.key}'s landing\n${ledgers.join('\n')}\ngate: ${JSON.stringify(gate())}\n${output.slice(-4000)}`);
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const cut = gate()!.inFlight!;
