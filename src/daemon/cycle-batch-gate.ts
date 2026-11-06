@@ -25,13 +25,28 @@ async function trialChecks(reads: MergeWriterReads, commit: string, checks: read
   return failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected')));
 }
 
+/** The pinning-test proof a gate filing binds, named from its check: `known-red:test:tests/a-b.test.ts` → `unit:a-b-pinned`. */
+export const pinningProof = (key: string) =>
+  `unit:${key.slice(key.indexOf(':') + 1).toLowerCase().replace(/^test:tests\//, '').replace(/\.test\.ts$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-pinned`;
+
+/**
+ * The bug item a gate filing creates (GY-3160): AC-1 binds a new pinning test, which fails on the
+ * base, so the bug trial reproduces the defect there; create-work-item, which passes on any base, is
+ * a separate preservation criterion.
+ */
+export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) => ({
+  title: input.title.slice(0, 200), type: 'bug' as const, priority: 1, description: input.description, dependencies: [],
+  criteria: [
+    { id: 'AC-1', text: `${input.title} is fixed at its cause, not skipped or weakened; a new test pins it and fails without the fix`.slice(0, 2000), proofs: [pinningProof(input.key)] },
+    { id: 'AC-2', text: 'The batch gate passes again and creating a work item still works', proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] },
+  ],
+  reason: `Filed by the batch gate on ${baseBranch}` });
+
 /** The gate's ports over the merge writer's reads. */
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[]): GatePorts & { diagnose(commit: string): Promise<{ failed: string[]; catalogMs: number }> } {
   const git = reads.git;
   const file = async (input: { title: string; description: string; key: string }) => {
-    const created = await reads.createWork?.({ title: input.title.slice(0, 200), type: 'bug', priority: 1, description: input.description, dependencies: [],
-      criteria: [{ id: 'AC-1', text: `${input.title} is fixed at its cause, not skipped or weakened`.slice(0, 2000), proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] }],
-      reason: `Filed by the batch gate on ${reads.baseBranch}` }, input.key);
+    const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch), input.key);
     return { item: created?.key ?? null };
   };
   const catalog = async (commit: string) => lines(await git(['ls-tree', '--name-only', `${commit}:e2e/cases`])).filter(name => name.endsWith('.json')).map(name => name.slice(0, -5));
