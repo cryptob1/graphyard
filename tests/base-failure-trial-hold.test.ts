@@ -52,6 +52,7 @@ function substitutedGit(tip: { at: string }): ChildRun {
     if (verb === 'merge-tree') return `${sha('tree')}\0`;
     if (verb === 'commit-tree') return `${sha(`merge:${argv.at(-3)}`)}\n`;
     if (verb === 'ls-tree') return `${Object.keys(sources).join('\n')}\n`;
+    if (verb === 'show' && argv[1] === '-s') return '1\n1\n';
     if (verb === 'show') return sources[argv[1]!.split(':')[1]!]!;
     if (verb === 'diff') { const range = argv.at(-1)!; return range.includes('...') ? changes[range.split('...')[1]!] ?? '' : 'src/lib.ts\n'; }
     throw new Error(`substituted git has no answer for: ${argv.join(' ')}`);

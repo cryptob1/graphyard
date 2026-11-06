@@ -1,0 +1,15 @@
+{
+  "id": "pipeline-trial-survives-restart",
+  "title": "A merge trial in progress when the loop restarts onto a new release finishes on its own verdict",
+  "description": "The real merge writer's flight launches its trial as a detached run of the loop's own code; the loop restarts while the trial is in progress (its watcher dies as the process would), and the next loop adopts the run from the persisted state: the head lands on the trial's own verdict with one run, no unpushed refusal, and no settled open intent.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Exercise a merge trial across a loop restart",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-trial-survives-restart.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

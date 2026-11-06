@@ -15,7 +15,8 @@ import { randomUUID } from 'node:crypto';
 export const trialContainerImage = 'graphyard-trial:local';
 export const trialHarness = '/graphyard-harness';
 const sourceRoot = fileURLToPath(new URL('../../', import.meta.url));
-const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve('tsx/package.json'))));
+/** The module tree the running code resolves its imports from (tsx among them): what a detached child of this code runs with. */
+export const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve('tsx/package.json'))));
 
 // Resolve the invocation's cwd and environment at spawn time, including the E2E
 // session host's stdin. Docker never receives candidate-controlled launch flags.

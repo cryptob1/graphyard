@@ -17,11 +17,12 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3148: the deploy unit serves a new release while the merge writer's concurrent per-head
-// trials keep it never idle. The loop still restarts onto the served release within a bound —
-// cancelling its trials at a boundary, refusing no head — and the next loop adopts those trials
-// from the recorded ledger state: open intents are refused unpushed and the heads trialled afresh.
-// In-flight entries a restart left for items that got a new head or no longer await a merge are
-// dropped instead of aging into a stall nothing clears.
+// trials keep it never idle. The loop still restarts onto the served release within a bound — its
+// trials run detached from the loop's process (GY-3159), so the restart leaves them running and no
+// head is refused — and the next loop adopts those trials when its reads can watch them; with these
+// fake ports it cannot (no detached runs exist), so the open intents are refused unpushed and the
+// heads trialled afresh. In-flight entries a restart left for items that got a new head or no
+// longer await a merge are dropped instead of aging into a stall nothing clears.
 
 const start = Date.parse('2030-07-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -107,7 +108,7 @@ const harness = (world: World, loadedRelease?: { commit: string; dirty: boolean 
 };
 const kinds = (world: World, n: number) => (world.recorded.get(n) ?? []).map(event => event.kind);
 
-test('unit:loop-adopts-release-under-trials — the deploy unit serves a release the loop did not load, and the loop restarts onto it within the bound while its concurrent trials run, cancelling them without refusing a head; the next loop adopts the trials from the ledger and drops the entries whose items moved on', { timeout: 60_000 }, async () => {
+test('unit:loop-adopts-release-under-trials — the deploy unit serves a release the loop did not load, and the loop restarts onto it within the bound while its concurrent trials run, leaving them running detached and refusing no head; the next loop settles the intents these fake ports cannot adopt and drops the entries whose items moved on', { timeout: 60_000 }, async () => {
   assert.ok(releaseAdoptionBoundMs + 60_000 <= 5 * 60_000, 'the bound plus a slow cycle stays inside the five minutes the criterion names');
 
   // The loop's checkout: a git repository whose HEAD is the commit the deploy unit serves.
@@ -132,16 +133,17 @@ test('unit:loop-adopts-release-under-trials — the deploy unit serves a release
     delay: async () => { clock += 60_000; },
     restartLoop: async () => { restarts.push(clock); host.emit('SIGUSR2'); } });
   assert.deepEqual(restarts, [start + releaseAdoptionBoundMs], 'the loop restarts at the bound, not before, and once');
-  assert.ok(logs.some(line => line.includes('restarting through the supervisor unit') && line.includes('checkpointing the merge trial(s) of GY-1, GY-2')), 'the restart names the trials it checkpointed');
-  assert.deepEqual(world.trials.map(entry => entry.n), [1, 2], 'each head ran one trial, cancelled rather than refused');
+  assert.ok(logs.some(line => line.includes('restarting through the supervisor unit') && line.includes('the merge trial(s) of GY-1, GY-2 run on, detached, and the next loop adopts them')), 'the restart names the trials it left running');
+  assert.deepEqual(world.trials.map(entry => entry.n), [1, 2], 'each head ran one trial, left running rather than cancelled or refused');
   for (const n of [1, 2]) {
-    assert.deepEqual(kinds(world, n), ['intent', 'trial'], `GY-${n}'s cancelled trial recorded no verdict and refused nothing`);
-    assert.equal(world.ledger(n)!.state, 'intent', `GY-${n}'s head is not refused: it stays queued for the next loop`);
+    assert.deepEqual(kinds(world, n), ['intent'], `GY-${n}'s trial in progress recorded no verdict and refused nothing when the loop restarted`);
+    assert.equal(world.ledger(n)!.state, 'intent', `GY-${n}'s head is not refused: its open intent is what the next loop adopts or settles`);
   }
 
-  // The next loop: a fresh process reading the persisted state, its trials now free to settle. The
-  // first cycle settles the open intents the cancelled trials left; the next one reads the settled
-  // ledger and restarts both heads' trials afresh.
+  // The next loop: a fresh process reading the persisted state, its trials now free to settle. Its
+  // reads carry no detached trial runs to adopt (these were fake, in-process), so the first cycle
+  // settles the open intents the restart left; the next one reads the settled ledger and restarts
+  // both heads' trials afresh.
   world.held = false;
   const next = structuredClone(state);
   await runCycle(loopConfig, next, effects, () => start + 360_000);
@@ -150,10 +152,10 @@ test('unit:loop-adopts-release-under-trials — the deploy unit serves a release
   assert.deepEqual(world.trials.slice(2).map(entry => entry.n).sort(), [1, 2], 'the next loop restarts both trials on the same heads');
   for (const n of [1, 2]) {
     const sequence = kinds(world, n);
-    assert.deepEqual(sequence.slice(0, 3), ['intent', 'trial', 'refused'], `GY-${n}'s open intent is refused unpushed before anything new starts`);
+    assert.deepEqual(sequence.slice(0, 3), ['intent', 'refused', 'intent'], `GY-${n}'s open intent is refused unpushed before anything new starts`);
     const refusal = world.recorded.get(n)!.find(event => event.kind === 'refused')!;
     assert.ok(refusal.kind === 'refused' && /was never pushed/.test(refusal.reason), 'the adoption refuses the unpushed intent');
-    assert.equal(sequence.filter(kind => kind === 'trial').length, 2, `GY-${n} is trialled once afresh, never twice for one adoption`);
+    assert.equal(sequence.filter(kind => kind === 'trial').length, 1, `GY-${n} is trialled once afresh by the next loop, the restart's own trial having recorded nothing`);
     assert.deepEqual(sequence.slice(-2), ['pushed', 'reconciled'], `GY-${n}'s fresh trial passes and the head lands`);
   }
   assert.equal(world.pushes.length, 2, 'both heads land once their fresh trials pass');

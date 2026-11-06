@@ -81,7 +81,7 @@ export const mergeSubject = (item: { key: string; title?: string | null }) => `M
  * to it, so every commit the base's first-parent history held stays on it, and no merge commit
  * wraps a tree with no new change. Any other head gets the merge commit of head onto baseTip:
  * `git merge-tree --write-tree` computes the merged tree, `git commit-tree` (authored by
- * graphyard-merge-writer, subject `input.subject`) makes the commit with parents baseTip and head.
+ * graphyard-merge-writer, subject `input.subject`, dated by its parents so a repeat is identical) makes the commit with parents baseTip and head.
  * Either way the only ref written is `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`,
  * no remote and no checkout is touched. A conflicting merge gives the conflicted paths and writes
  * no commit. Retention: one ref per tried head, overwritten by that head's next trial and never
@@ -107,9 +107,12 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
   const tree = out.split('\0')[0]!.trim();
   if (!fullSha.test(tree)) throw new Error(`git merge-tree answered no tree for ${head} onto ${baseTip}`);
   const email = `${trialAuthor}@users.noreply.invalid`;
+  // GY-3159: the dates are the later committer date of its two parents, not the clock, so merging
+  // the same head onto the same tip again (the loop adopting a trial after a restart) makes the same commit.
+  const date = `${Math.max(...(await git(['show', '-s', '--format=%ct', baseTip, head])).split(/\s+/).filter(Boolean).map(Number))} +0000`;
   // The environment names the author, so a caller's own GIT_AUTHOR_* never decides it.
   const mergeSha = (await git(['commit-tree', tree, '-p', baseTip, '-p', head, '-m', input.subject ?? `Merge ${head.slice(0, 12)}`],
-    { GIT_AUTHOR_NAME: trialAuthor, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: trialAuthor, GIT_COMMITTER_EMAIL: email })).trim().toLowerCase();
+    { GIT_AUTHOR_NAME: trialAuthor, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: trialAuthor, GIT_COMMITTER_EMAIL: email, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date })).trim().toLowerCase();
   await git(['update-ref', trialRef(head), mergeSha]);
   return { mergeSha, tree };
 }
@@ -725,6 +728,15 @@ export function trialNoVerdict(error: unknown): TrialNoVerdict {
 }
 /** Every attempt of a trial that ended with `error` and reached no verdict, oldest first (GY-1832); one entry for an error no retry wrapped. */
 export const trialAttempts = (error: unknown): TrialNoVerdict[] => (typeof error === 'object' && error ? attemptContext.get(error)?.attempts : undefined) ?? [trialNoVerdict(error)];
+/**
+ * GY-3159: attaches `attempts` to an error a detached trial run recorded and a watcher rebuilt, so
+ * the trial's record carries every attempt the run made, exactly as an in-process trial's would.
+ */
+export function setTrialAttempts(error: unknown, attempts: TrialNoVerdict[]): void {
+  if (typeof error !== 'object' || !error || !attempts.length) return;
+  const last = attempts.at(-1)!;
+  attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: last.phase, phases: last.phases }), attempts });
+}
 
 /**
  * The trial of a merge commit (`runTrialAttempt`), tried again once (`trialRetries`) when it
