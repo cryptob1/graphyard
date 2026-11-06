@@ -16,7 +16,7 @@ import { FleetOverview } from '../web/pages/fleet.js';
 const HOST = 'agents-host', now = Date.parse('2030-05-04T12:00:00Z');
 const iso = (offset: number) => new Date(now + offset).toISOString();
 
-test('a running master, an unconfigured producer and a credential-less runtime read neutrally', () => {
+test('unit:tests/agents-page-neutral-states.test.ts — a running master, an unconfigured producer and a credential-less runtime read neutrally', () => {
   const launch = { args: [], environment: {}, homeVariable: null, modelFlag: '--model', login: null, loginFile: null };
   const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: [{ name: 'claude', launch: { kind: 'claude', ...launch } }, { name: 'pi', launch: { kind: 'pi', ...launch } }],
