@@ -72,6 +72,12 @@ export async function adoptHeadlessRuns(effects: DaemonEffects, log: (line: stri
 /** The request a confined master files with `master restart`: the loop restarts through its unit once it reads it. */
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
 
+/** The restart cause a confined master's `master restart` request gives; it never waits for the handover window. */
+export const restartRequestedCause = 'a master restart was requested';
+
+/** GY-3165: minutes the loop runs before it adopts a newly served release when master.json sets no `run.handoverMinutes`. */
+export const defaultHandoverMinutes = 15;
+
 /**
  * Why the loop should restart now, or null: the deploy unit serves a commit other than the one this
  * process loaded and the checkout holds it, so a restart loads it; or a confined master filed a
@@ -80,7 +86,7 @@ export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFil
  * different repository still restarts its loop onto the revision the upgrade served.
  */
 export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(activeCliRoot(loopCodeRoot(config.cliPath, root)))): string | null {
-  if (existsSync(loopRestartRequestPath(config))) return 'a master restart was requested';
+  if (existsSync(loopRestartRequestPath(config))) return restartRequestedCause;
   const serving = readDeployRecord(deployRecordPath(root))?.tip ?? null;
   return serving && loaded && serving !== loaded && head() === serving ? `the deploy unit serves ${serving.slice(0, 12)}, not ${loaded.slice(0, 12)} this loop loaded` : null;
 }
@@ -144,7 +150,8 @@ export function deployRestartCause(root: string, running: DeployUnitProcess | nu
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe. A cycle that throws is recorded, logged and retried after a growing
  * delay; only a stop signal ends the loop. Between cycles the loop restarts through its unit when
- * the deploy unit serves a commit it did not load: it waits for a merge flight in flight to settle,
+ * the deploy unit serves a commit it did not load and the loop has run `run.handoverMinutes`
+ * (GY-3165; earlier serves wait for that window and batch into one restart): it waits for a merge flight in flight to settle,
  * but only within `releaseAdoptionBoundMs`, past which it restarts anyway — each flight's trial
  * runs detached from this process, the restart leaves it running, and the next loop adopts it
  * (GY-3148, GY-3159).
@@ -197,6 +204,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     let seen: number | null = null;
     // GY-3148: when the loop first saw the restart cause while merge trials were in flight; null while no wait is running.
     let restartWaitedFrom: number | null = null;
+    // GY-3165: a served release is adopted only once the loop has run `run.handoverMinutes`, so the
+    // serves landing in that window batch into one restart onto whatever is newest when it opens.
+    const startedAt = now();
+    let handoverLogged = false;
     // True when another actor wrote an event since the last read; the first read only sets the mark.
     const fresh = async () => {
       try {
@@ -254,7 +265,13 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // anyway: its trials run detached from this process (GY-3159), so the restart leaves each
         // one running and the next loop adopts it — the trial reaches its own verdict instead of
         // being discarded as the restart's own refusal.
-        const cause = options.root && !stopping ? restartCause(config, options.root, state.release?.commit ?? null) : null;
+        const found = options.root && !stopping ? restartCause(config, options.root, state.release?.commit ?? null) : null;
+        const windowMs = (config.run.handoverMinutes ?? defaultHandoverMinutes) * 60_000;
+        const cause = found && (found === restartRequestedCause || now() - startedAt >= windowMs) ? found : null;
+        if (found && !cause && !handoverLogged) {
+          handoverLogged = true;
+          log(`[graphyard-master] a handover is pending: ${found}; the loop adopts the newest served release once it has run ${windowMs / 60_000} minute(s), at ${new Date(startedAt + windowMs).toISOString()}`);
+        }
         const trialsInFlight = mergeWriterInFlight(state);
         if (!cause || !trialsInFlight) restartWaitedFrom = null;
         if (cause && (!trialsInFlight || now() - (restartWaitedFrom ??= now()) >= releaseAdoptionBoundMs)) {

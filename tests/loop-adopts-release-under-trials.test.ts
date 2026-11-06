@@ -121,7 +121,8 @@ test('unit:loop-adopts-release-under-trials — the deploy unit serves a release
   const loaded = sha('the-release-this-loop-loaded');
   await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(join(root, '.graphyard', 'deploy.json'), JSON.stringify({ tip: served, failed: null, reason: null, at: new Date().toISOString() }));
-  const loopConfig = { ...config, cliPath: join(root, 'bin/graphyard.mjs') };
+  // The loop has already run its handover window (GY-3165), so the served release is due at once and only the trial wait applies.
+  const loopConfig = { ...config, cliPath: join(root, 'bin/graphyard.mjs'), run: { ...config.run, handoverMinutes: 0 } };
 
   // Two queued heads trial at once and never settle: the merge writer is never idle.
   const world = new World(2);
