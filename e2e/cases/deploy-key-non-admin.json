@@ -1,0 +1,13 @@
+{
+  "id": "deploy-key-non-admin",
+  "title": "Install continues for a push-only operator when the deploy key already pushes",
+  "description": "The deploy-key step under a login GitHub answers 403/404: the registered key is probed over ssh (git-receive-pack's ref advertisement, nothing pushed) and the install continues; a refused probe stops naming the admin gh api command; a successful list behaves as before.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "deploy-key non-admin install regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/deploy-key-non-admin.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
