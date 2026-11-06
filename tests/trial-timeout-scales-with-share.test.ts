@@ -15,7 +15,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
 const item = { key: 'GY-1', criteria: [], type: 'bug' as const };
 const defaultMs = trialTimeoutMinutes * 60_000;
 
-test('unit:trial-timeout-scales-with-share — a trial sharing the host with share 3 gets 3x the deadline and a third of the cores; alone it keeps the default', async () => {
+test('unit:tests/trial-timeout-scales-with-share.test.ts — a trial sharing the host with share 3 gets 3x the deadline and a third of the cores; alone it keeps the default', async () => {
   const launched: { timeoutMs: number; cores?: number }[] = [];
   const reads = mergeWriterReads(config, '/repo/checkout', async () => '', { base: '/managed', record: async () => ({}),
     trial: async (input): Promise<MergeTrialRun> => { launched.push({ timeoutMs: input.timeoutMs, ...(input.cores === undefined ? {} : { cores: input.cores }) }); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; } });
