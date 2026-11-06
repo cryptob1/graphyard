@@ -1,0 +1,13 @@
+{
+  "id": "compose-safe-directory",
+  "title": "Compose server env trusts the mounted checkout",
+  "description": "composeBundle writes safe.directory=/repo into the server env exactly once, so a host user that is not uid 1000 still gets a healthy control plane.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "compose safe.directory regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/compose-safe-directory.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

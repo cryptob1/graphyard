@@ -108,12 +108,17 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[]): BundleFi
   // `GITHUB_PRIVATE_KEY_FILE`, which the server reads natively; the revert approver's key likewise.
   const keys = mountedKeys.flatMap(mount => { const value = values.find(entry => entry.name === mount.variable && entry.value); return value ? [{ ...mount, value: value.value }] : []; });
   const environment = values
-    .filter(value => !mountedKeys.some(mount => mount.variable === value.name))
+    .filter(value => !mountedKeys.some(mount => mount.variable === value.name) && !/^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(value.name))
     .map(value => {
       if (/[\r\n]/.test(value.value)) throw new Error(`${value.name} cannot be written to a Compose env file: its value spans multiple lines`);
       return `${value.name}=${value.value}`;
     });
   for (const key of keys) environment.push(`${key.file}=${key.container}`);
+  // The container user is uid 1000; a checkout owned by another host uid makes Git refuse it as
+  // dubious ownership. Derived fresh on every write, never carried over from the deployed env.
+  const safeDirectories = ['/repo', ...(ctx.repoGitDir ? [ctx.repoGitDir] : [])];
+  environment.push(`GIT_CONFIG_COUNT=${safeDirectories.length}`);
+  safeDirectories.forEach((directory, index) => environment.push(`GIT_CONFIG_KEY_${index}=safe.directory`, `GIT_CONFIG_VALUE_${index}=${directory}`));
   const serverVolumes = [
     ...keys.map(key => `"./${key.bundle}:${key.container}:ro"`),
     ...(ctx.repoCheckout ? [`"${ctx.repoCheckout}:/repo"`] : []),
