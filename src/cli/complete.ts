@@ -89,7 +89,7 @@ export function trialFailureTests(refusal: { kind: string; reason: string } | nu
   const prefix = `${trialFailurePrefix}: tests `;
   if (refusal?.kind !== 'merge' || !refusal.reason.startsWith(prefix)) return [];
   const files = new Set<string>();
-  for (const entry of refusal.reason.slice(prefix.length).split(',')) {
+  for (const entry of (refusal.reason.split('\n')[0] ?? '').slice(prefix.length).split(',')) {
     const path = (entry.split(': ')[0] ?? '').trim();
     if (!testFilePath.test(path)) continue;
     if (root && !existsSync(join(root, path))) continue;

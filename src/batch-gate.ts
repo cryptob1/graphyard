@@ -7,8 +7,9 @@
 // affected selection picks for the changed files — the whole E2E catalog in place of the subset
 // only when its measured gate-run time fits half the 45-minute limit (GY-3144). A passing gate records the tip as
 // verified in .graphyard/main-gate.json; the deploy watch serves only that commit. A failing check
-// is re-run once (a pass is a filed flake), an affected test that also fails on the last verified
-// commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
+// is re-run once (a pass is a filed flake), an affected test — or, when the whole catalog ran, a
+// catalog case no batch item binds, gate.core does not name and smoke is not (GY-3147) — that also
+// fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
 // merge order: the last item of the smallest failing prefix is reverted through the serve-revert
 // path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
 // commit served and wakes the master. The full suite and catalog run daily against the verified
@@ -68,7 +69,7 @@ export interface GateRecord {
   attempt: { recuts: number; timeouts: number };
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
   held: { tip: string; reason: string; at: string } | null;
-  /** Per commit, whether a check fails there (the known-red cache). */
+  /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
   results: Record<string, Record<string, boolean>>;
   /** The last merges judged, oldest first. */
   merges: GateMerge[];
@@ -81,6 +82,13 @@ export interface GateRecord {
    */
   gateRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
+  /**
+   * The items the gate filed, per filing key — the case binding a later run reuses instead of
+   * filing again (GY-3147). Optional only for records an older loop wrote.
+   */
+  filed?: Record<string, { item: string | null; at: string }>;
+  /** Filing failures that never aborted a run (GY-3147), newest last; the last few are kept. */
+  notes?: string[];
   at: string;
 }
 
@@ -98,7 +106,7 @@ export async function writeGateRecord(file: string, record: GateRecord) {
 /** At rollout, the currently served commit is the first verified commit. */
 export const bootstrapGate = (repository: string | null, served: string): GateRecord => ({
   repository, verified: served, verifiedAt: new Date().toISOString(), inFlight: null, attempt: { recuts: 0, timeouts: 0 }, held: null, lastOutcome: null,
-  results: {}, merges: [], catalogMs: null, diagnosticsAt: null, at: new Date().toISOString(),
+  results: {}, merges: [], catalogMs: null, diagnosticsAt: null, filed: {}, notes: [], at: new Date().toISOString(),
 });
 
 /** The reads and runs one gate goes through. */
@@ -122,13 +130,42 @@ export interface GatePorts {
   run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]>;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
-  /** Files an item owning a failure, once per `key`. */
-  file(input: { title: string; description: string; key: string }): Promise<void>;
+  /** Files an item owning a failure, once per `key`; answers the item it filed, when it names one. */
+  file(input: { title: string; description: string; key: string }): Promise<{ item: string | null } | void>;
   /**
    * Called whenever the record changed mid-flight — the cut, and each step a run finished — so a
    * loop restart adopts the batch as it stood, its finished steps with it.
    */
   checkpoint?(): Promise<void>;
+}
+
+/** How many filing notes the record keeps. */
+export const filingNotesWindow = 5;
+
+/** Whether a filing was refused because its key was filed before with different wording (GY-3147). */
+const reusedFilingKey = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
+
+/**
+ * Files the item owning one gate failure, once per case (GY-3147): a binding the record keeps says
+ * the case has its item and is reused, never re-filed — a later run's filing text differs, as the
+ * tip it names moves — a key the control plane already holds is already filed, and any other filing
+ * failure is a gate note. A refused or failed filing never aborts the run's verdict.
+ */
+async function fileFailure(ports: Pick<GatePorts, 'file'>, record: Pick<GateRecord, 'filed' | 'notes'>, at: string, input: { title: string; description: string; key: string }) {
+  if (input.key in (record.filed ?? {})) return; // the case has its item: reuse it
+  try {
+    const filed = await ports.file(input);
+    (record.filed ??= {})[input.key] = { item: typeof filed === 'object' && filed !== null ? filed.item : null, at };
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    if (reusedFilingKey(error)) (record.filed ??= {})[input.key] = { item: null, at };
+    else record.notes = [...record.notes ?? [], `${input.key}: ${text}`.slice(0, 200)].slice(-filingNotesWindow);
+  }
+}
+
+/** The filings of two concurrent writers — the gate beside the diagnostics — merged: the newest binding per case wins, notes stay deduplicated and bounded. */
+export function mergeFilings(latest: Pick<GateRecord, 'filed' | 'notes'> | null, mine: Pick<GateRecord, 'filed' | 'notes'>): Pick<GateRecord, 'filed' | 'notes'> {
+  return { filed: { ...latest?.filed, ...mine.filed }, notes: [...new Set([...latest?.notes ?? [], ...mine.notes ?? []])].slice(-filingNotesWindow) };
 }
 
 /** What one gate came to. */
@@ -158,12 +195,15 @@ export function catalogFits(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, 
   return measured !== null && measured <= catalogBudgetMs;
 }
 
+/** The E2E cases the batch's items bind; a reverted item's own cases left main with it. */
+function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): string[] {
+  const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
+}
+
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  // A reverted item's own cases left main with it.
-  const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-  const bound = landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
-  const cases = whole ? await ports.catalog(tip) : [...bound, ...await ports.core(tip)];
+  const cases = whole ? await ports.catalog(tip) : [...new Set([...boundCaseIds(record, landings), ...await ports.core(tip)])];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
@@ -252,16 +292,24 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       await step(`re-running ${failed.join(', ')}`);
       const again = await run(tip, failed, files);
       flakes = failed.filter(check => !again.includes(check));
-      for (const check of flakes) await ports.file({ key: `flake:${check}`, title: `Flaky check on main: ${check}`, description: `The batch gate's check ${check} failed on ${tip.slice(0, 12)} and passed on its re-run. Make it deterministic.` });
+      for (const check of flakes) await fileFailure(ports, record, at(), { key: `flake:${check}`, title: `Flaky check on main: ${check}`, description: `The batch gate's check ${check} failed on ${tip.slice(0, 12)} and passed on its re-run. Make it deterministic.` });
+      // The e2e cases that must pass outright (GY-3147): smoke, whatever gate.core names, and every
+      // case a batch item binds. A whole-catalog case outside them was red before the batch whenever
+      // it is red on the verified commit too, so it is a filed known red, never a revert.
+      let outright: Set<string> | null = null;
+      const mustPass = async () => outright ??= new Set(['e2e:smoke', ...(await ports.core(tip)).map(id => `e2e:${id}`), ...boundCaseIds(record, landings).map(id => `e2e:${id}`)]);
       for (const check of again) {
-        // Only an affected test may be a known red: one that also fails on the last verified commit.
-        if (check.startsWith('test:')) {
+        // A known red is a check that also fails on the last verified commit: an affected test, or a
+        // catalog-only e2e case — one no batch item binds, gate.core does not name and smoke is not.
+        const catalogOnly = check.startsWith('e2e:') && !(await mustPass()).has(check);
+        if (check.startsWith('test:') || catalogOnly) {
           let failsThere = record.results[verified]?.[check];
           if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
+          await ports.checkpoint?.(); // the probe's verdict is saved to the record before anything is filed (GY-3147)
           if (failsThere) {
             knownRed.push(check);
-            await ports.file({ key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `The test ${check.slice(5)} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
+            await fileFailure(ports, record, at(), { key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `${check.startsWith('test:') ? `The test ${check.slice(5)}` : `The E2E case ${check.slice(4)}`} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
             continue;
           }
         }
@@ -310,9 +358,10 @@ export async function runDiagnostics(ports: Pick<GatePorts, 'now' | 'file'> & { 
   const verified = record.verified;
   if (!verified || (record.diagnosticsAt && ports.now() - Date.parse(record.diagnosticsAt) < diagnosticsIntervalMs)) return null;
   const { failed, catalogMs } = await ports.diagnose(verified);
-  for (const check of failed) await ports.file({ key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`, description: `The scheduled full run against the verified commit ${verified.slice(0, 12)} failed ${check}. It never blocks a gate or a merge; fix it at its cause.` });
+  const at = new Date(ports.now()).toISOString();
+  for (const check of failed) await fileFailure(ports, record, at, { key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`, description: `The scheduled full run against the verified commit ${verified.slice(0, 12)} failed ${check}. It never blocks a gate or a merge; fix it at its cause.` });
   record.catalogMs = catalogMs;
-  record.diagnosticsAt = new Date(ports.now()).toISOString();
+  record.diagnosticsAt = at;
   return failed;
 }
 
@@ -330,7 +379,9 @@ export function gateSummary(record: GateRecord | null) {
     inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null } : null,
     // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
     lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
-    held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()) };
+    held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()),
+    // GY-3147: the filing failures that never aborted a run, newest last.
+    notes: record.notes ?? [] };
 }
 
 /** The causes that wake the master: a held batch, and a revert rate above 1 in 5. */
