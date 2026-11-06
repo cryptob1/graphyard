@@ -55,10 +55,10 @@ export function launchFailure(account: FleetAccountView, fleet: Pick<FleetView, 
   return null;
 }
 
-/** The time a role hold ends, from the registry's own reason (`roleIneligibility`). */
 /** A failure that only says the runtime has no credential yet (a CLI found on PATH, never signed in): not configured, not broken. */
 const missingCredential = /no api key|not logged in|no credential/i;
 
+/** The time a role hold ends, from the registry's own reason (`roleIneligibility`). */
 const heldUntil = (reason: string) => /until (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(reason)?.[1] ?? null;
 const exhausted = (account: FleetAccountView, now: number) => account.quota === 'exhausted' && (!account.resetsAt || Date.parse(account.resetsAt) > now);
 
