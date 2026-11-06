@@ -1,0 +1,16 @@
+{
+  "id": "deploy-predecessor-watcher",
+  "title": "A running predecessor deploy watcher upgrades without breaking active CLI dependencies",
+  "description": "An isolated scratch installation starts the actual predecessor upgrade --watch entry, changes its source on disk, and migrates it through supervisor unit alignment. Real worker CLI calls keep loading during a delayed dependency install, install failure, health-gated publication and rollback.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "migrate a running predecessor watcher while real CLI calls load",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/deploy-predecessor-watcher.test.ts",
+      "timeoutSeconds": 180
+    }
+  ]
+}

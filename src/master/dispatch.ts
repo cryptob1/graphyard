@@ -512,7 +512,7 @@ export function autonomousSession(outcome: string, blocker: string, failureExcep
  * whose target it cannot resolve, even with its permission checks skipped — and a session stopped
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
-export const destructivePromptGuidance = 'Never give rm or mv a glob or a variable as its target outside a directory you created with mktemp -d: your runtime\'s destructive-operation prompt waits for a person nobody will answer. Name explicit paths in your worktree; remove scratch directories only by their exact mktemp -d path. ';
+export const destructivePromptGuidance = 'Never give rm or mv a glob or variable target outside your mktemp -d directory: the destructive-operation prompt waits for nobody. A refused cleanup of untracked files is not a blocker: leave them, git add only your own paths and submit; stop only when a refusal blocks the change. ';
 /**
  * OpenCode asks before reaching any path outside its launch directory — a worker reaches one as
  * soon as it creates a second worktree (a bisect) or reads a sibling path (GY-2959) — so the
