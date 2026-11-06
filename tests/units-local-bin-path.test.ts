@@ -6,7 +6,7 @@ import { localUnitText } from '../src/install/local.js';
 import type { AdapterContext } from '../src/install/adapters.js';
 
 // GY-3179: the units src/install/local.ts writes put the operator's ~/.local/bin on PATH.
-test('the local control-plane unit has ~/.local/bin on its PATH', () => {
+test('unit:units-local-bin-path — the local control-plane unit has ~/.local/bin on its PATH', () => {
   const ctx = { repository: 'acme/shop', local: { paths: { directory: '/srv/graphyard', postgres: '/srv/graphyard/pg' }, command: ['/usr/bin/node', 'run'] } } as unknown as AdapterContext;
   const line = localUnitText(ctx).split('\n').find(row => row.startsWith('Environment=') && row.includes('PATH='));
   assert.ok(line, 'the unit sets PATH');
