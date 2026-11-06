@@ -12,6 +12,7 @@ import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-273: concurrent dispatchers launch implementation work from their own snapshots of
 // Herdr's agents. Two of them picking one profile used to mean two claims, two runtimes started,
@@ -22,15 +23,7 @@ const workerToken = 'worker-token-'.padEnd(40, 'x');
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
   const at = new Date(Date.now() - 3_600_000).toISOString();
-  return {
-    id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
-    // GY-2992: a released feature dispatches only with its spec check reported; these fixtures stand after it did.
-    specCheck: { policyRevision: 1, verdict: 'ready', paraphrase: 'It works; AC-1 is proven by the unit proof.', gaps: [], reviewer: 'spec-checker', at },
-    ...overrides,
-  } as Work;
+  return workFixture({ key, createdAt: at, updatedAt: at, stageEnteredAt: at, ...overrides });
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 

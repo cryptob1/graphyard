@@ -23,6 +23,7 @@ import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js
 import { knownRuntimes } from '../src/install/runtimes.js';
 import { connectProvider, type FleetLaunchAccount } from '../src/fleet.js';
 import { proposedRuntimes } from '../src/model/registry-proposal.js';
+import { workFixture } from './helpers/work-fixture.js';
 // Time-bomb allowance (GY-1694): 2026-09-22 and 2026-09-30 are virtual pane clocks the launcher's bounds read; the real new Date() only stamps snapshot/observation times on an item whose 2026-09-22 createdAt is already past.
 
 // GY-121: a session launch types a short, constant-size command line that references the
@@ -52,11 +53,11 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 121, branch: 'graphyard/gy-121-1', author: 'implementer' };
-  return { id: 'work-121', key: 'GY-121', title: 'Producers die at the start bound', description: '', type: 'bug', priority: 0, dependencies: [], 
+  return workFixture({ id: 'work-121', key: 'GY-121', title: 'Producers die at the start bound', type: 'bug', priority: 0,
     criteria: [{ id: 'AC-1', text: 'Bounded', proofs: ['unit:launch-command-bounded', 'integration:launch-refusal-names-the-screen'] }],
-    policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
-    lease: null, workspaces: [{ host: 'h', path: '/w/gy-121', branch: 'graphyard/gy-121-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 121 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
+    stage: 'review', revision: 7, createdAt: at, updatedAt: at, stageEnteredAt: at, epoch: 1,
+    workspaces: [{ host: 'h', path: '/w/gy-121', branch: 'graphyard/gy-121-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 121 },
+    observation: observation(candidate), gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], ...overrides });
 }
 // Dispatch no longer opens producer requests (GY-1235: proofs gate nothing), but the producer
 // launcher and the dispatcher's launch of a standing request remain: the requests are built by hand.

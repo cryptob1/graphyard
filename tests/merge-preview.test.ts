@@ -17,6 +17,7 @@ import { buildStaticSite, type StaticBuildShell } from '../src/release-project.j
 import { loadCases } from '../src/e2e/case.js';
 import { runCases } from '../src/e2e/runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-1902: a change's preview is checked out, served by `serveHead` and its declared cases run
 // against it. GY-3032: no merge is previewed on its own: its trial runs the bound cases against the
@@ -56,12 +57,11 @@ const previewDirectories = async (base: string) => (await readdir(base)).filter(
 // The fixtures' one fixed now: no instant here is compared with the wall clock.
 const fixedNow = 1_893_456_000_000, fixedAt = new Date(fixedNow).toISOString();
 const tip = sha('tip'), head = sha('head'), mergeSha = sha('merge');
-const work = (files: string[] = ['src/game.ts']) => ({
-  id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-  policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, stage: 'build', ready: true, epoch: 1, lease: null, workspaces: [],
-  submission: { epoch: 1, pr: 1 }, candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-  observation: { source: 'control-plane', candidate: { sha: head, baseSha: tip, pr: 1 }, files, checks: [], reviews: [], merged: false }, blocker: null, violations: [], gates: [], mergeLedger: null,
-}) as unknown as Work;
+const work = (files: string[] = ['src/game.ts']): Work => workFixture({
+  id: 'w1', key: 'GY-1', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], stage: 'build', epoch: 1,
+  submission: { epoch: 1, pr: 1 }, candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' },
+  observation: { source: 'control-plane', candidate: { sha: head, baseSha: tip, pr: 1 }, files, checks: [], reviews: [], merged: false } as never, gates: [], mergeLedger: null,
+});
 const passingTrial: MergeTrialRun = { build: 'pass', tests: { passed: 3, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/game.test.ts'], proofs: { 'unit:works': { executed: 1, failed: 0 } } } as MergeTrialRun;
 function ports() {
   const events: MergeRecordEvent[] = [], pushes: string[] = [];

@@ -23,6 +23,7 @@ import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWor
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { hostname } from 'node:os';
+import { workFixture } from './helpers/work-fixture.js';
 /** The control-plane registry each launch takes its slot from (GY-3030): a fresh one per launch. */
 const fleet = (role: 'producer' | 'reviewer') => registryFixture(hostname(), ['codex'], [role]).probe;
 
@@ -76,12 +77,11 @@ function request(proofs = ['integration:managed-worktree-root']) {
 }
 function work(key: string, overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 88, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-  return { id: `id-${key}`, key, title: 'Managed worktree root', description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:managed-worktree-root'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 2,
-    createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 88 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    blocker: null, gates: [], violations: [], implementers: ['implementer'],
-    observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },
-    ...overrides } as unknown as Work;
+  return workFixture({ key, title: 'Managed worktree root', type: 'bug', priority: 1,
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:managed-worktree-root'] }], stage: 'review', revision: 3, policyRevision: 2,
+    epoch: 1, candidate, submission: { epoch: 1, pr: 88 }, gates: [], implementers: ['implementer'],
+    observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [] },
+    ...overrides });
 }
 const producing = (key: string, asked: any) => work(key, { autoDispatch: { review: null, producers: [asked], history: [] } } as any);
 

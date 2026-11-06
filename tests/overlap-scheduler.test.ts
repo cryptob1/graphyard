@@ -12,9 +12,9 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { hostname } from 'node:os';
+import { workFixture } from './helpers/work-fixture.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
@@ -24,14 +24,7 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const later = iso(600_000), earlier = iso(-600_000);
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
-  return {
-    id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
-    specCheck: readySpecCheck(new Date().toISOString()),
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
-  } as Work;
+  return workFixture({ key, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }], createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0), ...overrides });
 }
 const claimed = (key: string, overrides: Partial<Work> = {}) => work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: later }, ...overrides });
 /** A submitted candidate observed to change `files`. */

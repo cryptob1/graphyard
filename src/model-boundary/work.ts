@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { criteriaSchema, policySchema, resourcesSchema } from './policy.js';
-import { sliceIds, systemDrivenDefault } from '../model/work.js';
+import { sliceIds, stages, systemDrivenDefault } from '../model/work.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 /**
@@ -55,3 +55,21 @@ export const createSchema = z.object({
   // follow-up for a windowed reading carries it; released, the item is not dispatched before it.
   observationWindow: observationWindowSchema.optional(),
 }).strict();
+/**
+ * The shape of a stored Work document (src/model/work.ts `Work`): the created intent plus the
+ * fields every stored item carries. Optional bookkeeping fields pass through unchecked; the test
+ * fixture builder (tests/helpers/work-fixture.ts) is held to it.
+ */
+const gateSchema = z.object({ name: z.string(), passed: z.boolean(), reasons: z.array(z.string()) }).strict();
+export const storedWorkSchema = createSchema.extend({
+  id: z.string().min(1), key: z.string().min(1), stage: z.enum(stages),
+  revision: z.number().int().min(0), policyRevision: z.number().int().min(0), epoch: z.number().int().min(0),
+  createdAt: z.string(), updatedAt: z.string(), stageEnteredAt: z.string(), ready: z.boolean(),
+  lease: z.object({ owner: z.string(), epoch: z.number().int(), expiresAt: z.string() }).strict().nullable(),
+  workspaces: z.array(z.object({ host: z.string(), path: z.string(), branch: z.string(), epoch: z.number().int(), owner: z.string() }).strict()),
+  candidate: z.object({ sha: z.string(), baseSha: z.string(), pr: z.number().int(), branch: z.string(), author: z.string(), createdAt: z.string().optional() }).strict().nullable(),
+  submission: z.object({ epoch: z.number().int(), pr: z.number().int() }).strict().nullable(),
+  reworkRequested: z.boolean(), scenarioRequirements: z.array(z.unknown()), evidence: z.array(z.unknown()),
+  observation: z.record(z.string(), z.unknown()).nullable(), blocker: z.string().nullable(),
+  gates: z.array(gateSchema), violations: z.array(z.string()),
+}).passthrough();

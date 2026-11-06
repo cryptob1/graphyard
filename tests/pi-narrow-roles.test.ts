@@ -15,6 +15,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
 // narrow role; with `pi` the unit proof producer runs through the headless runner
@@ -93,12 +94,11 @@ async function installation(runtimes?: { producer?: 'herdr' | 'pi' }) {
 function work(key: string, group: string, proofs: string[], overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 169, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   const request = { id: `request-${key}-${group}`, kind: 'producer', sha: H, baseSha: B, policyRevision: 4, pr: 169, group, proofs, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' };
-  return { id: `id-${key}`, key, title: 'Narrow roles', description: '', type: 'feature', priority: 1, dependencies: [],
+  return workFixture({ key, title: 'Narrow roles', priority: 1,
     criteria: [{ id: 'AC-2', text: 'Typed tools', proofs: ['unit:pi-graphyard-tools'] }, { id: 'AC-5', text: 'Guard', proofs: ['unit:pi-destructive-guard'] }, { id: 'AC-3', text: 'Roles', proofs: ['integration:pi-narrow-roles'] }],
-    policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 4, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate,
-    submission: { epoch: 1, pr: 169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['implementer'],
-    observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },
-    autoDispatch: { review: null, producers: [request], history: [] }, ...overrides } as unknown as Work;
+    stage: 'review', revision: 3, policyRevision: 4, epoch: 1, candidate, submission: { epoch: 1, pr: 169 }, gates: [], implementers: ['implementer'],
+    observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [] },
+    autoDispatch: { review: null, producers: [request], history: [] } as never, ...overrides });
 }
 const requestOf = (item: Work) => item.autoDispatch!.producers[0] as any;
 function herdr(calls: string[][] = []) {
