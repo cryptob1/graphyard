@@ -197,6 +197,13 @@ export const daemonStateSchema = z.object({
   diskHeadroom: z.object({ at: z.string(), floorBytes: z.number(), volumes: z.array(z.object({ path: z.string().max(1000), freeBytes: z.number() }).strict()).max(20), shortage: z.string().max(2000) }).strict().nullable().default(null),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
   failureRuns: z.record(z.string(), failureRunSchema).default({}),
+  /** GY-3101: the stalled-yard alert's own bookkeeping, kept on the cursor so a restarted loop neither re-alerts at once nor loses the all-clear. */
+  alerts: z.object({
+    /** When the stop the loop is watching began — the last movement the yard showed, or the first stalled observation when none is recorded. Null while work starts or merges. */
+    stoppedAt: z.string().max(64).nullable().default(null),
+    /** When the loop last POSTed a stall alert; null before the first, and the marker that an all-clear is owed once work moves. */
+    lastAlertAt: z.string().max(64).nullable().default(null),
+  }).strict().default({ stoppedAt: null, lastAlertAt: null }),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory(new Date().toISOString())),
 }).strip();

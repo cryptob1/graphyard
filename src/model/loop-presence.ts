@@ -25,7 +25,7 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -36,8 +36,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -62,6 +62,21 @@ export function loopPresenceInterval(header: string | string[] | undefined): num
 export function loopSupervision(header: string | string[] | undefined): LoopSupervision | null {
   const value = Array.isArray(header) ? header[0] : header;
   return value === 'supervised' || value === 'autonomous' ? value : null;
+}
+
+/**
+ * The header beside it (GY-3101) naming whether the loop alerts the operator directly when queued
+ * work can neither start nor merge (`run.alertUrl` set): its stall window in minutes, or `off`. The
+ * control plane keeps it beside the loop's presence for /api/status, so the dashboard says whether
+ * alerts are on, after how long, or off.
+ */
+export const loopAlertsHeader = 'X-Graphyard-Loop-Alerts';
+/** The loop's alert window in minutes, false when it names alerting off, or null when it names neither (an older loop). */
+export function loopAlerts(header: string | string[] | undefined): number | false | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (value === 'off') return false;
+  const minutes = Number(value);
+  return value && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
 }
 
 /**

@@ -80,6 +80,21 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
 }
 
 /**
+ * Whether the loop tells the operator directly when queued work can neither start nor merge
+ * (GY-3101), as the live loop names it in the status (`setup.alerts`): its stall window in minutes
+ * (on), false (off), or nothing (no live loop has named it).
+ */
+export function AlertsLine({ status }: { status: any }) {
+  const alerts = status?.setup?.alerts;
+  const on = typeof alerts === 'number' && alerts > 0;
+  return <p data-alerts={on ? 'on' : alerts === false ? 'off' : 'unknown'}>
+    {on ? <span className="green">Alerts are on: when queued work has neither started nor merged for {alerts} minutes, the loop posts to your webhook URL, repeats at most hourly, and posts an all-clear when work moves again.</span>
+      : alerts === false ? <span className="amber">Alerts are off. To be told when queued work cannot start or merge, set <code>run.alertUrl</code> in <code>.graphyard/master.json</code> on the host that runs the master loop to a webhook URL that takes a POST, such as an ntfy topic (<code>https://ntfy.sh/your-topic</code>); <code>run.alertMinutes</code> sets the stall window (default 20).</span>
+        : 'Whether alerts are on is not known yet: the dashboard learns it from a running master loop. Start the loop on the host with graphyard master run, or check it with graphyard master status.'}
+  </p>;
+}
+
+/**
  * The page body for a status answer and the work items (WORK, read at NOW), without the dashboard's
  * state: what the tests render. The onboarding change is a step of its own while it is open, as
  * `graphyard up` waits for it. WORKUNREAD: the work items are not read yet (or the read failed), so
@@ -98,6 +113,7 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
+    <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
   </>;
 }
 

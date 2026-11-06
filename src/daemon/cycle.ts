@@ -40,6 +40,7 @@ import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
+import { yardAlertStep } from './yard-alerts.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -165,6 +166,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   if (own) { await launches.idle(); performed.push(...launches.drain()); }
   await step('persist', async () => {
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
+    // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
+    if (!config.forPerson) await yardAlertStep(cycle);
   });
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: read.snapshot.work.filter(item => item.stage !== 'done').length, actions: performed.length, steps });
   state.metrics.push(metrics);
