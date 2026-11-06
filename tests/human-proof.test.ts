@@ -8,7 +8,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { proofPreview } from '../src/coordination.js';
 import { neededRework } from '../src/daemon/rework.js';
-import { mergeQueue } from '../src/merge-writer/executor.js';
+import { mergeQueue, trialAheadOfReviewReason } from '../src/merge-writer/executor.js';
 import { evaluate } from '../src/model-boundary/gates.js';
 import { dueHumanProofs, humanProofRows, physicalCheckRefusal } from '../src/model/human-proof.js';
 import type { HumanRequestRow } from '../src/model/human-request.js';
@@ -85,7 +85,13 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   const work = await submitted('GY-9101');
   assert.deepEqual(reasons(work), [`${proof} waits for a person's pass on Needs you for commit ${H.slice(0, 12)}`]);
   assert.equal(actionAccount(work, [work], new Date()).wait?.kind, 'human', 'the wait is a person\'s, not a review to request');
-  assert.deepEqual(mergeQueue([work], {}, Date.now()).due, [], 'the merge writer leaves the head alone');
+  // GY-3164: the head trials beside the person's check — the pass still gates the landing, so a
+  // trial that already passed (kept on the ledger with the settle's marker) is owed nothing while
+  // the review gate holds for the person.
+  assert.deepEqual(mergeQueue([work], {}, Date.now()).due.map(item => item.key), ['GY-9101'], 'the head is owed its trial beside the person\'s check');
+  const kept = { key: 'GY-9101', state: 'refused' as const, head: H, baseTip: B, mergeSha: H, risk: 'normal', intentAt: new Date(0).toISOString(), pushedAt: null, observedTip: null,
+    refusal: { kind: 'merge' as const, reason: trialAheadOfReviewReason('GY-9101') }, trial: { head: H, mergeSha: H, proofs: {} }, events: 3 };
+  assert.deepEqual(mergeQueue([work], { 'GY-9101': kept }, Date.now()).due, [], 'the person\'s pass still gates the landing');
   assert.deepEqual(dueHumanProofs(work), [proof], 'the loop owes the request');
 
   const body = { proof, sha: H, baseSha: B, url: 'https://preview.example/GY-9101/' };
@@ -134,7 +140,8 @@ test('unit:human-proof-request-and-answer — a fail returns the item to rework 
   assert.match(reasons(failed)[0], /failed a person's check.*The receipt came out blank/);
   assert.equal(nextAction(failed, [failed], new Date())?.kind, 'request-rework');
   assert.match(neededRework(failed)!.reason, /The receipt came out blank/);
-  assert.deepEqual(mergeQueue([failed], {}, Date.now()).due, []);
+  // GY-3164: the rework the failed check grounds returns the head to a worker, and the queue drops a returned head.
+  assert.deepEqual(mergeQueue([{ ...failed, reworkRequested: true } as Work], {}, Date.now()).due, []);
   assert.deepEqual(dueHumanProofs(failed), [], 'the failed head is not asked again');
 
   const fresh = { ...failed, candidate: head(H2), observation: observation(H2) } as unknown as Work;

@@ -117,7 +117,10 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
       if (mode === 'review-held') {
         // Trial history belongs to a current candidate even while product review holds landing.
         const target = works[0]!, head = target.candidate!.sha;
-        assert.match((await production.mergeWriter!.hold!(target))!, /build or review/);
+        // GY-3164: the build gate alone opens a flight, so the held review does not stop the trial;
+        // the landing hold names the settle that keeps the passing trial for the head.
+        assert.equal(await production.mergeWriter!.holdOpening!(target), null);
+        assert.match((await production.mergeWriter!.hold!(target))!, /^trial passed ahead of review/);
         const merged = await reads.merge(head, baseTip, target);
         assert.ok('mergeSha' in merged);
         const { mergeSha } = merged;
@@ -130,7 +133,7 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
         const current: Work = (await store.workDocument(target.id))!;
         assert.ok(current.evidence.some(entry => entry.proof === 'e2e:fixture' && entry.sha === mergeSha && entry.result === 'pass'), 'current trial retains trusted case history while review is pending');
         assert.equal(current.gates.find(gate => gate.name === 'review')?.passed, false);
-        assert.match((await production.mergeWriter!.hold!(target))!, /build or review/);
+        assert.match((await production.mergeWriter!.hold!(target))!, /^trial passed ahead of review/, 'the held review still refuses the landing, keeping the trial that passed');
         assert.equal(pushes, 0);
         assert.equal(current.delivery ?? null, null);
         continue;
