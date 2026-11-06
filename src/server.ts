@@ -1,5 +1,5 @@
 // The HTTP entry point. Routes live under src/server/routes/, one module per resource,
-// and src/server/index.ts assembles them; see docs/development.md for where a new route goes.
+// and src/server/index.ts assembles them.
 import { pathToFileURL } from 'node:url';
 import { main } from './server/main.js';
 

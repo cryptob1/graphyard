@@ -16,8 +16,7 @@ import { existsSync } from 'node:fs';
  * cannot serve its purpose: while a rolled-back write is refused — a read-only database, a standby,
  * a role without write privilege — or while a resource the plane owns is at its bound (GY-132). A
  * plane that answers reads and refuses every write used to report `ok: true` while nothing it was
- * asked to record could be recorded; the loop reads this verdict before it dispatches
- * (docs/master-agent.md).
+ * asked to record could be recorded; the loop reads this verdict before it dispatches.
  *
  * The plain endpoint still answers 200 for that verdict: it is the liveness and readiness probe of
  * the Helm chart and Railway, and restarting a plane, or pulling it from its Service, would not give

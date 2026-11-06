@@ -60,13 +60,16 @@ test('unit:generated-files-parse — the server parses exactly the comma-separat
 });
 
 test('integration:generated-files-setup — the documented command prints the value the server parses', async () => {
-  const run = (args: string[]) => execFileSync(process.execPath, ['scripts/check-docs.mjs', ...args], { cwd: repository, encoding: 'utf8' });
-  const listed = run(['--list']).trim();
-  assert.equal(listed, 'docs/protocol.md,docs/README.md');
-  assert.deepEqual(parseGeneratedFiles(listed), ['docs/protocol.md', 'docs/README.md']);
-  assert.deepEqual(parseGeneratedFiles(listed), JSON.parse(run(['--manifest'])).generated, 'the --list form and the manifest JSON declare the same files');
-  // This repository's own installer assignment derives the same value from its manifest.
-  assert.equal(generatedFilesAssignment(repository)?.line, 'GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md');
+  const fixture = await fixtureRepo({ 'scripts/check-docs.mjs': manifestScript });
+  try {
+    const run = (args: string[]) => execFileSync(process.execPath, ['scripts/check-docs.mjs', ...args], { cwd: fixture, encoding: 'utf8' });
+    const listed = run(['--list']).trim();
+    assert.equal(listed, 'docs/index.md,docs/list.md');
+    assert.deepEqual(parseGeneratedFiles(listed), JSON.parse(run(['--manifest'])).generated, 'the --list form and the manifest JSON declare the same files');
+    assert.equal(generatedFilesAssignment(fixture)?.line, 'GRAPHYARD_GENERATED_FILES=docs/index.md,docs/list.md');
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+  // Graphyard's own repository generates no documentation, so its installer sets nothing (GY-3109).
+  assert.equal(generatedFilesAssignment(repository), null);
 });
 
 test('integration:generated-files-setup — installers derive the assignment from a repository manifest', async () => {

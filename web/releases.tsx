@@ -27,12 +27,12 @@ export default function ReleasesView({ api, work }: { api: (path: string) => Pro
   }, [retry]);
   const release = (id: string, revision: number) => releases.find(r => r.id === id && r.revision === revision);
   const keyOf = (workId: string) => work.find(w => w.id === workId)?.key ?? workId;
-  return <><header><div className="breadcrumb">Verification <span>/</span> Releases</div><a href="/docs/delivery">Delivery guide ↗</a></header>
+  return <><header><div className="breadcrumb">Verification <span>/</span> Releases</div></header>
     <div className="page-heading"><div><div className="eyebrow">OBSERVED, NOT ASSUMED</div><h1>Releases</h1><p>Which release each environment expects, and whether independently observed runtime identity has verified it.</p></div></div>
     <div className="notice">Desired state changes only through an operator or a registered promoter. Runtime state comes only from service-scoped observers with measured instance identity; a provider webhook, a green deploy job or an application's own version report never verifies a release.</div>
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button onClick={() => setRetry(n => n + 1)}>Retry loading releases</button></div>}
     {!loaded && !error && <p role="status">Loading releases…</p>}
-    {loaded && !error && !environments.length && <div className="empty"><h2>No release selected yet.</h2><p>Attest a build, define a release with its explicit membership, approve it and select it as an environment's expected release.</p><a href="/docs/delivery">Set up observed delivery ↗</a></div>}
+    {loaded && !error && !environments.length && <div className="empty"><h2>No release selected yet.</h2><p>Attest a build, define a release with its explicit membership, approve it and select it as an environment's expected release.</p></div>}
     <div className="scenario-list">{environments.map(env => {
       const expected = env.expected && release(env.expected.releaseId, env.expected.releaseRevision);
       const v = env.verification;

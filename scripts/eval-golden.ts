@@ -5,7 +5,6 @@
 //   node --import tsx scripts/eval-golden.ts --compare eval/results/OLD.json eval/results/NEW.json
 //
 // It spends fleet time and runs by hand: not part of npm test or the merge trial.
-// docs/development.md tells when to run it and how to read a flip.
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
