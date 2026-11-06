@@ -3,7 +3,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory } from '../src/merge-writer/secret-scan.js';
 import { runTrialAttempt } from '../src/merge-writer/trial.js';
@@ -18,13 +17,13 @@ if git -C "$wt" log -p $range | grep -q '^+.*PLANTED-LEAK'; then echo "leaks fou
 `;
 
 async function repository() {
-  const root = await temporaryDirectory('scan-scope', tmpdir());
+  const root = await temporaryDirectory('scan-scope');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
   const commit = async (body: string) => { await writeFile(join(root, 'notes.txt'), body); git('add', '-A'); git('commit', '-qm', body.slice(0, 20)); return git('rev-parse', 'HEAD'); };
   git('init', '-q');
   await commit('token PLANTED-LEAK\n');
   const tip = await commit('cleaned\n');
-  const base = await temporaryDirectory('scan-scope-base', tmpdir());
+  const base = await temporaryDirectory('scan-scope-base');
   const cache = secretScanCacheDirectory(base);
   await mkdir(cache, { recursive: true });
   await writeFile(join(cache, 'gitleaks'), fakeGitleaks, { mode: 0o700 });

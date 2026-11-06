@@ -668,26 +668,33 @@ test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the t
   mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
   // With room, the choice answers while the taking-back is still running: the removal is off the checkout's path (GY-2963).
+  // A release's taking-back is awaited before the fixture is reused, so none of it races the next choice's stale
+  // checkout; and each probe records whether an ancestor was lookup-poisoned at the moment it was consulted — the
+  // root this file's trials share with every concurrently running file can gain and lose a stray node_modules, .git
+  // or package.json between a choice and its assertion (a merge trial's suite runs many files at once), so an outcome
+  // is judged by the environment its own choice read, never by a later snapshot (GY-3171's trial refusal).
   let releaseReclaim = () => {};
-  const reclaim = () => new Promise<string[]>(resolve => { releaseReclaim = () => resolve(reclaimTrialCheckouts(trials!)); });
-  const roomy: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
-  const gated = trialCheckoutRoot([trials!], 2e9, roomy, [], reclaim);
+  let reclaimSettled: Promise<string[]> = Promise.resolve([]);
+  const gate = () => new Promise<string[]>(resolve => { releaseReclaim = () => { reclaimSettled = reclaimTrialCheckouts(trials!); resolve(reclaimSettled); }; });
+  const poisonedAtRoomy: boolean[] = [];
+  const roomy: FilesystemProbe = async path => { poisonedAtRoomy.push(lookupPoisoned(trials!)); return { probed: path, volatile: null, freeBytes: 1e12 }; };
+  const gated = trialCheckoutRoot([trials!], 2e9, roomy, [], gate);
   const answered = await Promise.race([gated.then(value => `chosen ${value}`), new Promise(resolve => setTimeout(() => resolve('still waiting'), 100))]);
-  assert.equal(answered, lookupPoisoned(trials!) ? 'still waiting' : `chosen ${trials}`, 'a clean root is chosen immediately; a poisoned root retries after reclamation');
+  assert.equal(answered, poisonedAtRoomy[0] ? 'still waiting' : `chosen ${trials}`, 'a clean root is chosen immediately; a poisoned root retries after reclamation');
   releaseReclaim();
-  assert.equal(await gated, lookupPoisoned(trials!) ? null : trials, 'reclamation never makes an ancestor-poisoned root usable');
+  await reclaimSettled;
+  assert.equal(await gated, poisonedAtRoomy.at(-1) ? null : trials, 'reclamation never makes an ancestor-poisoned root usable');
   await reclaimTrialCheckouts(trials!);
   assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed))], [false, false], 'the stale checkout is taken back beside the choice');
   // Short of space, the taking-back is awaited and the root is measured again: the stale checkout never keeps its space (GY-2020).
   mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
-  const measured: boolean[] = [];
-  const filling: FilesystemProbe = async path => { measured.push(existsSync(crashed)); return { probed: path, volatile: null, freeBytes: existsSync(crashed) ? 1e9 : 1e12 }; };
-  const gatedReclaim = () => new Promise<string[]>(resolve => { releaseReclaim = () => resolve(reclaimTrialCheckouts(trials!)); });
-  const pending = trialCheckoutRoot([trials!], 2e9, filling, [], gatedReclaim);
+  const measured: boolean[] = [], poisonedAtFilling: boolean[] = [];
+  const filling: FilesystemProbe = async path => { measured.push(existsSync(crashed)); poisonedAtFilling.push(lookupPoisoned(trials!)); return { probed: path, volatile: null, freeBytes: existsSync(crashed) ? 1e9 : 1e12 }; };
+  const pending = trialCheckoutRoot([trials!], 2e9, filling, [], gate);
   await new Promise(resolve => setTimeout(resolve, 20));
   releaseReclaim();
-  assert.equal(await pending, lookupPoisoned(trials!) ? null : trials, 'the root is chosen once the stale checkout went');
+  assert.equal(await pending, poisonedAtFilling.at(-1) ? null : trials, 'the root is chosen once the stale checkout went');
   assert.deepEqual(measured, [true, false], 'the first measure saw the stale checkout; the second, after the taking-back, did not');
   // A removal that fails keeps the directory marked as this live process's own, and the next pass takes it back.
   const stuck = join(trials!, `${trialCheckoutPrefix}stuck`), live = join(trials!, `${trialCheckoutPrefix}live`);
