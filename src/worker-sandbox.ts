@@ -139,7 +139,7 @@ export function grantWorkerPaths(kind: string | undefined, args: string[], paths
 
 export class WorkerSandboxError extends Error {
   constructor(readonly runtime: string, readonly path: string, readonly detail: string, readonly role = 'worker') {
-    super(`${role[0].toUpperCase()}${role.slice(1)} launch failed: the ${runtime} sandbox cannot write ${path} (${detail}), so the ${role} would fail at its first ${role === 'worker' ? 'commit or sync' : 'command'}. Grant ${path} in the launch's sandbox arguments; docs/master-agent-sessions.md "Worker sandbox" says what each runtime needs`);
+    super(`${role[0].toUpperCase()}${role.slice(1)} launch failed: the ${runtime} sandbox cannot write ${path} (${detail}), so the ${role} would fail at its first ${role === 'worker' ? 'commit or sync' : 'command'}. Grant ${path} in the launch's sandbox arguments`);
     this.name = 'WorkerSandboxError';
   }
 }
@@ -210,7 +210,7 @@ export function environmentFailure(error: unknown, cwd = process.cwd()): { path:
 
 /** The blocker a required command records when the environment refused it: the sandbox and the path, never the item. */
 export function environmentBlocker(command: string, runtime: string | undefined, failure: { path: string; detail: string }) {
-  return `Environment, not the item: the ${runtime || 'worker'} sandbox cannot write ${failure.path}, so required command '${command}' failed: ${failure.detail.slice(0, 300)}. The launcher must grant this path to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"); unblock and relaunch once it does.`;
+  return `Environment, not the item: the ${runtime || 'worker'} sandbox cannot write ${failure.path}, so required command '${command}' failed: ${failure.detail.slice(0, 300)}. The launcher must grant this path to the worker's sandbox; unblock and relaunch once it does.`;
 }
 export const environmentBlocked = (blocker: string | null | undefined) => !!blocker?.startsWith('Environment, not the item:');
 export const blockedPath = (blocker: string) => /cannot write (\S+), so required command/.exec(blocker)?.[1] ?? null;

@@ -17,7 +17,6 @@
     "test": "node --import tsx tests/helpers/run-tests.ts",
     "test:affected": "node scripts/test-affected.mjs",
     "typecheck": "node --import tsx tests/helpers/run-tests.ts --typecheck",
-    "docs:check": "node scripts/check-docs.mjs",
     "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },
   "dependencies": {

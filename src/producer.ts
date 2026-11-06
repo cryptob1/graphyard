@@ -401,12 +401,12 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   }
   // A live-install proof left for a session on a host whose .env was never provisioned is a
   // host-configuration fault, refused before any account or session is taken; one a closed question
-  // decided needs no session and so no credential (GY-1071, docs/install.md). The dispatcher records
+  // decided needs no session and so no credential (GY-1071). The dispatcher records
   // the refusal against the request and retries it on its widening backoff, up to its attempt limit
   // (dispatch/tick.ts), so it surfaces once per attempt and launches once .env is provisioned.
   const producerEnv = needsProducerEnv(binding.proofs) ? await readProducerEnvironment(root) : {};
   const missingEnv = missingProducerEnv(binding.proofs, producerEnv);
-  if (missingEnv.length) throw new Error(`Graphyard refuses to launch the ${binding.key} ${binding.group} proofs (${binding.proofs.join(', ')}): ${missingEnv.join(' and ')} ${missingEnv.length > 1 ? 'are' : 'is'} not set in ${resolve(root, '.env')} on this coordinator; add ${missingEnv.length > 1 ? 'them' : 'it'} there (docs/install.md) and the request is launched again`);
+  if (missingEnv.length) throw new Error(`Graphyard refuses to launch the ${binding.key} ${binding.group} proofs (${binding.proofs.join(', ')}): ${missingEnv.join(' and ')} ${missingEnv.length > 1 ? 'are' : 'is'} not set in ${resolve(root, '.env')} on this coordinator; add ${missingEnv.length > 1 ? 'them' : 'it'} there and the request is launched again`);
   // The group is part of the request: a producer session answers one proof group of one item, so a
   // relaunch for that group replaces its own predecessor instead of being refused by it.
   // GY-1705: re-hold a producer account this item's last two sessions each spent, before registry /

@@ -32,6 +32,9 @@ import { stopServersUnder } from '../../src/postgres-stop.js';
 //   --durations FILE    also write each file's wall time to FILE (tests/helpers/file-durations.mjs)
 //   --file-timeout MS   kill a file's process group after MS, reporting a named test failure
 //
+// A run of named files (no --files-from, no --shard) is a targeted re-run, so it carries the merge
+// trial's per-file bound unless the caller names its own.
+//
 // Every GRAPHYARD_* and HERDR_* variable the caller carries is withheld from the tests except the
 // harness controls in src/cli/test-isolation.ts; GRAPHYARD_TEST_PORT is a window of free ports this
 // run holds until it exits, and GRAPHYARD_BROWSER_PORT the dev server's port. Two runs on one host —
@@ -132,8 +135,18 @@ function runnerOptions(args: string[]) {
  * tests/*.test.ts, narrowed to one shard. Without --files-from or --shard every argument passes
  * through in its order, as before those options existed.
  */
+/** The merge trial's per-file bound (src/merge-writer/trial.ts): a targeted re-run of named files carries it. */
+export const trialFileTimeoutMs = 300_000;
+
 export function nodeTestArgs(cwd: string, args: string[]) {
-  const { rest, filesFrom, shard, durations, fileTimeout } = runnerOptions(args);
+  const { rest, filesFrom, shard, durations, fileTimeout: given } = runnerOptions(args);
+  // A run of named files is a targeted re-run — complete's pre-submit rerun of the trial's failing
+  // files (complete.ts: "the rerun runs under the trial's own bound"), `npm run test:affected --
+  // FILE...` — so it runs under the merge trial's per-file bound: what passes it passes the trial's
+  // shape, and a file that bound cannot host (the slow-tick receipt's twenty-run execution)
+  // defers to an unbounded run there as it does in the trial. A whole-suite run names no file and
+  // stays unbounded.
+  const fileTimeout = given ?? (!filesFrom && !shard && rest.some(argument => !argument.startsWith('-')) ? String(trialFileTimeoutMs) : undefined);
   if (fileTimeout && (!Number.isFinite(Number(fileTimeout)) || Number(fileTimeout) <= 0)) throw new Error('--file-timeout needs positive milliseconds');
   const bounded = fileTimeout ? { bounded: true } : {};
   const reporters = fileTimeout
