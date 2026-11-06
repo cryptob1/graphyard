@@ -360,9 +360,9 @@ test('integration:trial-step-timings — bound E2E success and failure have sepa
     if (command === 'npm') { clock += 10; return ''; }
     if (command === 'node' && args.at(-1)?.endsWith('/run.mjs')) {
       clock += failed ? 900 : 300;
-      if (failed) throw new Error('E2E runner failed');
+      // GY-3180: a runner that throws never judged the head, so the failing trial is a case that failed a step.
       await writeFile(join(dirname(args.at(-1)!), 'result.json'), JSON.stringify([
-        { proof: 'e2e:timed', case: 'timed', executed: 1, failed: 0 },
+        { proof: 'e2e:timed', case: 'timed', executed: 1, failed: failed ? 1 : 0, ...(failed ? { failingStep: 'step 1 failed' } : {}) },
       ]));
       return '';
     }
