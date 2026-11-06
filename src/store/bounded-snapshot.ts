@@ -3,17 +3,36 @@ import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { settledSummariesSql } from './summary-sql.js';
 
+const settledScan = 'FROM work_index i WHERE i.settled OFFSET 0';
+if (!settledSummariesSql.includes(settledScan)) throw new Error('settledSummariesSql no longer scans the settled work index as the bounded snapshot expects');
+const settledByIdSql = settledSummariesSql.replace('SELECT d.number,', 'SELECT d.id::text AS id, d.number,').replace(settledScan, 'FROM work_index i WHERE i.settled AND i.id = ANY($1::uuid[]) OFFSET 0');
+/** A summary is rebuilt at least this often, so sessions leave its 24-hour window (GY-3187). */
+const summaryMaxAgeMs = 3_600_000;
+type Cached = { version: string; readAt: number; row: { number: string; document: Work } };
+const summaryCaches = new WeakMap<pg.Pool, Map<string, Cached>>();
+
 /**
  * The work snapshot every reader polls (GY-422): open items whole, and each settled delivery —
  * done, with nothing owed and nothing running — as its summary (`settledSummariesSql`): the work
  * index's stored settled form without prose, with its bounded timeline, recent sessions and
  * completed-action count. A reader that needs one delivered item's history asks for that document.
+ *
+ * Settled summaries are kept per pool (GY-3187): every write to an item rewrites its index row, so
+ * the row's `xmin` versions the summary, and a poll reads the settled index rows alone, rebuilding
+ * only the summaries whose row changed (or aged past `summaryMaxAgeMs`), never every settled document.
  */
 export async function boundedSnapshot(pool: pg.Pool): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const settled = (await client.query(settledSummariesSql)).rows;
+    const cache = summaryCaches.get(pool) ?? new Map<string, Cached>();
+    summaryCaches.set(pool, cache);
+    const versions = new Map<string, string>((await client.query('SELECT i.id::text AS id, i.xmin::text AS version FROM work_index i WHERE i.settled')).rows.map(row => [row.id, row.version]));
+    const now = Date.now();
+    const stale = [...versions].filter(([id, version]) => cache.get(id)?.version !== version || now - cache.get(id)!.readAt > summaryMaxAgeMs).map(([id]) => id);
+    for (const id of cache.keys()) if (!versions.has(id)) cache.delete(id);
+    if (stale.length) for (const { id, ...row } of (await client.query(settledByIdSql, [stale])).rows) cache.set(id, { version: versions.get(id)!, readAt: now, row });
+    const settled = [...versions.keys()].map(id => cache.get(id)?.row).filter(row => row !== undefined);
     const live = (await client.query('SELECT w.number, w.document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled)')).rows;
     const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
     await client.query('COMMIT');
