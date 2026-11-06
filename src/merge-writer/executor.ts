@@ -40,8 +40,8 @@ export function mergeCandidateObsolete(current: Work | undefined, selected: Work
     : current.reworkRequested ? 'returned for rework'
     : current.lease || current.epoch !== selected.epoch || current.submission?.epoch !== current.epoch ? 'implementation ownership changed'
     : !current.candidate || !current.submission || current.observation?.source !== 'control-plane' ? 'no submitted control-plane candidate'
-    : current.candidate.sha.toLowerCase() !== selected.candidate?.sha.toLowerCase()
-      || current.candidate.baseSha !== selected.candidate?.baseSha ? 'candidate changed'
+    // GY-3151: only the head counts; main moving re-merges a passing head onto the new tip (`mergeOne`).
+    : current.candidate.sha.toLowerCase() !== selected.candidate?.sha.toLowerCase() ? 'candidate changed'
     : current.policyRevision !== selected.policyRevision ? 'policy changed' : null;
   return reason ? `${current.key}: ${reason}; obsolete merge stays queued` : null;
 }
