@@ -1,0 +1,13 @@
+{
+  "id": "pipeline-concurrent-merge",
+  "title": "Two reviewed heads trial at once and both land with one trial each",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane and a scratch bare Git remote: two reviewed heads trial at the same time; when one merges, the other is re-merged onto the new tip and pushed without a candidate-changed refusal or a second trial. The batch gate then verifies the tip and the deploy watch serves it.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Merge two concurrently trialled heads through the real loop",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-concurrent-merge.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

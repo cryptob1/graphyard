@@ -15,7 +15,7 @@ import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
-import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
+import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
 import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
@@ -500,13 +500,9 @@ export const upgradeCommands = defineCommands([{
       // force from the next pass, not from the next reboot. The deploy record was written before
       // the handover, so the successor continues from it and nothing redeploys.
       const runningRoot = fileURLToPath(new URL('../../', import.meta.url));
-      const handover = async (tip: string) => {
-        let running: string | null = null;
-        try { running = git(runningRoot, 'rev-parse', 'HEAD'); } catch { /* a tree with no git history names no running commit */ }
-        if (!tip || running === tip) return;
-        stopping.abort(); // the serve half stops after the pass it is in; nothing is torn mid-flight
-        throw Object.assign(new Error(`[graphyard-deploy] the watch hands itself over to ${tip.slice(0, 12)}: it serves code this process is not running, and the restart loads it`), { releaseHandover: true });
-      };
+      const handover = releaseHandover(() => {
+        try { return git(runningRoot, 'rev-parse', 'HEAD'); } catch { return null; } // a tree with no git history names no running commit
+      }, () => stopping.abort()); // the serve half stops after the pass it is in; nothing is torn mid-flight
       // The managed repository's own serving (GY-2976): a main that declares .graphyard/serve.json is
       // checked out into the install's own serve checkout, built and served by the same unit's pass;
       // a repository that declares nothing gives the serve pass nothing to do.

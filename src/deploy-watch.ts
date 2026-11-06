@@ -157,6 +157,17 @@ export async function watchMain(file: string, ports: DeployWatchPorts, options: 
   }
 }
 
+/**
+ * The watch's release handover (GY-3123): after a pass served `tip`, a process not running that
+ * commit's code calls `stop` and throws the release handover, so the launcher restarts the watch on
+ * the code it serves. `running` names the commit this process's code comes from.
+ */
+export const releaseHandover = (running: () => string | null, stop: () => void) => async (tip: string) => {
+  if (!tip || running() === tip) return;
+  stop();
+  throw Object.assign(new Error(`[graphyard-deploy] the watch hands itself over to ${tip.slice(0, 12)}: it serves code this process is not running, and the restart loads it`), { releaseHandover: true });
+};
+
 /** The managed repository's serving, as the dashboard header reads it (GY-2964). */
 export interface ManagedDeploy {
   /** The managed repository this answers for. */
