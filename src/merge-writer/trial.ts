@@ -983,8 +983,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       });
+      // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.
+      const host = ran.find(entry => entry.hostFailure);
+      if (host && !ran.some(entry => entry.executed && entry.failed)) throw runnerFailure('tests', { ok: false, out: '', status: null, signal: null, cause: `e2e case ${host.case}: ${host.failingStep}` });
       // Bounded so the trial record the merge writer posts stays within its schema.
-      e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
+      e2e.push(...ran.filter(entry => !entry.hostFailure).map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
     }
     if (!checks.length) {
       if (!nodePackage) return finishTests('pass', { passed: 0, failed: [], files: 0 });

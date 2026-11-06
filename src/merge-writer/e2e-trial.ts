@@ -21,6 +21,8 @@ export interface TrialE2eCase {
   missing?: boolean;
   /** The step that failed, as the runner names it, or why the case could not run. */
   failingStep?: string | null;
+  /** GY-3180: the case's browser or runner could not start, so the head was never judged: the trial ends with no verdict. */
+  hostFailure?: boolean;
 }
 
 /** Why a case cannot run and the trial refuses the head: the declaration to add. */
@@ -153,7 +155,9 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
       const ran = report as E2eReport | null;
       for (const entry of loaded) {
         const outcome = ran?.cases.find((item: { id: string }) => item.id === entry.proof.slice(4));
-        if (!outcome || outcome.verdict === 'unrun')
+        if (outcome?.attemptResults?.at(-1)?.hostFailure)
+          cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 0, failed: 1, hostFailure: true, failingStep: outcome.failingStep?.reason ?? 'the case could not start' });
+        else if (!outcome || outcome.verdict === 'unrun')
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 0, failed: 1, failingStep: outcome?.stoppedBy ? `the run stopped at required case ${outcome.stoppedBy}` : 'the case never ran' });
         else if (outcome.verdict === 'passed')
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 0 });

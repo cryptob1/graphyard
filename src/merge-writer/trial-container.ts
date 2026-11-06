@@ -173,10 +173,17 @@ const cases = await runTrialE2eGroup(${JSON.stringify(target)}, ${JSON.stringify
   { ...${JSON.stringify(data)}, proofs: [], holds: async () => true, log: console.log }, ${JSON.stringify(origin)});
 writeFileSync(${JSON.stringify(result)}, JSON.stringify(cases));
 `);
-      input.log(String(await input.run('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], {
-        cwd: input.worktree, env: input.env, timeoutMs: left(), wrapper,
-      })));
-      return JSON.parse(await readFile(result, 'utf8')) as TrialE2eCase[];
+      // GY-3180: the group answers for every case the head fails, so a runner that ended with no answer never judged the head; one out of budget stays the merge's.
+      try {
+        input.log(String(await input.run('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], {
+          cwd: input.worktree, env: input.env, timeoutMs: left(), wrapper,
+        })));
+        return JSON.parse(await readFile(result, 'utf8')) as TrialE2eCase[];
+      } catch (error) {
+        if ((error as { timedOut?: boolean }).timedOut) throw error;
+        return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1, hostFailure: true,
+          failingStep: `the E2E runner could not start: ${error instanceof Error ? error.message : String(error)}` }));
+      }
     } catch (error) {
       return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1,
         failingStep: error instanceof Error ? error.message : String(error) }));

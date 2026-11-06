@@ -1,0 +1,13 @@
+{
+  "id": "e2e-host-start-failure",
+  "title": "A browser that cannot start is a host failure, not the head's",
+  "description": "Native private-root command regression runs the merge trial against a head whose bound browser case cannot launch its browser: the trial ends with no verdict as a runner failure and refuses nothing, while a case that fails a step still refuses the head.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "real browser-start-failure trial regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/e2e-host-start-failure.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
