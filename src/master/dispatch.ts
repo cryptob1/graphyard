@@ -22,7 +22,7 @@ import { credentialMaskFor } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
-import { simplicityParagraph } from '../review-prompt.js';
+import { reviewStandards } from '../review-prompt.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, launchSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, type HerdrAgent } from './herdr.js';
 import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
@@ -523,7 +523,7 @@ export const destructivePromptGuidance = 'Never give rm or mv a glob or variable
 export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'specCheck' | 'policyRevision'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'specCheck' | 'policyRevision'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -537,6 +537,7 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: baseSha ?? undefined });
+  const standards = reviewStandards(work);
   return `Implement ${work.key}: ${work.title}. Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
     + attemptBoundSection(config.run, work, epoch)
     + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
@@ -548,7 +549,7 @@ export function workerPrompt(
     + destructivePromptGuidance
     + externalDirectoryPromptGuidance
     + specCheckReportSection(work)
-    + simplicityParagraph
+    + standards.simplicity
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + reworkBriefSection(work, rework)
     // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.
@@ -556,9 +557,11 @@ export function workerPrompt(
     + resumedAttempt(work)
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
-    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not wait and do not write it as a blocker. `
+    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not write it as a blocker. `
+    // GY-3166: the reviewers' standards for this item's own criteria, known from the start of the work; only the verdict-posting text stays with the reviewer.
+    + (work.criteria?.length ? `Reviewers judge your head by this checklist, with the simplicity rule above: ${standards.criteria}. ${standards.repetition}For a user-facing feature, judge: ${standards.product}` : '')
     // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
-    + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
+    + `Last step before complete: check your diff against the reviewers' standards (node ${config.cliPath} review self ${work.key} prints them) and fix each BLOCKING finding you would expect. `
     + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`, ', other than a test failing only for the sandbox limitations described above');
 }
 

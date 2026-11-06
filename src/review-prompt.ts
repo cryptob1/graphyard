@@ -40,6 +40,8 @@ export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
  * and the rest are nits, never filed as work items (GY-1249). `criteria` are the item's own, written by its operator.
  * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
  * that topic beside the criteria instead of restating them.
+ * GY-3166: this is the judging half, ending mid-sentence so the worker's checklist can carry it;
+ * a reviewer's request continues with criteriaVerdictRule.
  */
 export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
   // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
@@ -55,8 +57,10 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
   }).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ` : '')
-    + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
+    + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases`;
 }
+/** What a verdict-posting reviewer adds to the criteria rule: nothing here is a worker's to do. */
+export const criteriaVerdictRule = '; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. ';
 
 /** The paths whose changes run on every loop cycle (GY-404), shared with the scope rule's soak companion (GY-1892). */
 export const repeatingPaths = loopRepeatingPaths;
@@ -76,6 +80,23 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
 }
 
 
+/** The product reviewer's questions (GY-2989): what its request judges a user-facing feature by. */
+const productQuestions = 'is this a good idea? Does it make the app better for the person using it — discoverable where they would look, worded as they would word it, and no more than it needs? A feature that passes every test and still makes the app worse is rejected. ';
+/**
+ * The reviewers' standards from one place (GY-3166): both review requests and the worker brief read
+ * these pieces, so what a worker checks before it submits cannot drift from what it is judged by.
+ * `head` defaults to HEAD, the worker's own commit, which does not exist when its brief is built;
+ * `files` left null asks the repetition question conditionally, as for a review with no observation.
+ */
+export function reviewStandards(work: Pick<Work, 'key'> & { criteria?: ReviewCriterion[]; scenarioRequirements?: Work['scenarioRequirements'] }, head = 'HEAD', files?: readonly string[] | null) {
+  return {
+    simplicity: simplicityParagraph,
+    criteria: criteriaRuleSection(work.key, head, work.criteria, work.scenarioRequirements),
+    repetition: repetitionReviewSection(files),
+    product: productQuestions,
+  };
+}
+
 /**
  * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
  * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the repetition section and
@@ -88,16 +109,17 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * none, and judges the diff by the shared standard alone.
  */
 export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string; scenarioRequirements?: Work['scenarioRequirements'] } | null) {
+  const standards = reviewStandards({ key: binding.key, criteria, scenarioRequirements: context?.scenarioRequirements }, binding.head, files);
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + (context?.round ?? '')
-    + criteriaRuleSection(binding.key, binding.head, criteria, context?.scenarioRequirements)
+    + standards.criteria + criteriaVerdictRule
     + postDeployReviewSection(criteria)
     + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
-    + repetitionReviewSection(files);
+    + standards.repetition;
 }
 
 /** Nits stay advisory and are kept for later workers. */
