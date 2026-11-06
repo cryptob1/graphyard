@@ -1,0 +1,14 @@
+{
+  "id": "control-plane-no-pr-link",
+  "title": "Control-plane items name and link their merge commit, never a pull request number",
+  "description": "The control plane is the merge writer and opens no pull request, so the number a control-plane candidate carries is its own change number, which on GitHub is somebody else's pull request. A control-plane item's plain status and candidate link name its commit — the merge commit once merged, the head before it — and never 'PR #N' or a /pull/ URL; pull-request-mode items keep theirs.",
+  "tags": ["dashboard", "status"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "control-plane no-PR link regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/control-plane-no-pr-link.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -11,8 +11,17 @@ const external = { target: '_blank', rel: 'noopener noreferrer' } as const;
  * a keyboard stop of its own, because the link around it is already one. With no repository
  * configured there is nothing to link to and nothing to abbreviate: the bare value is shown as
  * it is, and the item view names and defines both words in the label beside it.
+ *
+ * The merge writer opens no pull request, so an item the control plane observed itself
+ * (GY-3173) names its commit — the merge commit once merged, the head before it — linked to the
+ * commit itself: the number such a candidate carries is its own change number, which on GitHub
+ * is somebody else's pull request.
  */
-export function CandidatePr({ repository, candidate, workKey }: { repository: unknown; candidate: { pr: number }; workKey?: string }) {
+export function CandidatePr({ repository, candidate, workKey, observation }: { repository: unknown; candidate: { pr: number; sha?: string }; workKey?: string; observation?: { source?: string; mergeSha?: string | null } | null }) {
+  if (observation?.source === 'control-plane') {
+    const sha = observation.mergeSha ?? candidate.sha;
+    return sha ? <CandidateSha repository={repository} sha={sha} workKey={workKey}/> : null;
+  }
   const pr = candidate?.pr;
   // The accessible name starts with the visible text so voice control can act on what it reads.
   const label = `PR #${pr}, open pull request${workKey ? ` for ${workKey}` : ''} in GitHub`;
