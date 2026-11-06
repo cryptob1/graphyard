@@ -158,7 +158,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const worker = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work, new Date(now));
-  const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
+  // GY-3173: the merge writer opens no pull request, so an item the control plane observed itself never links one.
+  const controlPlane = item.observation?.source === 'control-plane';
+  const prUrl = item.candidate && !controlPlane ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
   const postDeployment = <PostDeployment item={item} repository={status?.repository}/>;
   // The inverted loop, as this item sees it: what the control plane says to do next, which
   // executor has it, who is waiting on a decision, and every session that can be watched or read.
@@ -218,7 +220,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
-      {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> on GitHub ↗</span>}
+      {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key} observation={item.observation}/> on GitHub ↗</span>}
     </div>
     <section className={`where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
       <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
@@ -241,7 +243,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
             <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
             <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     </details>
-    <section className="panel" aria-label="Pull request"><h2>Pull request</h2>
+    <section className="panel" aria-label={controlPlane ? 'Commit' : 'Pull request'}><h2>{controlPlane ? 'Commit' : 'Pull request'}</h2>
       {item.candidate ? <dl className="facts">
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
         <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
@@ -249,7 +251,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
-      </dl> : <p className="muted">No pull request yet.</p>}
+      </dl> : <p className="muted">{controlPlane ? 'No commit submitted yet.' : 'No pull request yet.'}</p>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
     <SpecCheckPanel item={item}/>

@@ -26,7 +26,7 @@ export default function ShippedPage({ work, status, observedAt, setSelected }: D
     {shipped.length === 0 ? <p className="muted">Nothing has shipped yet. Items appear here once their pull request merges.</p>
       : <ul className="shipped-list shipped-page">{shipped.map(w => { const plain = plainStatus(w, now); const label = plainStage(w, now, release, serve); return <li key={w.id} className={`tone-${plain.tone}`}>
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
-        {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key}/>}
+        {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key} observation={w.observation}/>}
         <span className="muted">{new Date(shippedAt(w)).toLocaleDateString()}</span>
         <span className={live(w) ? undefined : 'muted'} data-live={live(w)} data-plain-stage={label}>{label}</span>
         {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}><Explained sentence={plain.blocking}/></span>}

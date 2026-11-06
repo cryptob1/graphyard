@@ -4,7 +4,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern } from './gates.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 import { humanRequestBlocker } from './human-request.js';
-import { deliveryOutcome } from './format.js';
+import { deliveryOutcome, shortShas } from './format.js';
 import { isFilingRefusal } from './user-facing.js';
 
 /**
@@ -174,7 +174,19 @@ export function phaseOf(work: Work, now: number): Phase {
 
 /** Lower-cases a leading common word so a reason reads mid-sentence; names stay capitalized. */
 const lowerFirst = (text: string) => /^(Graphyard|GitHub|Codex|AC-|GY-)/.test(text) ? text : text[0].toLowerCase() + text.slice(1);
-const pr = (work: Work) => work.candidate ? `PR #${work.candidate.pr}` : work.submission ? `PR #${work.submission.pr}` : null;
+/**
+ * What the item's sentences name it by. The merge writer opens no pull request, so an item the
+ * control plane observed itself is named by its commit — the merge commit once merged, the head
+ * before it — never by its change number, which on GitHub is somebody else's pull request
+ * (GY-3173).
+ */
+const pr = (work: Work) => {
+  if (work.observation?.source === 'control-plane') {
+    const sha = work.observation.mergeSha ?? work.candidate?.sha;
+    return sha ? `commit ${shortShas(sha)}` : null;
+  }
+  return work.candidate ? `PR #${work.candidate.pr}` : work.submission ? `PR #${work.submission.pr}` : null;
+};
 
 /** One sentence: what is happening, what happens next, and who is on it. */
 export function plainStatus(work: Work, now: number): PlainStatus {
@@ -218,7 +230,10 @@ export function plainStatus(work: Work, now: number): PlainStatus {
     if (work.reworkRequested) return make('Sent back for changes — waiting for someone to pick it up', 'waiting', 'Nobody is working on it');
     return make(who.name ? `Waiting for someone to pick this up — ${who.name} stopped working on it` : 'Waiting for someone to pick this up', 'waiting', 'Nobody is working on it');
   }
-  if (phase === 'building') return make(`${who.name} is building it — ${link ? `${link} is open` : 'no pull request yet'}`, 'working', null, who.name);
+  // A control-plane item is never awaiting a pull request the merge writer will not open (GY-3173).
+  if (phase === 'building') return make(work.observation?.source === 'control-plane'
+    ? `${who.name} is building it`
+    : `${who.name} is building it — ${link ? `${link} is open` : 'no pull request yet'}`, 'working', null, who.name);
   const first = reasons(gate);
   const stuck = first.find(r => r.stuck);
   if (stuck) return make(`Stuck: ${lowerFirst(stuck.text)}`, 'stuck', stuck.text);
