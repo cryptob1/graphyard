@@ -9,6 +9,7 @@ import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-1852: a merge record whose reply was lost is replayed with its exact input under its exact key,
 // and a key the server refuses as reused is never sent again: the ledger is adopted and the next
@@ -23,12 +24,12 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy' } } });
 const gates = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: name !== 'merge', reasons: name !== 'merge' ? [] : ['merge refused'] }));
 const candidate = { sha: sha('head1'), baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' };
-const submitted = () => ({
-  id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
-  policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 600_000),
-  ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates, stage: 'build',
+const submitted = () => workFixture({
+  id: 'w1', key: 'GY-1', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
+  createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 600_000),
+  epoch: 1, submission: { epoch: 1, pr: 1 }, candidate, gates, stage: 'build',
   observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: tip, baseTipContained: true, at: iso(start) },
-}) as unknown as Work;
+});
 
 /**
  * The coordinator's merge-record route as far as these tests need it: the receipt rule (a key replays
