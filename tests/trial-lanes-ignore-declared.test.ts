@@ -60,7 +60,7 @@ async function otherRun(directory: string, files: number) {
   return async () => { const closed = once(child, 'close'); child.kill('SIGKILL'); await closed; };
 }
 
-test('unit:trial-lanes-ignore-declared — with 36 GiB available of 62 GiB and other runs declaring 60 suite files, the trial budget is memory-only and 9 shards on 8 cores run in 4 lanes', { timeout: 120_000 }, async () => {
+test('unit:tests/trial-lanes-ignore-declared.test.ts — with 36 GiB available of 62 GiB and other runs declaring 60 suite files, the trial budget is memory-only and 9 shards on 8 cores run in 4 lanes', { timeout: 120_000 }, async () => {
   // (36 GiB − max(10% of 62 GiB, 4 GiB) − 1 GiB) / 0.75 GiB a file.
   const budget = await trialAffordableFiles(memory);
   assert.equal(budget, Math.floor((36 - 6.2 - 1) / 0.75));
@@ -79,7 +79,7 @@ test('unit:trial-lanes-ignore-declared — with 36 GiB available of 62 GiB and o
   } finally { await stop(); }
 });
 
-test('unit:trial-lanes-ignore-declared — a trial\'s steps.jsonl carries one timing entry naming its lanes and breadth', { timeout: 120_000 }, async () => {
+test('unit:tests/trial-lanes-ignore-declared.test.ts — a trial\'s steps.jsonl carries one timing entry naming its lanes and breadth', { timeout: 120_000 }, async () => {
   const fixture = await repository();
   const spec: TrialRunSpec = { version: 1, key: 'GY-1', head: fixture.mergeSha, mergeSha: fixture.mergeSha, baseTip: null,
     changedFiles: testFiles, proofs: [], e2eProofs: [], timeoutMs: 120_000, reproduce: false,
