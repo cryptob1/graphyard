@@ -10,7 +10,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootstrapGate, gateRecordPath, writeGateRecord } from '../../src/batch-gate.js';
+import { bootstrapGate, gateRecordPath, readGateRecord, writeGateRecord, type GateRecord } from '../../src/batch-gate.js';
 import { defaultChildRun, type ChildRun } from '../../src/child-runner.js';
 import { runCycle } from '../../src/daemon/cycle.js';
 import { mergeWriterReads, type MergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
@@ -60,6 +60,8 @@ export interface World {
   store: Store; engine: Engine; base: string;
   /** Every trial the loops in this process ran, by item key (`batch-gate` for the gate's). */
   trialLog: { key: string; mergeSha: string; startedAt: number; endedAt?: number }[];
+  /** Every item the loops in this process filed, with main-gate.json as it stood on disk at that moment. */
+  filings: { key: string; gate: GateRecord | null }[];
   /** Commits a branch from main's tip writing `files` (null deletes) and submits it as a reviewed item. */
   submit(title: string, files: Record<string, string | null>): Promise<Work>;
   /** Every item's current document. */
@@ -101,7 +103,7 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
   let branches = 0;
   const work = async () => (await Promise.all((await store.list()).map(async item => (await store.workDocument(item.id))!)));
   return {
-    root, origin, checkout, trials, url, database, config, store, engine, base, trialLog: [],
+    root, origin, checkout, trials, url, database, config, store, engine, base, trialLog: [], filings: [],
     work,
     main: () => git(origin, 'rev-parse', 'main'),
     submit: async (title, files) => {
@@ -145,7 +147,7 @@ const fixtureRun: ChildRun = async (command, args, options) => {
   return defaultChildRun(command, args, { ...options, env: { ...process.env, ...identity, ...options?.env } });
 };
 
-type Where = Pick<World, 'checkout' | 'trials' | 'url' | 'config'> & { snapshot(): Promise<Work[]>; trialLog?: World['trialLog'] };
+type Where = Pick<World, 'checkout' | 'trials' | 'url' | 'config'> & { snapshot(): Promise<Work[]>; trialLog?: World['trialLog']; filings?: World['filings'] };
 
 const post = async (url: string, token: string, path: string, body: unknown, key: string) => {
   const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
@@ -169,7 +171,10 @@ export function loopReads(where: Where, options: { gate: boolean }): MergeWriter
     try { return await reads.trial(mergeSha, ...rest); } finally { entry.endedAt = Date.now(); }
   };
   return { ...reads, trial,
-    createWork: (input, key) => post(where.url, adminToken, 'work', input, key),
+    createWork: (input, key) => {
+      where.filings?.push({ key, gate: readGateRecord(gateRecordPath(where.checkout)) });
+      return post(where.url, adminToken, 'work', input, key);
+    },
     ...(options.gate ? { gate: { root: where.checkout, repository } } : {}) };
 }
 
@@ -235,4 +240,4 @@ export function storeSnapshot(database: string) {
   return { snapshot: async () => (await Promise.all((await store.list()).map(async item => (await store.workDocument(item.id))!))), close: () => store.close() };
 }
 
-export { coordinatorToken };
+export { adminToken };
