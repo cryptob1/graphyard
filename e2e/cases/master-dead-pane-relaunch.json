@@ -1,0 +1,13 @@
+{
+  "id": "master-dead-pane-relaunch",
+  "title": "A master pane left as a bare shell is relaunched",
+  "description": "A master pane reported with no agent on two consecutive loop cycles ends its session and relaunches the master; one miss does not, and status never reports it as working.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "master dead pane relaunch regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-dead-pane-relaunch.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -883,13 +883,16 @@ async function masterPaneFailover(cycle: Cycle, handle: RuntimeSession, open: Wo
     const screen = await Promise.resolve(effects.sessionScreen?.({ pane, agentName: master.agentName })).catch(() => null) ?? null;
     if (screen !== null) notice = detectRuntimeExhaustion(screen, master.runtime, clock);
   }
-  if (!notice && !exited) return;
-  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
+  // A pane Herdr reports as a bare shell (no agent) is gone once seen on two consecutive cycles.
+  const bare = handle.agent === null && !exited;
+  master.misses = bare ? master.misses + 1 : 0;
+  if (!notice && !exited && !(bare && master.misses >= 2)) return;
+  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {
     if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
     if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-    state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1,
+    state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1, misses: 0,
       lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },
       limitedUntil: notice?.resetsAt ?? null };
     await note(cycle, key, 'failover', null, 'done', `The master session ${master.agentName} is treated as absent (${reason}); the account it spent is held until its reset, and the master launches on the role's next account`);
