@@ -1,7 +1,10 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { defaultChildRun } from '../child-runner.js';
+import { countByRunner, countProofCases, proofTitle } from '../proof-runner.js';
 import { mechanicalProof } from '../model/dispatch.js';
 import type { CliCommand } from './registry.js';
 import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from './test-isolation.js';
@@ -50,9 +53,7 @@ export interface VerifyRecord { key: string; head: string; clean: boolean; at: s
 type Criterion = { id: string; proofs: string[]; bootstrap?: unknown };
 
 const git = (root: string, args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/** A case belongs to a proof when its title is the proof name, or starts with it followed by a space. */
-export const proofTitle = (proof: string) => new RegExp(`^${escape(proof)}(\\s|$)`);
+export { countProofCases, proofTitle };
 export const recordPath = (root: string, key: string) => join(root, '.graphyard', 'verify', `${key}.json`);
 
 /** Which of the item's proofs a worker can run here, and why each of the rest is outstanding. */
@@ -84,37 +85,30 @@ async function proofFiles(root: string, proof: string) {
 }
 
 /**
- * Run one proof's cases in `root` and count what the TAP stream says about them. The proof's test
+ * Run one proof's cases in `root` and count what the TAP stream, else the repository's runner, says about them. The proof's test
  * files run whole, and its cases are the ones whose title begins with the proof name: narrowing the
  * run with --test-name-pattern would report every other case of the file as skipped, which a
  * producer then has to explain away. The run gets the suite's isolation (test-isolation.ts): this
  * session's credentials withheld and a window of free ports held for it alone.
  */
 export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files' | 'abnormal'>> {
-  if (!files.length) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
   const reservation = await reserveTestPorts(ports);
-  let run: ReturnType<typeof spawnSync>;
+  const spawn = (command: string, args: string[]) => spawnSync(command, args, { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024 });
+  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-proof-'));
   try {
-    run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', ...files],
-      { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024 });
-  } finally { reservation.release(); }
-  const tap = String(run.stdout ?? ''), { executed, failed, skipped } = countProofCases(tap, proof);
-  // The file's other cases are the ordinary suite's business: only the proof's own decide its
-  // result. A run that did not end normally — a hook, the file or the process failing — passes none.
-  const abnormal = run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
-  return { result: !abnormal && executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files, ...(abnormal ? { abnormal } : {}) };
-}
-
-/** The proof's cases in a TAP stream, attributed by title prefix. */
-export function countProofCases(tap: string, proof: string) {
-  const title = proofTitle(proof);
-  let executed = 0, failed = 0, skipped = 0;
-  for (const line of tap.split('\n')) {
-    const match = line.match(/^\s*(not ok|ok) \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$/);
-    if (!match || !title.test(match[2])) continue;
-    if (match[3]) skipped++; else { executed++; if (match[1] === 'not ok') failed++; }
-  }
-  return { executed, failed, skipped };
+    const run = files.length ? spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', ...files]) : null;
+    const tap = String(run?.stdout ?? ''), { executed, failed, skipped } = countProofCases(tap, proof);
+    // GY-3170: what TAP counted nothing for, the repository's own runner counts, as the merge trial does.
+    if (!executed && !skipped) {
+      const counted = (await countByRunner({ root, proofs: [proof], scratch, runner: async (command, args) => spawn(command, args), git: defaultChildRun }))[proof];
+      if (counted) return { result: counted.executed > 0 && counted.failed === 0 && counted.skipped === 0 ? 'pass' : 'fail', executed: counted.executed, failed: counted.failed, skipped: counted.skipped, files: counted.files, ...(counted.reason ? { abnormal: counted.reason } : {}) };
+    }
+    if (!run) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
+    // The file's other cases are the ordinary suite's business: only the proof's own decide its
+    // result. A run that did not end normally — a hook, the file or the process failing — passes none.
+    const abnormal = run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
+    return { result: !abnormal && executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files, ...(abnormal ? { abnormal } : {}) };
+  } finally { reservation.release(); await rm(scratch, { recursive: true, force: true }); }
 }
 
 /**

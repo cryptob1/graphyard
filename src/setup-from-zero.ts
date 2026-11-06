@@ -13,6 +13,7 @@ import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrServerUnit } from './herdr-host.js';
 import { installIdFor } from './install/types.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
+import { landlockRefusal } from './landlock.js';
 
 /**
  * The prerequisites the README's setup steps depend on that `graphyard doctor` can check from this
@@ -23,6 +24,7 @@ export const setupSteps = {
   install: 'README setup step 2 (install with graphyard up)',
   environments: 'README setup step 3 (connect agent accounts)',
   sandbox: 'README setup step 1 (install bubblewrap for the worker sandbox)',
+  kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9',
   loopCode: 'rerun graphyard up --agent from this checkout (README setup step 2, start the master)',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
@@ -50,6 +52,8 @@ export interface SetupFromZeroInput {
   /** GY-2159: `systemctl --user ARGS` for the unit-overrides line; the user manager when unset here. */
   systemctl?: UserSystemctl;
   platform?: NodeJS.Platform;
+  /** GY-3169: the host's Landlock ABI reader; the landlock line appears only when given. */
+  landlockAbi?: () => number;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -231,6 +235,11 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
+  if (input.landlockAbi) {
+    const read = input.landlockAbi; let abi = 0;
+    const refusal = landlockRefusal(() => (abi = read()));
+    lines.push({ id: 'landlock', status: refusal ? 'fail' : 'pass', step: setupSteps.kernel, detail: refusal ?? `Landlock ABI ${abi} confines sessions` });
+  }
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));

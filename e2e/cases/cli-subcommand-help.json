@@ -1,0 +1,13 @@
+{
+  "id": "cli-subcommand-help",
+  "title": "A subcommand's help flag prints its usage and mints no sign-in link",
+  "description": "The launcher answers a subcommand's --help or -h itself: login --help and open -h print the command's help and never reach the control plane, so no single-use admin sign-in link is minted by asking for usage.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "subcommand help regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/cli-subcommand-help.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

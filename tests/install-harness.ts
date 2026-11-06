@@ -150,7 +150,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
       await writeFile(file, 'placeholder private key: never read by the installer\n', { mode: 0o600 });
       await writeFile(`${file}.pub`, `${DEPLOY_PUBLIC_KEY}\n`, { mode: 0o600 });
       return { stdout: '', stderr: '', code: 0 };
-    } }),
+    }, ssh: async args => transport.exec('ssh', args, { allowFailure: true }) }),
     detectRuntimes: async () => [{ kind: 'claude', program: 'claude', path: '/usr/bin/claude', authenticated: true, reason: 'test runtime' }],
     detectHerdr: async () => ({ available: true, version: 'herdr 0.7.1', reason: 'available' }),
     registerProfiles: async request => ({

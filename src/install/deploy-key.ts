@@ -16,6 +16,8 @@ export const deployKeyTitle = (host: string) => `graphyard-merge-writer-${host}`
 export interface DeployKeyOptions {
   /** Runs `ssh-keygen` with ARGS; the default spawns the host's. Tests substitute a fake that writes the pair. */
   keygen?: (args: string[]) => Promise<CommandResult>;
+  /** Runs `ssh` with ARGS (the push probe of a login that cannot list keys); the default spawns the host's. */
+  ssh?: (args: string[]) => Promise<CommandResult>;
   /** The host named in the key's title; the machine's hostname by default. */
   hostname?: string;
 }
@@ -26,6 +28,20 @@ function sshKeygen(args: string[]): Promise<CommandResult> {
       if (!error) return accept({ stdout: String(stdout), stderr: String(stderr), code: 0 });
       reject(commandFailure('ssh-keygen', { stdout: String(stdout ?? ''), stderr: String(stderr ?? error.message ?? ''), code: Number.isInteger(error.code) ? error.code : 1 }));
     });
+  });
+}
+
+/**
+ * An `ssh` run whose failure is an answer, not an exception: the push probe reads its exit code
+ * (0 is the ref advertisement a write key receives). Standard input is closed, so the probe sends
+ * nothing after the advertisement — no push is ever made.
+ */
+function sshProbeRun(args: string[]): Promise<CommandResult> {
+  return new Promise(accept => {
+    const child = execFile('ssh', args, { encoding: 'utf8', timeout: 60_000, windowsHide: true }, (error: any, stdout, stderr) => {
+      accept({ stdout: String(stdout ?? ''), stderr: String(stderr ?? error?.message ?? ''), code: error ? (Number.isInteger(error.code) ? error.code : 1) : 0 });
+    });
+    child.stdin?.end();
   });
 }
 
@@ -68,7 +84,7 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   await chmod(privateKeyFile, 0o600);
   await chmod(publicKeyFile, 0o600);
 
-  await registerDeployKey(publicKeyFile, repository, gh, title);
+  await registerDeployKey(publicKeyFile, repository, gh, title, { ssh: options.ssh });
   return privateKeyFile;
 }
 
@@ -76,11 +92,26 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
  * Registers the OpenSSH public key in PUBLIC_KEY_FILE read-write on REPOSITORY under TITLE, unless a
  * deploy key with its fingerprint is already listed. A self-contained host's key is generated on the
  * host and only its public half reaches this machine for this (GY-2010).
+ *
+ * Listing deploy keys takes repository admin (GY-3174), so GitHub answers 403/404 to a push-only
+ * operator even after an admin registered this key. That answer probes the key over ssh instead:
+ * the ref advertisement `git-receive-pack` gives a write key proves it pushes (nothing is sent), and
+ * a refusal stops with the one command an admin must run. Every other list failure still fails as
+ * the gh error it is.
  */
-export async function registerDeployKey(publicKeyFile: string, repository: string, gh: GitHubCli, title: string) {
+export async function registerDeployKey(publicKeyFile: string, repository: string, gh: GitHubCli, title: string, options: Pick<DeployKeyOptions, 'ssh'> = {}) {
   const fingerprint = publicKeyFingerprint(await readFile(publicKeyFile, 'utf8'));
   if (!fingerprint) throw new Error(`${publicKeyFile} holds no OpenSSH public key`);
-  const listed = await gh(['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title']);
+  const listed = await gh(['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title'], { allowFailure: true });
+  if (listed.code !== 0) {
+    if (!/HTTP 40[34]/.test(`${listed.stderr}\n${listed.stdout}`)) throw commandFailure('gh', listed);
+    const privateKeyFile = publicKeyFile.endsWith('.pub') ? publicKeyFile.slice(0, -'.pub'.length) : publicKeyFile;
+    const probed = await (options.ssh ?? sshProbeRun)(['-i', privateKeyFile, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', 'git@github.com', `git-receive-pack '${repository}.git'`]);
+    if (probed.code === 0) return;
+    throw new Error(`The deploy key at ${privateKeyFile} cannot push to ${repository} (${probed.stderr.trim() || `ssh exited with ${probed.code}`}), and this gh login cannot register it: gh repo deploy-key list needs a repository admin. Ask an admin to run:
+
+gh api -X POST repos/${repository}/keys -f title=${title} -f key="$(cat ${publicKeyFile})" -F read_only=false`);
+  }
   let registered: unknown;
   try { registered = JSON.parse(listed.stdout || '[]'); } catch { throw new Error(`gh repo deploy-key list returned no JSON for ${repository}`); }
   const keys = Array.isArray(registered) ? registered : [];

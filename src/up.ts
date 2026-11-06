@@ -17,6 +17,7 @@ import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onb
 import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './redaction.js';
+import { landlockRefusal, readLandlockAbi } from './landlock.js';
 import { recordSupervision } from './master/config.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
@@ -158,6 +159,8 @@ export interface UpDependencies {
    * when clean). The loop refuses to start from a dirty one, so preflight refuses first.
    */
   cliCheckout?(): Promise<{ root: string; dirty: string[] }>;
+  /** GY-3169: the host's Landlock ABI; preflight refuses below 9, since socket confinement then launches nothing. */
+  landlockAbi?(): number;
   /** GY-1480: why the master loop refuses to run, as the loop itself words it, or null while nothing stops it. */
   loopRefusal?(): Promise<string | null>;
   /**
@@ -637,6 +640,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     await step('preflight', async () => {
+      const landlock = deps.landlockAbi ? landlockRefusal(deps.landlockAbi) : null;
+      if (landlock) throw new UpStop(`preflight: ${landlock}. Boot a newer kernel, then rerun ${rerun()}; nothing was installed.`, upExitCodes.prerequisite);
       // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
       await ensureRepository();
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1065,30 +1070,6 @@ export async function upUrlRefusal(root: string, url: string | null | undefined)
     : `--url ${url} is not the control plane this checkout's master is set up with (${recorded} in .graphyard/master.json), and master init accepts no other; omit --url to use ${recorded}`;
 }
 
-/** `graphyard up --help` (GY-1510): up's usage, one line for each option. */
-export const upUsage = [
-  'Usage: graphyard up --repo OWNER/NAME [options]',
-  '',
-  'First-run setup in one command, resumable: a rerun skips what is done (.graphyard/up.json).',
-  '',
-  'Options:',
-  '  --base-branch NAME         branch to build on; a rerun keeps the installed branch',
-  '  --repo OWNER/NAME          the repository to set up; a rerun reuses the recorded one',
-  '  --provider NAME            compose (default) or local',
-  '  --local                    --provider local: embedded Postgres on this machine, no Docker',
-  '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
-  '  --master NAME              the master agent runtime, claude or codex (default claude)',
-  '  --wait MINUTES             how long each wait on a person lasts (agent default 20)',
-  "  --share-tailnet            serve the dashboard on this host's tailnet (never publicly)",
-  '  --url URL                  the control plane\'s address before master init records one (HTTPS, or HTTP on loopback); every later step uses it',
-  '  --json                     print the result as JSON',
-  '  -h, --help                 print this help and exit',
-  '',
-  'Exit codes: 0 green, 1 a step failed, 2 a machine prerequisite needs a person, 3 still waiting on a person.',
-].join('\n');
-/** Whether ARGS ask for up's usage. */
-export const upHelpRequested = (args: readonly (string | undefined)[]) => args.includes('--help') || args.includes('-h');
-
 /**
  * The repository and provider an earlier run recorded in .graphyard/up.json (GY-1466), so a
  * resumed `up` needs those flags again only when they differ; null when no run is recorded here.
@@ -1101,7 +1082,7 @@ export function recordedUp(root: string): { repository: string; provider: string
   } catch (error: any) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
 }
 
-/** The options `graphyard up` parses; upUsage gives each one line (GY-1510). */
+/** The options `graphyard up` parses (GY-1510). */
 export const upOptions = { 'base-branch': { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
@@ -1266,6 +1247,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     // checkout A to this CLI rewrites the loop onto this CLI, so uncommitted work in the obsolete A
     // stops nothing, and work in this CLI's own checkout stops the run before anything is installed.
     cliCheckout: async () => { const checkout = await readCoordinatorCheckout(coordinatorCheckoutRoot(cliPath)); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
+    landlockAbi: readLandlockAbi,
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),

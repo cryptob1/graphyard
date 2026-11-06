@@ -5,7 +5,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { prepareInstall, installRequestFromArgs } from '../src/install/index.js';
 import { writeInstallRecord } from '../src/install/secrets.js';
-import { publishOnboarding, runUp, upRequestFromArgs, upUsage, type UpDependencies } from '../src/up.js';
+import { installCommands } from '../src/cli/install.js';
+import { publishOnboarding, runUp, upRequestFromArgs, type UpDependencies } from '../src/up.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 test('unit:tests/up-base-branch.test.ts — up passes --base-branch to install; reruns retain it and onboarding uses its tip', async () => {
@@ -32,7 +33,7 @@ test('unit:tests/up-base-branch.test.ts — up passes --base-branch to install; 
 
   const request = upRequestFromArgs(['--repo', 'owner/project', '--base-branch', 'release/test']);
   assert.equal(request.baseBranch, 'release/test');
-  assert.match(upUsage, /--base-branch NAME/);
+  assert.match(installCommands.find(command => command.name === 'up')!.help.join('\n'), /--base-branch NAME/);
   const calls: string[][] = [];
   const dependencies: UpDependencies = {
     root, emit: () => {}, now: Date.now, sleep: async () => {},
