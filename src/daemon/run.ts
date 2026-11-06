@@ -11,7 +11,7 @@ import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness,
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from '../install/loop-unit.js';
-import { cancelMergeWriterTrials, mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
+import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
@@ -93,10 +93,12 @@ export async function restartThroughUnit() {
 }
 
 /**
- * GY-3148: how long a restart the deploy unit's served release owes may wait for the merge trials
- * in flight to settle on their own. Past the bound the loop cancels the trials (no head refused,
- * each stays queued) and restarts anyway — with concurrent per-head trials the writer is otherwise
- * never idle. Four minutes, since the loop looks between cycles and owes the restart within five.
+ * GY-3148: how long a restart the deploy unit's served release owes may wait for the merge flights
+ * in flight to settle inside the loop that started them. Past the bound the loop restarts anyway:
+ * since GY-3159 each merge flight's trial runs detached from this process (its own session, under
+ * systemd its own transient scope), so the restart leaves it running and the next loop adopts it —
+ * the trial keeps its own verdict (merged, or refused for its own failure) instead of being
+ * discarded. Four minutes, since the loop looks between cycles and owes the restart within five.
  */
 export const releaseAdoptionBoundMs = 4 * 60_000;
 
@@ -141,9 +143,10 @@ export function deployRestartCause(root: string, running: DeployUnitProcess | nu
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe. A cycle that throws is recorded, logged and retried after a growing
  * delay; only a stop signal ends the loop. Between cycles the loop restarts through its unit when
- * the deploy unit serves a commit it did not load: it waits for a merge trial in flight to settle,
- * but only within `releaseAdoptionBoundMs`, past which it cancels the trials and restarts anyway
- * (GY-3148); the next loop adopts those trials from their recorded ledger state.
+ * the deploy unit serves a commit it did not load: it waits for a merge flight in flight to settle,
+ * but only within `releaseAdoptionBoundMs`, past which it restarts anyway — each flight's trial
+ * runs detached from this process, the restart leaves it running, and the next loop adopts it
+ * (GY-3148, GY-3159).
  */
 export async function runDaemon(config: MasterConfig, state: DaemonState, raw: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
   environment?: Record<string, string | undefined>;
@@ -245,18 +248,17 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           storeAction(state, `deploy-unit-restart:${serving}`, { kind: 'deployment', work: null, principal: null, state: outcome, detail: detail.slice(0, 1000), attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() });
           await effects.persist(state).catch(() => {});
         }
-        // A restart would kill a merge trial in flight, so it waits for the trial to settle — but
-        // only within `releaseAdoptionBoundMs` (GY-3148): with concurrent per-head trials the
-        // writer is never idle, so a loop that waited forever ran old code beside the release the
-        // deploy unit already serves. Past the bound the loop cancels its running trials — each
-        // settles at once, no head refused — and restarts anyway; the next loop adopts those trials
-        // from their recorded ledger state, as it already adopts the batch gate and headless runs.
+        // A restart would cut a merge flight's landing short, so it waits for the flight to settle
+        // — but only within `releaseAdoptionBoundMs` (GY-3148). Past the bound the loop restarts
+        // anyway: its trials run detached from this process (GY-3159), so the restart leaves each
+        // one running and the next loop adopts it — the trial reaches its own verdict instead of
+        // being discarded as the restart's own refusal.
         const cause = options.root && !stopping ? restartCause(config, options.root, state.release?.commit ?? null) : null;
         const trialsInFlight = mergeWriterInFlight(state);
         if (!cause || !trialsInFlight) restartWaitedFrom = null;
         if (cause && (!trialsInFlight || now() - (restartWaitedFrom ??= now()) >= releaseAdoptionBoundMs)) {
-          const checkpointed = trialsInFlight ? cancelMergeWriterTrials(state, 'the loop restarts onto the release the deploy unit now serves') : [];
-          log(`[graphyard-master] restarting through the supervisor unit${checkpointed.length ? `, checkpointing the merge trial(s) of ${checkpointed.join(', ')} that could not settle inside the bound` : ''}: ${cause}`);
+          const running = state.mergeWriter.inFlights?.map(entry => entry.key) ?? [];
+          log(`[graphyard-master] restarting through the supervisor unit${running.length ? `; the merge trial(s) of ${running.join(', ')} run on, detached, and the next loop adopts them` : ''}: ${cause}`);
           try { rmSync(loopRestartRequestPath(config), { force: true }); await (options.restartLoop ?? restartThroughUnit)(); }
           catch (error) { restartWaitedFrom = null; log(`[graphyard-master] the restart could not be asked: ${message(error)}`); }
         }

@@ -725,6 +725,15 @@ export function trialNoVerdict(error: unknown): TrialNoVerdict {
 }
 /** Every attempt of a trial that ended with `error` and reached no verdict, oldest first (GY-1832); one entry for an error no retry wrapped. */
 export const trialAttempts = (error: unknown): TrialNoVerdict[] => (typeof error === 'object' && error ? attemptContext.get(error)?.attempts : undefined) ?? [trialNoVerdict(error)];
+/**
+ * GY-3159: attaches `attempts` to an error a detached trial run recorded and a watcher rebuilt, so
+ * the trial's record carries every attempt the run made, exactly as an in-process trial's would.
+ */
+export function setTrialAttempts(error: unknown, attempts: TrialNoVerdict[]): void {
+  if (typeof error !== 'object' || !error || !attempts.length) return;
+  const last = attempts.at(-1)!;
+  attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: last.phase, phases: last.phases }), attempts });
+}
 
 /**
  * The trial of a merge commit (`runTrialAttempt`), tried again once (`trialRetries`) when it
