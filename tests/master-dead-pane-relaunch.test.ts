@@ -9,7 +9,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const clock = Date.parse('2026-10-24T07:00:00Z');
 const MASTER = 'graphyard-master-project';
 
-test('unit:master-dead-pane-relaunch — a master pane reported as a bare shell on two consecutive cycles ends the session and relaunches; one miss does not', async () => {
+test('unit:tests/master-dead-pane-relaunch.test.ts — a master pane reported as a bare shell on two consecutive cycles ends the session and relaunches; one miss does not', async () => {
   const directory = await temporaryDirectory('master-dead-pane');
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: `${directory}/coordinator.token`, cliPath: '/bin/graphyard',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: MASTER, workers: [] });
