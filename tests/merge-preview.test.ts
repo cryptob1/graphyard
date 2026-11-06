@@ -55,7 +55,7 @@ const previewDirectories = async (base: string) => (await readdir(base)).filter(
 // The fixtures' one fixed now: no instant here is compared with the wall clock.
 const fixedNow = 1_893_456_000_000, fixedAt = new Date(fixedNow).toISOString();
 const tip = sha('tip'), head = sha('head'), mergeSha = sha('merge');
-const work = (files: string[] = ['src/game.ts']) => workFixture({
+const work = (files: string[] = ['src/game.ts']): Work => workFixture({
   id: 'w1', key: 'GY-1', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], stage: 'build', epoch: 1,
   submission: { epoch: 1, pr: 1 }, candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' },
   observation: { source: 'control-plane', candidate: { sha: head, baseSha: tip, pr: 1 }, files, checks: [], reviews: [], merged: false } as never, gates: [], mergeLedger: null,
