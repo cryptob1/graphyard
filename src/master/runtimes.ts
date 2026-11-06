@@ -19,6 +19,7 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
  * - `recipe`: the no-approval startup contract (harness.ts `launchPlan`), with folder trust.
  * - `request`/`role`: where the session's first request and role file go on its command line (launch.ts).
  * - `screen`: the runtime's own start screen, so a slow start is told from a dead one.
+ * - `firstRun`: screens a fresh account home stops on before it takes any request; a session showing one is stuck, whatever Herdr reports.
  * - `endedStates`: what its session listing calls an ended session, beyond the shared set.
  * - `resume`: how a session is named at launch and resumed by that name, and how its transcript follows a new worktree.
  * - `limitNotices`: the provider-authored usage-limit notices it prints; `zonelessUtcResets` when those name a UTC wall clock with no zone.
@@ -32,6 +33,7 @@ export interface RuntimeAdapter {
   request?: (reference: string) => string;
   role?: (reference: string) => string;
   screen?: RegExp;
+  firstRun?: readonly RegExp[];
   endedStates?: readonly string[];
   resume?: { fresh: (id: string) => string[]; resume: (id: string) => string[]; carry?: (environment: Record<string, string>, session: string, from: string, to: string) => Promise<void> };
   limitNotices?: readonly RegExp[];
@@ -83,6 +85,7 @@ const builtInAdapters = {
     request: reference => reference,
     // Only Claude Code, which leaves AGENTS.md out under a role file, loads the launch authorization from a file.
     role: reference => `--append-system-prompt-file ${reference}`,
+    firstRun: [/Choose the text style/, /Security notes/, /Use Claude Code.s terminal setup\?/, /Select login method/],
     screen: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
     // Claude Code takes the id it will use (`--session-id`) and resumes it (`--resume`).
     resume: { fresh: id => ['--session-id', id], resume: id => ['--resume', id], carry: carryClaudeTranscript },
@@ -177,6 +180,9 @@ export const environmentKinds = runtimeKinds.filter(kind => 'home' in builtInAda
 
 const adapters = new Map<string, RuntimeAdapter>(Object.entries(builtInAdapters).map(([kind, adapter]) => [kind, { kind, ...adapter } as RuntimeAdapter]));
 /** The adapter for `kind`, or undefined for a kind Graphyard knows nothing of. */
+/** The remedy for a session stuck on its runtime's first-run screen, or null when the screen is not one. */
+export const firstRunStuck = (kind: string | null | undefined, screen: string | null): string | null =>
+  screen && runtimeAdapter(kind)?.firstRun?.some(pattern => pattern.test(screen)) ? `stuck on ${kind} first-run setup: open the pane and finish setup, or run ${kind} once interactively in that account home` : null;
 export const runtimeAdapter = (kind: string | null | undefined): RuntimeAdapter | undefined => kind ? adapters.get(kind) : undefined;
 /** Every adapter, built-in and registered. */
 export const runtimeAdapters = (): RuntimeAdapter[] => [...adapters.values()];
