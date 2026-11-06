@@ -83,8 +83,9 @@ test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requ
     assert.equal(refused.launched.length, 0);
     assert.match(refused.refused[0].reason, /superseded/);
     assert.doesNotMatch(refused.refused[0].reason, /two minutes/);
-    // A base that moved supersedes it the same way.
-    assert.throws(() => assertReviewCandidate(item(iso(-20 * minute)), iso(0), reviewRequest({ baseSha: 'd'.repeat(40) })), /superseded/);
+    // A base tip that moved alone does not (GY-3162): the request binds the head and policy revision.
+    assert.doesNotThrow(() => assertReviewCandidate(item(iso(-20 * minute)), iso(0), reviewRequest({ baseSha: 'd'.repeat(40) })));
+    assert.throws(() => assertReviewCandidate(item(iso(-20 * minute)), iso(0), reviewRequest({ policyRevision: 99 })), /superseded/);
     // The observation must still be of the candidate itself.
     assert.throws(() => assertReviewCandidate(item(iso(-20 * minute), { observation: observation(moved, iso(-20 * minute)) }), iso(0), reviewRequest()), /does not match the current candidate/);
 

@@ -407,7 +407,7 @@ export function assertReviewCandidate(work: Work, observedAt: string, request?: 
   if (work.reworkRequested) throw new Error(`${work.key} is awaiting rework; review the next submitted candidate`);
   if (!observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) throw new Error(`${work.key} GitHub observation does not match the current candidate`);
   if (!Number.isFinite(Date.parse(observation.at))) throw new Error(`${work.key} GitHub observation has no valid time`);
-  if (request && (request.sha !== candidate.sha || request.baseSha !== candidate.baseSha || request.policyRevision !== work.policyRevision)) throw new Error(`${work.key} review request for ${request.sha.slice(0, 12)} on base ${request.baseSha.slice(0, 12)} is superseded: the latest observation is of head ${candidate.sha.slice(0, 12)} on base ${candidate.baseSha.slice(0, 12)}`);
+  if (request && (request.sha !== candidate.sha || request.policyRevision !== work.policyRevision)) throw new Error(`${work.key} review request for ${request.sha.slice(0, 12)} under policy revision ${request.policyRevision} is superseded: the latest observation is of head ${candidate.sha.slice(0, 12)} under policy revision ${work.policyRevision}`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
   // A head behind the base branch is reviewed as it stands when it merges cleanly: GitHub

@@ -1,5 +1,5 @@
 import type { Work } from '../model/work.js';
-import { type ProductReviewState, short, type DispatchTransition, type AutoDispatch, type DispatchRequest, dispatchHistoryLimit, binds, reviewNeed } from '../model/dispatch.js';
+import { type ProductReviewState, short, type DispatchTransition, type AutoDispatch, type DispatchRequest, dispatchHistoryLimit, binds, reviewBinds, reviewNeed } from '../model/dispatch.js';
 import { needsProductReview } from '../model/product-review.js';
 import { standingProductReview } from './product-review.js';
 import { createHash } from 'node:crypto';
@@ -41,8 +41,8 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
   const staleReason = (request: DispatchRequest) => {
     const candidate = work.candidate!;
     if (request.sha !== candidate.sha) return `head changed from ${short(request.sha)} to ${short(candidate.sha)}`;
-    if (request.baseSha !== candidate.baseSha) return `base changed from ${short(request.baseSha)} to ${short(candidate.baseSha)}`;
-    return `policy revision changed from ${request.policyRevision} to ${work.policyRevision}`;
+    if (request.policyRevision !== work.policyRevision) return `policy revision changed from ${request.policyRevision} to ${work.policyRevision}`;
+    return `base changed from ${short(request.baseSha)} to ${short(candidate.baseSha)}`;
   };
   const ineligible = dispatchIneligibility(work);
   if (ineligible) {
@@ -53,7 +53,7 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
   } else {
     const candidate = work.candidate!;
     // Review: one live request per head, resolved by the verdict that lands on it.
-    if (state.review && !binds(state.review, work)) { resolve(state.review, 'cancelled', staleReason(state.review)); state.review = null; }
+    if (state.review && !reviewBinds(state.review, work)) { resolve(state.review, 'cancelled', staleReason(state.review)); state.review = null; }
     const need = reviewNeed(work, all, now);
     // A standing request over a head whose mechanical proofs are not all passing is withdrawn, not
     // answered: nothing reviewed it. (A request raised before GY-115 is the only way to hold one.)
@@ -62,7 +62,7 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     // Product review (GY-2989): one live request per head, raised beside the code review's. A
     // verdict on the head resolves it; a carried approval satisfies it; a change request or a
     // reject cancels it — no session is asked for a head those verdicts have already answered.
-    if (state.product && !binds(state.product, work)) { resolve(state.product, 'cancelled', staleReason(state.product)); state.product = null; }
+    if (state.product && !reviewBinds(state.product, work)) { resolve(state.product, 'cancelled', staleReason(state.product)); state.product = null; }
     const productNeed = productReviewNeed(work);
     if (state.product && !productNeed.needed) {
       resolve(state.product, productNeed.state === 'approved' || productNeed.state === 'carried' ? 'satisfied' : 'cancelled', productNeed.reason);
