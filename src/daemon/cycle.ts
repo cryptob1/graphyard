@@ -317,6 +317,8 @@ async function closeStep(cycle: Cycle) {
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
+  const orphans = await effects.stopOrphanedProcesses?.() ?? [];
+  if (orphans.length) await note(cycle, `orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${orphans.join(', ')}: still running against a removed worktree`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
 }

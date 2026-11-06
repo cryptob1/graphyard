@@ -8,6 +8,7 @@ import type { ChildRun } from '../child-runner.js';
 import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig } from './profiles.js';
 import { assertOutsideWorktrees } from '../private-file.js';
+import { stopProcessesUnder } from '../session-processes.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 
 /*
@@ -30,12 +31,14 @@ export async function freeBytes(path: string): Promise<number | null> {
 /**
  * Remove an ended attempt's assignment worktree with `git worktree remove`, never forced: Git keeps a
  * tree with uncommitted changes, and the branch it had checked out survives. A shared install linked
- * into the tree is unlinked first, since it is no work of the attempt's. Whether a tree was removed:
+ * into the tree is unlinked first, since it is no work of the attempt's, and whatever still runs
+ * under it is stopped first: the attempt is over even when Git keeps the tree. Whether a tree was removed:
  * one already gone, or a path that is not directly inside `worktreesDirectory`, is nothing to do.
  */
 export async function removeAttemptWorktree(root: string, path: string, run: ChildRun): Promise<boolean> {
   const target = resolve(path);
   if (dirname(target) !== worktreesDirectory(root) || !existsSync(target)) return false;
+  await stopProcessesUnder(target);
   for (const name of dependencyDirectories) if ((await lstat(resolve(target, name)).catch(() => null))?.isSymbolicLink()) await unlink(resolve(target, name));
   await Promise.resolve(run('git', ['-C', root, 'worktree', 'remove', target]));
   return true;

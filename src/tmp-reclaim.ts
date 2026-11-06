@@ -106,6 +106,8 @@ export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
   }));
   return held;
 }
+/** The absolute path one argument is, or carries as `--opt=/path` or a short `-D/path`. */
+export const argumentPath = (argument: string) => argument.match(/^(?:--[\w-]+=|-[A-Za-z])?(\/.*)$/s)?.[1];
 /**
  * The absolute paths a process's NUL-separated command line names. An argument that is a path, or
  * the value of `--opt=/path` or a short `-D/path`, is taken whole, spaces included, since the kernel
@@ -113,7 +115,7 @@ export async function heldOpenPaths(procRoot = '/proc'): Promise<Set<string>> {
  * to its first space, which can only name a shorter path and so keeps more, never less.
  */
 export const namedPaths = (commandLine: string): string[] => commandLine.split('\0').flatMap(argument => {
-  const whole = argument.match(/^(?:--[\w-]+=|-[A-Za-z])?(\/.*)$/s)?.[1];
+  const whole = argumentPath(argument);
   return [...whole ? [whole] : [], ...argument.match(/(?<![\w.~:/-])\/[^\s'"`=:,;)]+/g) ?? []];
 }).map(path => path.replace(/\/+$/, '')).filter((path, index, all) => path.length > 1 && all.indexOf(path) === index);
 /**

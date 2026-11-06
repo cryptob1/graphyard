@@ -98,6 +98,8 @@ export interface DaemonEffects {
   reclaimDisk?: () => Promise<string[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
+  /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
+  stopOrphanedProcesses?: () => Promise<string[]>;
   /**
    * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
