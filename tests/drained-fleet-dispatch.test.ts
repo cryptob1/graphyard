@@ -16,6 +16,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { hostname } from 'node:os';
+import { workFixture } from './helpers/work-fixture.js';
 
 const registry = () => ({ probe: registryFixture(hostname(), ['codex']).probe });
 // Time-bomb allowance (GY-1694): the 2030-01-01T12:00Z observedAt is the clock handed to reclaimableAgent and runCycle; the new Date() dispatchWork calls stamp their own snapshot and a lease built from that same Date.now().
@@ -36,12 +37,7 @@ const clock = Date.parse(observedAt);
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
   const at = new Date(clock - 3_600_000).toISOString();
-  return {
-    id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], containmentQuarantine: null, ...overrides,
-  } as Work;
+  return workFixture({ key, type: 'bug', priority: 1, stage: 'build', createdAt: at, updatedAt: at, stageEnteredAt: at, containmentQuarantine: null, ...overrides });
 }
 const profile = (name: string, credentialFile = `/srv/credentials/${name}.token`): WorkerProfile =>
   ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} } as WorkerProfile);

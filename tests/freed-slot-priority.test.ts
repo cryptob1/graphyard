@@ -10,18 +10,14 @@ import { dispatchKey } from '../src/daemon/reconcile.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readySpecCheck } from './helpers/spec-check.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-3149: two items waiting for a worker slot; the freed slot goes to the priority-0 one.
 const cli = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T12:00:00Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
-const work = (key: string, priority: number): Work => ({
-  id: `id-${key}`, key, title: `Hotfix: ${key}`, description: '', type: 'feature', priority, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
-  policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000),
-  ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-  specCheck: readySpecCheck(new Date().toISOString()), gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
-} as Work);
+const work = (key: string, priority: number): Work =>
+  workFixture({ key, title: `Hotfix: ${key}`, priority, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000) });
 const profile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 
 test('unit:freed-slot-goes-to-highest-priority — a priority-1 item never launches while the priority-0 item waits for a slot, and the freed slot goes to the priority-0 item', async () => {

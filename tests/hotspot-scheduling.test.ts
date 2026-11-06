@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,6 +11,7 @@ import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-882: hot-spot-aware scheduling. Dispatch stays optimistic — file overlap never holds an
 // item — but within one operator priority an item that touches no file two or more live attempts
@@ -27,14 +27,7 @@ const later = iso(600_000), earlier = iso(-600_000);
 const hotFile = 'src/daemon/cycle-sessions.ts';
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
-  return {
-    id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
-    specCheck: readySpecCheck(new Date().toISOString()),
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
-  } as Work;
+  return workFixture({ key, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }], createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0), ...overrides });
 }
 /** The files an item's candidate was observed to change: what heat reads. */
 const observed = (files: string[]) => ({ observation: { files } as unknown as Work['observation'] });
