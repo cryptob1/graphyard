@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bootstrapGate, catalogBudgetMs, catalogFits, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -199,6 +200,7 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
   assert.equal(adopted.verified, tip, 'the adopted batch verifies its own candidate tip, not the newer main');
   assert.equal(adopted.inFlight, null);
   assert.ok(loop.filed.some(entry => entry.key === 'flake:e2e:case-2'), 'the passing re-run files its flake');
+  assert.equal(readGateRecord(gateRecordPath(coordinator))!.filed!['flake:e2e:case-2']!.item, 'GY-101', 'the filed case binding survives on disk for a later run to reuse (GY-3147)');
 
   // The following batch gates the merge that landed meanwhile.
   const third = await batchGateStep(cycleWith(loop.value, work4));
@@ -581,4 +583,145 @@ test('unit:verified-batch-release-note — a verified batch appends a release no
   for (let n = 0; n < 25; n++) await appendReleaseNote(releaseNotesPath(coordinator), note);
   assert.equal(readReleaseNotes(releaseNotesPath(coordinator)).length, 20);
   assert.match(latestReleaseNote(releaseNotesPath(coordinator))!.items.join('\n'), /GY-3.*no E2E case/);
+});
+
+test('unit:batch-gate-filing-idempotent — a known red or diagnostic failure whose item is already filed — the same case under different wording, as a later tip makes — is reused and never re-filed; a refused or failed filing is a gate note and never aborts the verdict (GY-3147)', async () => {
+  const verified = sha(1), batch = [landing(2)];
+  const refused = () => new RefusedResponse('Graphyard refused work (409): Idempotency key reused with different input', 409, { error: 'Idempotency key reused with different input' });
+
+  // The gate: a known red filed on one batch, then the same case on the next batch — its filing would name the new tip, so its wording differs.
+  {
+    const world = gatePorts(batch, (_, check) => check === 'test:tests/a.test.ts');
+    const filings: string[] = [];
+    world.ports.file = async input => { filings.push(input.key); return { item: `GY-${100 + filings.length}` }; };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(world.ports, record)).outcome, 'verified', 'the first batch files its known red');
+    assert.deepEqual(filings, ['known-red:test:tests/a.test.ts']);
+    const next = [landing(3)];
+    world.ports.landings = async () => next;
+    world.ports.fetch = async () => next[0]!.sha;
+    assert.equal((await runGate(world.ports, record)).outcome, 'verified');
+    assert.equal(filings.length, 1, 'the case already has its item: reused, never re-filed');
+    assert.equal(record.filed!['known-red:test:tests/a.test.ts']!.item, 'GY-101', 'the binding names the filed item');
+  }
+  // A filing the control plane refuses — its key was filed before with different input — is already filed: the verdict stands.
+  {
+    const world = gatePorts(batch, (_, check) => check === 'test:tests/a.test.ts');
+    world.ports.file = async () => { throw refused(); };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(world.ports, record)).outcome, 'verified');
+    assert.equal(record.lastOutcome!.outcome, 'verified', 'the run records its verdict');
+    assert.equal(record.filed!['known-red:test:tests/a.test.ts']!.item, null, 'the refused key is treated as already filed');
+    assert.deepEqual(record.notes, [], 'a refused key is already filed, not a failure');
+  }
+  // A filing that fails outright never aborts the run: it is a gate note, and the verdict stands.
+  {
+    const world = gatePorts(batch, (_, check) => check === 'test:tests/a.test.ts');
+    world.ports.file = async () => { throw new Error('the control plane is unreachable'); };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(world.ports, record)).outcome, 'verified');
+    assert.deepEqual(record.notes, ['known-red:test:tests/a.test.ts: the control plane is unreachable']);
+    assert.deepEqual(record.filed, {}, 'nothing was filed: the next run tries again');
+    assert.ok(gateSummary(record)!.notes.includes('known-red:test:tests/a.test.ts: the control plane is unreachable'), 'master status shows the note');
+  }
+  // The diagnostics file idempotently too: each case is filed once and reused a day later.
+  {
+    const record = bootstrapGate(repository, verified);
+    let clock = Date.parse('2026-11-05T00:00:00Z');
+    const diagnose = { failed: ['test:tests/slow.test.ts', 'e2e:board'], catalogMs: 20 * 60_000 };
+    const filings: string[] = [];
+    const ports = { now: () => clock, file: async (input: { key: string }) => { filings.push(input.key); return { item: `GY-${100 + filings.length}` }; }, diagnose: async () => diagnose };
+    assert.deepEqual(await runDiagnostics(ports, record), diagnose.failed);
+    clock += diagnosticsIntervalMs;
+    assert.deepEqual(await runDiagnostics(ports, record), diagnose.failed, 'due again a day later');
+    assert.equal(filings.length, 2, 'each case is filed once, then reused');
+    assert.deepEqual(Object.keys(record.filed!), ['diagnostic:test:tests/slow.test.ts', 'diagnostic:e2e:board']);
+  }
+  // A refused diagnostic filing is already filed, and a failed one is a note: neither aborts the run's own records.
+  {
+    let clock = Date.parse('2026-11-05T00:00:00Z');
+    const diagnose = { failed: ['e2e:board'], catalogMs: 5 * 60_000 };
+    const refusedRecord = bootstrapGate(repository, verified);
+    assert.deepEqual(await runDiagnostics({ now: () => clock, file: async () => { throw refused(); }, diagnose: async () => diagnose }, refusedRecord), diagnose.failed);
+    assert.equal(refusedRecord.filed!['diagnostic:e2e:board']!.item, null);
+    assert.equal(refusedRecord.diagnosticsAt, new Date(clock).toISOString(), 'the run still records its verdict');
+    const down = bootstrapGate(repository, verified);
+    assert.deepEqual(await runDiagnostics({ now: () => clock, file: async () => { throw new Error('the control plane is down'); }, diagnose: async () => diagnose }, down), diagnose.failed);
+    assert.deepEqual(down.notes, ['diagnostic:e2e:board: the control plane is down']);
+    assert.deepEqual(down.filed, {});
+    assert.equal(down.catalogMs, diagnose.catalogMs, 'the run still records its own fields');
+  }
+});
+
+test('unit:gate-catalog-known-red — before any culprit search, a confirmed catalog-only e2e case (not smoke, not gate.core, not bound by a batch item) is re-run on the last verified commit: red there too is a filed known red and nothing is reverted, while smoke, gate.core and bound cases stay strict and blame their culprit (GY-3147)', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3)];
+  const catalog = ['create-work-item', 'smoke', 'case-2', 'case-3', 'other'];
+  // The measured catalog fits half the limit, so the gate runs the whole catalog — 'other' is catalog-only.
+  const wholeWorld = (fails: (commit: string, check: string, call: number) => boolean) => {
+    const world = gatePorts(batch, fails);
+    world.ports.catalog = async () => catalog;
+    return world;
+  };
+  const measured = () => ({ ...bootstrapGate(repository, verified), catalogMs: 60_000 });
+
+  // A catalog case red on every commit yields a known red, not a revert of the first item.
+  {
+    const world = wholeWorld((_, check) => check === 'e2e:other');
+    const record = measured();
+    const outcome = await runGate(world.ports, record);
+    assert.equal(outcome.outcome, 'verified');
+    assert.deepEqual(outcome.outcome === 'verified' && outcome.knownRed, ['e2e:other']);
+    assert.deepEqual(world.filed, ['known-red:e2e:other'], 'the known red is filed for an owner');
+    assert.deepEqual(world.reverted, [], 'nothing is reverted for a case the batch did not break');
+    assert.ok(world.runs.some(entry => entry.commit === verified && entry.checks.includes('e2e:other')), 'the case is re-run on the last verified commit before any culprit search');
+  }
+  // A catalog case the batch broke — it passes on the verified commit — is no known red: it blames its culprit.
+  {
+    const world = wholeWorld((commit, check) => check === 'e2e:other' && commit !== verified);
+    assert.equal((await runGate(world.ports, measured())).outcome, 'reverted');
+    assert.deepEqual(world.reverted, ['GY-2']);
+    assert.deepEqual(world.filed, []);
+  }
+  // Smoke, gate.core and the batch's bound cases stay strict: red on every commit, each still blames its culprit and is never compared with the verified commit.
+  for (const check of ['e2e:smoke', 'e2e:create-work-item', 'e2e:case-3']) {
+    const world = wholeWorld((_, failing) => failing === check);
+    assert.equal((await runGate(world.ports, measured())).outcome, 'reverted', `${check} must pass outright even when the whole catalog runs`);
+    assert.ok(!world.runs.some(entry => entry.commit === verified), `${check} is never probed on the verified commit`);
+    assert.deepEqual(world.filed, []);
+    assert.deepEqual(world.reverted, ['GY-2'], `${check} still blames its culprit`);
+  }
+});
+
+test('unit:gate-results-saved-before-filing — every check result is on the gate record before anything is filed — the run and re-run steps, and each probe verdict, for a flake, a known-red test and a known-red catalog case — so a filing failure or crash cannot lose them; a ports.file failure is logged as a note and the run still reaches its verdict (GY-3147)', async () => {
+  const verified = sha(1), batch = [landing(2)];
+  // The whole catalog runs; the flake passes its re-run, the test and the catalog case fail on every commit.
+  const record = { ...bootstrapGate(repository, verified), catalogMs: 60_000 };
+  const world = gatePorts(batch, (_commit, check, call) => (check === 'e2e:case-2' && call === 0) || check === 'test:tests/a.test.ts' || check === 'e2e:other');
+  world.ports.catalog = async () => ['create-work-item', 'smoke', 'case-2', 'other'];
+  const file = gateRecordPath(await temporaryDirectory('gate-results-before-filing'));
+  world.ports.checkpoint = async () => { await writeGateRecord(file, record); };
+  const filed: string[] = [];
+  world.ports.file = async input => {
+    const onDisk = readGateRecord(file)!;
+    if (input.key === 'flake:e2e:case-2')
+      assert.ok(Object.entries(onDisk.inFlight?.results ?? {}).some(([step, failed]) => step.includes('e2e:case-2') && !failed.includes('e2e:case-2')),
+        'the re-run the flake passed is saved before the flake is filed');
+    else assert.equal(onDisk.results[verified]?.[input.key.slice('known-red:'.length)], true, `the probe verdict for ${input.key.slice('known-red:'.length)} is saved before it is filed`);
+    filed.push(input.key);
+    return { item: `GY-${100 + filed.length}` };
+  };
+  assert.equal((await runGate(world.ports, record)).outcome, 'verified');
+  assert.deepEqual(filed, ['flake:e2e:case-2', 'known-red:e2e:other', 'known-red:test:tests/a.test.ts'], 'three filings, each after its result was saved');
+
+  // A filing that fails outright is logged as a note and loses nothing: the verdict stands and the results are already on disk.
+  {
+    const record2 = bootstrapGate(repository, verified);
+    const world2 = gatePorts(batch, (_, check) => check === 'test:tests/a.test.ts');
+    const file2 = gateRecordPath(await temporaryDirectory('gate-results-before-filing-2'));
+    world2.ports.checkpoint = async () => { await writeGateRecord(file2, record2); };
+    world2.ports.file = async () => { throw new Error('the control plane is unreachable'); };
+    assert.equal((await runGate(world2.ports, record2)).outcome, 'verified', 'the run continues to its verdict');
+    assert.deepEqual(record2.notes, ['known-red:test:tests/a.test.ts: the control plane is unreachable'], 'the failure is logged');
+    assert.equal(readGateRecord(file2)!.results[verified]!['test:tests/a.test.ts'], true, 'the probe verdict was saved before the filing failed, so the crash lost nothing');
+  }
 });
