@@ -17,6 +17,7 @@ import { emptyObservation, httpHealth, tool, variableMarker, type AdapterContext
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from './loop-unit.js';
 import type { EnvValue, PreflightItem } from './types.js';
+import { withLocalBin } from '../herdr-host.js';
 import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
 /** How the runtime is kept alive on this machine. A test supervisor runs it in-process. */
@@ -123,6 +124,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=${unitWord(local.paths.directory)}
+# Agent runtimes such as claude install to ~/.local/bin, which a user unit's default PATH lacks.
+Environment=${unitWord(`PATH=${withLocalBin(process.env.PATH)}`)}
 ExecStart=${local.command.map(unitWord).join(' ')}
 Restart=always
 RestartSec=2

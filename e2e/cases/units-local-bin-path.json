@@ -1,0 +1,13 @@
+{
+  "id": "units-local-bin-path",
+  "title": "Host service units find agent runtimes installed in ~/.local/bin",
+  "description": "The systemd user unit written by the local install provider has the operator's ~/.local/bin on its PATH, so account connection finds claude.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "unit PATH includes ~/.local/bin",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/units-local-bin-path.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
