@@ -13,7 +13,7 @@ export const plainStages = [
 ] as const;
 export type PlainStage = typeof plainStages[number];
 
-/** One line each in docs/glossary.md: the plain label and the derived stage it names. */
+/** The plain label and the derived stage it names. */
 export const plainStageLines: Record<PlainStage, string> = {
   'Not started': 'Not started (backlog, ready) — nobody holds it yet.',
   Waiting: 'Waiting (build) — no worker holds it and no session runs; master status names why when the reason is known (GY-3095).',

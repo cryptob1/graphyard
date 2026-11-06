@@ -20,7 +20,7 @@ import { launchStartMs, launchSession, type PromptDelivery, type StartBounds } f
 import { loadMasterConfig, readCredentialFile } from './master/config.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { sessionAgentName } from './master/profiles.js';
-import { selectReviewerProfile } from './auto-dispatch.js';
+import { selectReviewerProfile } from './dispatch/launch-failover.js';
 import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';

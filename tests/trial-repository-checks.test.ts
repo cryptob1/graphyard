@@ -266,7 +266,7 @@ test('unit:repository-check-refusal-names-failing-tests — a repository test ch
   assert.match(failing.logTail, /first case in a/);
   assert.match(failing.logTail, /tests\/a\.test\.ts/);
   const reason = trialFailureReason({ run: failing })!;
-  assert.match(reason, new RegExp(`^${trialFailurePrefix}: tests tests/a\\.test\\.ts, tests/b\\.test\\.ts: first case in a$`));
+  assert.match(reason, new RegExp(`^${trialFailurePrefix}: tests tests/a\\.test\\.ts, tests/b\\.test\\.ts: first case in a\nfailing tests: second case in b\nlog tail:\n`));
   assert.equal(repositoryCheckFailure('✖ frame budget timed out (180000ms)\ntest at tests/frame-budget.test.ts:1:1').timedOut, true);
   assert.match(trialFailureReason({ run: { ...failing, tests: { passed: 0, failed: ['tests/frame-budget.test.ts'], files: 1 }, failingCase: 'frame budget', timedOut: true } })!, /timed out/);
 });

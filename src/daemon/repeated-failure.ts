@@ -36,8 +36,9 @@ export function normalizeFailureReason(reason: string, accounts: readonly string
     .replace(/\s+/g, ' ').trim();
 }
 
+/** GY-3150: a trial refusal's log tail is the run's own output, not its failure, so the signature stops before it. */
 export const failureSignature = (kind: FailureKind, reason: string, accounts: readonly string[] = []) =>
-  `${kind}:${createHash('sha256').update(normalizeFailureReason(reason, accounts)).digest('hex')}`;
+  `${kind}:${createHash('sha256').update(normalizeFailureReason(reason.split('\nlog tail:\n')[0]!, accounts)).digest('hex')}`;
 
 /**
  * The failures the item's records show now, each under an id that names that one occurrence. A failed

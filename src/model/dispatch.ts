@@ -78,7 +78,7 @@ export function reviewNeed(work: Work, all: Work[] = [work], now: Date): { neede
   const behind = behindBaseHold(work);
   if (behind) return { needed: false, state: 'base-not-contained', reason: behind };
   // Review is never held for proofs: CI runs the unit tests on the head and no producer is
-  // requested, so the reviewer is asked as soon as the build gate passes (docs/delivery.md).
+  // requested, so the reviewer is asked as soon as the build gate passes.
   return { needed: true, state: 'required', reason: `independent approval of ${short(candidate.sha)} against ${short(candidate.baseSha)} under policy revision ${work.policyRevision} is required` };
 }
 

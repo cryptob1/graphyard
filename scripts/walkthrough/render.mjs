@@ -1,7 +1,7 @@
 // Renders the walkthrough's SVG stage + caption to PNG frames by seeking its scrubber.
 // usage: node render.mjs HTML OUTDIR FPS
 //
-// See docs/walkthrough.md for complete rendering, encoding and decode commands.
+// README.md ("The walkthrough video") gives the encoding commands.
 // HTML uses local font fallbacks and a fixed caption height so all frames share dimensions.
 import { existsSync } from 'node:fs';
 // Private merge trials carry Chromium in the image, outside their empty home/cache.
@@ -16,7 +16,7 @@ await page.goto('file://' + html);
 await page.evaluate(() => document.fonts.ready);
 await page.addStyleTag({ content: '.controls,.chapters{display:none!important} .player{border-radius:0}' });
 const player = page.locator('.player');
-const duration = 120;
+const duration = Number(await page.locator('#scrub').getAttribute('max'));
 const total = Math.round(duration * fps);
 for (let i = 0; i <= total; i++) {
   await page.evaluate(t => { const s = document.getElementById('scrub'); s.value = t; s.dispatchEvent(new Event('input')); }, i / fps);

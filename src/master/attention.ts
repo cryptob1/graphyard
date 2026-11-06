@@ -89,7 +89,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then ${reviewNext}`);
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
-  if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
+  if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox, then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
   const first = work.gates.find(gate => !gate.passed);
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;

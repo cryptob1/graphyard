@@ -9,7 +9,10 @@ import { recordSession, type RuntimeSession, type SessionHandle, type SessionHan
 import { endedByFact, lostAfterReports, observeSessions, observedRuntimeState, registeredLaunch, reportedHandle, sessionObservationFreshMs, sessionObservationRefreshMs, sessionView, settledPurpose, runningSessions } from '../src/model/session-state.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { reconciledClosure } from '../web/workers-view.js';
-import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, type DispatchEffects } from '../src/dispatch/effects.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { herdrSessionListing } from '../src/dispatch/session-sweep.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.

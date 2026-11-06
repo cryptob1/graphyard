@@ -7,7 +7,9 @@ import type { Observation, Work } from '../src/model.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
-import { emptyDispatchCursor, launchWaitLimit, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, launchWaitLimit, tickWaits } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**

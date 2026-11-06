@@ -12,7 +12,10 @@ import {
   type RuntimeSession, type SessionHandle,
 } from '../src/model/sessions.js';
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
-import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
+import { closureHandle, launchedSessionHandle, reconcileSessionLiveness, sessionHandleKey } from '../src/dispatch/session-sweep.js';
+import { dispatchEffects, type DispatchEffects } from '../src/dispatch/effects.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
 import { masterConfigSchema, selectAccount, sessionAgentName } from '../src/master.js';
 import { launchGraceMs } from '../src/model/registry.js';
 import { registryFixture } from './helpers/registry-fixture.js';
