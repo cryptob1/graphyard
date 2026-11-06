@@ -32,7 +32,11 @@ export function stepEnvironment(url: string, secrets: Record<string, string>, ho
   return { ...env, ...secrets, ...(baselineUrl ? { BASELINE_URL: baselineUrl } : {}), TARGET_URL: url };
 }
 
-export interface ProcessResult { code: number | null; output: string; timedOut: boolean }
+/** `notStarted`: the process never ran (a spawn error, a confined session host that is gone), which says nothing of the case (GY-3180). */
+export interface ProcessResult { code: number | null; output: string; timedOut: boolean; notStarted?: boolean }
+/** A browser or step process that could not start (GY-3180): the host's failure, never the case's. */
+export class E2eHostError extends Error {}
+const started = (result: ProcessResult, what: string) => { if (result.notStarted) throw new E2eHostError(`${what} could not start: ${result.output}`); return result; };
 /** `signal` cancels the process (GY-1718: a merge preview past its budget), killing it as its timeout does. */
 export type ProcessRunner = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; shell: boolean; signal?: AbortSignal }) => Promise<ProcessResult>;
 
@@ -47,7 +51,7 @@ export const runProcess: ProcessRunner = (command, args, options) => new Promise
   const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs);
   const settle = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', kill); };
   if (options.signal?.aborted) kill(); else options.signal?.addEventListener('abort', kill, { once: true });
-  child.on('error', error => { settle(); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut }); });
+  child.on('error', error => { settle(); resolve({ code: null, output: `${Buffer.concat(chunks).toString('utf8')}${error.message}`, timedOut, ...(child.pid === undefined ? { notStarted: true } : {}) }); });
   child.on('close', code => { settle(); resolve({ code, output: Buffer.concat(chunks).toString('utf8'), timedOut }); });
 });
 
@@ -68,13 +72,13 @@ const dispatch = request => {
   const argv = request.shell ? ['sh', '-c', request.command] : [request.command].concat(request.args || []);
   let child;
   try { child = spawn(argv[0], argv.slice(1), { cwd: request.cwd, env: request.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); }
-  catch (error) { reply({ id: request.id, code: null, output: error.message, timedOut: false }); return; }
+  catch (error) { reply({ id: request.id, code: null, output: error.message, timedOut: false, notStarted: true }); return; }
   const chunks = []; let size = 0, timedOut = false;
   const keep = piece => { chunks.push(piece); size += piece.length; while (size - chunks[0].length >= 4000000) size -= chunks.shift().length; };
   child.stdout.on('data', keep); child.stderr.on('data', keep);
   running.set(request.id, { child });
   const timer = request.timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; kill(child); }, request.timeoutMs);
-  const done = ended => { if (timer) clearTimeout(timer); running.delete(request.id); reply({ id: request.id, code: ended.code, output: Buffer.concat(chunks).toString('utf8') + (ended.error || ''), timedOut }); };
+  const done = ended => { if (timer) clearTimeout(timer); running.delete(request.id); reply({ id: request.id, code: ended.code, output: Buffer.concat(chunks).toString('utf8') + (ended.error || ''), timedOut, notStarted: child.pid === undefined }); };
   child.on('error', error => done({ code: null, error: error.message }));
   child.on('close', code => done({ code }));
 };
@@ -105,7 +109,7 @@ export const confinedSession = (wrapper: readonly string[] = [], hostEnvironment
   if (!wrapper.length) return { run: base, close: async () => {} };
   let host: ChildProcess | null = null, next = 0, unread = '';
   const pending = new Map<number, (result: ProcessResult) => void>();
-  const settleAll = (output: string) => { const waiting = [...pending.values()]; pending.clear(); for (const settle of waiting) settle({ code: null, output, timedOut: false }); };
+  const settleAll = (output: string) => { const waiting = [...pending.values()]; pending.clear(); for (const settle of waiting) settle({ code: null, output, timedOut: false, notStarted: true }); };
   const start = (): ChildProcess | null => {
     let begun: ChildProcess;
     try { begun = spawn(wrapper[0]!, [...wrapper.slice(1), process.execPath, '-e', sessionHost], { stdio: ['pipe', 'pipe', 'pipe'], env: hostEnvironment }); }
@@ -114,14 +118,14 @@ export const confinedSession = (wrapper: readonly string[] = [], hostEnvironment
     begun.stdout!.on('data', piece => { unread += piece; let at;
       while ((at = unread.indexOf('\n')) >= 0) {
         const line = unread.slice(0, at); unread = unread.slice(at + 1);
-        let reply: { id?: unknown; code?: unknown; output?: unknown; timedOut?: unknown };
+        let reply: { id?: unknown; code?: unknown; output?: unknown; timedOut?: unknown; notStarted?: unknown };
         try { reply = JSON.parse(line); } catch { continue; }
         const id = typeof reply.id === 'number' ? reply.id : null;
         if (id === null) continue;
         const settle = pending.get(id);
         if (!settle) continue;
         pending.delete(id);
-        settle({ code: typeof reply.code === 'number' ? reply.code : null, output: typeof reply.output === 'string' ? reply.output : '', timedOut: reply.timedOut === true });
+        settle({ code: typeof reply.code === 'number' ? reply.code : null, output: typeof reply.output === 'string' ? reply.output : '', timedOut: reply.timedOut === true, ...(reply.notStarted === true ? { notStarted: true } : {}) });
       } });
     begun.on('error', () => { if (host === begun) { host = null; settleAll('the confined session host could not start'); } });
     begun.on('close', () => { if (host === begun) { host = null; settleAll('the confined session host ended'); } });
@@ -130,13 +134,13 @@ export const confinedSession = (wrapper: readonly string[] = [], hostEnvironment
   };
   const run: ProcessRunner = (command, args, options) => new Promise(resolve => {
     const current = host ?? start();
-    if (!current || !current.stdin || current.stdin.destroyed) { resolve({ code: null, output: 'the confined session host is not running', timedOut: false }); return; }
+    if (!current || !current.stdin || current.stdin.destroyed) { resolve({ code: null, output: 'the confined session host is not running', timedOut: false, notStarted: true }); return; }
     const id = ++next;
     const cancel = () => { try { current.stdin!.write(`${JSON.stringify({ cancel: id })}\n`); } catch { /* the host is gone; its ending settles this invocation */ } };
     const settle = (result: ProcessResult) => { options.signal?.removeEventListener('abort', cancel); resolve(result); };
     pending.set(id, settle);
     try { current.stdin.write(`${JSON.stringify({ id, command, args, cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs, shell: options.shell })}\n`); }
-    catch { pending.delete(id); settle({ code: null, output: 'the confined session host is not running', timedOut: false }); return; }
+    catch { pending.delete(id); settle({ code: null, output: 'the confined session host is not running', timedOut: false, notStarted: true }); return; }
     if (options.signal?.aborted) cancel(); else options.signal?.addEventListener('abort', cancel, { once: true });
   });
   const close = async () => {
@@ -201,7 +205,7 @@ export interface GeneralStepContext { url: string; root: string; env: Record<str
 
 /** A command step: pass on exit 0, fail otherwise, keeping failure identity/cause alongside the output tail. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
-  const result = await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal });
+  const result = started(await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal }), 'the step\'s command');
   const sanitized = redact(result.output, context.secrets);
   const lines = sanitized.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
   const test = lines.find(line => /^\s*(?:✖ (?!failing tests:)|not ok \d+ - )/.test(line));
@@ -249,7 +253,7 @@ async function agentLeg(step: Extract<E2eStep, { kind: 'agent' }>, base: string,
   const target = new URL(step.path ?? '/', base).toString();
   const prefix = ['--session', session];
   // A cancelled run kills the step's invocations; only the session's own close still runs, bounded by its timeout.
-  const invoke = (args: string[], timeoutMs: number, cancellable = true) => context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined });
+  const invoke = async (args: string[], timeoutMs: number, cancellable = true) => started(await context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined }), 'agent-browser');
   const remaining = () => Math.max(1, deadline - Date.now());
   const transcript: string[] = [];
   let reason: string | null = null, verdict: string | undefined;

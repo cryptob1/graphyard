@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { contractFile, describeStep, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { checkoutRepositoryPolicy, repositoryPolicy } from '../model-boundary/repository-policy.js';
 import { type RepositoryPolicy } from '../model/repository-policy.js';
-import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type CompareJudge, type ProcessRunner, type StepRecord } from './steps.js';
+import { E2eHostError, installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type CompareJudge, type ProcessRunner, type StepRecord } from './steps.js';
 import type { ExternalEvidence, ExternalRunResult, ExternalVerdict } from '../runner-report.js';
 import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
@@ -49,6 +49,8 @@ export interface E2ePage {
 export interface FailingStep { index: number; name: string; reason: string }
 export type CaseVerdict = 'passed' | 'failed' | 'flaky' | 'unrun';
 export interface AttemptResult { attempt: number; outcome: 'pass' | 'fail'; durationMs: number; executed: number; failingStep: FailingStep | null;
+  /** GY-3180: the failing step's browser or process could not start, which says nothing of the head. */
+  hostFailure?: boolean;
   /** Each command and agent step the attempt ran: its outcome, last lines of output (secrets redacted), verdict and screenshots. */
   steps?: StepRecord[] }
 export interface CaseOutcome {
@@ -298,13 +300,15 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
     page: async () => {
       if (!page) {
         if (options.signal?.aborted) throw new Error('the run was cancelled');
-        browser = await (await options.launcher()).launch({ headless: true });
-        page = await browser.newPage();
+        try {
+          browser = await (await options.launcher()).launch({ headless: true });
+          page = await browser.newPage();
+        } catch (error) { throw new E2eHostError(`the browser could not start: ${message(error)}`); }
         page.on('pageerror', error => pageErrors.push(message(error)));
       }
       return page;
     } };
-  let executed = 0, failingStep: FailingStep | null = null;
+  let executed = 0, failingStep: FailingStep | null = null, hostFailure = false;
   // The step as it ran, values substituted then redacted, and only then shortened; a step whose value names nothing substitutable is described as written.
   const name = (step: E2eStep) => { let ran = step; try { ran = substitute(step, vars); } catch { /* the failure names the missing value */ } return describeStep(redactValues(ran, secrets)); };
   // A cancelled run closes the case's browser at once, so a step waiting on its page settles.
@@ -320,14 +324,14 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
       } catch (error) {
         const record = (error as { record?: Omit<StepRecord, 'index' | 'name'> }).record;
         if (record) steps.push({ index, name: name(step), ...record });
-        failingStep = { index, name: name(step), reason: redactedMessage(error, secrets) }; break;
+        failingStep = { index, name: name(step), reason: redactedMessage(error, secrets) }; hostFailure = error instanceof E2eHostError; break;
       }
     }
   } finally {
     options.signal?.removeEventListener('abort', closeOnCancel);
     if (browser) await (browser as E2eBrowser).close().catch(() => {});
   }
-  return { executed, failingStep, steps };
+  return { executed, failingStep, steps, ...(hostFailure ? { hostFailure } : {}) };
 }
 
 /**
