@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { masterGuide } from '../master/guide.js';
 import { defineCommands } from './registry.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
@@ -61,8 +60,8 @@ export const masterCommands = defineCommands([
     async run(context) {
       const { id } = context;
       const root = context.repositoryRoot();
-      // The master's role instructions lead the guide; the guide file's first line is its docs-index entry, not guide body.
-      if (id === 'guide') return console.log(`${masterInstructions}\n` + (await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
+      // The master's role instructions lead the guide.
+      if (id === 'guide') return console.log(`${masterInstructions}\n${masterGuide}`);
       if (id === 'init') return masterInit(context, root);
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);

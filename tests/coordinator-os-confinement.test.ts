@@ -41,7 +41,7 @@ function coordinatorFixture(base: string) {
   return { root, worktree };
 }
 
-/** A coordinator checkout that is itself a linked worktree of the repository beside it — the install mode docs/install.md's worktree flow produces — with an assignment worktree under it. */
+/** A coordinator checkout that is itself a linked worktree of the repository beside it — with an assignment worktree under it. */
 function linkedWorktreeCoordinatorFixture(base: string) {
   const main = join(base, 'main');
   const seed = (...args: string[]) => execFileSync('git', ['-C', main, ...args], { stdio: 'ignore' });

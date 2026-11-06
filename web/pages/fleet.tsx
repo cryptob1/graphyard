@@ -72,8 +72,7 @@ export const pastesCredential = (form: FormData) => [...form.entries()].some(([n
  * How old an account's quota reading may be before the fleet panel calls it an old probe
  * (GY-945): executors fold what they observe into the registry on every action, so on a working
  * fleet a reading is minutes old, and one that has stood for over an hour says nothing about a
- * wall the provider may have lifted since. The one freshness bound every reader applies;
- * docs/dashboard.md states it.
+ * wall the provider may have lifted since. The one freshness bound every reader applies.
  */
 export const quotaStaleThresholdMs = 60 * 60_000;
 
@@ -403,7 +402,7 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
     if (input) { const names = input.value.split(',').map(entry => entry.trim()).filter(Boolean); if (!names.includes(account)) input.value = [...names, account].join(', '); }
     document.getElementById('role-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  return <><PageHeader crumbs={['Settings', 'Agents']} guide="/docs/onboarding#connect-an-account" eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents" actions={onOpenSetup && <button data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}>
+  return <><PageHeader crumbs={['Settings', 'Agents']} eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents" actions={onOpenSetup && <button data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}>
       Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
     </PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}

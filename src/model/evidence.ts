@@ -41,7 +41,7 @@ export interface Evidence {
   /** GY-1841: the evaluation that judged this result under the recovery rule, every attempt kept with its time, outcome and cause. */
   evaluation?: EvaluationRecord;
   /**
-  /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/delivery.md, "Attribution". */
+  /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target. */
   attribution?: EvidenceAttribution;
   /**
    * D6: this entry was derived from an executed attempt's pass by a recorded reuse decision

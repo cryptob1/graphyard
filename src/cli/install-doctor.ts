@@ -32,7 +32,7 @@ export async function runDoctor(context: CliContext) {
     setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
     proposal: stored?.proposal ?? null,
   });
-  // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
+  // The machine-local prerequisites the README's setup steps depend on (GY-1352), each naming its step.
   const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and

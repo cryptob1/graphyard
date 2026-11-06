@@ -104,7 +104,7 @@ export function canaryOffer(runtime: FleetRuntime, versions: (root: string) => s
   return pin && newest && newest !== pin.version ? { runtime: runtime.name, entry: versionEntry(pin, newest), version: newest } : null;
 }
 /**
- * Whether the canary session `item` epoch `epoch` proved its version (the docs/master-agent.md
+ * Whether the canary session `item` epoch `epoch` proved its version (the master guide's
  * failed-launch rule): it submitted, committed, or ran longer than 60 s after its runtime started.
  * A session that ended sooner failed; null while it is still inside the window.
  */

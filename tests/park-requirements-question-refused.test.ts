@@ -17,7 +17,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // GY-1816: GY-1814's release-soak fix sat parked under goals and priorities on a question that was
 // never the operator's — its worker asked whether AC-1 should be rewritten to match GY-1762's test
 // assertions or GY-1762 reversed, and only a master session noticing it unblocked the item.
-// Requirement rewrites are two agent identities' decision (docs/glossary.md#who-decides): the master
+// Requirement rewrites are two agent identities' decision: the master
 // requests one, an independent approver approves it. So `park` refuses a goals-and-priorities park
 // whose ask, needed text or reason asks whether a criterion is rewritten, revised or matched to
 // another item's tests, naming the agent route — record the conflict with `graphyard blocked`, so

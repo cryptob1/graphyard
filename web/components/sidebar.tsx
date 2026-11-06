@@ -41,7 +41,7 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
       {status?.repository && <span className="mono repository">{status.repository}</span>}
       <span className="connection"><span className={`dot ${connected ? 'live' : ''}`}/>{connected ? `Live · updated ${lastUpdated ?? 'now'}` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</span>
       {actor && <span className="signed-in" title="Signed in as">{actor.id} · {actor.role}</span>}
-      <span className="sidebar-links"><button type="button" className="text-button" aria-label="Delivery" title="Delivery defaults" onClick={() => go('delivery')}><NavIcon name="delivery"/></button><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><a className="docs-link" href="/docs">Documentation ↗</a><button type="button" className="text-button" onClick={signOut}>{dashboard.token ? 'Sign out' : 'Sign in'}</button></span>
+      <span className="sidebar-links"><button type="button" className="text-button" aria-label="Delivery" title="Delivery defaults" onClick={() => go('delivery')}><NavIcon name="delivery"/></button><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><button type="button" className="text-button" onClick={signOut}>{dashboard.token ? 'Sign out' : 'Sign in'}</button></span>
     </div>
   </div></aside>;
 }
