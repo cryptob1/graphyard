@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { accountLaunch, loadMasterConfig, masterConfigSchema, saveProducerProfile, selectAccount, setupMaster, type MasterConfig } from '../src/master.js';
 import { launchProducer } from '../src/producer.js';
+import { assertLaunchable, launchPlan, requestPlaceholder } from '../src/harness.js';
+import { launchCommand, launchDelivery, writeLaunchFiles } from '../src/master/launch.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
@@ -148,4 +151,19 @@ test('integration:registry-drives-launch — a producer role on a pi account run
   assert.ok(!calls.some(args => args[0] === 'tab'), 'no Herdr tab was created');
   const session = registry.current().sessions.at(-1)!;
   assert.equal(session.role, 'producer'); assert.ok(session.endedAt, 'the chosen registry session is given back');
+});
+
+// GY-3034 AC-1, proof unit:registry-drives-launch: a registry runtime launches through its kind's
+// adapter — a built-in kind on the adapter recipe, any other kind only on its own registry contract.
+test('unit:registry-drives-launch — a registry runtime launches through its kind adapter, or on its own contract where the kind has no recipe', async () => {
+  assert.doesNotThrow(() => assertLaunchable('codex'), 'a built-in kind launches on its adapter recipe');
+  assert.deepEqual(launchPlan('codex').args, runtimeAdapter('codex')!.recipe!.args, 'the adapter recipe supplies its no-approval flags');
+  assert.equal(runtimeAdapter('cline')?.recipe, undefined, 'cline is a kind with no built-in recipe');
+  assert.throws(() => assertLaunchable('cline'), /no non-interactive launch contract for cline/);
+  assert.throws(() => assertLaunchable('cline', { args: [requestPlaceholder] }), /registers no arguments or environment/);
+  assert.doesNotThrow(() => assertLaunchable('cline', { args: ['--yes', '--message', requestPlaceholder] }), 'its registry contract launches it');
+  assert.equal(launchDelivery('cline', ['--yes', '--message', requestPlaceholder]), 'request');
+  const directory = join(scratch, `contract-${crypto.randomUUID().slice(0, 8)}`);
+  const files = writeLaunchFiles(directory, 'session', { request: 'Implement GY-1' });
+  assert.match(launchCommand('cline', ['--yes', '--message', requestPlaceholder], files), /cline --yes --message "\$\(cat "\$GY\.request"\)"$/, 'the request goes where the registry contract places it');
 });

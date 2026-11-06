@@ -7,7 +7,7 @@ import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { nonInteractiveLaunch } from '../src/harness.js';
+import { runtimeAdapters } from '../src/master/runtimes.js';
 import { accountLaunch, dispatchWork, launchCommandLimit, loadMasterConfig, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { environmentBlocked, environmentBlocker, environmentFailure, grantWorkerPaths, runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError, workerPaths, writablePaths, type SandboxExec } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
@@ -47,9 +47,9 @@ test('unit:worker-sandbox-grants-git-admin-dir — every runtime that takes a sa
     const paths = workerPaths(fixture.worktree);
     assert.deepEqual(paths, { worktree: fixture.worktree, gitDir: fixture.gitDir, commonDir: fixture.commonDir }, 'the admin directory is read from Git, not guessed');
     // Every runtime whose launch contract selects a sandbox has a grant; none is left to assume one.
-    const sandboxed = Object.entries(nonInteractiveLaunch).filter(([, recipe]) => recipe.args.includes('--sandbox')).map(([kind]) => kind);
+    const sandboxed = runtimeAdapters().filter(adapter => adapter.recipe?.args.includes('--sandbox')).map(adapter => adapter.kind);
     assert.deepEqual(sandboxed, ['codex']);
-    for (const kind of Object.keys(nonInteractiveLaunch)) {
+    for (const kind of runtimeAdapters().filter(adapter => adapter.recipe).map(adapter => adapter.kind)) {
       const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, null);
       const args = grantWorkerPaths(kind, launch.args, writablePaths(paths), fixture.worktree);
       if (!sandboxed.includes(kind)) { assert.deepEqual(args, launch.args, `${kind} takes no sandbox argument, so nothing is added`); continue; }

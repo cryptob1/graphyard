@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { environmentKinds, runtimeAdapter, runtimeHomeVariables, runtimeKinds, type EnvironmentKind } from './runtimes.js';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
@@ -77,7 +78,7 @@ function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
   return rebuilt;
 }
 
-export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
+export const agentKindSchema = z.enum(runtimeKinds);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
 // 'auto' installs the runtime's own non-interactive startup contract. 'prompt' would keep the
 // runtime's approval prompts for a human in the session tab, so a profile that sets it is still
@@ -88,16 +89,16 @@ const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 // ~/.coding_agents/claude-b. The Graphyard principal a profile claims under is independent of the
 // provider account its session runs on: a profile names the accounts it may use, in failover order,
 // and every launch runs on the first of them that is logged in and has provider quota left.
-export const environmentKinds = ['claude', 'codex', 'opencode', 'cursor'] as const;
-export type EnvironmentKind = typeof environmentKinds[number];
-export const environmentVariable: Record<EnvironmentKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', opencode: 'XDG_DATA_HOME', cursor: 'CURSOR_CONFIG_DIR' };
+// The environment kinds are the runtimes whose adapter names a login home (master/runtimes.ts).
+export { environmentKinds, type EnvironmentKind };
+export const environmentVariable = Object.fromEntries(environmentKinds.map(kind => [kind, runtimeAdapter(kind)!.home!.variable])) as Record<EnvironmentKind, string>;
 /**
  * The runtime login homes a launch's environment names (GY-1856): the session's own login, set on
  * the kind's home variable, plus the registry contract's own — the credential mask keeps these
  * readable while it hides every other credential location.
  */
 export const runtimeLoginHomes = (environment: Record<string, string> | undefined, homeVariable?: string | null): string[] => {
-  const variables = new Set([...Object.values(environmentVariable), ...(homeVariable ? [homeVariable] : [])]);
+  const variables = new Set([...runtimeHomeVariables(), ...(homeVariable ? [homeVariable] : [])]);
   return [...variables].flatMap(variable => environment?.[variable] ? [environment[variable]] : []);
 };
 export const agentEnvironmentSchema = z.object({

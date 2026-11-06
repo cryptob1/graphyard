@@ -33,7 +33,6 @@ export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, per
         save();
       }
     },
-    ...(ports.preview ? { preview: (...args: Parameters<NonNullable<MergePorts['preview']>>) => timed(args[0], 'preview', () => ports.preview!(...args)) } : {}),
     // GY-3120: a landing re-merges the head onto a moved tip, making a merge commit no trial ran on;
     // aliasing it to the head's own trial record keeps the landing's push duration on that record.
     merge: async (mergeHead, baseTip, item) => {

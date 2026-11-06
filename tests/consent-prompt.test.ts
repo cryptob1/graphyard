@@ -16,6 +16,7 @@ import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { hostname } from 'node:os';
+import { workFixture } from './helpers/work-fixture.js';
 
 /** GY-3030: the registry grants every launch; each launch takes a fresh one, as each session's reservation stands until it ends. */
 const registry = (role: 'worker' | 'producer') => registryFixture(hostname(), ['codex'], [role]).probe;
@@ -93,10 +94,8 @@ class ConsentPane {
 }
 
 function work(overrides: Partial<Work> = {}): Work {
-  return { id: 'work-130', key: 'GY-130', title: 'A runtime that stops on a first-run trust prompt holds its worker slot silently', description: '', type: 'bug', priority: 0, dependencies: [], 
-    criteria: [{ id: 'AC-1', text: 'Consent', proofs: ['unit:consent-prompt-detected'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
-    stage: 'ready', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
-    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides } as Work;
+  return workFixture({ id: 'work-130', key: 'GY-130', title: 'A runtime that stops on a first-run trust prompt holds its worker slot silently', type: 'bug', priority: 0,
+    criteria: [{ id: 'AC-1', text: 'Consent', proofs: ['unit:consent-prompt-detected'] }], revision: 3, createdAt: at, updatedAt: at, stageEnteredAt: at, ...overrides });
 }
 
 async function installed() {

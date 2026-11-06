@@ -12,6 +12,7 @@ import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from '../install/loop-unit.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
+import { noteBatchGateStopping } from './cycle-batch-gate.js';
 import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
@@ -170,7 +171,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   const host = options.process ?? process;
   let stopping = false;
   const waking = new AbortController();
-  const stop = () => { stopping = true; waking.abort(); };
+  const stop = () => { stopping = true; noteBatchGateStopping(state); waking.abort(); };
   const signals = options.signals ?? ['SIGTERM', 'SIGINT'];
   for (const signal of signals) host.on(signal, stop);
   const unlisten = () => { for (const signal of signals) host.off(signal, stop); };

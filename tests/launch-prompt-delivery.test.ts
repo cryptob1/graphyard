@@ -21,6 +21,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import type { FleetRoleName } from '../src/model/registry.js';
 import { hostname } from 'node:os';
+import { workFixture } from './helpers/work-fixture.js';
 /** The control-plane registry every launch takes its slot from (GY-3030): a fresh one per launch, one account of `runtime` in `role`. */
 const fleet = (role: FleetRoleName, runtime: string) => registryFixture(hostname(), [runtime], [role]).probe;
 // Time-bomb allowance (GY-1694): 2026-09-20 is the request clock (sessionRetry, reconcileProducers now: () => new Date(clock + offset)); the real clock only stamps snapshot times and the registerLaunch expiry relative to itself.
@@ -50,11 +51,11 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 93, branch: 'graphyard/gy-93-1', author: 'implementer' };
-  return { id: 'work-93', key: 'GY-93', title: 'Launched sessions refuse their own prompt', description: '', type: 'bug', priority: 0, dependencies: [],
+  return workFixture({ id: 'work-93', key: 'GY-93', title: 'Launched sessions refuse their own prompt', type: 'bug', priority: 0,
     criteria: [{ id: 'AC-1', text: 'Request', proofs: ['integration:launch-prompt-is-a-request'] }],
-    policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
-    lease: null, workspaces: [{ host: 'h', path: '/w/gy-93', branch: 'graphyard/gy-93-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 93 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
+    stage: 'review', revision: 7, createdAt: at, updatedAt: at, stageEnteredAt: at, epoch: 1,
+    workspaces: [{ host: 'h', path: '/w/gy-93', branch: 'graphyard/gy-93-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 93 },
+    observation: observation(candidate), gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], ...overrides });
 }
 // Dispatch no longer opens producer requests (GY-1235: proofs gate nothing), but the producer
 // launcher and its ledger still stand: the request the launches below bind is built by hand.

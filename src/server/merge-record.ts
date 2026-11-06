@@ -18,6 +18,7 @@ import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
+import { recordDispatch } from '../engine/evaluate.js';
 import type { Services } from './routes.js';
 
 import { foldServeReverts, mergeServeRevertKind, mergeServeRevertSchema } from '../merge-writer/serve-revert-ledger.js';
@@ -237,7 +238,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     } else {
       // The gates read the ledger: the test gate passes on the intent, the merge gate on the push and its reconciliation.
       engine.evaluate(work!, all, now);
-      await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+      await recordDispatch(db, work!, now);
       await save(db, work!, actor.id, `merge-writer.${kind}`, now, payload);
     }
     return answer();

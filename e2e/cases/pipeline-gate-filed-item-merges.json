@@ -1,0 +1,15 @@
+{
+  "id": "pipeline-gate-filed-item-merges",
+  "title": "A batch-gate-filed item that adds its pinning test merges",
+  "description": "Runs the real merge writer trial with real Git and a served head: an item the batch gate files binds a pinning test named from its check, which is new on the head, so the bug trial reproduces the defect on base and the item merges; bound to create-work-item alone it is refused as not reproduced.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "gate-filed item merge trial",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/gate-filed-item.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

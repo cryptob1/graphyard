@@ -12,6 +12,7 @@ import { dispatchCursorPath, emptyDispatchCursor, readDispatchCursor } from '../
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { workFixture } from './helpers/work-fixture.js';
 // Time-bomb allowance: the fixed `at`/clock is handed to reconcileAutoDispatch; the new Date() readings only stamp the stub's snapshot and review records.
 
 // GY-3007: exercise immediate dispatch and compatibility with settings and cursors from older loops.
@@ -23,13 +24,12 @@ const at = '2026-09-25T10:00:00.000Z', clock = Date.parse(at);
 
 function work(): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  const observation: Observation = { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/store/pools.ts'], scopeFiles: [], at, prState: 'open', draft: false,
+  const observation: Observation = { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/store/pools.ts'], scopeFiles: [], at,
     baseTip: B, baseTree: sha40('7b'), baseTipContained: true } as Observation;
-  return { id: 'work-64', key: 'GY-64', title: 'No bot wait', description: '', type: 'feature', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:a'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
-    createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/w/gy-64', branch: 'graphyard/gy-64-1', epoch: 1, owner: 'implementer' }],
-    candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [] } as Work;
+  return workFixture({ id: 'work-64', key: 'GY-64', title: 'No bot wait', priority: 0, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:a'] }], stage: 'review', revision: 7,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, epoch: 1, workspaces: [{ host: 'h', path: '/w/gy-64', branch: 'graphyard/gy-64-1', epoch: 1, owner: 'implementer' }],
+    candidate, submission: { epoch: 1, pr: 64 }, observation,
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] });
 }
 /** A head whose unit proof passed, so the control plane has raised its review request. */
 function reviewRequested(): Work {

@@ -16,6 +16,7 @@ import { listHerdrAgents, masterConfigSchema, startAgentSession, type MasterConf
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import type { Work } from '../src/model.js';
+import { workFixture } from './helpers/work-fixture.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle as its explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
 
 // GY-125. Each test is named for the proof it produces: unit:no-sync-child-processes,
@@ -32,15 +33,9 @@ function config(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'r
     masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], ...overrides });
 }
 function work(overrides: Partial<Work> = {}): Work {
-  return {
-    id: 'work-1', key: 'GY-125', title: 'Never block the loop on a child', description: '', type: 'bug', priority: 1,
-    dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:child-wait-attributed'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 3, policyRevision: 1,
-    createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
-    lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
-    scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
-  } as Work;
+  return workFixture({ id: 'work-1', key: 'GY-125', title: 'Never block the loop on a child', type: 'bug', priority: 1,
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:child-wait-attributed'] }], revision: 3,
+    createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ...overrides });
 }
 function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
   return {

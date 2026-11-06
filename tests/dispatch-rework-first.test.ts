@@ -4,6 +4,7 @@ import { dispatchSort, dispatchStarvationMs } from '../src/coordination.js';
 import { recordRework, recordSubmission } from '../src/pipeline-speed.js';
 import { coordinationWork } from '../src/server/work-view.js';
 import type { Work } from '../src/model.js';
+import { workFixture } from './helpers/work-fixture.js';
 
 // GY-1891: dispatch finishes before it starts — an item returning for rework is offered before a
 // never-attempted item of the same priority. A rework has already been built and reviewed once and
@@ -17,12 +18,7 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hotFile = 'src/daemon/cycle-sessions.ts';
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
-  return {
-    id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
-  } as Work;
+  return workFixture({ key, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }], createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0), ...overrides });
 }
 /** A delivered item reopened for rework after its merge was reverted (the retired candidate revert did this). */
 function reopenReverted(work: Work, now: Date) {

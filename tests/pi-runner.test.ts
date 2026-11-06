@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
+import { defaultPiModel, piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
+import { assertLaunchable, launchPlan } from '../src/harness.js';
+import { launchDelivery } from '../src/master/launch.js';
+import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
+import { freshLaunch, resumePlan } from '../src/master/session-resume.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -151,4 +156,32 @@ test('unit:runner-pi-events cancel stops the run and resolves it as cancelled; t
     assert.deepEqual(launched.env.filter((name: string) => /^(GRAPHYARD_|HERDR_)/.test(name)), [], 'no inherited Graphyard or Herdr variable');
     assert.deepEqual(Object.keys(runEnvironment({ GRAPHYARD_TOKEN_FILE: '/x', HERDR_PANE: 'p', PATH: '/bin' }, { GRAPHYARD_URL: 'u' })).sort(), ['GRAPHYARD_URL', 'PATH']);
   } finally { await cleanup(); }
+});
+
+// GY-3034 AC-1, proof unit:pi-runner: pi launches, resumes and reports usage through its runtime
+// adapter (src/master/runtimes.ts), and its headless run takes the request on its command line.
+test('unit:pi-runner — pi launches, resumes and reports usage through its adapter', async () => {
+  const adapter = runtimeAdapter('pi')!;
+  assert.doesNotThrow(() => assertLaunchable('pi'), 'pi launches on its adapter recipe, with no registry contract');
+  const plan = launchPlan('pi');
+  assert.equal(plan.applied, true);
+  assert.deepEqual(plan.args, [], 'pi has no approval flag to add');
+  assert.equal(launchDelivery('pi'), 'request', 'its first request is on its command line, never pasted');
+  assert.deepEqual(freshLaunch('pi', null), { resume: false, session: null, args: [], why: null }, 'pi has no resume form, so each attempt launches fresh');
+  assert.equal(resumePlan({ epoch: 1, runtime: 'pi', account: 'pi-a', session: 's' }, { kind: 'pi', account: 'pi-a' }).resume, false);
+  assert.ok(piArgs('Implement GY-1', { model: defaultPiModel }).includes('Implement GY-1'), 'the headless run takes the request as an argument');
+
+  const at = Date.parse('2026-10-15T01:10:00Z');
+  const signal = detectRuntimeExhaustion('Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-17 08:27:35"}', 'pi', at);
+  assert.equal(signal?.resetsAt, '2026-10-17T08:27:35.000Z', 'the adapter limit notice and its zone-less UTC reset report the account spent');
+
+  const home = await temporaryDirectory('pi-adapter-home');
+  try {
+    assert.equal(adapter.sharedPlan, true, 'pi accounts read the shared Z.AI plan');
+    const out = await adapter.usage!({ name: 'pi-a', kind: 'pi', home }, { quota: false }, { plan: 'zai-a', now: at });
+    assert.equal(out.loggedIn, false, 'a home with no key is not logged in');
+    await writeFile(join(home, 'auth.json'), JSON.stringify({ zai: { type: 'api_key', key: 'zai-key' } }));
+    const read = await adapter.usage!({ name: 'pi-a', kind: 'pi', home }, { quota: false }, { plan: 'zai-a', now: at });
+    assert.deepEqual([read.loggedIn, read.note], [true, 'quota not read'], 'the adapter usage reader reads pi\'s own login');
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
