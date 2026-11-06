@@ -1,0 +1,13 @@
+{
+  "id": "pipeline-gate-known-red",
+  "title": "The batch gate files a known red case and reverts the landing that broke smoke",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane and a scratch bare Git remote: a catalog-only case red on the verified commit and the tip is filed known red, nothing is reverted and the tip verifies, with the probe saved in main-gate.json before the filing and a refused (409) filing not ending the run; a smoke case red only on the tip reverts its culprit, the recut verifies and the deploy watch serves it.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Gate a known red case and a smoke regression through the real loop",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-gate-known-red.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

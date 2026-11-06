@@ -1,0 +1,13 @@
+{
+  "id": "pipeline-gate-restart",
+  "title": "A gate run in flight when the loop is replaced is adopted and finished",
+  "description": "Run the real loop cycle in a loop process against a real temporary Postgres control plane and a scratch bare Git remote, kill that process while its batch gate runs, and check the next loop adopts the batch on the tip it was cut on, finishes it to verified while a newer merge waits for the next batch, and that the deploy watch serves the verified tip.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Replace the loop mid gate run and finish the adopted batch",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-gate-restart.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

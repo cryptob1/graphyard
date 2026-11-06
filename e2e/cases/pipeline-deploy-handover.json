@@ -1,0 +1,13 @@
+{
+  "id": "pipeline-deploy-handover",
+  "title": "The deploy watch serves only the gate-verified commit and hands over to its watch code",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane and a scratch bare Git remote: a merged tip carrying new deploy-watch code is fetched but never served while unverified; once the real batch gate verifies it, the deploy watch serves it and hands itself over, and the successor running that code neither rebuilds nor redeploys it.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Serve a gate-verified commit and hand the watch over to its code",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-deploy-handover.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
