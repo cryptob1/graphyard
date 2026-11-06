@@ -105,9 +105,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
-        // Trials running at once divide the host's cores, so their shards never oversubscribe it.
-        ...(share && share > 1 ? { cores: Math.max(1, Math.floor(availableParallelism() / share)) } : {}) });
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+        ...trialShareAllowance(share, timeoutMs) });
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
     itemPreviews: { root, base: options.base, timeoutMs: trialTimeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
@@ -241,12 +240,22 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(error); return status === null || status >= 500 || status === 408 || status === 429; };
 
 /**
- * GY-2053: the writer's worst case for one flight — one trial timeout, then a landing that re-merges onto each
+ * Trials running at once divide the host's cores, so their shards never oversubscribe it; a trial
+ * given 1/`share` of the cores gets `share` times the deadline (GY-3183), so the suite that passes
+ * alone within the limit is not timed out for running beside others.
+ */
+export function trialShareAllowance(share: number | undefined, timeoutMs = trialTimeoutMinutes * 60_000): { timeoutMs: number; cores?: number } {
+  if (!share || share <= 1) return { timeoutMs };
+  return { timeoutMs: timeoutMs * share, cores: Math.max(1, Math.floor(availableParallelism() / share)) };
+}
+
+/**
+ * GY-2053: the writer's worst case for one flight — one trial timeout (scaled by the most trials that share the host, GY-3183), then a landing that re-merges onto each
  * tip move another head's landing makes (GY-3120), one cycle's allowance per head that can trial at once
  * (`run.mergeWriter.parallel`) — the bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`).
  */
 export const mergeWriterFlightBoundMs = (run: { intervalSeconds?: number; mergeWriter?: { parallel?: number } }) =>
-  trialTimeoutMinutes * 60_000 + (run.mergeWriter?.parallel ?? defaultMergeWriterParallel) * (run.intervalSeconds ?? 20) * 1000;
+  (run.mergeWriter?.parallel ?? defaultMergeWriterParallel) * (trialTimeoutMinutes * 60_000 + (run.intervalSeconds ?? 20) * 1000);
 
 /**
  * GY-2053: what one recorded write says, as the reader reads it — the attempt step the writer's summary reports as its newest movement.
@@ -605,9 +614,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
     if (!launch) return reads.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs);
     const launched = launch({ key: item.key, head: heads?.[0]?.head ?? mergeSha, mergeSha,
       baseTip: baseTip?.toLowerCase() ?? null, changedFiles: [...files], proofs: criterionProofs(item), e2eProofs: e2eProofsOf(item),
-      timeoutMs: timeoutMs ?? trialTimeoutMinutes * 60_000, reproduce: item.type !== 'chore',
-      // Trials running at once divide the host's cores, so their shards never oversubscribe it.
-      cores: share && share > 1 ? Math.max(1, Math.floor(availableParallelism() / share)) : null });
+      reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeoutMs) });
     // The run's directory is persisted on the in-flight entry before its verdict can land, so a restart after it adopts the run.
     const entry = state.mergeWriter.inFlights?.find(candidate => candidate.key === item.key);
     if (entry) { entry.run = { directory: launched.directory, mergeSha }; await persist().catch(() => {}); }
