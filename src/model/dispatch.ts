@@ -54,6 +54,14 @@ export { automatableOutcomes, automatableProof, dispatchIneligibility, mechanica
 export const short = (sha: string) => sha.slice(0, 12);
 export const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevision'>, work: Work) =>
   !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
+/**
+ * A review or product request binds the head and policy revision, not the base tip (GY-3162): a
+ * verdict binds the head alone and the session judges it against the head's merge base, which a
+ * base branch moving on never changes. Every merge moves the tip — and every merge lands a release
+ * the loop restarts onto — so binding the tip cancelled each review in flight at each release.
+ */
+export const reviewBinds = (request: Pick<DispatchRequest, 'sha' | 'policyRevision'>, work: Work) =>
+  !!work.candidate && request.sha === work.candidate.sha && request.policyRevision === work.policyRevision;
 
 /**
  * Why the current head does or does not need a launched reviewer.
@@ -118,5 +126,5 @@ export function dispatchRequestsFor(work: Pick<Work, 'autoDispatch'>, sha: strin
  */
 export function liveReviewRequest(work: Work): DispatchRequest | null {
   const request = work.autoDispatch?.review;
-  return request && request.state === 'requested' && binds(request, work) ? request : null;
+  return request && request.state === 'requested' && reviewBinds(request, work) ? request : null;
 }
