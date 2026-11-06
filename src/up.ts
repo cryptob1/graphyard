@@ -17,6 +17,7 @@ import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onb
 import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './redaction.js';
+import { landlockRefusal, readLandlockAbi } from './landlock.js';
 import { recordSupervision } from './master/config.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
@@ -157,6 +158,8 @@ export interface UpDependencies {
    * when clean). The loop refuses to start from a dirty one, so preflight refuses first.
    */
   cliCheckout?(): Promise<{ root: string; dirty: string[] }>;
+  /** GY-3169: the host's Landlock ABI; preflight refuses below 9, since socket confinement then launches nothing. */
+  landlockAbi?(): number;
   /** GY-1480: why the master loop refuses to run, as the loop itself words it, or null while nothing stops it. */
   loopRefusal?(): Promise<string | null>;
   /**
@@ -636,6 +639,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     await step('preflight', async () => {
+      const landlock = deps.landlockAbi ? landlockRefusal(deps.landlockAbi) : null;
+      if (landlock) throw new UpStop(`preflight: ${landlock}. Boot a newer kernel, then rerun ${rerun()}; nothing was installed.`, upExitCodes.prerequisite);
       // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
       await ensureRepository();
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1263,6 +1268,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     // checkout A to this CLI rewrites the loop onto this CLI, so uncommitted work in the obsolete A
     // stops nothing, and work in this CLI's own checkout stops the run before anything is installed.
     cliCheckout: async () => { const checkout = await readCoordinatorCheckout(coordinatorCheckoutRoot(cliPath)); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
+    landlockAbi: readLandlockAbi,
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),

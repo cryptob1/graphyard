@@ -7,6 +7,7 @@ import type { CliContext } from './context.js';
 import { doctorRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
+import { readLandlockAbi } from '../landlock.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 
 /** `graphyard doctor [--profile PROFILE]`: local discovery, live integration readiness and the readiness checklist for a completion profile. */
@@ -33,7 +34,7 @@ export async function runDoctor(context: CliContext) {
     proposal: stored?.proposal ?? null,
   });
   // The machine-local prerequisites the README's setup steps depend on (GY-1352), each naming its step.
-  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });
+  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi });
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and
   // an undeployed merge are the next actions; until then the checklist's own gap comes first.

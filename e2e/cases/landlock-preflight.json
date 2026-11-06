@@ -1,0 +1,13 @@
+{
+  "id": "landlock-preflight",
+  "title": "up and doctor refuse a host below Landlock ABI 9",
+  "description": "With the ABI reader stubbed, up's preflight refuses ABI 8 before any install naming 'Landlock ABI 9 or newer' and passes ABI 9; doctor prints one FAIL landlock line below 9 and PASS at 9 or above.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "landlock preflight and doctor line",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/landlock-preflight.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
