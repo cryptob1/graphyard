@@ -144,8 +144,9 @@ export const emptyMasterSession = (): MasterSessionState => masterSessionSchema.
  * `limited until T` while the account hold a limit notice recorded stands, and `absent` once the pane
  * is closed with no hold standing. An unreadable screen or unknown runtime never reads working.
  */
-export function masterSessionState(master: MasterSessionState, now: number, agent?: { agent_status?: string }, screen?: string | null) {
+export function masterSessionState(master: MasterSessionState, now: number, agent?: { agent?: string | null; agent_status?: string }, screen?: string | null) {
   if (master.agentName) {
+    if (agent?.agent === null) return 'no agent';
     if (screen === null) return 'screen unreadable';
     return agent?.agent_status ?? 'unknown';
   }
@@ -153,7 +154,7 @@ export function masterSessionState(master: MasterSessionState, now: number, agen
   return 'absent';
 }
 /** The master line of the daemon summary (GY-898); the session and heartbeat budgets are added by the reader from its config. */
-export function masterSummary(master: MasterSessionState, now: number, agent?: { agent_status?: string; pane_id?: string }, screen?: string | null) {
+export function masterSummary(master: MasterSessionState, now: number, agent?: { agent?: string | null; agent_status?: string; pane_id?: string }, screen?: string | null) {
   const startedAt = master.startedAt ? Date.parse(master.startedAt) : Number.NaN;
   return { session: master.agentName, pane: agent?.pane_id ?? master.pane, runtime: master.runtime, account: master.account, adopted: master.adopted,
     startedAt: master.startedAt, ageMs: Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : null,
