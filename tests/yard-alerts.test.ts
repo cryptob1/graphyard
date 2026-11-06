@@ -57,22 +57,38 @@ const stateWith = (fields: Record<string, unknown> = {}) => {
   return Object.assign(state, fields) as DaemonState;
 };
 
+test('unit:stalled-yard-alerts-operator — work parked on a human decision is not queued work: the yard is waiting on the operator, so no alert fires; the answer queues it again', async () => {
+  const at = start, posts: string[] = [];
+  const request = { id: 'hr-1', kind: 'goals-and-priorities', reason: 'Which comes first', needed: 'A priority call', requestedBy: 'worker-a', epoch: 1, at: iso(at - 3 * 60 * minute) };
+  // What `park` leaves: an open humanRequest, no blocker, the lease ended, at build with no session.
+  const parked = item({ id: 'w1', key: 'GY-1', title: 'Parked', stage: 'build', epoch: 1, humanRequest: request });
+  const state = stateWith();
+  state.mergeWriter.lastMergeAt = iso(at - 3 * 60 * minute);
+  assert.deepEqual(queuedForStartOrMerge(state, [parked], at), [], 'the Work page lists it under Needs you and the dispatcher refuses it');
+  await yardAlertStep(cycle(config(), state, [parked], at, posts));
+  assert.deepEqual(posts, [], 'an open human decision never reads as a stopped yard');
+  assert.equal(state.alerts.stoppedAt, null);
+
+  const answered = { ...parked, humanRequest: { ...request, answer: { outcome: 'provided', text: 'Go ahead' } } } as unknown as Work;
+  assert.deepEqual(queuedForStartOrMerge(state, [answered], at).map(entry => entry.key), ['GY-1'], 'once answered it waits for a launch again');
+});
+
 test('unit:stalled-yard-alerts-operator — queued work with no launch and no merge past the window posts one alert naming the stop, since when and the top cause, repeats at most hourly, and sends one all-clear when work moves again', async () => {
   const posts: string[] = [], at = start;
   const lastMerge = at - 25 * minute;
   const state = stateWith();
   state.mergeWriter.lastMergeAt = iso(lastMerge);
-  // GY-1 waits for a launch with a recorded launch failure; GY-2 is parked (a standing blocker); GY-3 is in review; GY-4 waits for its merge.
+  // GY-1 waits for a launch with a recorded launch failure; GY-2 is held by a standing blocker; GY-3 is in review; GY-4 waits for its merge.
   state.mergeWriter.queue = [{ key: 'GY-4', id: 'w4', head: 'a'.repeat(40), submittedAt: iso(lastMerge), waitingMs: 0 }];
   const work = [
     item({ id: 'w1', key: 'GY-1', title: 'Waiting', actionQueue: { actions: [failedDispatch(lastMerge, 'mise shim not found in PATH')], history: [] } }),
-    item({ id: 'w2', key: 'GY-2', title: 'Parked', blocker: 'waits on the owner' }),
+    item({ id: 'w2', key: 'GY-2', title: 'Blocked', blocker: 'waits on the owner' }),
     item({ id: 'w3', key: 'GY-3', title: 'In review', stage: 'review' }),
     item({ id: 'w4', key: 'GY-4', title: 'Merge owed', stage: 'merge' }),
   ];
   // The cursor also holds a newer early-exit incident on a queued item: that is the top cause line.
   state.actions['early-exit:w4'] = { kind: 'dispatch', work: 'GY-4', principal: 'worker-a', state: 'failed', detail: 'GY-4 epoch 1: worker exited unsuccessfully (code 1) within 60s without submitting or committing', attempts: 1, epoch: 1, cycle: 3, at: iso(at - 3 * minute) };
-  assert.deepEqual(queuedForStartOrMerge(state, work, at).map(entry => entry.key), ['GY-1', 'GY-4'], 'open, unblocked items waiting for a launch or a merge are the queued work; parked and in-review items are not');
+  assert.deepEqual(queuedForStartOrMerge(state, work, at).map(entry => entry.key), ['GY-1', 'GY-4'], 'open, unblocked items waiting for a launch or a merge are the queued work; blocked and in-review items are not');
   assert.equal(topCauseLine(state, queuedForStartOrMerge(state, work, at)), state.actions['early-exit:w4'].detail, 'the newest failed launch the cursor names among the queued items is the top cause line');
 
   // One minute later the window has passed: one alert, at once, because the last movement is 26 minutes old.

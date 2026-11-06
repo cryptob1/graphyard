@@ -1,6 +1,7 @@
 // Concern: the stalled-yard alert (GY-3101) — plain, non-AI code in the loop that tells the operator directly when queued work can neither start nor merge, so a person hears about a stopped yard within minutes even when the master session is down.
 import type { Work } from '../model.js';
 import { formatAge } from '../model/duration.js';
+import { parkedOnHuman } from '../model/human-request.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { resumeExitWindowMs } from '../master/session-resume.js';
 import type { Cycle } from './cycle.js';
@@ -16,8 +17,9 @@ export const alertMinutesOf = (run: { alertMinutes?: number | null }) => run.ale
 export const yardAlertKey = 'yard:alert';
 
 /**
- * Queued work (GY-3101): open items that are not blocked, not parked (a parked item is one with a
- * standing blocker), and are waiting for a worker launch — no lease and no running session at
+ * Queued work (GY-3101): open items that are not blocked, not parked on a human decision (the
+ * dispatcher refuses those and the Work page lists them under Needs you, so the yard is waiting on
+ * the operator, not stopped), and are waiting for a worker launch — no lease and no running session at
  * backlog, ready or build — or for a merge — a head the merge writer's queue owes. Items in review
  * or under tests are waiting on other roles, not on a launch or a merge, so they never hold the
  * alert open on their own.
@@ -25,7 +27,7 @@ export const yardAlertKey = 'yard:alert';
 export function queuedForStartOrMerge(state: DaemonState, work: Work[], now: number): Work[] {
   const mergeQueued = new Set(state.mergeWriter.queue.map(entry => entry.key));
   return work.filter(item => {
-    if (item.stage === 'done' || item.blocker) return false;
+    if (item.stage === 'done' || item.blocker || parkedOnHuman(item)) return false;
     if (mergeQueued.has(item.key)) return true;
     const label = plainStage(item, now);
     return label === 'Not started' || label === 'Waiting';
