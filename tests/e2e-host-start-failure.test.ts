@@ -75,7 +75,7 @@ const outcomeOf = (ran: Promise<TrialRun>) => ran.then(run => ({ run, error: nul
 const browserFile = { file: 'e2e/cases/home-opens.json', definition: parseCase('e2e/cases/home-opens.json', JSON.stringify(browserCase)) };
 const commandFile = (run: string) => ({ file: 'e2e/cases/home-runs.json', definition: parseCase('e2e/cases/home-runs.json', JSON.stringify({ ...browserCase, id: 'home-runs', steps: [{ kind: 'command', run }] })) });
 
-test('unit:e2e-host-start-failure — a browser that cannot launch is the host\'s; a step that fails is the case\'s', async () => {
+test('unit:tests/e2e-host-start-failure.test.ts — a browser that cannot launch is the host\'s; a step that fails is the case\'s', async () => {
   const launcher: E2eLauncher = { launch: async () => { throw new Error("Executable doesn't exist at /nowhere/chrome"); } };
   const report = await runCases([browserFile], { url: 'http://127.0.0.1:1', token: 't', launcher });
   assert.equal(report.cases[0].attemptResults?.at(-1)?.hostFailure, true);
@@ -88,7 +88,7 @@ test('unit:e2e-host-start-failure — a browser that cannot launch is the host\'
   assert.equal(stepFailed.cases[0].attemptResults?.at(-1)?.hostFailure, undefined);
 });
 
-test('unit:e2e-host-start-failure — a process that never started is the host\'s, whether spawned directly or under a session gone', async () => {
+test('unit:tests/e2e-host-start-failure.test.ts — a process that never started is the host\'s, whether spawned directly or under a session gone', async () => {
   const notStarted: ProcessRunner = async () => ({ code: null, output: 'spawn sh ENOENT', timedOut: false, notStarted: true });
   const spawned = await runCases([commandFile('true')], { url: 'http://127.0.0.1:1', token: 't', root, processRunner: notStarted });
   assert.equal(spawned.cases[0].attemptResults?.at(-1)?.hostFailure, true);
@@ -104,21 +104,21 @@ test('unit:e2e-host-start-failure — a process that never started is the host\'
   assert.equal(exited.cases[0].attemptResults?.at(-1)?.hostFailure, undefined, 'a command that ran and failed is the head\'s');
 });
 
-test('unit:e2e-host-start-failure — a trial whose bound browser cannot launch ends as a runner failure, refusing nothing', async () => {
+test('unit:tests/e2e-host-start-failure.test.ts — a trial whose bound browser cannot launch ends as a runner failure, refusing nothing', async () => {
   const { run, error } = await outcomeOf(trial(['e2e:home-opens']));
   assert.ok(error instanceof TrialRunnerError, `no runner failure: ${run ? trialFailureReason({ run }) : error}`);
   assert.equal(error.phase, 'tests');
   assert.match(error.outputTail, /e2e case home-opens: the browser could not start/);
 });
 
-test('unit:e2e-host-start-failure — a case that fails a step still refuses the head, a browser that could not start beside it or not', async () => {
+test('unit:tests/e2e-host-start-failure.test.ts — a case that fails a step still refuses the head, a browser that could not start beside it or not', async () => {
   for (const proofs of [['e2e:home-says'], ['e2e:home-opens', 'e2e:home-says']]) {
     const run = await trial(proofs);
     assert.match(trialFailureReason({ run })!, /^trial failed: e2e case home-says: step 1 GET \//);
   }
 });
 
-test('unit:e2e-host-start-failure — a runner process that cannot start is reported as the host\'s; one out of budget stays a failure', async () => {
+test('unit:tests/e2e-host-start-failure.test.ts — a runner process that cannot start is reported as the host\'s; one out of budget stays a failure', async () => {
   const input = { worktree: root, mergeSha, proofs: ['e2e:home-opens'], env: { PATH: process.env.PATH! }, wrapper: [], networkWrapper: () => [], budgetMs: 5_000, log: () => {} };
   const scratch = await temporaryDirectory('e2e-host-runner', fixtureRoot);
   gitIn('checkout', '-q', '--detach', mergeSha);
