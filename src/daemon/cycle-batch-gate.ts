@@ -87,6 +87,9 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
 }
 
 const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
+const stopped = new WeakSet<object>();
+/** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
+export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
 
 /**
  * One record writer at a time per file: the gate's mid-flight checkpoints and the diagnostics'
@@ -152,6 +155,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
           note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}`);
         }
       } catch (error) {
+        // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
+        if (stopped.has(cycle.state)) return;
         // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
         await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, ...mergeFilings(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
