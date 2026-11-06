@@ -194,14 +194,17 @@ test('unit:stalled-yard-alerts-operator — with no run.alertUrl the step is ine
   assert.deepEqual(on.alerts, { on: true, url: 'https://ntfy.example/yard', minutes: 20, stoppedAt: null, lastAlertAt: null }, 'master status names the alert URL, window and recorded stop');
 
   // The dashboard reads the loop's own on/off naming: the coordination-read header, kept beside the loop's presence.
-  assert.equal(loopAlerts('on'), true);
+  assert.equal(loopAlerts('20'), 20, 'the loop names its stall window');
   assert.equal(loopAlerts('off'), false);
   assert.equal(loopAlerts(undefined), null, 'an older loop names nothing');
   const registry = loopRegistry({});
   registry.observe({ principal: 'loop', intervalSeconds: 20, alerts: loopAlerts('off') }, new Date(start));
   assert.equal(registry.live(new Date(start))?.alerts, false, 'the control plane keeps the loop\'s alerts naming beside its presence');
-  assert.ok(renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: false } } })).includes('Alerts are off'), 'the dashboard says alerts are off');
-  assert.ok(renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: true } } })).includes('Alerts are on'), 'the dashboard says alerts are on when the loop names them');
+  const offLine = renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: false } } }));
+  assert.ok(offLine.includes('Alerts are off') && offLine.includes('run.alertUrl') && offLine.includes('.graphyard/master.json') && offLine.includes('ntfy'), 'the dashboard says alerts are off and names the webhook URL setting');
+  const onLine = renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: 20 } } }));
+  assert.ok(onLine.includes('Alerts are on') && onLine.includes('20 minutes') && onLine.includes('hourly'), 'the dashboard says alerts are on with the stall window and hourly repeat');
+  assert.ok(renderToStaticMarkup(createElement(AlertsLine, { status: {} })).includes('running master loop'), 'unknown names the running loop it needs');
 });
 
 test('unit:stalled-yard-alerts-operator — the alert runs inside the cycle\'s persist step, which stays the fifth of five steps', async () => {

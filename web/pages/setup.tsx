@@ -81,15 +81,16 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
 
 /**
  * Whether the loop tells the operator directly when queued work can neither start nor merge
- * (GY-3101), as the live loop names it in the status (`setup.alerts`): on, off, or not known yet
- * (no live loop has named it).
+ * (GY-3101), as the live loop names it in the status (`setup.alerts`): its stall window in minutes
+ * (on), false (off), or nothing (no live loop has named it).
  */
 export function AlertsLine({ status }: { status: any }) {
   const alerts = status?.setup?.alerts;
-  return <p data-alerts={alerts === true ? 'on' : alerts === false ? 'off' : 'unknown'}>
-    {alerts === true ? <span className="green">Alerts are on: you are told when queued work cannot start or merge.</span>
-      : alerts === false ? <span className="amber">Alerts are off: set an alert address to be told when queued work cannot start or merge.</span>
-        : 'Whether alerts are on is not known yet.'}
+  const on = typeof alerts === 'number' && alerts > 0;
+  return <p data-alerts={on ? 'on' : alerts === false ? 'off' : 'unknown'}>
+    {on ? <span className="green">Alerts are on: when queued work has neither started nor merged for {alerts} minutes, the loop posts to your webhook URL, repeats at most hourly, and posts an all-clear when work moves again.</span>
+      : alerts === false ? <span className="amber">Alerts are off. To be told when queued work cannot start or merge, set <code>run.alertUrl</code> in <code>.graphyard/master.json</code> on the host that runs the master loop to a webhook URL that takes a POST, such as an ntfy topic (<code>https://ntfy.sh/your-topic</code>); <code>run.alertMinutes</code> sets the stall window (default 20).</span>
+        : 'Whether alerts are on is not known yet: the dashboard learns it from a running master loop. Start the loop on the host with graphyard master run, or check it with graphyard master status.'}
   </p>;
 }
 
