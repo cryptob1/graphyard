@@ -43,10 +43,10 @@ async function readToken(env) {
   throw new Error('Set GRAPHYARD_TOKEN or GRAPHYARD_TOKEN_FILE to this session\'s worker credential');
 }
 
-/** The pull loop is TypeScript (src/auto-dispatch.ts); tsx is a runtime dependency already. */
+/** The pull loop is TypeScript (src/dispatch/worker-pull.ts); tsx is a runtime dependency already. */
 export async function loadLoop() {
   const { tsImport } = await import('tsx/esm/api');
-  return tsImport('../src/auto-dispatch.ts', import.meta.url);
+  return tsImport('../src/dispatch/worker-pull.ts', import.meta.url);
 }
 
 /** A request that never got an answer, as opposed to a server that refused: only this is retried. */

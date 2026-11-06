@@ -8,7 +8,9 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { evaluate } from '../src/model-boundary/gates.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { dispatchCursorPath, emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchCursorPath, emptyDispatchCursor, readDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance: the fixed `at`/clock is handed to reconcileAutoDispatch; the new Date() readings only stamp the stub's snapshot and review records.
 

@@ -60,8 +60,7 @@ gates pass, runs its proofs and pushes it to the base branch with its deploy key
 merges nothing and no pull request is opened. A merge of a head whose gates had not passed is held
 as a violation; file the follow-up that re-verifies what it skipped.
 Never use an administrative merge bypass, edit a candidate, or read a
-worker credential. Read \`docs/master-agent.md\`
-in Graphyard or run \`graphyard master guide\` for the complete operating loop.
+worker credential. Run \`graphyard master guide\` for the complete operating loop.
 `;
 
 /**

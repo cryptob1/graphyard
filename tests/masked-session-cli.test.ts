@@ -8,7 +8,8 @@ import { credentialMaskFor, coordinatorConfinement, sessionMountNamespaceWorks }
 import { LauncherUnavailableError, loadMasterConfig, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
 import { storeAction, writeDaemonState } from '../src/daemon/state.js';
 import type { Work } from '../src/model.js';
-import { emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';

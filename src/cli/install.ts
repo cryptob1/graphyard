@@ -109,7 +109,6 @@ export const installCommands = defineCommands([
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
       '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind.',
-      '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
     readsConnection: () => false,

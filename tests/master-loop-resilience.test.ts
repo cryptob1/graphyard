@@ -15,7 +15,9 @@ import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpe
 import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.js';
 import { launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
-import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, readDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { emptyDaemonState, readDaemonState } from '../src/daemon/state.js';
 import { noteConfigReload, runDaemon } from '../src/daemon/run.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';

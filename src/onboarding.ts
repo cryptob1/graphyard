@@ -432,10 +432,10 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   if (parsed.success) committed = parsed.data;
   else if (declared !== undefined) {
     const declarations = parsed.error.issues.filter(issue => ['applications', 'cases'].includes(String(issue.path[0])));
-    if (declarations.length) throw new Error(`graphyard.json delivery declares applications or case bindings Graphyard cannot use: ${declarations.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}. Correct them (docs/delivery.md#managed-repositories), then rescan`);
+    if (declarations.length) throw new Error(`graphyard.json delivery declares applications or case bindings Graphyard cannot use: ${declarations.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}. Correct them, then rescan`);
   }
   const unknownCases = committed ? applicationProblems(committed, caseIdsOf(input.files)).filter(problem => problem.includes('does not exist')) : [];
-  if (unknownCases.length) throw new Error(`${unknownCases.join('; ')} (docs/delivery.md#managed-repositories)`);
+  if (unknownCases.length) throw new Error(`${unknownCases.join('; ')}`);
   // A repository with no deploy target has no UAT or production to promote a candidate to, so
   // under the GitHub merger each pull request is its own delivery (setup-from-zero step 12).
   const mode = overrides.mode ?? committed?.mode ?? (overrides.merger === 'control-plane' ? 'local' : deploy.target === 'none' ? 'per-pr' : 'release-candidate');

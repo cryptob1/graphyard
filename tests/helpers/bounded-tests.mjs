@@ -26,8 +26,11 @@ let next = 0;
 await Promise.all(Array.from({ length: Math.min(breadth, files.length) }, async () => {
   while (next < files.length) {
     const file = files[next++], started = Date.now();
+    // The bound is named to the file it bounds, so a test whose execution cannot fit it (the
+    // slow-tick receipt's twenty sequential runs) defers to an unbounded run instead of dying at
+    // the deadline.
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', ...reporter, ...flags, file], {
-      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GRAPHYARD_FILE_TIMEOUT_MS: String(timeoutMs) },
     });
     children.add(child);
     let output = '', timedOut = false;

@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, vanishedSettledSession } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import type { MasterConfig } from '../src/master.js';
 import { fleet, requested, starts } from './helpers/review-fleet.js';
 import { registryFixture } from './helpers/registry-fixture.js';
@@ -46,7 +48,7 @@ async function launchedOnce() {
   return { host, config, registry, effects, item: withReviewHandle(base, config.hostId!, pane, name, startedAt), pane, name };
 }
 
-test('unit:vanished-reviewer-slot-freed — a reviewer whose session vanished and whose record settled no longer holds the profile\'s slot, and the loop launches a replacement review', async () => {
+test('unit:vanished-reviewer-slot — a reviewer whose session vanished and whose record settled no longer holds the profile\'s slot, and the loop launches a replacement review', async () => {
   const { host, config, registry, effects, item, pane, name } = await launchedOnce();
   try {
     // The session leaves Herdr without posting a verdict.
@@ -79,7 +81,7 @@ test('unit:vanished-reviewer-slot-freed — a reviewer whose session vanished an
   } finally { await host.cleanup(); }
 });
 
-test('unit:live-reviewer-slot-kept — a reviewer session Herdr still lists keeps the profile\'s slot, and no second review launches beside it', async () => {
+test('unit:vanished-reviewer-slot — a live one is kept: a reviewer session Herdr still lists keeps the profile\'s slot, and no second review launches beside it', async () => {
   const { host, config, effects, item, name } = await launchedOnce();
   try {
     // Another request for a second item waits for the one slot the live session holds.
