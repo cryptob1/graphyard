@@ -84,15 +84,14 @@ test('unit:executor-serial-oldest-first — nextToMerge takes the oldest-submitt
   assert.equal(nextToMerge([], {}, start), null);
 });
 
-test('unit:executor-sensitive-waits-for-review — a sensitive delta (riskOf) needs its review gate passed before the writer takes it, a normal one does not, and the sensitive head waits behind nothing once reviewed', () => {
+test('unit:executor-trials-beside-review — the queue takes a head whose build gate passed whether its review gate has (GY-3164): the sensitive delta trials while still unapproved, and only a build-failed head is held out', () => {
   const sensitive = submitted(1, 60, ['src/store/schema.ts'], { gates: gates({ ready: true, build: true, test: true }) });
   // The served review gate passes a normal head reviewed after merge (GY-1525); the writer follows that gate (GY-1843).
   const normal = submitted(2, 10, ['src/app.ts'], { gates: gates({ ready: true, build: true, review: true, test: true }) });
-  assert.equal(nextToMerge([sensitive, normal], {}, start)?.key, 'GY-2', 'the older sensitive head waits for its review; the normal one needs none');
-  assert.equal(nextToMerge([{ ...normal, gates: gates({ ready: true, build: true, test: true }) } as Work], {}, start), null, 'a normal head whose served review gate failed waits too');
-  assert.equal(nextToMerge([sensitive], {}, start), null);
-  const reviewed = { ...sensitive, gates: gates({ ready: true, build: true, review: true, test: true }) } as Work;
-  assert.equal(nextToMerge([reviewed, normal], {}, start)?.key, 'GY-1', 'reviewed, the older sensitive head goes first');
+  // GY-3164: the queue required build and review; now the build gate alone admits a head, so its trial runs beside its review.
+  assert.equal(nextToMerge([sensitive, normal], {}, start)?.key, 'GY-1', 'the older sensitive head, its review gate unpassed, is still owed its trial');
+  assert.equal(nextToMerge([{ ...normal, gates: gates({ ready: true, build: true, test: true }) } as Work], {}, start)?.key, 'GY-2', 'a head whose served review gate failed trials too; the landing, not the trial, holds for review');
+  assert.equal(nextToMerge([{ ...normal, gates: gates({ ready: true, review: true, test: true }) } as Work], {}, start), null, 'a head whose build gate failed — worker verification not recorded — is not queued at all');
 });
 
 /** Ports that answer from memory and record every call in order. */

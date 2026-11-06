@@ -24,7 +24,7 @@ import { releasedSince, profileAccount, recordObservedExhaustion } from '../mast
 import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
-import { mergeCandidateHold } from '../merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
 import type { RelandInput } from '../merge-writer/serve-revert.js';
@@ -214,7 +214,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // files a reverted item's re-land as the master's operator-agent identity — only while the
     // live configuration names that identity, like the rework beside it.
     get mergeWriter() { const config = current();
-      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => mergeCandidateHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
+      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => mergeCandidateHold((await deps.snapshot()).work.find(item => item.id === work.id), work), holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
