@@ -1,0 +1,13 @@
+{
+  "id": "up-base-branch",
+  "title": "Up retains the installation base branch",
+  "description": "Up forwards the selected branch to install, reruns retain it, and onboarding commits above its tip instead of the default branch.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "up base branch regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/up-base-branch.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

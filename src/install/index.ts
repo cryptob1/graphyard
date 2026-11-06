@@ -317,7 +317,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   // a committed policy is its own choice and ignores this.
   const merger = installMerger(record, !!rawInputs.observeOnly);
   const delivery = await repositoryDelivery(root, merger).catch((error: any) => { throw new Error(`${repositoryConfigFile}'s delivery policy cannot be installed: ${error.message}. Correct it, then rerun`); });
-  let detectedBase = rawInputs.baseBranch;
+  let detectedBase = rawInputs.baseBranch ?? record?.baseBranch;
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
   }

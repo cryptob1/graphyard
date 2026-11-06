@@ -65,9 +65,9 @@ export const installCommands = defineCommands([
   {
     name: 'up',
     help: [
-      '  up --repo OWNER/NAME [--provider compose|local] [--local]',
-      '     [--master claude|codex] [--agent] [--wait MINUTES] [--share-tailnet]',
-      '     [--url URL] [--json]',
+      '  up --repo OWNER/NAME [--base-branch NAME] [--provider compose|local]',
+      '     [--local] [--master claude|codex] [--agent] [--wait MINUTES]',
+      '     [--share-tailnet] [--url URL] [--json]',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
       '                                Herdr, the merge writer\'s deploy key, master autonomy, onboarding, agent',
       '                                accounts, harness and master loop, resumable (.graphyard/up.json;',
@@ -83,6 +83,8 @@ export const installCommands = defineCommands([
       '                                registered: up creates the repository when missing and registers the merge writer\'s deploy',
       '                                key with the gh login. --url URL names the control plane\'s address before master init',
       '                                records one (HTTPS, or HTTP on loopback); --json prints the result as JSON.',
+      '                                --base-branch NAME builds on that branch (default: the repository\'s default branch);',
+      '                                a rerun without the flag keeps the branch the install recorded.',
       '                                --wait MINUTES bounds a wait (agent: 20). Exit codes: 0 green, 1 a step failed, 2 a',
       '                                machine prerequisite needs a person, 3 still waiting on a person.',
     ],
