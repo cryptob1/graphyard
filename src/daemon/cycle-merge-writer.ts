@@ -98,7 +98,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     merge: async (head, baseTip, item) => {
       const merged = await trialMerge(gitAs, { head, baseTip, ...(item ? { subject: mergeSubject(item) } : {}) });
       if ('conflict' in merged) return merged;
-      return { mergeSha: merged.mergeSha, files: (await git('diff', '--name-only', baseTip, merged.mergeSha)).split('\n').map(line => line.trim()).filter(Boolean) };
+      const changes = (await git('diff', '--name-status', '--no-renames', baseTip, merged.mergeSha)).split('\n').filter(line => line.trim()).map(line => line.trim().split('\t') as [string, string]);
+      return { mergeSha: merged.mergeSha, files: changes.map(([, path]) => path), addedOrModified: changes.filter(([status]) => status === 'A' || status === 'M').map(([, path]) => path) };
     },
     trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs) => {
       const proofs = criterionProofs(item);

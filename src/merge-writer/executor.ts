@@ -382,6 +382,12 @@ export { firstParentHolds } from './trial.js';
 export const criterionProofs = (work: Pick<Work, 'criteria'>) => [...new Set(work.criteria.flatMap(criterion => criterion.proofs.filter(proof => /^(unit|integration):/.test(proof))))];
 /** The e2e: proofs the item's criteria name (GY-2965): each binds e2e/cases/NAME.json, which the trial runs against the served head. */
 export const e2eProofsOf = (work: Pick<Work, 'criteria'>) => [...new Set(work.criteria.flatMap(criterion => criterion.proofs.filter(proof => /^e2e:/.test(proof))))];
+/** GY-3168: every feature grows the catalog — its head adds or changes a case its criteria name. Bugs, chores and legacy features naming no e2e proof pass. */
+export function featureCaseFailure(work: Pick<Work, 'type' | 'criteria'>, addedOrModified: readonly string[]): string | null {
+  const proofs = e2eProofsOf(work);
+  if (work.type !== 'feature' || !proofs.length || proofs.some(proof => addedOrModified.includes(`e2e/cases/${proof.slice(4)}.json`))) return null;
+  return `${trialFailurePrefix}: ${proofs.join(', ')}: a feature's head must add or change one of their cases under e2e/cases/`;
+}
 
 /**
  * Every test file in the merge commit whose source names one of `proofs`, read from the object store
@@ -655,8 +661,8 @@ function caseFiles(tap: string, files: readonly string[]): Map<string, string | 
 
 // ---- One merge, step by step against the ledger ------------------------------------------------------
 
-/** The trial merge of one head onto one tip: the commit to land (the head itself when it fast-forwards the tip, else its merge commit) and the files it changes against the tip, or the conflicting paths. */
-export type MergeOutcomeOfTrial = { mergeSha: string; files: string[] } | { conflict: string[] };
+/** The trial merge of one head onto one tip: the commit to land (the head itself when it fast-forwards the tip, else its merge commit), the files it changes against the tip and which of them it adds or modifies, or the conflicting paths. */
+export type MergeOutcomeOfTrial = { mergeSha: string; files: string[]; addedOrModified?: string[] } | { conflict: string[] };
 /** Everything `mergeOne` and `reconcileIntents` touch outside the process: git in the coordinator checkout, the deploy-key push, and the coordinator's ledger. */
 export interface MergePorts {
   baseBranch: string;
@@ -770,7 +776,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
     baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
-    failure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
+    failure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run) ?? featureCaseFailure(item, merged.addedOrModified ?? []);
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,

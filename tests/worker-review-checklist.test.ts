@@ -40,3 +40,9 @@ test('unit:tests/worker-review-checklist.test.ts unit:worker-brief-self-check-be
   assert.match(brief.slice(selfCheck, autonomous), /review self GY-7 prints them\) and fix each BLOCKING finding you would expect\. $/);
   for (const reviewerOnly of [/Post APPROVE/, /REQUEST_CHANGES/, /Do not run builds/, /state each judgement/]) assert.doesNotMatch(brief, reviewerOnly);
 });
+
+test('unit:tests/worker-review-checklist.test.ts — the criteria section reviewStandards gives the brief and the reviewers states, once, that a feature must add or change an e2e case its criteria name', () => {
+  const sentence = 'A feature must add or change an e2e case its criteria name.';
+  assert.equal(reviewStandards(work).criteria.split(sentence).length, 2);
+  assert.equal(brief.split(sentence).length, 2);
+});

@@ -1,0 +1,13 @@
+{
+  "id": "feature-adds-e2e-case",
+  "title": "A feature's merge adds or changes an e2e case it names",
+  "description": "A native command regression runs real git merges through the merge writer: a feature whose head adds or modifies a case its criteria name lands; one that leaves its cases untouched or only deletes one is refused naming its e2e proofs; bugs, chores and features naming no e2e proof pass.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "real feature-case merge regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/feature-adds-e2e-case.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
