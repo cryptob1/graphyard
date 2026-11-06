@@ -42,6 +42,9 @@ export async function main(argv = process.argv.slice(2)) {
   const [command, id, ...args] = argv;
   if (!command || command === 'help' || command === '--help') { console.log(renderHelp()); return; }
   const selected = commands.find(entry => entry.name === command);
+  // A subcommand's help flag is answered by the launcher before any command runs, so
+  // `graphyard login --help` prints login's help instead of minting a sign-in link (GY-3172).
+  if (selected && [id, ...args].some(word => word === '--help' || word === '-h')) { console.log(selected.help.join('\n')); return; }
   const context = await createContext(command, id, args, selected?.readsConnection?.(id) ?? true);
   if (selected && selected.scope !== 'work') return selected.run(context, undefined);
   if (selected?.unscoped && !id) return selected.unscoped(context);

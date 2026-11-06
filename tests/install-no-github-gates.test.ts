@@ -14,8 +14,7 @@ import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from 
 import { applyProposal } from '../src/repository-setup.js';
 import { gitleaksIgnorePath, gitleaksSha256, runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from '../src/merge-writer/secret-scan.js';
 import { runTrialAttempt, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
-import { refuseUpAppReuse } from '../src/cli/install.js';
-import { upUsage } from '../src/up.js';
+import { installCommands, refuseUpAppReuse } from '../src/cli/install.js';
 import { harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -184,5 +183,6 @@ test('unit:install-no-github-gates — up refuses --reuse-app and its help no lo
   assert.throws(() => refuseUpAppReuse(['--repo', 'owner/project', '--reuse-app', 'slug']), /--reuse-app is refused.*GY-2009/);
   assert.throws(() => refuseUpAppReuse(['--reuse-app=slug']), /GY-2009/);
   refuseUpAppReuse(['--repo', 'owner/project']);
-  assert.ok(!/--reuse-app/.test(upUsage), upUsage);
+  const upHelp = installCommands.find(command => command.name === 'up')!.help.join('\n');
+  assert.ok(!/--reuse-app/.test(upHelp), upHelp);
 });
