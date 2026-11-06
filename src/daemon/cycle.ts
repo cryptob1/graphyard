@@ -394,8 +394,8 @@ async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['se
   const { config, state, effects, clock, herdr } = cycle;
   if (!herdr.available || !effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
   const agent = herdr.agents.find(candidate => (session.pane && candidate.pane_id === session.pane) || (!!session.agentName && candidate.name === session.agentName));
-  // A first-run screen is never work, however Herdr labels it: report it with its remedy and leave the session alone.
-  const firstRun = effects.sessionScreen && (session.pane || session.agentName) ? firstRunStuck(session.runtime, await Promise.resolve(effects.sessionScreen(session)).catch(() => null)) : null;
+  // A first-run screen is never work, though Herdr reports it idle: report it with its remedy and leave the session alone.
+  const firstRun = agent?.agent_status !== 'working' && effects.sessionScreen && (session.pane || session.agentName) ? firstRunStuck(session.runtime, await Promise.resolve(effects.sessionScreen(session)).catch(() => null)) : null;
   if (firstRun) return void await note(cycle, `first-run:${item.id}:${session.id}`, 'attention', item.key, 'failed', `${session.id} is ${firstRun}`, session.principal);
   const reject = `reject:${item.id}:${session.id}`;
   if (agent?.agent_status === 'blocked') return blockedPromptStep(cycle, item, session, reject, effects.endStall);
