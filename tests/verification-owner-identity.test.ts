@@ -48,7 +48,6 @@ test('integration:verification-owner-identity — host release, live safety and 
   assert.equal(heldSlots(directory).length, 1, 'budget reads preserve live holders');
   held.release();
   assert.equal(heldSlots(directory).length, 0);
-  const baseline = await trialAffordableFiles(memory, directory);
   const ready = join(directory, 'ready');
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
     import { declareTrialFiles } from ${JSON.stringify(join(root, 'src/merge-writer/trial.ts'))};
@@ -61,13 +60,13 @@ test('integration:verification-owner-identity — host release, live safety and 
   let output = ''; child.stderr!.on('data', chunk => output += chunk);
   try {
     await waitFor(ready, child, () => output);
-    assert.equal(await trialAffordableFiles(memory, directory), baseline! - 46);
+    assert.equal(await othersDeclaredFiles(directory), 46);
     assert.equal(heldSlots(directory).length, 1);
     const ownerFile = join(directory, 'slot-1000', 'owner.json');
     await writeFile(ownerFile, JSON.stringify({ ...JSON.parse(readFileSync(ownerFile, 'utf8')), pid: process.pid }));
-    assert.equal(await trialAffordableFiles(memory, directory), baseline! - 46, 'same numeric PID is still another owner');
+    assert.equal(await othersDeclaredFiles(directory), 46, 'same numeric PID is still another owner');
     await stop();
-    assert.equal(await trialAffordableFiles(memory, directory), baseline, 'first plan reclaims before subtracting declarations');
+    assert.equal(await othersDeclaredFiles(directory), 0, 'first read reclaims the dead owner');
     assert.equal(heldSlots(directory).length, 0);
     const release = await declareTrialFiles(directory, 'ordinary', 3);
     assert.equal(heldSlots(directory)[0].owner?.files, 3);
@@ -79,7 +78,7 @@ test('integration:verification-owner-identity — host release, live safety and 
 test('integration:verification-owner-identity — private container PID collision preserves live owner then recovers first host plan', { timeout: 60_000 }, async () => {
   const directory = await temporaryDirectory('verification-private', root);
   const ready = join(directory, 'ready');
-  const baseline = await trialAffordableFiles(memory, directory);
+  const baseline = await trialAffordableFiles(memory);
   const wrapper = trialContainerWords([directory]);
   // PID 1 in the nested private root collides with the caller's live PID 1.
   // This uses the ordinary trial container, including its real nested namespace support.
@@ -100,12 +99,12 @@ test('integration:verification-owner-identity — private container PID collisio
     await waitFor(ready, child, () => output);
     assert.equal(Number(readFileSync(ready, 'utf8')), 1);
     assertHostPidOneAlive();
-    assert.equal(await trialAffordableFiles(memory, directory), baseline! - 46);
+    assert.equal(await othersDeclaredFiles(directory), 46);
     assert.equal(heldSlots(directory).length, 1, 'foreign live owner is retained');
     await stop();
     assertHostPidOneAlive();
-    assert.equal(await trialAffordableFiles(memory, directory), baseline);
-    assert.deepEqual(trialShardBreadth(24, 24, await trialAffordableFiles(memory, directory)), trialShardBreadth(24, 24, baseline));
+    assert.equal(await othersDeclaredFiles(directory), 0);
+    assert.deepEqual(trialShardBreadth(24, 24, await trialAffordableFiles(memory)), trialShardBreadth(24, 24, baseline));
     const held = await acquireVerificationSlot({ directory, slots: 1, label: 'host successor' });
     assert.equal(held.slot, 0); held.release();
     assert.equal(heldSlots(directory).length, 0);
