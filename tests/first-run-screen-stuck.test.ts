@@ -57,7 +57,7 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); });
 
-test('unit:first-run-screen-stuck — a Claude session on any first-run screen is reported stuck with its remedy, never re-prompted; an ordinary prompt is unaffected', async () => {
+test('unit:tests/first-run-screen-stuck.test.ts — a Claude session on any first-run screen is reported stuck with its remedy, never re-prompted; an ordinary prompt is unaffected', async () => {
   const clock = Date.now() + 30 * 60_000, iso = (at: number) => new Date(at).toISOString();
   const screens = ['Choose the text style that looks best', 'Security notes:\n 1. Claude can make mistakes', 'Use Claude Code’s terminal setup?', 'Select login method:'];
   const stuck: (Awaited<ReturnType<typeof item>> & { screen: string })[] = [];
