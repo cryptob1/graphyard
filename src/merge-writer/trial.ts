@@ -613,6 +613,8 @@ export interface RunTrialInput {
   secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
   /** GY-2965: the item's `e2e:` proofs; each binds e2e/cases/NAME.json, which the trial runs against the served head. */
   e2eProofs?: readonly string[];
+  /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
+  countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
   hidden?: readonly string[];
 }
@@ -959,6 +961,17 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
     }
   };
+  const finishTests = async (...verdict: Parameters<typeof finish>) => {
+    await input.countProofs?.({
+      root: worktree, scratch: temporary!, git: (command, args) => run(command, args, { timeoutMs: remaining() }),
+      runner: async (command, args) => {
+        enterStep('tests: proof runner');
+        const ran = await child('tests', command, args);
+        if (hostEnded(ran)) throw runnerFailure('tests', ran);
+      },
+    });
+    return finish(...verdict);
+  };
   const runChecks = async (checks: RepositoryTrialCheck[]): Promise<TrialRun> => {
     // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
     if (input.e2eProofs?.length) {
@@ -973,10 +986,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
     }
     if (!checks.length) {
-      if (!nodePackage) return finish('pass', { passed: 0, failed: [], files: 0 });
+      if (!nodePackage) return finishTests('pass', { passed: 0, failed: [], files: 0 });
       enter('tests');
       log.push(noTestCheckConfigured);
-      return finish('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
+      return finishTests('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
     }
     enter('tests');
     const failed: string[] = [];
@@ -991,7 +1004,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         passed += selected.tests.passed; files += selected.tests.files;
         failed.push(...selected.tests.failed); groups.push(...(selected.groups ?? []));
         runnerExit = selected.runnerExit ?? null;
-        if (failed.length) return finish('pass', { passed, failed, files }, runnerExit, groups, selected.logTail);
+        if (failed.length) return finishTests('pass', { passed, failed, files }, runnerExit, groups, selected.logTail);
         continue;
       }
       files++;
@@ -1010,7 +1023,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       passed++;
     }
     const logTail = failingOutput && log.join('\n').length > tailLength ? failureTail([failingOutput]) : tail();
-    return finish('pass', { passed, failed, files }, runnerExit, groups.length ? groups : undefined, logTail, detail);
+    return finishTests('pass', { passed, failed, files }, runnerExit, groups.length ? groups : undefined, logTail, detail);
   };
   const runSelected = async (check: RepositoryTrialCheck): Promise<Pick<TrialRun, 'tests' | 'runnerExit' | 'groups' | 'logTail'>> => {
     const result = (tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()) => ({ tests, runnerExit, groups, logTail });
