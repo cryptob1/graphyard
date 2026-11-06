@@ -138,3 +138,18 @@ test('manual:lease-lifecycle-docs: the generated worker instructions say complet
   assert.match(guideText('complete'), /do not heartbeat or edit after it/);
   assert.match(guideText('complete').replace(/\s+/g, ' '), /the supervisor stops the session; that is the attempt ending, not lease loss/);
 });
+
+test('unit:lease-lifecycle — a claim takes the lease, a heartbeat renews it, a release ends it and the item is claimable again', async () => {
+  let work = await claimed('lease-lifecycle');
+  const epoch = work.epoch;
+  assert.deepEqual({ owner: work.lease!.owner, epoch: work.lease!.epoch }, { owner: worker.id, epoch });
+  const claimedUntil = Date.parse(work.lease!.expiresAt);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  work = await engine.execute(worker, 'heartbeat', work.id, { epoch }, id());
+  assert.ok(Date.parse(work.lease!.expiresAt) > claimedUntil, 'a heartbeat extends the lease');
+  await assert.rejects(engine.execute(replacement, 'heartbeat', work.id, { epoch }, id()), /Lease missing, expired, or superseded/);
+  work = await engine.execute(worker, 'release', work.id, { epoch }, id());
+  assert.equal(work.lease, null, 'a release ends the lease');
+  work = await engine.execute(replacement, 'claim', work.id, {}, id());
+  assert.equal(work.lease!.owner, replacement.id);
+});

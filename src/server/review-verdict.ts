@@ -1,8 +1,9 @@
 import { once } from '../store/mutations.js';
+import { recordDispatch } from '../engine/evaluate.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, implementerIdentities, type Principal, type Work } from '../model.js';
+import { demand, implementerIdentities, type Principal } from '../model.js';
 import type { ControlPlaneReviewLaunch, ControlPlaneVerdict } from '../model/post-merge-review.js';
 import { reviewEvents, verdictStateOf } from '../review-post.js';
 import { blockingFindings } from '../review-cap.js';
@@ -222,7 +223,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     if (launch!.postMerge) work!.postMergeReview = 'reviewed';
     if (work!.stage !== 'done') {
       engine.evaluate(work!, all, now);
-      await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+      await recordDispatch(db, work!, now);
     }
     await save(db, work!, actor.id, `${product ? productReviewVerdictEvent : reviewVerdictEvent}.recorded`, now, { launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, reviewId, postMerge: launch!.postMerge, product });
     return { result: { recorded: true, key: work!.key, launch: launch!.id, reviewId, state: product ? productVerdict : state, sha: data.sha, reviewer: launch!.reviewer, stage: work!.stage, postMerge: launch!.postMerge, product } };
@@ -257,7 +258,7 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
     work!.productReview = productReview;
     if (work!.stage !== 'done') {
       services.engine.evaluate(work!, all, now);
-      await (services.engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+      await recordDispatch(db, work!, now);
     }
     await save(db, work!, actor.id, `${productReviewVerdictEvent}.recorded`, now, { reviewer: data.reviewer, sha: data.sha, verdict: data.verdict });
     return { recorded: true, key: work!.key, verdict: data.verdict, sha: data.sha, reviewer: data.reviewer, stage: work!.stage };
@@ -337,7 +338,7 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
     work!.specCheck = specCheck;
     work!.specCheckLaunch = null;
     services.engine.evaluate(work!, all, now);
-    await (services.engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+    await recordDispatch(db, work!, now);
     await save(db, work!, actor.id, `${specCheckVerdictEvent}.recorded`, now, { reviewer, verdict: data.verdict, recheck });
     return { recorded: true, key: work!.key, verdict: data.verdict, recheck, reviewer, policyRevision: specCheck.policyRevision, stage: work!.stage };
   }));

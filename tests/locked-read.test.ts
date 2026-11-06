@@ -86,11 +86,12 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
     + 'await this.store.leasePool.query(`SELECT document FROM work_items w JOIN work_index i ON i.id = w.id ORDER BY w.number`);\nawait db.query(wholeSql, []);';
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Single-item commands use the peer read; graph-wide edits retain the bounded fleet read.
-  const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
+  const engineSource = sources(join(src, 'engine')).map(file => readFileSync(file, 'utf8')).join('\n');
+  const schedulerSource = readFileSync(join(src, 'reconcile/scheduler.ts'), 'utf8');
   assert.equal((engineSource.match(/decisionWork\(db, \[id\]/g) ?? []).length, 3, 'single-item commands name their focus in the peer read');
   assert.equal((engineSource.match(/lockedWork\(db, \[id\]\)/g) ?? []).length, 1, 'only graph and workspace edits retain the fleet read');
-  assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
-  assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
+  assert.match(schedulerSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
+  assert.match(schedulerSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
   assert.doesNotMatch(readFileSync(join(src, 'store/locked-read.ts'), 'utf8'), /settled IS NOT TRUE|NOT i\.settled/, 'the locked read does not read every open document whole');
 
