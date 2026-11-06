@@ -56,7 +56,8 @@ const head = await workerGit('rev-parse', 'HEAD');
 item = await call(`${work}/submit`, workerToken, { epoch, head });
 assert.equal(item.candidate.sha, head);
 assert.equal(item.lease, null, 'submission ends the worker lease');
-assert.equal(nextToMerge([item], {}, Date.now()), null, 'a submitted head waits for review');
+// GY-3164: a build-passed head is queued for its trial beside review; the landing still waits for the approval.
+assert.equal(nextToMerge([item], {}, Date.now())?.id, item.id, `a submitted head trials beside review: ${JSON.stringify(item.gates)}`);
 
 const reviewToken = randomBytes(32).toString('hex');
 await call(`${work}/review-launch`, coordinatorToken, {
