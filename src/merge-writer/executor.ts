@@ -4,6 +4,7 @@ import { riskOf } from '../model-boundary/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { parseFailedTests } from '../model/base-failure.js';
+import { maskSecrets } from '../redaction.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
@@ -146,7 +147,36 @@ export const mergeRecordStatus = (error: unknown) => {
   return Number(/\brefused \S+ \((\d{3})\)/.exec(error instanceof Error ? error.message : String(error))?.[1]) || null;
 };
 
-/** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
+/**
+ * GY-3150: the failing test names a trial step's output reports: node:test's spec and TAP entries
+ * (`parseFailedTests`, file-level entries left out) and Playwright's `✘ … › FILE:L:C › title` and
+ * `1) [project] › FILE:L:C › title` lines, as `FILE › title`.
+ */
+export function failingTestNames(log: string): string[] {
+  const names = new Set(parseFailedTests(log).filter(name => !/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)));
+  for (const raw of log.split('\n')) {
+    const line = raw.replace(ansiEscape, '').trim();
+    const spec = /^(?:[✘×]\s+\d+\s+|\d+\)\s+)(?:\[[^\]]+\]\s+›\s+)?([\w./-]+\.(?:spec|test)\.[cm]?[jt]sx?):\d+:\d+\s+›\s+(.+?)(?:\s+\(retry #\d+\))?(?:\s+\(\d+(?:\.\d+)?m?s\))?(?:\s+─+)?$/.exec(line);
+    if (spec && spec[2]!.length <= 500) names.add(`${spec[1]} › ${spec[2]}`);
+  }
+  return [...names];
+}
+const reasonBound = 2000;
+/**
+ * GY-3150: a failed step's refusal carries what its output names — the failing test names not
+ * already in the reason, then a credential-masked tail of the step's log — within the ledger's
+ * 2,000 characters. The first line stays the reason itself, which `trialFailureTests` reads.
+ */
+function withStepDetail(reason: string, logTail: string | undefined): string {
+  const log = logTail?.trim() ?? '';
+  const names = failingTestNames(log).filter(name => !reason.includes(name));
+  const head = `${reason}${names.length ? `\nfailing tests: ${boundedList(names, '; ', 600)}` : ''}`.slice(0, reasonBound);
+  const room = reasonBound - head.length - '\nlog tail:\n'.length;
+  const masked = maskSecrets(log);
+  const tail = room > 1 ? (masked.length > room ? `…${masked.slice(-(room - 1)).trim()}` : masked.trim()) : '';
+  return tail ? `${head}\nlog tail:\n${tail}` : head;
+}
+/** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3), with the step's failing test names and log tail (GY-3150). */
 export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Partial<Pick<TrialRun, 'logTail'>> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
@@ -155,18 +185,14 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
   const missing = run.e2e?.find(entry => entry.missing);
   if (missing) return `${trialFailurePrefix}: ${missing.proof} has no case at e2e/cases/${missing.case}.json`;
   const failedCase = run.e2e?.find(entry => entry.failingStep);
-  if (failedCase) return `${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`;
-  if (run.build === 'fail') {
-    const reason = `${trialFailurePrefix}: build step npm run build`;
-    const tail = run.logTail?.trim();
-    return tail ? `${reason}\n${tail.slice(-(2000 - reason.length - 1))}` : reason;
-  }
+  if (failedCase) return withStepDetail(`${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`, run.logTail);
+  if (run.build === 'fail') return withStepDetail(`${trialFailurePrefix}: build step npm run build`, run.logTail);
   if (run.tests.failed.length) {
     // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
     const files = run.tests.failed.slice(0, 20).join(', ');
-    if (run.timedOut) return `${trialFailurePrefix}: tests ${files} timed out`;
-    if (run.failingCase) return `${trialFailurePrefix}: tests ${files}: ${run.failingCase}`;
-    return `${trialFailurePrefix}: tests ${files}`;
+    if (run.timedOut) return withStepDetail(`${trialFailurePrefix}: tests ${files} timed out`, run.logTail);
+    if (run.failingCase) return withStepDetail(`${trialFailurePrefix}: tests ${files}: ${run.failingCase}`, run.logTail);
+    return withStepDetail(`${trialFailurePrefix}: tests ${files}`, run.logTail);
   }
   // GY-2984: a bug fix whose proofs already pass on the base proves no bug.
   if (run.notReproduced) return `${trialFailurePrefix}: not reproduced: ${run.notReproduced.proofs.join(', ')} ${run.notReproduced.proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${run.notReproduced.tip}`;
