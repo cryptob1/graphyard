@@ -574,7 +574,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   // install registers no GitHub App (GY-2010): it registers the merge writer's deploy key instead.
   const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : [])];
-  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch ${request.baseBranch}` : ''}${request.agent ? ' --agent' : ''}`;
+  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch '${request.baseBranch}'` : ''}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
     if (!deps.gh || !deps.git) throw new UpStop('preflight: control-plane merger needs gh and git on this machine to create the repository when it is missing', upExitCodes.prerequisite);
@@ -1152,7 +1152,7 @@ export async function publishOnboarding(root: string, repository: string, run: (
   // name, never skipped, so the change never claims a file it does not hold.
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
   if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
-  const record = await readInstallRecord(installDirectory(installIdFor(repository)));
+  const record = await readInstallRecord(installDirectory(installIdFor(repository))).catch(() => null);
   const base = record?.baseBranch ?? run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
   run('git', ['fetch', '--quiet', 'origin', base]);
   const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
