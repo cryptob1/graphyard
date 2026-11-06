@@ -11,7 +11,8 @@ import {
   sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession,
   type RuntimeSession, type SessionHandle,
 } from '../src/model/sessions.js';
-import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
+import { runtimeEndedStates } from '../src/harness.js';
+import { runtimeAdapters } from '../src/master/runtimes.js';
 import { closureHandle, launchedSessionHandle, reconcileSessionLiveness, sessionHandleKey } from '../src/dispatch/session-sweep.js';
 import { dispatchEffects, type DispatchEffects } from '../src/dispatch/effects.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
@@ -246,7 +247,7 @@ test('integration:dead-session-reconciled — a session the runtime no longer re
   // Muse's names are not Claude's.
   assert.deepEqual([...runtimeEndedStates('unknown-runtime')], [...endedRuntimeStates]);
   assert.ok(runtimeEndedStates('muse').includes('terminated') && !endedRuntimeStates.includes('terminated'));
-  assert.ok(Object.keys(runtimeEndedSessionStates).includes('muse'));
+  assert.ok(runtimeAdapters().some(adapter => adapter.kind === 'muse' && adapter.endedStates));
 
   // A handle another host launched is left to that host's loop, however long this one has not
   // reported it: the slot it holds is that host's to free.

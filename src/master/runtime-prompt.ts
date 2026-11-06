@@ -1,6 +1,7 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
 import { freeModelNotice, exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
+import { providerUsageErrors, runtimeAdapter } from './runtimes.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -105,7 +106,7 @@ function usageLimitMenu(above: string[], options: { number: string; label: strin
   const lines = above.slice(-limitMenuNoticeLines).map(frameless).filter(Boolean);
   if (!limitMenuQuestion.test(lines.at(-1) ?? '')) return null;
   // The menu vouches for the notice above it, so the notice need not lead its line here.
-  const claude = providerLimitNotices.claude;
+  const claude = runtimeLimitNotices('claude');
   const noticeAt = (line: string) => Math.min(...claude.map(pattern => pattern.exec(line)?.index ?? Infinity));
   const found = [...lines].reverse().find(line => line.length <= exhaustionNoticeMaxLength && noticeAt(line) < Infinity);
   // The notice as the provider wrote it, without the label the runtime drew in front of it.
@@ -177,36 +178,12 @@ export function continueAfterDecline(key: string, prompt: Pick<RuntimePrompt, 't
 // session is being judged mid-work.
 // ---------------------------------------------------------------------------
 
-/** The usage-limit messages the provider APIs themselves return, in a runtime's error output. */
-const providerUsageErrors: readonly RegExp[] = [
-  /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
-  /\b(?:usage|rate) limit reached\b/i,
-  /\breached your [\w .-]{0,40}usage limits?\b/i,
-  /\busage limits? (?:has|have) been reached\b/i,
-  /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
-  /\blimit reached\b.*\breset/i,
-];
-/** Z.AI's 429 `Weekly/Monthly Limit Exhausted`, which the runtimes that speak to it print verbatim behind their own error labels (GY-973, GY-1817). */
-const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i;
-/** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
-const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
-/** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
-export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
-  claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
-  codex: [...providerUsageErrors],
-  opencode: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
-  cursor: [...providerUsageErrors],
-  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
-  pi: [...providerUsageErrors, zaiLimitEnvelope], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
-};
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
-export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
+export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => runtimeAdapter(runtime)?.limitNotices ?? providerUsageErrors;
 
 /** The label a runtime draws in front of a provider error — `Error:`, `API Error:`, `Error code: 429 -` — which is not the agent's voice. */
 const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
 
-/** The runtimes whose provider writes a zone-less reset wall clock in UTC: pi's 429 code 1310 names `2026-10-17 08:27:35` with no zone (GY-1817). Read in the loop host's zone, the hold would differ by whatever offset the host happens to sit in — releasing a still-spent account early on one, out-waiting a reset hours past it on another. */
-const zonelessUtcRuntimes: ReadonlySet<string> = new Set(['pi']);
 /** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
 const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?![.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
 /** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
@@ -244,7 +221,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
     // A notice that names no reset at all — Z.AI's 429 rate-limit envelope — is held for the envelope's own default (GY-2943).
-    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
+    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
   }
   return null;
 }

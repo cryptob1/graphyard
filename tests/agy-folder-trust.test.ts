@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { agyConfigFile, launchPlan, LaunchRefusedError, nonInteractiveLaunch, trustAgyFolder } from '../src/harness.js';
+import { agyConfigFile, launchPlan, LaunchRefusedError, trustAgyFolder } from '../src/harness.js';
+import { runtimeAdapter } from '../src/master/runtimes.js';
 import { awaitRuntimeStart, SessionStartError, startAgentSession } from '../src/master.js';
 import { detectConsentPrompt } from '../src/consent-prompt.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -37,7 +38,7 @@ const agyTrustDialog = [
 ].join('\n');
 
 test('unit:agy-fresh-worktree-trusted — the built agy launch for a worktree it has never run in records that worktree in agy\'s trustedWorkspaces before the session starts', async () => {
-  assert.equal(nonInteractiveLaunch.agy.trust, trustAgyFolder, 'the agy recipe carries a trust step, as the claude recipe does');
+  assert.equal(runtimeAdapter('agy')?.recipe?.trust, trustAgyFolder, 'the agy recipe carries a trust step, as the claude recipe does');
   assert.match(launchPlan('agy').prompts!, /workspace-trust prompt/);
   const home = await temporaryDirectory('agy-home'), worktree = await temporaryDirectory('agy-worktree'), directory = await temporaryDirectory('agy-launch');
   const settings = agyConfigFile({ HOME: home });

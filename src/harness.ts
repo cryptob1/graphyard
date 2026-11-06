@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { endedRuntimeStates, type RuntimeStates } from './model/sessions.js';
 import { temporaryDirectories, underTestRunner } from './runtime-environment.js';
+import { runtimeAdapter, runtimeAdapters } from './master/runtimes.js';
 
 export type ApprovalMode = 'auto' | 'prompt';
 /**
@@ -34,36 +35,8 @@ export function asksNothing(value: string) {
   return !asks(document);
 }
 
-// Per-runtime startup contracts that remove the approval and workspace-trust prompts a freshly
-// launched session blocks on. These are runtime CLI contracts, not Graphyard authority: a session
-// that never asks can still only act inside its own assigned worktree and its own credentials.
-export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
-  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, verify: verifyClaudeTrust, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
-    tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository\'s own Claude settings; everything the agent proposes runs without asking.' },
-  // No Codex flag skips its "Trust this folder?" dialog in a folder its config does not list, so
-  // the folder is recorded trusted first (trustCodexFolder, GY-1306).
-  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, trust: trustCodexFolder, verify: verifyCodexTrust, prompts: 'directory-trust and per-command approval prompts',
-    tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
-  cursor: { program: 'agent', args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
-    tradeoff: 'Cursor Agent (`agent`) runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
-  opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
-    tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
-  // Pi has no approval or trust prompt to suppress: every tool it has runs without asking.
-  pi: { args: [], environment: {}, prompts: 'none: pi has no approval or workspace-trust prompts',
-    tradeoff: 'pi runs every tool it proposes in the assigned worktree; it has no approval step to turn off.' },
-  gemini: { args: ['--yolo'], environment: {}, prompts: 'per-tool approval prompts',
-    tradeoff: 'Gemini CLI approves every tool call it proposes (YOLO mode) without asking.' },
-  qwen: { args: ['--yolo'], environment: {}, prompts: 'per-tool approval prompts',
-    tradeoff: 'Qwen Code approves every tool call it proposes (YOLO mode) without asking.' },
-  copilot: { args: ['--allow-all-tools', '--allow-all-paths'], environment: {}, prompts: 'per-tool approval and path-access prompts',
-    tradeoff: 'Copilot CLI runs every tool and reaches every path it proposes without asking.' },
-  muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
-    tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
-  // Google Antigravity CLI (agy 1.2+): one flag auto-approves every tool permission request; no
-  // flag skips its workspace-trust prompt, so the folder is recorded trusted first (trustAgyFolder).
-  agy: { args: ['--dangerously-skip-permissions'], environment: {}, trust: trustAgyFolder, prompts: "per-tool permission prompts, and the fresh-worktree workspace-trust prompt ('Do you trust the contents of this project?')",
-    tradeoff: 'Antigravity CLI (`agy`) approves every tool permission request it proposes without asking and trusts the assigned worktree without asking.' },
-};
+/** The no-approval launch recipe of `kind`, from its runtime adapter (master/runtimes.ts). */
+export const launchRecipe = (kind: string | null | undefined): LaunchRecipe | undefined => runtimeAdapter(kind)?.recipe;
 
 /**
  * Claude Code asks "Do you trust the files in this folder?" the first time it starts in a folder
@@ -360,7 +333,7 @@ export async function trustAgyFolder(directory: string, environment: Record<stri
 }
 
 export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
-  super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
+  super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${runtimeAdapters().filter(adapter => adapter.recipe).map(adapter => adapter.kind).join(', ')}) for this profile or registry role.`);
 } }
 /**
  * The launch contract a registry runtime brings with it (model/registry.ts): its own startup
@@ -380,7 +353,7 @@ export const requestPlaceholder = '{request}';
 export interface RegisteredLaunch { args: string[]; environment?: Record<string, string>; homeVariable?: string | null }
 export const registryContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: its agent-registry launch contract registers no arguments or environment, so nothing suppresses its own approval or trust prompts and the session would wait for a human. Register the flags that start ${kind} without approvals with graphyard master registry runtime set NAME --kind ${kind} --arg=FLAG --reason REASON.`;
 export function assertLaunchable(kind: string, registered: RegisteredLaunch | null = null) {
-  if (nonInteractiveLaunch[kind]) return;
+  if (launchRecipe(kind)) return;
   if (!registered) throw new LaunchRefusedError(kind);
   if (!registered.args.some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
 }
@@ -408,11 +381,7 @@ export function assertNoApprovalOptOut(kind: string, approvals: ApprovalMode = '
  * prompt, and closing its handle would take away the attach command at the one moment somebody
  * needs it.
  */
-export const runtimeEndedSessionStates: Record<string, readonly string[]> = {
-  // Muse is the one runtime whose listing reports an exit rather than dropping the session.
-  muse: [...endedRuntimeStates, 'exited-error', 'terminated'],
-};
-export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionStates[runtime] ?? endedRuntimeStates;
+export const runtimeEndedStates: RuntimeStates = runtime => runtimeAdapter(runtime)?.endedStates ?? endedRuntimeStates;
 
 /**
  * The runtime's no-approval mode merged into a profile's own arguments and environment. Recipe
@@ -423,7 +392,7 @@ export const runtimeEndedStates: RuntimeStates = runtime => runtimeEndedSessionS
  * refuses it before any session starts (GY-184).
  */
 export function launchPlan(kind: string | undefined, approvals: ApprovalMode = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
-  const recipe = kind ? nonInteractiveLaunch[kind] : undefined;
+  const recipe = launchRecipe(kind);
   const base = { approvals, args: [...agentArgs], environment: {} as Record<string, string>, applied: false, refusal: null as string | null, prompts: recipe?.prompts ?? null, tradeoff: recipe?.tradeoff ?? null };
   if (!recipe) return { ...base, reason: kind ? `Graphyard has no non-interactive launch contract for ${kind}; a session of it is refused at launch rather than left at its own approval prompt` : 'A launched session requires an agent kind' };
   if (approvals === 'prompt') return { ...base, reason: approvalOptOutRefusal(kind!), refusal: approvalOptOutRefusal(kind!) };
