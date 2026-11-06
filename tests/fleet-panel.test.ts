@@ -191,11 +191,11 @@ test('unit:fleet-why-no-duplication — an idle account\'s and a spent account\'
 test('unit:fleet-launch-summary-compact — every role that can launch is one chip on one line naming its next account in its title, and only a role that cannot launch gets a line, with why and when', () => {
   const names = ['launch-a', 'launch-b'];
   const roles = (['worker', 'reviewer', 'producer', 'master'] as const).map(name => ({ name, accounts: names, concurrency: name === 'master' ? 1 : 2 }));
-  // The master at its concurrency limit: one blocked role.
+  // The master holding its own slot: one line, read as running, not as an error (GY-3181).
   const blocked = render(declutterFleet(names, roles, [], [['master', 'launch-a', 'GY-1325']]));
   assert.equal(blocked.split('data-can-launch="no"').length - 1, 1, 'exactly one reason line');
-  assert.equal(blocked.split('Cannot launch').length - 1, 1);
-  assert.match(blocked, /<li data-role-launch="master" data-can-launch="no">.*master: none can launch — at its concurrency limit \(1 of 1 live\); next: launch-a when one of its sessions ends<\/li>/);
+  assert.ok(!blocked.includes('Cannot launch'));
+  assert.match(blocked, /<li data-role-launch="master" data-can-launch="no"><span class="status-chip tone-busy">Running<\/span> Master: Running since .*<\/li>/);
   assert.equal(blocked.split('class="role-chip"').length - 1, 3, 'the other three are chips');
   assert.ok(blocked.includes('<span class="role-chip" data-role-launch="worker" data-can-launch="yes" title="next: launch-a now"><span aria-hidden="true">Workers</span><span class="sr-only">Workers: can launch now — next: launch-a now</span></span>'), 'a chip names its next account in its title');
   assert.ok(blocked.includes('</span></span>: can launch</p>'));

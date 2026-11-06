@@ -1,0 +1,13 @@
+{
+  "id": "agents-page-neutral-states",
+  "title": "The Agents page shows a healthy install's normal states neutrally",
+  "description": "A running master reads 'Running since', an unconfigured optional role and a credential-less detected runtime read 'Not configured'; the agents page model marks no row as an error.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "agents page neutral states",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/agents-page-neutral-states.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

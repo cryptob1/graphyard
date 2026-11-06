@@ -8,14 +8,14 @@ import { formatDuration } from '../src/model/duration';
  * the `FleetView` `GET /api/agent-registry` serves, so a test renders exactly what the browser does.
  */
 
-export const accountChips = ['disabled', 'no-role', 'spent', 'launch-failing', 'unavailable', 'working', 'idle'] as const;
+export const accountChips = ['disabled', 'no-role', 'spent', 'not-configured', 'launch-failing', 'unavailable', 'working', 'idle'] as const;
 export type AccountChip = typeof accountChips[number];
 export const chipLabels: Record<AccountChip, string> = {
-  disabled: 'Disabled', 'no-role': 'No role', spent: 'Spent', 'launch-failing': 'Launch failing', unavailable: 'Unavailable', working: 'Working', idle: 'Idle',
+  disabled: 'Disabled', 'no-role': 'No role', spent: 'Spent', 'not-configured': 'Not configured', 'launch-failing': 'Launch failing', unavailable: 'Unavailable', working: 'Working', idle: 'Idle',
 };
 /** The tone each chip draws with, from the dashboard's own status tokens (web/style.css). */
 export const chipTones: Record<AccountChip, 'ok' | 'busy' | 'wait' | 'bad' | 'off'> = {
-  disabled: 'off', 'no-role': 'off', spent: 'wait', 'launch-failing': 'bad', unavailable: 'bad', working: 'busy', idle: 'ok',
+  disabled: 'off', 'no-role': 'off', spent: 'wait', 'not-configured': 'off', 'launch-failing': 'bad', unavailable: 'bad', working: 'busy', idle: 'ok',
 };
 
 /** A reset or retry time in the viewer's own time zone, e.g. "Oct 3, 08:27 AM". */
@@ -55,6 +55,9 @@ export function launchFailure(account: FleetAccountView, fleet: Pick<FleetView, 
   return null;
 }
 
+/** A failure that only says the runtime has no credential yet (a CLI found on PATH, never signed in): not configured, not broken. */
+const missingCredential = /no api key|not logged in|no credential/i;
+
 /** The time a role hold ends, from the registry's own reason (`roleIneligibility`). */
 const heldUntil = (reason: string) => /until (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(reason)?.[1] ?? null;
 const exhausted = (account: FleetAccountView, now: number) => account.quota === 'exhausted' && (!account.resetsAt || Date.parse(account.resetsAt) > now);
@@ -70,6 +73,8 @@ export function accountStatus(account: FleetAccountView, fleet: Pick<FleetView, 
   if (exhausted(account, now)) return status('spent', account.resetsAt
     ? `quota spent until ${whenText(account.resetsAt, now)}${account.usage.length ? ` — ${account.usage.map(entry => `${entry.window} ${entry.percent}%`).join(', ')}` : ''}`
     : 'quota spent; the provider stated no reset time', account.resetsAt);
+  const unconfigured = [account.smoke?.result === 'fail' ? account.smoke.reason : null, account.ineligible].find(reason => reason && missingCredential.test(reason));
+  if (unconfigured) return status('not-configured', `no credential yet (${unconfigured}); connect one to use it`);
   const failing = launchFailure(account, fleet, now);
   if (failing) return status('launch-failing', `${failing.reason}${failing.until ? `; retried ${whenText(failing.until, now)}` : ''}`, failing.until);
   const live = account.liveSessions;
@@ -79,10 +84,12 @@ export function accountStatus(account: FleetAccountView, fleet: Pick<FleetView, 
   return status('idle', `ready for ${account.roles.map(entry => entry.role).join(', ')}`);
 }
 
-export const roleLabels: Record<string, string> = { worker: 'Workers', reviewer: 'Reviewers', producer: 'Producers', diagnostician: 'Diagnosticians' };
+export const roleLabels: Record<string, string> = { master: 'Master', worker: 'Workers', reviewer: 'Reviewers', producer: 'Producers', diagnostician: 'Diagnosticians' };
 
 export interface RoleLaunch {
   role: string; canLaunch: boolean;
+  /** How the role reads: `running` (a master holding its own slot) and `not-configured` are healthy, only `blocked` is an error. */
+  state: 'ready' | 'running' | 'not-configured' | 'blocked';
   /** The account the next launch runs on now, when one can. */
   account: string | null;
   /** The earliest time an account of the role frees up by itself, when none can launch now and one will. */
@@ -97,9 +104,11 @@ export interface RoleLaunch {
  */
 export function roleLaunch(role: FleetRoleView, fleet: Pick<FleetView, 'accounts' | 'sessions'>, now: number): RoleLaunch {
   const label = roleLabels[role.role] ?? role.role;
-  const result = (canLaunch: boolean, text: string, account: string | null = null, nextAt: string | null = null): RoleLaunch => ({ role: role.role, canLaunch, account, nextAt, text: `${label}: ${text}` });
+  const result = (canLaunch: boolean, text: string, account: string | null = null, nextAt: string | null = null, state: RoleLaunch['state'] = canLaunch ? 'ready' : 'blocked'): RoleLaunch => ({ role: role.role, canLaunch, state, account, nextAt, text: `${label}: ${text}` });
+  const master = role.role === 'master' && role.live >= role.concurrency ? fleet.sessions.find(session => session.role === 'master' && !session.endedAt) : undefined;
+  if (master) return result(false, `Running since ${localTime(master.selectedAt)}`, master.account, null, 'running');
   if (role.concurrency === 0) return result(false, 'none can launch — paused (concurrency 0); next: when its concurrency is raised');
-  if (!role.accounts.length) return result(false, 'none can launch — the role names no account; next: when an account is added to it');
+  if (!role.accounts.length) return result(false, 'Not configured — the role names no account yet', null, null, 'not-configured');
   const accounts = role.accounts.map(name => ({ name, view: fleet.accounts.find(account => account.name === name) ?? null }));
   // The account the registry's own choice would take: the first eligible one the role does not hold out.
   const ready = accounts.find(({ view }) => view && view.eligible && !view.held.some(entry => entry.role === role.role));
@@ -122,3 +131,7 @@ export function roleLaunch(role: FleetRoleView, fleet: Pick<FleetView, 'accounts
   const reasons = [...groups].map(([why, names]) => `${names.join(', ')} ${why}`).join('; ');
   return result(false, `none can launch — ${reasons}; next: ${next ? `${next.name} ${whenText(next.at, now)}` : 'no account frees up by itself — enable, fix or connect one'}`, null, next?.at ?? null);
 }
+
+/** Roles missing from the registry: only a missing master is an error; any other role still launches from local profiles. */
+export const unconfiguredRoles = (fleet: Pick<FleetView, 'attention'>) => fleet.attention.flatMap(line => /^role (\S+) is not configured/.exec(line)?.[1] ?? [])
+  .map(role => ({ role, error: role === 'master' }));

@@ -3,7 +3,7 @@ import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quot
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
-import { accountStatus, chipTones, countdown, launchFailure, localTime, roleLabels, roleLaunch, type AccountStatus } from '../agent-status';
+import { accountStatus, chipTones, countdown, launchFailure, localTime, roleLabels, roleLaunch, unconfiguredRoles, type AccountStatus } from '../agent-status';
 import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 
 const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
@@ -152,7 +152,7 @@ export function whyText(account: FleetAccountView, status: AccountStatus, fleet:
 }
 
 /** Accounts read working, then idle, then out of work: failing, unavailable, spent, role-less, disabled. */
-const statusOrder: AccountStatus['chip'][] = ['working', 'idle', 'launch-failing', 'unavailable', 'spent', 'no-role', 'disabled'];
+const statusOrder: AccountStatus['chip'][] = ['working', 'idle', 'launch-failing', 'unavailable', 'spent', 'not-configured', 'no-role', 'disabled'];
 const spentDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 interface AccountRow { account: FleetAccountView; status: AccountStatus; plan: FleetPlan | null; shared: boolean }
 interface RowGroup { plan: FleetPlan | null; rows: AccountRow[] }
@@ -235,7 +235,7 @@ export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) 
     {ready.length > 0 && <p className="role-launch-ready">{ready.map((launch, index) => <Fragment key={launch.role}>{index > 0 && ' · '}
       <span className="role-chip" data-role-launch={launch.role} data-can-launch="yes" title={`next: ${launch.account} now`}><span aria-hidden="true">{roleLabels[launch.role] ?? launch.role}</span><span className="sr-only">{launch.text}</span></span></Fragment>)}: {blocked.length ? 'can launch' : 'all can launch'}</p>}
     {blocked.length > 0 && <ul>{blocked.map(launch => <li key={launch.role} data-role-launch={launch.role} data-can-launch="no">
-      <span className="status-chip tone-bad">Cannot launch</span> {launch.text}</li>)}</ul>}
+      {launch.state === 'running' ? <span className="status-chip tone-busy">Running</span> : launch.state === 'not-configured' ? <span className="status-chip tone-off">Not configured</span> : <span className="status-chip tone-bad">Cannot launch</span>} {launch.text}</li>)}</ul>}
   </div>;
 }
 
@@ -246,8 +246,9 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Connect an account below — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
     {/* A blocked role reads in its launch line and a role-less account in its chip; only a role missing from the registry has no other place. */}
-    {(() => { const missing = fleet.attention.flatMap(line => /^role (\S+) is not configured/.exec(line)?.[1] ?? []);
-      return missing.length > 0 && <div role="alert" className="notice danger">Not configured: {missing.join(', ')} — {missing.length > 1 ? 'their' : 'its'} sessions launch from local profiles until {missing.length > 1 ? 'they are' : 'it is'}.</div>; })()}
+    {(() => { const missing = unconfiguredRoles(fleet), master = missing.some(entry => entry.error), optional = missing.filter(entry => !entry.error).map(entry => entry.role);
+      return <>{master && <div role="alert" className="notice danger">Not configured: master — the loop launches no master session until the role names an account.</div>}
+        {optional.length > 0 && <div className="notice">Not configured: {optional.join(', ')} — {optional.length > 1 ? 'their' : 'its'} sessions launch from local profiles until {optional.length > 1 ? 'they are' : 'it is'}.</div>}</>; })()}
     {fleet.roles.length > 0 && <PageSection title="Can launch now?" count={`${fleet.roles.filter(role => roleLaunch(role, fleet, now).canLaunch).length} of ${fleet.roles.length}`}><RoleLaunches fleet={fleet} now={now}/></PageSection>}
     <PageSection title="Accounts" count={fleet.accounts.length}>
       {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
