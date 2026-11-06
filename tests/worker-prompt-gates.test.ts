@@ -23,7 +23,7 @@ import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, worke
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = '/bin/graphyard.mjs';
-const gates = [...workerFastGates.tests, ...workerFastGates.scripts];
+const gates = [...workerFastGates.tests];
 const gatesIn = (text: string) => gates.filter(gate => text.includes(gate));
 const render = (fastGates?: boolean, dependencies?: Parameters<typeof workerPrompt>[4], maps?: Parameters<typeof workerPrompt>[7]) =>
   workerPrompt({ cliPath: cli, ...(fastGates === undefined ? {} : { fastGates }) }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1, dependencies ?? null, null, null, maps ?? null);
@@ -32,8 +32,7 @@ const section = workerBeforePushSection(cli, 'GY-1'), sync = workerSyncSentence(
 test('unit:worker-request-names-fast-gates — the request names the fast mechanical gates and their one command line, after the sync instruction and before the complete instruction, and an input that adds nothing leaves the request byte-identical', () => {
   const request = render(true);
   // The request carries the sync instruction and the gates sentence, and the gates run as one
-  // command line: the whole list in a single code span, the test files in one harness run chained
-  // with `&&` to each script.
+  // command line: the whole list in a single code span, the test files in one harness run.
   assert.ok(request.includes(sync), 'the request carries the sync instruction');
   assert.match(sync, /^Run node \/bin\/graphyard\.mjs sync GY-1 before submitting: /, 'the sync instruction names the CLI and the item');
   assert.ok(request.includes(workerFastGatesSentence), 'the request carries the fast-gates sentence');

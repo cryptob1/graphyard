@@ -28,7 +28,7 @@ const previewLabel: Record<string, string> = { local: 'Local preview', off: 'No 
 export function DeliveryDefaults({ status }: { status: any }) {
   const project = status?.project;
   const delivery = project?.delivery;
-  return <><header><div className="breadcrumb">Delivery</div><a href="/docs/delivery">Delivery guide ↗</a></header>
+  return <><header><div className="breadcrumb">Delivery</div></header>
     <section className="panel" aria-label="Delivery defaults"><h2>Delivery defaults</h2>
       {project?.error && <p className="error" role="alert">The project's delivery declaration is refused: {project.error}</p>}
       {!delivery && !project?.error && <p className="muted">Loading the project's delivery settings…</p>}

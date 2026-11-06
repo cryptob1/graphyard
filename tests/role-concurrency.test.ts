@@ -17,7 +17,9 @@ import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, launchGraceMs, liveSessions, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';

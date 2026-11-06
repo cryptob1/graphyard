@@ -7,7 +7,7 @@ import type { Observation, Work } from '../../src/model.js';
 import { reconcileAutoDispatch } from '../../src/model-boundary/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
 import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
-import type { DispatchEffects } from '../../src/auto-dispatch.js';
+import type { DispatchEffects } from '../../src/dispatch/effects.js';
 import { startedAtOnce } from './launch-shell.js';
 import { temporaryDirectory } from './temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items; new Date() is the clock handed to reconcileAutoDispatch and stamps snapshots and token expiries nothing ages.

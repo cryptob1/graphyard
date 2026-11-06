@@ -11,7 +11,11 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark, wholeFindings } from '../src/model/post-merge-review.js';
-import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, type DispatchEffects } from '../src/dispatch/effects.js';
+import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
+import { filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, unknownParent } from '../src/dispatch/post-merge.js';
+import { runDispatchTick } from '../src/dispatch/tick.js';
+import { selectReviewerProfile } from '../src/dispatch/launch-failover.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { readProjectMemory } from '../src/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -204,7 +208,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.deepEqual(wholeFindings(`${named}\nFollow-up finding: short`, [named.slice(19, 19 + 2_000), 'short']), [named.slice(19), 'short'], 'a cut named line is read to its end');
   const memoryRoot = await temporaryDirectory('post-merge-memory');
   try {
-    await dispatchEffects(memoryRoot, config, { snapshot: async () => ({ work: [], now: at }) }).recordFindings!(wordy, memoryFail, kept[0]!);
+    await dispatchEffects(memoryRoot, config, { snapshot: async () => ({ work: [], now: at }), mutate: async () => ({}) }).recordFindings!(wordy, memoryFail, kept[0]!);
     const entry = (await readProjectMemory(memoryRoot)).notes.find(note => note.kind === 'post-merge-review')!;
     for (const finding of kept[0]!) assert.ok(entry.text.includes(finding), 'project memory keeps every finding whole');
   } finally { await rm(memoryRoot, { recursive: true, force: true }); }

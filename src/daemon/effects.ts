@@ -119,7 +119,7 @@ export interface DaemonEffects {
   askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
   /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */
   release?: (work: Work, reason: string) => Promise<unknown>;
-  /** One reviewer and producer dispatch tick over the cycle's snapshot (auto-dispatch.ts). */
+  /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). */
   dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;

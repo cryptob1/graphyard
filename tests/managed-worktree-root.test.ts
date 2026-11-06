@@ -188,7 +188,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
     // Include every owning module under master/ and daemon/.
     const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);
-    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
+    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), ...await split('daemon'), ...await split('dispatch'), 'harness.ts', 'install/worktree-root.ts']) {
       const code = (await readFile(join(sources, file), 'utf8')).split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
       assert.doesNotMatch(code, /tmpdir\(\)/, `${file} never allocates from the host temporary directory`);
       if (!['master/confinement.ts', 'master/socket-confinement.ts'].includes(file))

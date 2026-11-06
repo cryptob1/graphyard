@@ -794,7 +794,7 @@ export const answeredByPendingReview = (error: unknown, request: { sha: string }
 
 /**
  * A review launch refused because no configured reviewer profile carries the name it asks for: a
- * configuration wait, never a failure counted against the request (auto-dispatch.ts), so a fault
+ * configuration wait, never a failure counted against the request (dispatch/tick.ts), so a fault
  * that outlasts the dispatcher's attempt limit still resumes the same request once the profiles change.
  */
 export class UnknownReviewerProfileError extends Error {
