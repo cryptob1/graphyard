@@ -13,7 +13,7 @@ import { gateRecordPath, gateSummary, readGateRecord } from '../batch-gate.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
-import { specCheckCurrent } from '../model/spec-check.js';
+import { specCheckCurrent, specCheckGaps } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
@@ -37,11 +37,13 @@ export async function itemLedger(masterApi: (path: string) => Promise<any>, id: 
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
-/** One open item's line: its plain stage (GY-2988; Waiting with its reason, GY-3095), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
+/** One open item's line: its plain stage (GY-2988; Waiting with its reason, GY-3095; Waiting on the master with its spec-check gaps, GY-3163), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
 export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  const stage = plainStage(item, now);
-  return { key: item.key, title: item.title, stage, ...(stage === 'Waiting' ? { waiting: waitingReason(item) } : {}), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
+  const plain = plainStage(item, now), gaps = specCheckGaps(item);
+  // GY-3163: a first gaps verdict holds the item until master requirements answers it.
+  const stage = gaps && plain === 'Not started' ? 'Waiting on the master' : plain;
+  return { key: item.key, title: item.title, stage, ...(stage === 'Waiting' ? { waiting: waitingReason(item) } : {}), ...(stage === 'Waiting on the master' ? { gaps } : {}), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 

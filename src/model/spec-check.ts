@@ -52,6 +52,12 @@ export const needsSpecCheck = (work: Pick<Work, 'type' | 'yardRepair'>): boolean
 export const specCheckCurrent = (work: Pick<Work, 'specCheck' | 'policyRevision'>): SpecCheck | null =>
   work.specCheck && work.specCheck.policyRevision === work.policyRevision ? work.specCheck : null;
 
+/** GY-3163: the gaps of a standing first gaps verdict, which waits on master requirements; null otherwise (a recheck dispatches). */
+export const specCheckGaps = (work: Pick<Work, 'specCheck' | 'policyRevision'>): string[] | null => {
+  const check = specCheckCurrent(work);
+  return check?.verdict === 'gaps' && !check.recheck ? check.gaps : null;
+};
+
 /** Whether a launch still stands for this item's spec check at `now`: the loop launches no second session while it does. */
 export const specCheckLaunchLive = (work: Pick<Work, 'specCheckLaunch'>, now: number): boolean =>
   !!work.specCheckLaunch && Date.parse(work.specCheckLaunch.expiresAt) > now;

@@ -1,6 +1,6 @@
 // The actionable shared-base refusals, read from the same ledger after a loop restart.
 import { createHash } from 'node:crypto';
-import { specCheckCurrent } from '../model/spec-check.js';
+import { specCheckCurrent, specCheckGaps } from '../model/spec-check.js';
 import type { DaemonState } from './state.js';
 import type { DispatchCursor } from '../dispatch/cursor.js';
 import type { ServingReport } from '../deploy-watch.js';
@@ -45,6 +45,8 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   const quiet = (item: Pick<Work, 'key'>, entry: MasterCause) => repeating.has(item.key) ? { ...entry, quiet: true } : entry;
   for (const item of open) {
     if (item.blocker) causes.push(cause(subject('blocker', item.id), `${item.key}: ${item.blocker}`));
+    const gaps = specCheckGaps(item);
+    if (gaps) causes.push(cause(subject('spec-gaps', item.id), `${item.key}: spec check named gaps: ${gaps.join('; ')}; answer with master requirements ${item.key} FILE REASON`));
     const repeat = repeatedFailureCause(runs[item.id]);
     if (repeat) causes.push(cause(repeat.key, repeat.detail));
     for (const action of item.actionQueue?.actions ?? []) {
