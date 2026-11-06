@@ -85,14 +85,14 @@ test('unit:worker-prompt-names-review-self — every worker request names review
   // and the item's key, so the worker judges its own diff by the reviewer's standard before it
   // submits, and the sentence sits directly before the autonomous-session line that ends the
   // request, so reading order runs: do the work, self-review it, then decide and act on your own.
-  const sentence = (cli: string, key: string) => `Before complete, run node ${cli} review self ${key}, judge your diff by what it prints and fix each BLOCKING finding first. `;
+  const sentence = (cli: string, key: string) => `Last step before complete: check your diff against the reviewers' standards (node ${cli} review self ${key} prints them) and fix each BLOCKING finding you would expect. `;
   for (const fastGates of [true, false]) {
     const request = render(fastGates);
     assert.ok(request.includes(sentence(cli, 'GY-1')), 'the request names review self with the configured CLI and the item key');
     const at = request.indexOf(sentence(cli, 'GY-1')), autonomous = request.indexOf('Decide and act on your own: implement the item');
     assert.ok(at >= 0 && at < autonomous, 'the self-review instruction sits before the autonomous-session line');
     assert.equal(request.split(sentence(cli, 'GY-1')).length, 2, 'the instruction appears exactly once');
-    assert.ok(request.indexOf('review self') === at + `Before complete, run node ${cli} `.length, 'the self-review instruction is the first mention of review self');
+    assert.ok(request.indexOf('review self') === at + `Last step before complete: check your diff against the reviewers' standards (node ${cli} `.length, 'the self-review instruction is the first mention of review self');
   }
   // An item with everything attached — criteria and a description — carries
   // the same instruction, naming its own key.

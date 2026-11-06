@@ -2,8 +2,8 @@ import { atomicPrivateWrite, privateFile, readCredentialFile } from './private-f
 import { writeFailure } from './disk-space.js';
 import type { ReviewCriterion } from './review-prompt.js';
 export type { ReviewCriterion } from './review-prompt.js';
-import { reviewStandard, repetitionReviewSection } from './review-prompt.js';
-import { simplicityParagraph, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
+import { reviewStandard, reviewStandards } from './review-prompt.js';
+import { postDeployReviewSection, singleCaseReviewSection, criteriaVerdictRule } from './review-prompt.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -47,8 +47,8 @@ import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 import { LauncherUnavailableError } from './master/config.js';
 export { controlPlaneFindingSection } from './review-prompt.js';
-export { reviewStandard, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
-export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
+export { reviewStandard, reviewStandards, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
+export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection, criteriaVerdictRule } from './review-prompt.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 /** The most BLOCKING lines of a post-merge verdict that are each filed as their own follow-up item (GY-1525 AC-4). */
@@ -578,18 +578,19 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
+  const standards = reviewStandards({ key: binding.key, criteria, scenarioRequirements }, binding.sha, files);
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + reviewRoundSection(binding.sha, history)
-    + criteriaRuleSection(binding.key, binding.sha, criteria, scenarioRequirements)
+    + standards.criteria + criteriaVerdictRule
     + postDeployReviewSection(criteria)
     + singleCaseReviewSection(criteria)
     + reviewReadSection(config.cliPath ?? launcherPath, binding.sha)
     + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
-    + simplicityParagraph
-    + repetitionReviewSection(files)
+    + standards.simplicity
+    + standards.repetition
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'Read-only: no edits, Git mutations, work claims or evidence submissions; do not run the project\'s build, tests, or servers. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
@@ -611,7 +612,7 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane. `
     + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct. `
     + walk
-    + `Then judge: is this a good idea? Does it make the app better for the person using it — discoverable where they would look, worded as they would word it, and no more than it needs? A feature that passes every test and still makes the app worse is rejected. `
+    + `Then judge: ${reviewStandards(binding).product}`
     + (plane.answer ? readOnlySession + plane.answer : productPostSection(config.cliPath ?? launcherPath) + readOnlySession
     + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
     + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
