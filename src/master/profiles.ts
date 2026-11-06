@@ -290,6 +290,10 @@ export const masterRunSchema = z.object({
   // them; the rest queue. Each launch creates a Herdr pane, so this bounds the host's launch load.
   // Unset: 3 (`defaultLaunchConcurrency`).
   launchConcurrency: z.number().int().min(1).max(20).optional(),
+  // GY-3165: how long the loop runs before it hands over to a newly served release, so serves
+  // landing inside the window batch into one restart onto the newest. Unset: 15
+  // (`defaultHandoverMinutes`); 0 hands over as soon as a release is served.
+  handoverMinutes: z.number().int().min(0).max(1440).optional(),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
   // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
