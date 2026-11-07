@@ -43,7 +43,7 @@ async function fixture(files: Record<string, string>) {
   return root;
 }
 
-test('unit:affected-tests-selected — a pull request runs only the tests that reach its changed module transitively, and the full suite when a change is outside the map, the install, the runner or configuration, and on every queue tip and push', async () => {
+test('unit:affected-tests-selected — a pull request runs only the tests that reach its changed module transitively, and the full suite for the install, the runner or configuration', async () => {
   const root = await fixture({
     'package.json': '{}', 'tsconfig.json': '{}', 'tests/helpers/shared.ts': 'export const x = 1;\n',
     'src/leaf.ts': 'export const leaf = 1;\n',
@@ -65,12 +65,14 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
     // Documentation selects nothing, even a file a test reads by path: no test executes prose.
     assert.deepEqual(selectAffected(['docs/guide.md'], map, tests), { mode: 'affected', reason: '1 changed file(s) are documentation only', files: [] });
     assert.deepEqual(selectAffected(['docs/guide.md', 'docs/orphan.md'], map, tests).files, []);
-    // The full suite, with the reason, for anything the map cannot place.
+    // GY-3192: a file the map does not hold selects the tests that import or name it, not everything.
+    assert.deepEqual(selectAffected(['src/unused.ts'], map, tests).files, []);
+    assert.deepEqual(selectAffected(['src/types.ts'], map, tests).files, ['tests/other.test.ts'], 'a type-only import is no runtime dependency; the test still names the file');
+    // The full suite, with the reason, for the install, the compiler configuration and the runner.
     const full = (changed: string[]) => { const selection = selectAffected(changed, map, tests); assert.equal(selection.mode, 'full', changed.join(', ')); assert.deepEqual(selection.files, tests); return selection.reason; };
-    assert.equal(full(['src/unused.ts']), 'src/unused.ts is not in the dependency map');
-    assert.equal(full(['src/types.ts']), 'src/types.ts is not in the dependency map', 'a type-only import is no runtime dependency');
-    for (const changed of ['package.json', 'package-lock.json', 'tests/helpers/shared.ts', 'tsconfig.json', 'vite.config.ts', '.github/workflows/ci.yml', 'scripts/ci-tests.mjs'])
+    for (const changed of ['package.json', 'package-lock.json', 'tsconfig.json', 'tests/helpers/run-tests.ts', 'scripts/ci-tests.mjs'])
       assert.match(full(['src/leaf.ts', changed]), /changes the install, the test runner or configuration$/, changed);
+    for (const changed of ['tests/helpers/shared.ts', 'vite.config.ts', '.github/workflows/ci.yml']) assert.equal(selectAffected([changed], map, tests).mode, 'affected', changed);
     assert.equal(selectAffected(null, map, tests).mode, 'full');
   } finally { await rm(root, { recursive: true, force: true }); }
 
@@ -83,7 +85,7 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
   assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
-  assert.equal(selectAffected(['scripts/missing.mjs'], map, tests).mode, 'full');
+  assert.equal(selectAffected(['scripts/missing.mjs'], map, tests).mode, 'affected', 'a file outside the map selects the tests naming it');
   assert.deepEqual(selectAffected(['README.missing.md'], map, tests).files, [], 'documentation selects nothing, mapped or not');
 });
 
