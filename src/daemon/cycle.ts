@@ -317,6 +317,7 @@ async function closeStep(cycle: Cycle) {
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
+  await effects.stopOrphanTrials?.();
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
 }

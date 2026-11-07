@@ -1,5 +1,6 @@
 // Concern: disk headroom (GY-3122) — the close step measures the volumes Graphyard writes; below the
 // floor it reclaims only its own leftovers, and while still below it no new merge trial or worker starts.
+import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
@@ -9,6 +10,9 @@ import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTe
 import { record } from './effects.js';
 import type { DaemonEffects } from './effects.js';
 import type { DaemonAction, DaemonState } from './state.js';
+import { workerVerificationTimeoutMs } from '../merge-writer/worker-verification.js';
+import { trialShareAllowance } from './cycle-merge-writer.js';
+import { defaultMergeWriterParallel } from '../master/merge-writer-settings.js';
 
 /** The free space every volume Graphyard writes keeps, when master.json sets no `run.diskFloorGb`. */
 export const defaultDiskFloorGb = 30;
@@ -89,4 +93,27 @@ export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporar
     }
   } catch { /* no Docker on this host: nothing of Graphyard's there to reclaim */ }
   return removed;
+}
+
+/** Twice the longest deadline a trial container runs under: a merge trial at the most shares the host allows, or a worker verification (GY-3186). */
+export const trialContainerMaxAgeMs = (run: Pick<MasterConfig, 'run'>['run']) =>
+  2 * Math.max(trialShareAllowance(run.mergeWriter?.parallel ?? defaultMergeWriterParallel).timeoutMs, workerVerificationTimeoutMs);
+
+/**
+ * GY-3186: every cycle, stops (removes) a running `graphyard-trial-` container whose checkout (its working
+ * directory) is gone or that has run past `maxAgeMs` — a trial nothing will end any more. What it stopped, by name.
+ */
+export async function stopOrphanTrialContainers(run: ChildRun, maxAgeMs: number, now = Date.now()): Promise<string[]> {
+  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
+  const stopped: string[] = [];
+  try {
+    const names = (await docker(['ps', '--filter', 'name=^graphyard-trial-', '--filter', 'status=running', '--format', '{{.Names}}'])).filter(name => name.startsWith('graphyard-trial-'));
+    if (!names.length) return stopped;
+    for (const line of await docker(['inspect', '--format', '{{.Name}}\t{{.State.StartedAt}}\t{{.Config.WorkingDir}}', ...names])) {
+      const [name, startedAt, workdir] = line.replace(/^\//, '').split('\t');
+      if (!name?.startsWith('graphyard-trial-') || (workdir && existsSync(workdir) && now - Date.parse(startedAt ?? '') <= maxAgeMs)) continue;
+      try { await docker(['rm', '--force', name]); stopped.push(`container ${name}`); } catch { /* the next */ }
+    }
+  } catch { /* no Docker on this host: no trial container to stop */ }
+  return stopped;
 }
