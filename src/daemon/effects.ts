@@ -102,6 +102,8 @@ export interface DaemonEffects {
   stopOrphanedProcesses?: () => Promise<string[]>;
   /** Stops running trial containers whose checkout is gone or that outlived twice the trial deadline (GY-3186), answering what was stopped. */
   stopOrphanTrials?: () => Promise<string[]>;
+  /** Takes back what ended jobs left: owner-gone trial and verification scratch, stopped trial containers with their volumes, and trial build cache older than a day (GY-3188), answering what was removed. */
+  reclaimJobLeftovers?: () => Promise<string[]>;
   /**
    * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the

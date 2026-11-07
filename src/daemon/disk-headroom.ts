@@ -10,7 +10,9 @@ import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTe
 import { record } from './effects.js';
 import type { DaemonEffects } from './effects.js';
 import type { DaemonAction, DaemonState } from './state.js';
-import { workerVerificationTimeoutMs } from '../merge-writer/worker-verification.js';
+import { workerVerificationPrefix, workerVerificationRoot, workerVerificationTimeoutMs } from '../merge-writer/worker-verification.js';
+import { trialBuilder } from '../install/trial-image.js';
+import { sweepComposePreviews } from '../compose-preview.js';
 import { trialShareAllowance } from './cycle-merge-writer.js';
 import { defaultMergeWriterParallel } from '../master/merge-writer-settings.js';
 
@@ -70,28 +72,47 @@ export async function graphyardVolumes(paths: string[]): Promise<Volume[]> {
 }
 
 /**
- * Reclaims only what Graphyard created and no longer uses: trial temporary, home and checkout
- * directories whose owner marker names a process that is gone, stopped `graphyard-trial-`
- * containers, and `graphyard-trial` images other than the one trials run (never forced, so Docker
- * keeps an image a container still uses). Ended attempts' worktrees and settled managed checkouts
- * are already removed by the close step itself. What was removed, by name.
+ * GY-3188: what every ended job leaves, taken back by the loop's sweep: trial temporary, home and
+ * checkout directories and worker verification allocations whose owner marker names a process
+ * that is gone (a running one's are kept), stopped `graphyard-trial-` containers with their
+ * anonymous volumes, preview and trial Compose projects whose owner is gone, and Graphyard's own
+ * trial-image build cache older than a day (its dedicated builder only). What was removed, by name.
  */
-export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporary?: string[]; checkouts?: string[] } = {}): Promise<string[]> {
+export async function reclaimJobLeftovers(run: ChildRun, roots: { temporary?: string[]; checkouts?: string[]; verification?: string[] } = {}): Promise<string[]> {
   const removed: string[] = [];
   for (const root of roots.temporary ?? trialTemporaryRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialTemporaryPrefix, 'gy-h']));
   for (const root of roots.checkouts ?? trialCheckoutRoots()) removed.push(...await reclaimTrialCheckouts(root, [trialCheckoutPrefix]));
-  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
+  for (const root of roots.verification ?? [workerVerificationRoot()]) removed.push(...await reclaimTrialCheckouts(root, [workerVerificationPrefix]));
+  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 60_000 })).split('\n').map(line => line.trim()).filter(Boolean);
   try {
     const containers = await docker(['ps', '--all', '--filter', 'name=^graphyard-trial-', '--filter', 'status=exited', '--filter', 'status=dead', '--format', '{{.Names}}']);
     for (const name of containers.filter(name => name.startsWith('graphyard-trial-'))) {
-      try { await docker(['rm', name]); removed.push(`container ${name}`); } catch { /* the next */ }
+      try { await docker(['rm', '--volumes', name]); removed.push(`container ${name}`); } catch { /* the next */ }
     }
+  } catch { /* no Docker on this host: nothing of Graphyard's there to reclaim */ }
+  try { removed.push(...(await sweepComposePreviews({ docker: async (args, options) => String(await run('docker', args, options)) })).map(project => `compose project ${project}`)); } catch { /* the next sweep */ }
+  try {
+    const pruned = (await docker(['buildx', 'prune', '--builder', trialBuilder, '--filter', 'until=24h', '--force'])).find(line => /^Total:/i.test(line));
+    if (pruned && !/:\s*0\s*B?$/i.test(pruned)) removed.push(`trial build cache older than a day (${pruned.replace(/^Total:\s*/i, '')})`);
+  } catch { /* no trial builder on this host yet */ }
+  return removed;
+}
+
+/**
+ * Below the disk floor: every job leftover, and `graphyard-trial` images other than the one trials
+ * run (never forced, so Docker keeps an image a container still uses). Ended attempts' worktrees and
+ * settled managed checkouts are already removed by the close step itself.
+ */
+export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporary?: string[]; checkouts?: string[]; verification?: string[] } = {}): Promise<string[]> {
+  const removed = await reclaimJobLeftovers(run, roots);
+  const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
+  try {
     const current = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, repository = trialContainerImage.split(':')[0]!;
     for (const image of await docker(['images', repository, '--format', '{{.Repository}}:{{.Tag}}'])) {
       if (image === current || !image.startsWith(`${repository}:`) || image.endsWith(':<none>')) continue;
       try { await docker(['image', 'rm', image]); removed.push(`image ${image}`); } catch { /* in use, or already gone */ }
     }
-  } catch { /* no Docker on this host: nothing of Graphyard's there to reclaim */ }
+  } catch { /* no Docker on this host */ }
   return removed;
 }
 
@@ -112,7 +133,7 @@ export async function stopOrphanTrialContainers(run: ChildRun, maxAgeMs: number,
     for (const line of await docker(['inspect', '--format', '{{.Name}}\t{{.State.StartedAt}}\t{{.Config.WorkingDir}}', ...names])) {
       const [name, startedAt, workdir] = line.replace(/^\//, '').split('\t');
       if (!name?.startsWith('graphyard-trial-') || (workdir && existsSync(workdir) && now - Date.parse(startedAt ?? '') <= maxAgeMs)) continue;
-      try { await docker(['rm', '--force', name]); stopped.push(`container ${name}`); } catch { /* the next */ }
+      try { await docker(['rm', '--force', '--volumes', name]); stopped.push(`container ${name}`); } catch { /* the next */ }
     }
   } catch { /* no Docker on this host: no trial container to stop */ }
   return stopped;
