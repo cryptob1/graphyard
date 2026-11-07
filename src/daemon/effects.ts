@@ -9,7 +9,7 @@ import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
-import { type DaemonAction, type DaemonState, type LoopRelease, storeAction } from './state.js';
+import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
 import type { ComposeServer } from './compose-recovery.js';
@@ -104,6 +104,8 @@ export interface DaemonEffects {
   stopOrphanTrials?: () => Promise<string[]>;
   /** Takes back what ended jobs left: owner-gone trial and verification scratch, stopped trial containers with their volumes, and trial build cache older than a day (GY-3188), answering what was removed. */
   reclaimJobLeftovers?: () => Promise<string[]>;
+  /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
+  leftoverDisk?: () => Promise<LeftoverDisk>;
   /**
    * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the

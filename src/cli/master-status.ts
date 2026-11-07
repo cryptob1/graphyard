@@ -111,6 +111,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       : { on: false },
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
+    // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
+    leftovers: state?.leftovers.report ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen),

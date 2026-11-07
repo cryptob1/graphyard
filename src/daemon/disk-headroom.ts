@@ -8,6 +8,7 @@ import { freeBytes } from '../master/worktrees.js';
 import { trialContainerImage } from '../merge-writer/trial-container.js';
 import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTemporaryPrefix, trialTemporaryRoots } from '../merge-writer/trial.js';
 import { record } from './effects.js';
+import { tallyLeftovers } from './leftovers.js';
 import type { DaemonEffects } from './effects.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import { workerVerificationPrefix, workerVerificationRoot, workerVerificationTimeoutMs } from '../merge-writer/worker-verification.js';
@@ -41,6 +42,7 @@ export async function diskHeadroomStep(cycle: { config: Pick<MasterConfig, 'run'
   if (!low.length && !state.diskHeadroom) return;
   if (low.length && effects.reclaimDisk) {
     const removed = await effects.reclaimDisk();
+    tallyLeftovers(state, 'reclaimed', removed.length);
     if (removed.length) performed.push(await record(state, `disk-reclaim:${state.cycle}`, { kind: 'reclaim', work: null, principal: null, state: 'done', attempts: 1, cycle: state.cycle,
       detail: `Free space fell below the ${gb(floor)} floor; reclaimed Graphyard's own leftovers: ${removed.join(', ')}` }, now(), effects.persist));
     low = short(await effects.diskVolumes(), floor);
