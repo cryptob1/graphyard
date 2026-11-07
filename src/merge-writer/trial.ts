@@ -1037,7 +1037,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     enter('selection');
     enterStep('selection');
     // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
-    const selection = await child('selection', selector[0]!, [...selector.slice(1), ...input.changedFiles]);
+    // GY-3192: the base tip lets the selection narrow each changed file to the declarations its diff touches.
+    const selection = await child('selection', selector[0]!, [...selector.slice(1), ...input.changedFiles], input.baseTip ? { env: { ...env, GRAPHYARD_SELECTION_BASE: input.baseTip } } : {});
     if (hostEnded(selection)) throw runnerFailure('selection', selection);
     if (!selection.ok) return result({ passed: 0, failed: [strategy.command], files: 0 });
     const pattern = new RegExp(strategy.pattern);

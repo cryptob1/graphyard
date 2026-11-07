@@ -8,21 +8,24 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dependencyMap, listTestFiles, repositoryRoot, selectAffected } from './ci-tests.mjs';
+import { changedDeclarations, dependencyMap, listTestFiles, repositoryRoot, selectAffected } from './ci-tests.mjs';
 
 const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 const lines = text => text.split('\n').filter(Boolean);
 
+const mergeBaseOf = (root, base) => { try { return git(root, ['merge-base', 'HEAD', `refs/remotes/origin/${base}`]).trim(); } catch { return null; } };
+
 /** The files changed against the merge-base with origin/`base`, or null when there is no such base. */
 export function changedFiles(root = repositoryRoot, base = 'main') {
-  let mergeBase;
-  try { mergeBase = git(root, ['merge-base', 'HEAD', `refs/remotes/origin/${base}`]).trim(); } catch { return null; }
+  const mergeBase = mergeBaseOf(root, base);
+  if (!mergeBase) return null;
   return [...new Set([...lines(git(root, ['diff', '--name-only', '--no-renames', mergeBase])), ...lines(git(root, ['ls-files', '--others', '--exclude-standard']))])].sort();
 }
 
-/** The selection for this checkout's changes, with the named test files appended. */
+/** The selection for this checkout's changes, narrowed to the declarations they touch, with the named test files appended. */
 export function affectedTests(root = repositoryRoot, extra = []) {
-  const tests = listTestFiles(root), selection = selectAffected(changedFiles(root), dependencyMap(root, tests), tests);
+  const tests = listTestFiles(root), changed = changedFiles(root), mergeBase = mergeBaseOf(root, 'main');
+  const selection = selectAffected(changed, dependencyMap(root, tests), tests, changed && mergeBase ? changedDeclarations(changed, mergeBase, root) : undefined);
   return { ...selection, files: [...new Set([...selection.files, ...extra])] };
 }
 

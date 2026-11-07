@@ -19,7 +19,7 @@ async function write(root: string, files: Record<string, string>) {
   for (const [path, text] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); }
 }
 
-test('unit:worker-affected-tests — selects the tests reached by committed, uncommitted and untracked changes against the merge-base with origin/main, plus the named test files, and the full suite when the selection says so', async () => {
+test('unit:worker-affected-tests — selects the tests reached by committed, uncommitted and untracked changes against the merge-base with origin/main, plus the named test files, and the full suite when the selection says so (GY-3192: narrowed to the declarations a change touches)', async () => {
   const root = await temporaryDirectory('worker-affected');
   await write(root, {
     'package.json': '{}',
@@ -44,8 +44,10 @@ test('unit:worker-affected-tests — selects the tests reached by committed, unc
   assert.equal(selection.mode, 'affected');
   assert.deepEqual(selection.files, ['tests/a.test.ts', 'tests/b.test.ts', 'tests/proof.test.ts'], 'exactly the affected tests plus the named proof file');
 
-  // An untracked file outside the dependency map runs the whole suite, as the trial's selection does.
+  // An untracked file outside the dependency map selects the tests naming it (none); the install runs the whole suite, as the trial's selection does.
   await write(root, { 'src/new.ts': 'export const n = 1;\n' });
+  assert.deepEqual(affectedTests(root, ['tests/proof.test.ts']).files, ['tests/a.test.ts', 'tests/b.test.ts', 'tests/proof.test.ts']);
+  await write(root, { 'package.json': '{ "private": true }' });
   const full = affectedTests(root, ['tests/proof.test.ts']);
   assert.equal(full.mode, 'full');
   assert.deepEqual(full.files, ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts', 'tests/proof.test.ts']);

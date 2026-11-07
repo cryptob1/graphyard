@@ -1,14 +1,16 @@
-// Which test files the merge writer's trial executes (GY-499). The trial runs only the test files
-// the change can affect; the install, the runner or configuration, and any change this module
-// cannot map run every file, while a change limited to documentation runs none.
+// Which test files the merge writer's trial executes (GY-499, GY-3192). The trial runs only the test
+// files the change can affect; the install, the compiler configuration and the runner run every file,
+// while a change limited to documentation runs none.
 //
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
 //                                                         the files it runs, one per line (every one when full)
 //
-// The dependency map is built from the source itself: every relative import, and every path a file
-// names in text (`'../docs/x.md'`, `join(root, 'src')`, `${root}/src/cli.ts`), is an edge; a
-// directory named is an edge to everything under it. Test files reach src modules transitively
-// through those edges.
+// The dependency map is built from the source itself, parsed with TypeScript: a test depends on the
+// modules it imports (static and literal dynamic imports), and through each only on the top-level
+// declarations the names it takes reach — a class method once reached code reads its name — and on
+// the paths a test or test helper reads as data (`'../docs/x.md'`, `join(root, 'e2e/cases')`). With
+// a base revision (GRAPHYARD_SELECTION_BASE), a changed file selects only the tests needing the
+// declarations its diff touches.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
@@ -84,7 +86,8 @@ export function fileEdges(file, text, files, directories) {
   const resolveIn = (path, named = false) => {
     const normal = posix.normalize(path).replace(/\/$/, '');
     if (normal.startsWith('..') || !normal || normal === '.') return [];
-    for (const candidate of [normal, normal.replace(/\.js$/, '.ts'), normal.replace(/\.js$/, '.tsx'), normal.replace(/\.mjs$/, '.mts'), `${normal}.ts`, `${normal}.tsx`, `${normal}.js`, `${normal}.mjs`, `${normal}/index.ts`, `${normal}/index.js`]) {
+    // A path ending in a slash names a directory, never the module of that name beside it.
+    if (!path.endsWith('/')) for (const candidate of [normal, normal.replace(/\.js$/, '.ts'), normal.replace(/\.js$/, '.tsx'), normal.replace(/\.mjs$/, '.mts'), `${normal}.ts`, `${normal}.tsx`, `${normal}.js`, `${normal}.mjs`, `${normal}/index.ts`, `${normal}/index.js`]) {
       if (files.has(candidate)) return [candidate];
     }
     return directories.has(normal) && (!named || scans) ? directories.get(normal) : [];
@@ -95,7 +98,7 @@ export function fileEdges(file, text, files, directories) {
   // Paths named in a statement's strings, relative to the file or to the repository root.
   const roots = [...new Set([...files].map(path => path.split('/')[0]))].filter(name => name !== '.' && name.length > 1).map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const pathPattern = new RegExp(`(?<![\\w@.-])((?:\\.{1,2}/)*)((?:${roots.join('|')})(?:/[\\w.@-]+)*/?)(?![\\w@-])`, 'g');
-  for (const statement of shape.statements) {
+  for (const statement of shape.statements.flatMap(statement => [statement, ...statement.members])) {
     statement.data = new Set();
     for (const [, up, path] of statement.strings.join('\n').matchAll(pathPattern)) {
       const found = up ? resolveIn(posix.join(directory, up + path), true) : [];
@@ -125,30 +128,53 @@ export function moduleShape(file, text, resolveSpecifier) {
   const isDefault = node => node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.DefaultKeyword);
   const patternNames = (name, into) => { if (ts.isIdentifier(name)) into.add(name.text); else for (const element of name.elements ?? []) if (!ts.isOmittedExpression(element)) patternNames(element.name, into); return into; };
   const load = targets => { for (const target of targets) shape.imports.add(target); return targets; };
-  // What a statement references and loads: every identifier outside type syntax, and every module a call names.
-  const scan = (node, refs, loads, strings) => {
-    if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
+  // What a statement references and loads: every identifier outside type syntax, every module a call
+  // names, the strings it holds and the property names it reads (`a.name`, `a['name']`, `{ name } = a`).
+  const scan = (node, part, skip) => {
+    if (ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || skip?.has(node)) return;
+    const named = (ts.isPropertyAccessExpression(node.parent) || ts.isPropertyAssignment(node.parent) || ts.isMethodDeclaration(node.parent) || ts.isPropertyDeclaration(node.parent) || ts.isGetAccessor(node.parent) || ts.isSetAccessor(node.parent)) && node.parent.name === node;
     // A property name (`a.name`, `{ name: a }`) names no local; a shorthand `{ name }` does.
-    if (ts.isIdentifier(node) && !((ts.isPropertyAccessExpression(node.parent) || ts.isPropertyAssignment(node.parent) || ts.isMethodDeclaration(node.parent) || ts.isPropertyDeclaration(node.parent)) && node.parent.name === node)) refs.add(node.text);
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateLiteralToken(node)) strings.push(node.text);
+    if (ts.isIdentifier(node) && !named) part.refs.add(node.text);
+    if ((ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) part.props.add(node.text);
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) part.props.add(node.argumentExpression.text);
+    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) { const key = node.propertyName ?? node.name; if (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) part.props.add(key.text); }
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateLiteralToken(node)) part.strings.push(node.text);
     if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments?.length) {
       const callee = node.expression, name = callee.kind === ts.SyntaxKind.ImportKeyword ? 'import' : ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '';
-      if (['import', 'require', 'resolve', 'URL'].includes(name)) for (const target of load(specifier(node.arguments[0]))) loads.add(target);
+      if (['import', 'require', 'resolve', 'URL'].includes(name)) for (const target of load(specifier(node.arguments[0]))) part.loads.push({ target, name: name === 'import' ? taken(node) : null });
     }
-    ts.forEachChild(node, child => scan(child, refs, loads, strings));
+    ts.forEachChild(node, child => scan(child, part, skip));
   };
+  // The names a dynamic import takes: `const { a, b } = await import(...)` or `(await import(...)).a`; else the whole module.
+  const taken = call => {
+    let node = call.parent;
+    while (ts.isParenthesizedExpression(node)) node = node.parent;
+    if (!ts.isAwaitExpression(node)) return null;
+    do node = node.parent; while (ts.isParenthesizedExpression(node));
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) return new Set([node.name.text]);
+    if (!ts.isVariableDeclaration(node) || !ts.isObjectBindingPattern(node.name) || node.name.elements.some(element => element.dotDotDotToken || !ts.isIdentifier(element.propertyName ?? element.name))) return null;
+    return new Set(node.name.elements.map(element => (element.propertyName ?? element.name).text));
+  };
+  const part = (node, skip) => { const scanned = { refs: new Set(), loads: [], strings: [], props: new Set() }; scan(node, scanned, skip); return scanned; };
+  const line = position => source.getLineAndCharacterOfPosition(position).line + 1;
   const statement = (node, declares) => {
-    const refs = new Set(), loads = new Set(), strings = [];
-    scan(node, refs, loads, strings);
-    for (const name of declares) refs.delete(name);
-    shape.statements.push({ declares, refs, loads, strings });
+    // A class's methods and accessors are parts of their own, needed once reached code reads their name.
+    const methods = ts.isClassDeclaration(node) ? node.members.filter(member => (ts.isMethodDeclaration(member) || ts.isGetAccessor(member) || ts.isSetAccessor(member)) && member.body && (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name) || ts.isStringLiteral(member.name))) : [];
+    const scanned = part(node, new Set(methods)), owner = [...declares][0];
+    const members = methods.map(member => ({ name: member.name.text, declares: new Set([`${owner}.${member.name.text}`]), ...part(member), first: line(member.getStart(source)), last: line(member.end) }));
+    for (const name of declares) scanned.refs.delete(name);
+    shape.statements.push({ declares, ...scanned, members });
     // A statement declaring nothing runs on load, except the entry-point guard, which runs only when
     // the file is the process's main module.
     if (!declares.size && !(ts.isIfStatement(node) && /process\.argv\[1\]/.test(node.expression.getText(source)) && /import\.meta\.(?:url|filename|main)/.test(node.expression.getText(source)))) shape.effects.push(shape.statements.length - 1);
   };
-  // Each top-level statement's last line and what a change inside it touches: the names it declares,
-  // none for type-only syntax, or `null` for the whole module (an import, an export list, an effect).
-  const span = (node, names) => shape.spans.push({ last: source.getLineAndCharacterOfPosition(node.end).line + 1, names: names && shape.effects.includes(shape.statements.length - 1) ? null : names });
+  // Each top-level statement's last line and what a change inside it touches: the names it declares
+  // (a method, its class and its own name), none for type-only syntax, or `null` for the whole module
+  // (an import, an export list, an effect).
+  const span = (node, names) => {
+    for (const member of shape.statements.at(-1)?.members ?? []) if (names && ts.isClassDeclaration(node)) shape.spans.push({ first: member.first, last: member.last, names: member.declares });
+    shape.spans.push({ last: line(node.end), names: names && shape.effects.includes(shape.statements.length - 1) ? null : names });
+  };
   for (const node of source.statements) {
     if (ts.isImportDeclaration(node)) {
       const targets = load(specifier(node.moduleSpecifier)), clause = node.importClause;
@@ -190,6 +216,8 @@ export function moduleShape(file, text, resolveSpecifier) {
       statement(node, names); span(node, names);
     } else { statement(node, new Set()); span(node, null); }
   }
+  shape.declaring = new Map();
+  shape.statements.forEach((statement, at) => { for (const name of statement.declares) shape.declaring.set(name, [...(shape.declaring.get(name) ?? []), at]); });
   return shape;
 }
 
@@ -223,40 +251,45 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
     return shape.exports.has(name) || shape.stars.some(target => provides(target, name, seen));
   };
   const reach = test => {
-    // Each file with the names asked of it so far (`null`: all); a file asked for new names is walked again.
-    const asked = new Map([[test, null]]), queue = [[test, null]], read = new Set(), used = new Map();
+    // Each module with the names asked of it so far (`null`: all); a module asked for new names is resolved again.
+    const asked = new Map([[test, null]]), modules = [[test, null]], statements = [], done = new Set(), read = new Set(), used = new Map(), props = new Set();
+    let methods = [];
     const ask = (file, names) => {
       const before = asked.get(file);
       if (asked.has(file) && (before === null || (names && [...names].every(name => before.has(name))))) return;
       const merged = !asked.has(file) ? names : before === null || names === null ? null : new Set([...before, ...names]);
-      asked.set(file, merged); queue.push([file, merged]);
+      asked.set(file, merged); modules.push([file, merged]);
     };
     const askBinding = ({ target, name }) => ask(target, name === null ? null : new Set([name]));
-    while (queue.length) {
-      const [file, names] = queue.pop(), { shape } = edgesOf(file);
-      if (!shape) continue;
-      for (const target of shape.loads) ask(target, new Set());
-      const locals = new Set(), wanted = [...shape.effects];
-      if (names === null) { shape.statements.forEach((_, at) => wanted.push(at)); for (const target of shape.stars) ask(target, null); }
-      for (const [name, entry] of shape.exports) {
-        if (names !== null && !names.has(name)) continue;
-        if (entry.local) locals.add(entry.local); else askBinding(entry);
-      }
-      if (names !== null) for (const name of names) if (!shape.exports.has(name)) for (const target of shape.stars) if (provides(target, name)) ask(target, new Set([name]));
-      shape.statements.forEach((statement, at) => { if ([...statement.declares].some(name => locals.has(name))) wanted.push(at); });
-      const done = new Set();
-      while (wanted.length) {
-        const at = wanted.pop();
-        if (done.has(at)) continue;
-        done.add(at);
-        const { refs, loads, data, declares } = shape.statements[at];
-        for (const name of declares) used.set(file, (used.get(file) ?? new Set()).add(name));
-        for (const target of loads) ask(target, null);
-        for (const target of data ?? []) read.add(target);
-        for (const ref of refs) {
-          if (shape.bindings.has(ref)) askBinding(shape.bindings.get(ref));
-          else shape.statements.forEach((other, index) => { if (!done.has(index) && other.declares.has(ref)) wanted.push(index); });
+    const want = (file, at) => { const key = `${file}\0${at}`; if (!done.has(key)) { done.add(key); statements.push([file, at]); } };
+    const take = (file, shape, part) => {
+      for (const name of part.declares) used.set(file, (used.get(file) ?? new Set()).add(name));
+      for (const { target, name } of part.loads) ask(target, name);
+      for (const target of part.data ?? []) read.add(target);
+      for (const name of part.props) props.add(name);
+      for (const ref of part.refs) if (shape.bindings.has(ref)) askBinding(shape.bindings.get(ref)); else for (const at of shape.declaring.get(ref) ?? []) want(file, at);
+    };
+    for (;;) {
+      if (modules.length) {
+        const [file, names] = modules.pop(), { shape } = edgesOf(file);
+        if (!shape) continue;
+        for (const target of shape.loads) ask(target, new Set());
+        for (const at of shape.effects) want(file, at);
+        if (names === null) { shape.statements.forEach((_, at) => want(file, at)); for (const target of shape.stars) ask(target, null); }
+        for (const [name, entry] of shape.exports) {
+          if (names !== null && !names.has(name)) continue;
+          if (entry.local) for (const at of shape.declaring.get(entry.local) ?? []) want(file, at); else askBinding(entry);
         }
+        if (names !== null) for (const name of names) if (!shape.exports.has(name)) for (const target of shape.stars) if (provides(target, name)) ask(target, new Set([name]));
+      } else if (statements.length) {
+        const [file, at] = statements.pop(), { shape } = edgesOf(file), statement = shape.statements[at];
+        take(file, shape, statement);
+        for (const member of statement.members) methods.push([file, shape, member]);
+      } else {
+        const ready = methods.filter(([, , member]) => props.has(member.name));
+        if (!ready.length) break;
+        methods = methods.filter(entry => !ready.includes(entry));
+        for (const [file, shape, member] of ready) take(file, shape, member);
       }
     }
     return { files: new Set([...asked.keys(), ...read]), read, used };
@@ -280,7 +313,7 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
 
 /**
  * The tests for a file the map does not hold: those reaching or naming it, or any file that imports
- * it, transitively. A test names a file by its path or its file name.
+ * it, transitively. A test names a file by its file name (a code file's with any code extension).
  */
 function unmappedTests(file, map) {
   const seen = new Set([file]), queue = [file];
@@ -288,9 +321,9 @@ function unmappedTests(file, map) {
   const selected = new Set();
   for (const path of seen) {
     for (const test of map.get(path) ?? []) selected.add(test);
-    const name = posix.basename(path), stem = name.replace(/\.[^.]+$/, '');
-    const named = new RegExp(`(?<![\\w-])(?:${[name, stem].map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?![\\w-])`);
-    for (const [test, text] of map.texts ?? []) if (text.includes(stem) && named.test(text)) selected.add(test);
+    const name = posix.basename(path), stem = name.replace(codeExtension, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const named = new RegExp(`(?<![\\w-])${codeExtension.test(name) ? `${stem}\\.[cm]?[jt]sx?` : name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`);
+    for (const [test, text] of map.texts ?? []) if (named.test(text)) selected.add(test);
   }
   return selected;
 }
@@ -313,9 +346,9 @@ export function changedDeclarations(changed, base, root = repositoryRoot, head =
     let names = new Set();
     const touch = (shape, from, count) => {
       for (let line = from; line < from + count && names; line++) {
-        const span = shape?.spans.find(entry => line <= entry.last);
+        const span = shape?.spans.find(entry => (entry.first ?? 0) <= line && line <= entry.last);
         if (!shape || span?.names === null) names = null;
-        else if (span?.names.bindings) for (const statement of shape.statements) { if ([...span.names.bindings].some(binding => statement.refs.has(binding))) { if (!statement.declares.size) names = null; else for (const name of statement.declares) names?.add(name); } }
+        else if (span?.names.bindings) for (const statement of shape.statements.flatMap(statement => [statement, ...statement.members])) { if ([...span.names.bindings].some(binding => statement.refs.has(binding))) { if (!statement.declares.size) names = null; else for (const name of statement.declares) names?.add(name); } }
         else if (span) for (const name of span.names) names.add(name);
       }
     };
@@ -350,7 +383,9 @@ export function selectAffected(changed, map, tests, declarations = new Map()) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'affected') {
-    const selection = selectAffected(args, dependencyMap(), listTestFiles());
+    // GRAPHYARD_SELECTION_BASE (the merge writer's trial sets its base tip) narrows each changed file to the declarations its diff touches.
+    const base = process.env.GRAPHYARD_SELECTION_BASE;
+    const selection = selectAffected(args, dependencyMap(), listTestFiles(), base ? changedDeclarations(args, base) : undefined);
     // The files follow in both modes, so the merge writer's trial runs exactly this selection; an empty one runs nothing.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else {

@@ -17,7 +17,7 @@ export function standingBaseFailure(ledger: Readonly<Record<string, MergeLedgerS
 
 /**
  * The failing tests at `tip` and every file they select, as the trial's selection maps it
- * (scripts/ci-tests.mjs `fileEdges`, followed transitively): a change to none of them cannot
+ * (scripts/ci-tests.mjs `fileEdges`, imports and data reads followed transitively): a change to none of them cannot
  * repair the failure. Without that script only the test files themselves count.
  */
 export async function baseFailureScope(git: Git, tip: string, tests: readonly string[]): Promise<Set<string>> {
@@ -34,7 +34,8 @@ export async function baseFailureScope(git: Git, tip: string, tests: readonly st
   while (queue.length) {
     const file = queue.pop()!;
     if (!codeExtension.test(file)) continue;
-    for (const next of edges(file, await git(['show', `${tip}:${file}`]), files, directories)) if (!seen.has(next)) { seen.add(next); queue.push(next); }
+    const { imports, data } = edges(file, await git(['show', `${tip}:${file}`]), files, directories);
+    for (const next of [...imports, ...data]) if (!seen.has(next)) { seen.add(next); queue.push(next); }
   }
   return seen;
 }
