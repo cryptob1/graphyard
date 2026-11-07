@@ -17,7 +17,7 @@ const fakeDocker = (log: string) => `#!/bin/sh
 echo "$*" >> ${JSON.stringify(log)}
 case "$3" in
   start) for name; do :; done; echo $$ > ${JSON.stringify(log)}."$name"; exec sleep 60 ;;
-  rm) kill "$(cat ${JSON.stringify(log)}."$5")" 2>/dev/null; exit 0 ;;
+  rm) for name; do :; done; kill "$(cat ${JSON.stringify(log)}."$name")" 2>/dev/null; exit 0 ;;
 esac
 exit 0
 `;
