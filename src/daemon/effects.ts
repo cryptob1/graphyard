@@ -90,8 +90,8 @@ export interface DaemonEffects {
   releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */
   reclaimLease?: (work: Work) => Promise<unknown>;
-  /** Removes an ended attempt's worktree (never forced); whether one was removed. */
-  removeWorktree?: (path: string) => Promise<boolean>;
+  /** Removes an ended attempt's worktree, forced only when asked (a done item's, a day after its last attempt ended); whether one was removed. */
+  removeWorktree?: (path: string, force?: boolean) => Promise<boolean>;
   /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
   diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
   /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */

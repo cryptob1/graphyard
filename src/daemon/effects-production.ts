@@ -175,7 +175,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
-    removeWorktree: path => removeAttemptWorktree(root, path, run),
+    removeWorktree: (path, force) => removeAttemptWorktree(root, path, run, force),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
