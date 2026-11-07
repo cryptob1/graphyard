@@ -130,6 +130,22 @@ test(`${proof} — a freed slot goes to the merge trial before the gate, and the
   } finally { await host.close(); }
 });
 
+test(`${proof} — a start that waited holds no place in the queue once it runs, so later-order starts use the free slots`, async () => {
+  const host = await machine('load-queue');
+  try {
+    const occupant = host.launch({ cap: 2 }), other = host.launch({ cap: 2 });
+    await host.until(async () => await host.started() === 2, 'both slots are taken');
+    const merge = host.launch({ cap: 2 });
+    await host.until(() => merge.said().includes('waiting'), 'the merge trial waits');
+    await host.end(occupant.child);
+    await host.until(() => merge.said().includes('starting'), 'the merge trial runs');
+    await host.end(other.child);
+    const verification = host.launch({ cap: 2, order: trialStartOrder.verification });
+    await host.until(async () => await host.started() === 4, 'the free slot goes to a later-order start beside the running merge trial');
+    assert.equal(verification.said(), '');
+  } finally { await host.close(); }
+});
+
 test(`${proof} — the cap is one per trial lane, and every start reads the install's disk floor and one machine-wide directory`, async () => {
   assert.equal(trialContainerCap(24), 12);
   assert.equal(trialContainerCap(4), 6, 'small hosts keep room for every trial\'s serve and session pair');

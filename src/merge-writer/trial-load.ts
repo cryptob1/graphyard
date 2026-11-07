@@ -86,6 +86,8 @@ def admit():
         why = pressure()
         slot = None if why else take_slot()
         if slot is not None:
+            if queued is not None:
+                os.close(queued)
             if said:
                 print('${startingLine}', file=sys.stderr, flush=True)
             return slot
