@@ -5,7 +5,7 @@
   "tags": [
     "api",
     "dashboard",
-    "preview"
+    "static-preview"
   ],
   "target": "uat",
   "required": true,

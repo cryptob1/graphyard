@@ -581,10 +581,11 @@ export const deliverySuspendedCases = (cases: readonly CaseFile[], servesDeliver
 /**
  * Whether a case's outcome is served by an install's project applications at all (GY-2217): the
  * previews a project with declared applications runs for a change, and the application a project
- * UAT serves at its root. The case files mark these with the `preview` tag — the three preview
- * cases and the two fixture cases whose target is the fixture project's own site and app.
+ * UAT serves at its root. The case files mark these with the `preview` tag — the two Compose preview
+ * cases and the two fixture cases whose target is the fixture project's own site and app — or, for
+ * preview-serves-change, `static-preview`: the merge trial runs it, and a trial leaves `preview` out (GY-3193).
  */
-export const exercisesApplications = (definition: Pick<CaseFile['definition'], 'tags'>): boolean => definition.tags.includes('preview');
+export const exercisesApplications = (definition: Pick<CaseFile['definition'], 'tags'>): boolean => definition.tags.includes('preview') || definition.tags.includes('static-preview');
 /** The cases a run pends because the install it runs against declares no application previews (GY-2217): every case that exercises the applications' surface, required or not — the deploy's end-to-end step fails on optional cases too. */
 export const applicationSuspendedCases = (cases: readonly CaseFile[], previewsServed: boolean): string[] =>
   previewsServed ? [] : cases.filter(entry => exercisesApplications(entry.definition)).map(entry => entry.definition.id);

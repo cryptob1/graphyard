@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { bootstrapGate, gateSummary, runDiagnostics, type GateRecord } from '../src/batch-gate.js';
 import { batchGatePorts } from '../src/daemon/cycle-batch-gate.js';
+import { applicationSuspendedCases } from '../src/e2e/runner.js';
 import { previewCaseRuns, runServedPreviewCases, servedPreviewCases, type PreviewCaseRun } from '../src/merge-writer/served-previews.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultChildRun } from '../src/child-runner.js';
@@ -87,7 +88,9 @@ test(`${own} — the served run checks the commit out and hands each case to its
 
 test(`${own} — the Compose cases are tagged so the trial leaves them out, and every preview read waits for the loop`, () => {
   const definition = (id: string) => JSON.parse(readFileSync(`e2e/cases/${id}.json`, 'utf8'));
-  assert.ok(!definition('preview-serves-change').tags.includes('compose'), 'preview-serves-change runs in the trial');
+  // The trial's harness is the deployed release, whose rule leaves out every `preview` tag: a head's own rule cannot admit the case.
+  for (const tag of ['compose', 'preview']) assert.ok(!definition('preview-serves-change').tags.includes(tag), 'preview-serves-change runs in the trial');
+  assert.deepEqual(applicationSuspendedCases(servedPreviewCases.map(id => ({ file: `e2e/cases/${id}.json`, definition: definition(id) })), false), [...servedPreviewCases], 'an install serving no previews still pends all three');
   for (const id of ['preview-isolation-cleanup', 'previews-for-declared-apps']) assert.ok(definition(id).tags.includes('compose'));
   for (const id of servedPreviewCases) {
     const reads = definition(id).steps.filter((step: any) => step.expect?.some((entry: any) => entry.path === 'preview.state'));
