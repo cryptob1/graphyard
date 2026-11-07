@@ -32,7 +32,7 @@ export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
 /** The checkout's own declarations, read from its graphyard.json and never from the process's: its `e2e.serve` read as a command application (its migration source). */
-function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string> } {
+export function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string> } {
   let serve: CommandApplication | null = null;
   try { const declared = checkoutRepositoryPolicy(worktree).e2e.serve; serve = declared ? commandApplication(declared) : null; } catch { /* a policy the head broke: no serve, the case run names it */ }
   try {

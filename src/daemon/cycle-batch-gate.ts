@@ -1,9 +1,10 @@
 // Concern: the loop's batch gate on main (GY-3119): one gate at a time beside the cycle, the
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
-import { bootstrapGate, gateLimitMs, gateOutcomeReason, gateRecordPath, mergeFilings, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
+import { bootstrapGate, gateLimitMs, type DiagnosePort, gateOutcomeReason, gateRecordPath, mergeFilings, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
 import { appendReleaseNote, releaseNote, releaseNotesPath } from '../release-notes.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
+import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import { gateTrialKey } from '../merge-writer/trial-load.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -44,7 +45,7 @@ export const gateFiledItem = (input: { title: string; description: string; key: 
   reason: `Filed by the batch gate on ${baseBranch}` });
 
 /** The gate's ports over the merge writer's reads. */
-export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[]): GatePorts & { diagnose(commit: string): Promise<{ failed: string[]; catalogMs: number }> } {
+export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[]): GatePorts & { diagnose: DiagnosePort } {
   const git = reads.git;
   const file = async (input: { title: string; description: string; key: string }) => {
     const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch), input.key);
@@ -77,12 +78,15 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
-    // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own.
+    // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialChecks(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
-      const cases = (await catalog(commit)).map(id => `e2e:${id}`), started = reads.now();
-      const failed = cases.length ? await trialChecks(reads, commit, cases, [], gateLimitMs) : [];
-      return { failed: [...new Set([...suite, ...failed])], catalogMs: reads.now() - started };
+      const held = await catalog(commit), cases = held.map(id => `e2e:${id}`), started = reads.now();
+      const failed = cases.length ? await trialChecks(reads, commit, cases, [], gateLimitMs) : [], catalogMs = reads.now() - started;
+      const previews = reads.gate?.previews;
+      const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
+        : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
+      return { failed: [...new Set([...suite, ...failed])], catalogMs, previewCases };
     },
   };
 }
@@ -104,6 +108,9 @@ function mergeGateRecord(file: string, merge: (latest: GateRecord | null) => Gat
   recordWrites.set(file, chained.catch(() => undefined));
   return chained;
 }
+
+/** What a gate's write keeps of the diagnostics' own fields (GY-3147, GY-3193): they recorded them meanwhile. */
+const diagnosticFields = (latest: GateRecord | null, current: GateRecord) => ({ catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, previewCases: latest?.previewCases ?? current.previewCases, ...mergeFilings(latest, current) });
 
 /** The commit served at rollout, which becomes the first verified commit: the deploy record's when it names this repository, else main's tip. */
 async function rolloutCommit(root: string, repository: string, reads: MergeWriterReads) {
@@ -142,7 +149,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         // as the settled gate's own write does: the batch it carries — tip, files, checks, finished
         // steps — is what the next loop adopts after a restart (GY-3135).
         const before = current.verified;
-        const write = () => mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, ...mergeFilings(latest, current) }));
+        const write = () => mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) }));
         const outcome = await runGate({ ...ports, checkpoint: write }, current);
         // The diagnostics' fields and filings are theirs: a gate's write keeps what they recorded meanwhile.
         await write();
@@ -159,7 +166,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
         if (stopped.has(cycle.state)) return;
         // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
-        await mergeGateRecord(file, latest => ({ ...current, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, ...mergeFilings(latest, current) })).catch(() => undefined);
+        await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }
       finally { live.gate = null; }
@@ -173,7 +180,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         if (failed) {
           // Re-read so the diagnostics' fields never overwrite what a gate recorded meanwhile; the
           // filings of both writers merge (GY-3147).
-          await mergeGateRecord(file, latest => ({ ...(latest ?? fresh), catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt, ...mergeFilings(latest, fresh) }));
+          await mergeGateRecord(file, latest => ({ ...(latest ?? fresh), catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt, previewCases: fresh.previewCases, ...mergeFilings(latest, fresh) }));
           note('batch-gate:diagnostics', 'done', `Diagnostics on ${fresh.verified?.slice(0, 12)}: ${failed.length} failure(s) filed`);
         }
       } catch (error) { note('batch-gate:diagnostics', 'failed', `The diagnostics failed and run again next cycle: ${message(error)}`); }

@@ -263,17 +263,17 @@ test('unit:trial-serves-head-and-runs-bound-cases — the repository runs e2e:fi
   assert.ok(readFileSync(join(worktree, 'fixtures/static-site/index.html'), 'utf8').includes(expected));
 });
 
-test('unit:trial-skips-unbound-preview-cases — the trial leaves out, naming them, the unbound cases that need an item preview; bound and other cases still run', async () => {
-  // GY-3128: preview-isolation-cleanup and its siblings need the loop's item previews, which e2e.serve never runs in a trial.
+test('unit:trial-skips-unbound-preview-cases — the trial leaves out, naming them, the unbound cases that need a Compose item preview; preview-serves-change, bound and other cases still run', async () => {
+  // GY-3128, GY-3193: the trial withholds Docker from the head's code, so a Compose item preview cannot pass there; e2e.serve runs the loop's preview step for a static one.
   const worktree = process.cwd();
   const groups: { target: unknown; proofs: readonly string[] }[] = [], log: string[] = [];
-  const previews = ['e2e:preview-isolation-cleanup', 'e2e:preview-serves-change', 'e2e:previews-for-declared-apps'];
+  const leftOut = ['e2e:preview-isolation-cleanup', 'e2e:previews-for-declared-apps'];
   const cases = await runTrialE2eCases({
-    worktree, mergeSha: 'a'.repeat(40), proofs: [...previews, 'e2e:fixture-compose-app', 'e2e:create-work-item'], env: {}, scratch: worktree, budgetMs: 1_000,
+    worktree, mergeSha: 'a'.repeat(40), proofs: [...leftOut, 'e2e:preview-serves-change', 'e2e:fixture-compose-app', 'e2e:create-work-item'], env: {}, scratch: worktree, budgetMs: 1_000,
     holds: async path => existsSync(join(worktree, path)), log: line => log.push(line),
     runGroup: async (target, proofs) => { groups.push({ target, proofs }); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); },
   });
-  assert.deepEqual(cases.map(entry => entry.proof).sort(), ['e2e:create-work-item', 'e2e:fixture-compose-app'], 'no left-out case is reported, so none fails');
-  assert.deepEqual(groups.map(group => group.proofs), [['e2e:fixture-compose-app'], ['e2e:create-work-item']]);
-  for (const proof of previews) assert.ok(log.some(line => line.startsWith(`left out ${proof}:`)), `${proof} is named as left out`);
+  assert.deepEqual(cases.map(entry => entry.proof).sort(), ['e2e:create-work-item', 'e2e:fixture-compose-app', 'e2e:preview-serves-change'], 'no left-out case is reported, so none fails');
+  assert.deepEqual(groups.map(group => group.proofs), [['e2e:fixture-compose-app'], ['e2e:preview-serves-change', 'e2e:create-work-item']]);
+  for (const proof of leftOut) assert.ok(log.some(line => line.startsWith(`left out ${proof}:`)), `${proof} is named as left out`);
 });

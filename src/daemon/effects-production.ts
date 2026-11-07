@@ -27,6 +27,7 @@ import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
+import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
 import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
@@ -227,7 +228,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
-        gate: { root, repository: config.repository },
+        gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },
       };
     },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

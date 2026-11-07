@@ -13,7 +13,9 @@
 // merge order: the last item of the smallest failing prefix is reverted through the serve-revert
 // path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
 // commit served and wakes the master. The full suite and catalog run daily against the verified
-// commit as diagnostics that file items and never block.
+// commit as diagnostics that file items and never block; the three preview cases run with them on
+// the host, the verified commit in its own scratch install (GY-3193), and each one's last run and
+// verdict stays on the record for master status.
 //
 // The batch it cut is the batch it gates (GY-3135): a loop restart adopts the batch in flight —
 // the same candidate tip, files, checks and the steps already finished — and finishes it, so the
@@ -26,6 +28,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Work } from './model.js';
 import type { ServeLanding } from './merge-writer/serve-revert.js';
+import type { PreviewCaseRun } from './merge-writer/served-previews.js';
 
 /** How long one gate may run before it counts as failed (gate timeout). */
 export const gateLimitMs = 45 * 60_000;
@@ -82,6 +85,8 @@ export interface GateRecord {
    */
   gateRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
+  /** Each preview case's last daily run and verdict, by case (GY-3193). Optional only for records an older loop wrote. */
+  previewCases?: Record<string, PreviewCaseRun>;
   /**
    * The items the gate filed, per filing key — the case binding a later run reuses instead of
    * filing again (GY-3147). Optional only for records an older loop wrote.
@@ -350,18 +355,21 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   }
 }
 
-/** The diagnostics' run: the full suite and the whole catalog on the commit, their failures and the catalog's duration. */
-export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number }>;
+/** The diagnostics' run: the full suite and the whole catalog on the commit, their failures, the catalog's duration and the preview cases' runs. */
+export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number; previewCases?: PreviewCaseRun[] }>;
 
 /** The scheduled diagnostics, when due: each failure files an item; nothing here touches the gate. */
 export async function runDiagnostics(ports: Pick<GatePorts, 'now' | 'file'> & { diagnose: DiagnosePort }, record: GateRecord): Promise<string[] | null> {
   const verified = record.verified;
   if (!verified || (record.diagnosticsAt && ports.now() - Date.parse(record.diagnosticsAt) < diagnosticsIntervalMs)) return null;
-  const { failed, catalogMs } = await ports.diagnose(verified);
+  const { failed: checks, catalogMs, previewCases = [] } = await ports.diagnose(verified);
   const at = new Date(ports.now()).toISOString();
+  // A preview case that failed or was not covered reaches an owner like any failing check.
+  const failed = [...new Set([...checks, ...previewCases.filter(run => run.verdict !== 'passed').map(run => `e2e:${run.case}`)])];
   for (const check of failed) await fileFailure(ports, record, at, { key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`, description: `The scheduled full run against the verified commit ${verified.slice(0, 12)} failed ${check}. It never blocks a gate or a merge; fix it at its cause.` });
   record.catalogMs = catalogMs;
   record.diagnosticsAt = at;
+  if (previewCases.length) record.previewCases = Object.fromEntries(previewCases.map(run => [run.case, run]));
   return failed;
 }
 
@@ -380,6 +388,8 @@ export function gateSummary(record: GateRecord | null) {
     // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
     lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
     held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()),
+    // GY-3193: each preview case's last daily run and verdict; `not covered` when it did not run.
+    previewCases: Object.values(record.previewCases ?? {}).map(run => ({ ...run, commit: run.commit.slice(0, 12) })),
     // GY-3147: the filing failures that never aborted a run, newest last.
     notes: record.notes ?? [] };
 }
