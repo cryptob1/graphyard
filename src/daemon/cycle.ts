@@ -41,6 +41,7 @@ import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
+import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -169,6 +170,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);
+    if (!config.forPerson) await leftoversStep(state, clock, effects.leftoverDisk, log);
   });
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: read.snapshot.work.filter(item => item.stage !== 'done').length, actions: performed.length, steps });
   state.metrics.push(metrics);
@@ -237,6 +239,7 @@ async function closeStep(cycle: Cycle) {
     if (reason) {
       try {
         if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+        if (session.pane) tallyLeftovers(state, 'panes');
         await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure ?? `closed by the loop: ${reason}`.slice(0, 500) });
         await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${failure ?? reason}`, session.principal);
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
@@ -270,7 +273,7 @@ async function closeStep(cycle: Cycle) {
   if (effects.removeWorktree) for (const { item, space } of endedAttemptWorktrees(snapshot.work, config.hostId, clock)) {
     const key = `worktree:${item.id}:${space.epoch}`;
     if (state.actions[key]) continue;
-    try { if (await effects.removeWorktree(space.path)) await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); }
+    try { if (await effects.removeWorktree(space.path)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
   }
   // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
@@ -313,13 +316,15 @@ async function closeStep(cycle: Cycle) {
       }
     }
     if (!launched.has(agent.pane_id)) continue;
-    try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
+    try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); tallyLeftovers(state, 'panes'); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
   const orphans = await effects.stopOrphanedProcesses?.() ?? [];
+  tallyLeftovers(state, 'processes', orphans.length);
   if (orphans.length) await note(cycle, `orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${orphans.join(', ')}: still running against a removed worktree`);
   const trials = await effects.stopOrphanTrials?.() ?? [];
+  tallyLeftovers(state, 'trialContainers', trials.length);
   if (trials.length) await note(cycle, `trial-orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${trials.join(', ')}: a trial container whose checkout is gone or that outlived twice the trial deadline`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);

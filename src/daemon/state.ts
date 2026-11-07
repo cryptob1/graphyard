@@ -170,6 +170,13 @@ const failureRunSchema = z.object({
 }).strict();
 export type FailureRun = z.infer<typeof failureRunSchema>;
 
+/** GY-3190: what the close step's sweeps stopped or removed, by kind, and the disk Graphyard's leftovers hold. */
+const leftoverCountsSchema = z.object({ processes: z.number().int().min(0), trialContainers: z.number().int().min(0), reclaimed: z.number().int().min(0), panes: z.number().int().min(0), worktrees: z.number().int().min(0) }).strict();
+export type LeftoverCounts = z.infer<typeof leftoverCountsSchema>;
+const bytes = z.number().min(0).nullable();
+const leftoverDiskSchema = z.object({ trialRuns: bytes, worktrees: bytes, trialCheckouts: bytes, trialImages: bytes, buildCache: bytes }).strict();
+export type LeftoverDisk = z.infer<typeof leftoverDiskSchema>;
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -196,6 +203,10 @@ export const daemonStateSchema = z.object({
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** A disk shortage the headroom step could not reclaim (GY-3122): while set, no new merge trial or worker starts; null with room above the floor. */
   diskHeadroom: z.object({ at: z.string(), floorBytes: z.number(), volumes: z.array(z.object({ path: z.string().max(1000), freeBytes: z.number() }).strict()).max(20), shortage: z.string().max(2000) }).strict().nullable().default(null),
+  /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
+  leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
+    report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()
+    .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 }, report: null })),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
   failureRuns: z.record(z.string(), failureRunSchema).default({}),
   /** GY-3101: the stalled-yard alert's own bookkeeping, kept on the cursor so a restarted loop neither re-alerts at once nor loses the all-clear. */

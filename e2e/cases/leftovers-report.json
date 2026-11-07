@@ -1,0 +1,13 @@
+{
+  "id": "leftovers-report",
+  "title": "The loop reports once a day what Graphyard left running and the disk it holds",
+  "description": "Run loop cycles across a UTC midnight with sweeps that stop orphaned processes and trial containers, reclaim disk, close a pane and remove a worktree. The first persist of the new day turns the previous day's counts and the disk readings into one report, logged once; master status shows it under leftovers, and taking the readings removes nothing.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Report the day's leftovers and show them in master status",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/leftovers-report.test.ts",
+    "timeoutSeconds": 180
+  }]
+}
