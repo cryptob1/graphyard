@@ -67,7 +67,8 @@
           "path": "preview.cases.0.result",
           "equals": "pass"
         }
-      ]
+      ],
+      "waitSeconds": 300
     },
     {
       "kind": "http",

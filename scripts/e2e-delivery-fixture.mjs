@@ -1,5 +1,5 @@
 // A repository owned entirely by e2e-serve's scratch install. No remote or credential is used.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { defaultChildRun } from '../src/child-runner.ts';
@@ -24,10 +24,18 @@ export async function deliveryFixture(directory) {
     });
   });
   await writeFile(join(root, 'serve.mjs'), `import { createServer } from 'node:http';\nimport { delivered } from './src/store/change.mjs';\ncreateServer((_request, response) => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ delivered })); }).listen(${port}, '127.0.0.1');\n`);
+  // GY-3193: the applications the preview cases' items preview, each with its fixture case: a static site whose build shows the change, and the runnable Compose application.
+  await mkdir(join(root, 'public'));
+  await writeFile(join(root, 'public/index.html'), '<!doctype html><title>Fixture static site</title>\n<h1>Fixture static site</h1>\n');
+  await writeFile(join(root, 'build.mjs'), 'import { appendFileSync } from "node:fs";\nconst title = process.env.GRAPHYARD_PREVIEW_TITLE;\nif (title) appendFileSync("public/index.html", `<p>${title.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)}</p>\\n`);\n');
+  await cp('fixtures/preview-compose', join(root, 'compose'), { recursive: true });
   await writeFile(join(root, 'graphyard.json'), JSON.stringify({ e2e: { serve: {
     command: 'node serve.mjs', url: `http://127.0.0.1:${port}`, readySeconds: 10,
-  } } }));
+  } }, delivery: { mode: 'local', previews: 'local',
+    applications: [{ id: 'site', kind: 'static', directory: 'public', build: 'node build.mjs' }, { id: 'app', kind: 'compose', file: 'compose/compose.yml', service: 'web', port: 8080 }],
+    cases: { 'fixture-static-home': 'site', 'fixture-compose-app': 'app' } } }));
   await mkdir(join(root, 'e2e/cases'), { recursive: true });
+  for (const id of ['fixture-static-home', 'fixture-compose-app']) await cp(`e2e/cases/${id}.json`, join(root, `e2e/cases/${id}.json`));
   await writeFile(join(root, 'e2e/cases/scratch-delivery.json'), JSON.stringify({
     id: 'scratch-delivery', title: 'The submitted change is served', target: 'uat',
     steps: [{ kind: 'http', method: 'GET', path: '/', status: 200, expect: [{ path: 'delivered', equals: true }] }],

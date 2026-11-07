@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
 import { projectCaseSuite } from '../release-project.js';
-import { exercisesApplications, type E2eReport } from '../e2e/runner.js';
+import type { E2eReport } from '../e2e/runner.js';
 import { confinedSession } from '../e2e/steps.js';
 import { composeProjectName } from '../compose-preview.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
@@ -42,9 +42,9 @@ function declaredServe(worktree: string): { serve: CommandApplication | null; ap
   return { serve, applications: [], bindings: {} };
 }
 
-/** Whether the head's case `name` exercises an item preview: its `preview` tag (GY-2217). A case that does not parse runs, and its run names why. */
-async function needsItemPreview(worktree: string, name: string) {
-  try { return exercisesApplications(parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8'))); } catch { return false; }
+/** Whether the head's case `name` needs a Compose item preview: its `compose` tag (GY-3193). A case that does not parse runs, and its run names why. */
+async function needsComposePreview(worktree: string, name: string) {
+  try { return parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8')).tags.includes('compose'); } catch { return false; }
 }
 
 /**
@@ -89,11 +89,11 @@ export async function runTrialE2eCases(input: {
     const application = bound ?? fallback;
     const id = application ? `application:${application.id}` : declared.serve && !declared.bindings[name] ? 'serve' : null;
     const target = application ?? (id ? declared.serve : null);
-    // GY-3128: an unbound case needing an item preview (tagged `preview`) has nothing to run against on
-    // e2e.serve: only a loop brings up item previews, and the trial withholds Docker from the head's
-    // code (GY-2997). It is left out, named in the log, and proven against the served install instead.
-    if (id === 'serve' && await needsItemPreview(input.worktree, name)) {
-      input.log(`left out ${proof}: it needs an item preview, which only the served install's loop runs`);
+    // GY-3128: an unbound case needing a Compose item preview cannot pass on e2e.serve: the trial
+    // withholds Docker from the head's code (GY-2997). It is left out, named in the log, and the
+    // daily run proves it on the host (GY-3193, merge-writer/served-previews.ts).
+    if (id === 'serve' && await needsComposePreview(input.worktree, name)) {
+      input.log(`left out ${proof}: it needs a Compose item preview, which the daily served run proves`);
       continue;
     }
     if (!target) {

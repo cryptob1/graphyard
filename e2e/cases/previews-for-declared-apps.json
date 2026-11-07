@@ -5,7 +5,8 @@
   "tags": [
     "api",
     "dashboard",
-    "preview"
+    "preview",
+    "compose"
   ],
   "target": "uat",
   "required": true,
@@ -96,7 +97,8 @@
           "path": "preview.runner",
           "equals": "local"
         }
-      ]
+      ],
+      "waitSeconds": 300
     },
     {
       "kind": "http",
@@ -117,7 +119,8 @@
           "path": "preview.runner",
           "equals": "local"
         }
-      ]
+      ],
+      "waitSeconds": 300
     },
     {
       "kind": "http",
