@@ -3,6 +3,7 @@ import { lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { stopProcessesUnder } from '../session-processes.js';
 
 /**
  * The managed worktree root: the one directory on this host under which Graphyard creates every
@@ -116,13 +117,14 @@ export async function allocateSessionCheckout(base: string, kind: CheckoutKind, 
 type Run = ChildRun;
 const git = (repository: string): Run => (command, args) => defaultChildRun(command, args, { cwd: repository });
 /**
- * Remove one session's checkout: the worktree's registration in the repository, then the whole
+ * Remove one session's checkout: whatever still runs under it, the worktree's registration in the repository, then the whole
  * session directory with its dependency tree and evidence files. Git is asked first so the
  * registration goes with the files; a worktree the session never created, or already removed, is
  * not an error, and the prune afterwards drops whatever registration is left pointing at nothing.
  */
 export async function removeSessionCheckout(repository: string, base: string, directory: string, run?: Run) {
   assertManaged(base, directory);
+  await stopProcessesUnder(directory);
   const execute = run ?? git(repository);
   try { await execute('git', ['-C', repository, 'worktree', 'remove', '--force', resolve(directory, 'checkout')]); } catch { /* never created, or already gone */ }
   await rm(directory, { recursive: true, force: true });

@@ -19,7 +19,8 @@ import { listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson } from '
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
-import { removeAttemptWorktree } from '../master/worktrees.js';
+import { removeAttemptWorktree, worktreesDirectory } from '../master/worktrees.js';
+import { stopOrphansOfRemovedWorktrees } from '../session-processes.js';
 import { releasedSince, profileAccount, recordObservedExhaustion } from '../master/environments.js';
 import { sessionAccount } from '../master/launch-account.js';
 import { type DaemonState, writeDaemonState } from './state.js';
@@ -174,6 +175,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
+    stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
