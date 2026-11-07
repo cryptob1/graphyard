@@ -63,8 +63,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`${label}: median ${files} test files (${share(files, result.tests)}), ${minutes.toFixed(1)} test minutes (${share(minutes, result.totalMinutes)}); ran everything ${everything} (${share(everything, result.rows.length)})`);
   }
   for (const failure of mainFailures) {
-    const check = result.checks.find(entry => entry.item === failure.item);
-    console.log(`  ${failure.file} failed on main (${failure.item}): ${!failure.culprit ? 'a flake, no culprit merge' : !check ? `culprit ${failure.culprit} is outside these merges` : `culprit ${failure.culprit} — old ${check ? 'picked' : 'skipped'} it, new ${check.kept ? 'picks' : 'SKIPS'} it`}`);
+    const row = result.rows.find(entry => entry.key === failure.culprit);
+    console.log(`  ${failure.file} failed on main (${failure.item}): ${!failure.culprit ? 'a flake, no culprit merge' : !row ? `culprit ${failure.culprit} is outside these merges` : `culprit ${failure.culprit} — old ${row.then.files.includes(failure.file) ? 'picks' : 'skips'} it, new ${row.now.files.includes(failure.file) ? 'picks' : 'SKIPS'} it`}`);
   }
   console.log(`lost dependencies: ${result.lost.length} of ${result.checks.length}`);
   for (const row of result.rows) console.log(`${row.key} ${row.changed} changed: old ${row.then.files.length}, new ${row.now.files.length} files (${row.minutes.toFixed(1)} min) ${row.now.mode === 'full' ? row.now.reason : ''}`);
