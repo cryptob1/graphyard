@@ -68,10 +68,10 @@ if guardian == 0:
                 if select.select([reader], [], [], 0.05)[0]:
                     break
             # Remove first: this also ends the attached client and its output pipes.
-            subprocess.run(docker + ['rm', '--force', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(docker + ['rm', '--force', '--volumes', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             status = client.wait()
     finally:
-        subprocess.run(docker + ['rm', '--force', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(docker + ['rm', '--force', '--volumes', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os._exit(status if status >= 0 else 128 - status)
 os.close(reader)
 def stop(number, frame):

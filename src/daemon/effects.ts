@@ -102,6 +102,8 @@ export interface DaemonEffects {
   stopOrphanedProcesses?: () => Promise<string[]>;
   /** Stops running trial containers whose checkout is gone or that outlived twice the trial deadline (GY-3186), answering what was stopped. */
   stopOrphanTrials?: () => Promise<string[]>;
+  /** Takes back what ended jobs left: owner-gone trial and verification scratch, stopped trial containers with their volumes, and trial build cache older than a day (GY-3188), answering what was removed. */
+  reclaimJobLeftovers?: () => Promise<string[]>;
   /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
   leftoverDisk?: () => Promise<LeftoverDisk>;
   /**

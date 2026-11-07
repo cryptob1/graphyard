@@ -61,10 +61,11 @@ test('integration:close-dead-worktree-panes — an exited Graphyard pane in a re
   assert.ok(Object.values(state.actions).some(action => action.kind === 'reclaim' && action.detail.includes('Stopped chrome (577131)')), 'the sweep says what it stopped');
   assert.equal(fullReads, 1, 'one history recovery for the eligible inventory');
 
-  // A Graphyard pane whose worktree still exists stays open even after its runtime exited.
+  // A live session's pane in an existing worktree stays open, even with its runtime idle, and needs no history read.
   closed.length = 0;
-  agents.splice(0, agents.length, { pane_id: 'pane-dead', agent: null, agent_status: 'unknown', cwd: live });
-  await runCycle(config, state, effects, () => clock);
+  agents.splice(0, agents.length, { pane_id: 'pane-live', agent: 'claude', agent_status: 'idle', cwd: live });
+  const liveWork = [{ id: 'w3', key: 'GY-3', stage: 'build', sessions: [{ ...handle('worker:1', 'pane-live'), state: 'running' }] }] as unknown as Work[];
+  await runCycle(config, state, { ...effects, snapshot: async () => ({ work: liveWork, now: new Date(clock).toISOString() }) }, () => clock);
   assert.deepEqual(closed, []);
-  assert.equal(fullReads, 1, 'no full history read for an existing worktree');
+  assert.equal(fullReads, 1, 'no full history read for a live session');
 });

@@ -184,11 +184,11 @@ test('unit:disk-headroom-floor — the reclaim removes only Graphyard-created le
       return '';
     };
     const { reclaimGraphyardLeftovers } = await headroom();
-    const removed = await reclaimGraphyardLeftovers(run, { temporary: [temporary], checkouts: [checkouts] });
+    const removed = await reclaimGraphyardLeftovers(run, { temporary: [temporary], checkouts: [checkouts], verification: [] });
     assert.ok(!existsSync(join(temporary, 'gy-tdead')) && !existsSync(join(temporary, 'gy-hdead')) && !existsSync(join(checkouts, 'gy-cdead')), 'a dead trial\'s scratch goes');
     assert.ok(existsSync(join(temporary, 'gy-tlive')), 'a live trial\'s scratch stays');
     assert.ok(existsSync(join(temporary, 'someone-else')) && existsSync(join(temporary, 'gy-tunmarked')), 'what Graphyard did not mark as its own stays');
-    assert.deepEqual(docker.filter(args => args[0] === 'rm' || args[0] === 'image').map(args => args.join(' ')), ['rm graphyard-trial-1a2b', 'image rm graphyard-trial:old'], 'only stopped trial containers and unused trial images, never forced');
+    assert.deepEqual(docker.filter(args => args[0] === 'rm' || (args[0] === 'image' && args[1] === 'rm')).map(args => args.join(' ')), ['rm --volumes graphyard-trial-1a2b', 'image rm graphyard-trial:old'], 'only stopped trial containers and unused trial images, never forced');
     assert.ok(removed.includes('container graphyard-trial-1a2b') && removed.includes('image graphyard-trial:old'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

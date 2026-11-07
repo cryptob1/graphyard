@@ -7,16 +7,21 @@ import { defaultChildRun } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
 import { trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
+import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
 export interface WorkerVerificationInput { head: string; epoch: number; mode: 'verify' | 'complete'; preserves?: string[] }
 export const workerVerificationTimeoutMs = 55 * 60_000;
+/** Where worker verifications make their `verify-` allocations, each marked with its owner so the loop's sweep takes back a crashed one's (GY-3188). */
+export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');
+export const workerVerificationPrefix = 'verify-';
 
-export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = join(homedir(), '.gy', 'trials')): Promise<WorkerVerificationResult> {
+export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot()): Promise<WorkerVerificationResult> {
   await mkdir(parent, { recursive: true });
-  const allocation = await mkdtemp(join(parent, 'verify-'));
+  const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
+  await writeTempOwner(allocation);
   const tree = join(allocation, 'checkout'), home = join(allocation, 'home'), temporary = join(allocation, 'tmp');
   const deadline = Date.now() + workerVerificationTimeoutMs;
   const remaining = () => Math.max(1, deadline - Date.now());
@@ -48,5 +53,5 @@ writeFileSync(${JSON.stringify(result)}, JSON.stringify({ record, rerun }));
 `);
     await defaultChildRun('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], { cwd: tree, env, wrapper, timeoutMs: remaining(), group: true });
     return JSON.parse(await readFile(result, 'utf8'));
-  } finally { await rm(allocation, { recursive: true, force: true }); }
+  } finally { await rm(allocation, { recursive: true, force: true }); await rm(tempOwnerMarker(allocation), { force: true }); }
 }

@@ -302,29 +302,42 @@ async function closeStep(cycle: Cycle) {
       await note(cycle, key, 'close', item.key, 'done', `Released ${session.id}'s agent-registry session (${ended ?? 'none recorded'}): ${reason}`, session.principal ?? null);
     } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
   }
-  // A pane Graphyard launched whose runtime exited in a worktree since removed is a leftover shell: close it.
+  // GY-3188: a pane Graphyard launched is closed once its session has ended (its item done, or its
+  // session no longer running) unless its agent is still working, and so is one whose runtime exited
+  // in a worktree since removed. A live session's pane is never touched.
   const launched = new Set([...snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)), ...Object.values(state.actions).map(action => action.pane)]);
+  const ended = new Set<string>(), live = new Set<string>();
+  const judge = (item: Work, session: NonNullable<Work['sessions']>[number]) => {
+    if (!session.pane) return;
+    launched.add(session.pane);
+    if (item.stage === 'done' || session.state !== 'running') { if (!live.has(session.pane)) ended.add(session.pane); }
+    else { live.add(session.pane); ended.delete(session.pane); }
+  };
+  for (const item of snapshot.work) for (const session of item.sessions ?? []) judge(item, session);
   const masters = new Set([state.master, ...Object.values(state.personalMasters)].map(master => master.pane));
+  const managedRoots = [resolve(dataDirectory(), 'worktrees'), ...(config.run.worktreeRoot ? [resolve(config.run.worktreeRoot)] : [])];
   const recoveredItems = new Set<string>();
   if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
     const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
-    if (!agent.pane_id || masters.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
-    const managedRoots = [resolve(dataDirectory(), 'worktrees'), ...(config.run.worktreeRoot ? [resolve(config.run.worktreeRoot)] : [])];
-    const managed = managedRoots.some(root => cwd.startsWith(root + sep));
-    if ((!cwd.includes('/.graphyard/worktrees/') && !managed) || existsSync(cwd)) continue;
+    const pane = agent.pane_id;
+    if (!pane || masters.has(pane) || live.has(pane) || agent.agent_status === 'working') continue;
+    if (!cwd.includes('/.graphyard/worktrees/') && !managedRoots.some(root => cwd.startsWith(root + sep))) continue;
+    const gone = !existsSync(cwd), exited = !agent.agent || endedRuntimeStates.includes(agent.agent_status ?? '');
+    const due = () => ended.has(pane) || (gone && exited && launched.has(pane));
     // Finished sessions disappear from coordination, and old launch actions are pruned.
     // Read only the leftover's item, once per cycle; never fetch the fleet's full history.
-    if (!launched.has(agent.pane_id) && effects.sessionHistory) {
+    if (!due() && effects.sessionHistory) {
       const key = [...cwd.matchAll(/(?:^|[/-])(GY-\d+)(?=[/-]|$)/gi)].at(-1)?.[1].toUpperCase();
       const item = snapshot.work.find(work => work.key === key || work.workspaces?.some(space => space.path === cwd));
       if (item && !recoveredItems.has(item.id)) {
-        for (const session of await effects.sessionHistory(item)) launched.add(session.pane);
+        for (const session of await effects.sessionHistory(item)) judge(item, session);
         recoveredItems.add(item.id);
       }
     }
-    if (!launched.has(agent.pane_id)) continue;
-    try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); tallyLeftovers(state, 'panes'); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
-    catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
+    if (live.has(pane) || !due()) continue;
+    const why = ended.has(pane) ? 'its session has ended' : `its runtime exited and its worktree ${cwd} is removed`;
+    try { await Promise.resolve(effects.closeSession(pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); tallyLeftovers(state, 'panes'); await note(cycle, `pane:${pane}`, 'close', null, 'done', `Closed pane ${pane}: ${why}`); }
+    catch (error) { await note(cycle, `pane:${pane}`, 'close', null, 'failed', `Could not close pane ${pane}: ${message(error)}`); }
   }
   await effects.sweepCheckouts?.();
   const orphans = await effects.stopOrphanedProcesses?.() ?? [];
@@ -333,6 +346,9 @@ async function closeStep(cycle: Cycle) {
   const trials = await effects.stopOrphanTrials?.() ?? [];
   tallyLeftovers(state, 'trialContainers', trials.length);
   if (trials.length) await note(cycle, `trial-orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${trials.join(', ')}: a trial container whose checkout is gone or that outlived twice the trial deadline`);
+  const leftovers = await effects.reclaimJobLeftovers?.() ?? [];
+  tallyLeftovers(state, 'reclaimed', leftovers.length);
+  if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
 }

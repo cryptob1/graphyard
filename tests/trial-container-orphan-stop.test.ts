@@ -27,7 +27,7 @@ test('unit:tests/trial-container-orphan-stop.test.ts — the sweep stops a runni
   }) as ChildRun;
   const stopped = await stopOrphanTrialContainers(run, maxAgeMs, now);
   assert.deepEqual(stopped, ['container graphyard-trial-gone', 'container graphyard-trial-old']);
-  assert.deepEqual(calls.filter(args => args[0] === 'rm'), [['rm', '--force', 'graphyard-trial-gone'], ['rm', '--force', 'graphyard-trial-old']], 'a current trial\'s container is left alone');
+  assert.deepEqual(calls.filter(args => args[0] === 'rm'), [['rm', '--force', '--volumes', 'graphyard-trial-gone'], ['rm', '--force', '--volumes', 'graphyard-trial-old']], 'a current trial\'s container is left alone');
   assert.ok(calls[0]!.includes('status=running'), 'running trial containers are what it judges');
 });
 
@@ -69,5 +69,5 @@ test('unit:tests/trial-container-orphan-stop.test.ts — a trial container stops
   child.kill('SIGTERM');
   await exited;
   const name = /--name (graphyard-trial-[0-9a-f]+)/.exec(create)![1]!;
-  assert.ok((await calls()).some(line => line.endsWith(`rm --force ${name}`)), 'the aborted trial\'s container is removed');
+  assert.ok((await calls()).some(line => line.endsWith(`rm --force --volumes ${name}`)), 'the aborted trial\'s container is removed');
 });

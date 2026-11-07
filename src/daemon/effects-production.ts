@@ -38,7 +38,7 @@ import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
-import { graphyardVolumes, reclaimGraphyardLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
+import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
@@ -57,6 +57,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
+  let leftoversSweptAt = 0;
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
@@ -181,6 +182,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
+    // GY-3188: hourly, so the builder and Docker are not asked every cycle.
+    reclaimJobLeftovers: async () => { if (Date.now() - leftoversSweptAt < 3_600_000) return []; leftoversSweptAt = Date.now(); return reclaimJobLeftovers(run); },
     leftoverDisk: () => leftoverDisk({ trialRuns: trialRunsDirectory(root), worktrees: worktreesDirectory(root), trialCheckouts: trialCheckoutRoots()[0]! }, run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
