@@ -212,6 +212,9 @@ function reconciledAttempt(item: Work, hostId: string): Pick<NonNullable<Work['l
   return space ? { owner: space.owner, epoch: end.epoch } : null;
 }
 
+/** How long a done item's worktree with uncommitted files is kept after its last attempt ended. */
+const finishedWorktreeKeepMs = 24 * 60 * 60 * 1000;
+
 /** The ended attempts' worktrees on this host: no live lease and no running session holds their epoch. */
 export function endedAttemptWorktrees(work: Work[], hostId: string, now: number) {
   return work.flatMap(item => (item.workspaces ?? []).filter(space => space.host === hostId
@@ -270,10 +273,14 @@ async function closeStep(cycle: Cycle) {
     }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `${item.key}: the lapsed lease could not be reconciled: ${message(error)}`, ended.owner); }
   }
+  // GY-3191: Git keeps a tree its attempt left uncommitted files in; once the item is done and a day
+  // has passed since its last attempt ended, nothing will resume that work, so the removal is forced.
   if (effects.removeWorktree) for (const { item, space } of endedAttemptWorktrees(snapshot.work, config.hostId, clock)) {
-    const key = `worktree:${item.id}:${space.epoch}`;
+    const endedAt = Date.parse((item as Work & CoordinationRounds).attemptEnd?.endedAt ?? item.updatedAt);
+    const force = item.stage === 'done' && clock - endedAt > finishedWorktreeKeepMs;
+    const key = `worktree:${item.id}:${space.epoch}${force ? ':forced' : ''}`;
     if (state.actions[key]) continue;
-    try { if (await effects.removeWorktree(space.path)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
+    try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
   }
   // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
