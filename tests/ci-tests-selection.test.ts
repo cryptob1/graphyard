@@ -35,7 +35,7 @@ const project = {
   'tests/method.test.ts': "import { K } from '../src/k.js';\nnew K().used();\n",
 };
 
-test('unit:ci-tests-selection — a static import, a literal dynamic import, a path read as data, a file outside the map and package.json select exactly their tests', async () => {
+test('unit:tests/ci-tests-selection.test.ts — a static import, a literal dynamic import, a path read as data, a file outside the map and package.json select exactly their tests', async () => {
   const root = await temporaryDirectory('selection');
   try {
     await write(root, project);
@@ -56,7 +56,7 @@ test('unit:ci-tests-selection — a static import, a literal dynamic import, a p
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:ci-tests-selection — against a base, a change selects only the tests needing the declarations it touches', async () => {
+test('unit:tests/ci-tests-selection.test.ts — against a base, a change selects only the tests needing the declarations it touches', async () => {
   const root = await temporaryDirectory('selection-base');
   try {
     await write(root, project);
@@ -80,7 +80,7 @@ test('unit:ci-tests-selection — against a base, a change selects only the test
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:ci-tests-selection — the replay reports files and test minutes for both selectors, how many ran everything, and every culprit merge whose main failure the new selector skips', async () => {
+test('unit:tests/ci-tests-selection.test.ts — the replay reports files and test minutes for both selectors, how many ran everything, and every culprit merge whose main failure the new selector skips', async () => {
   const root = await temporaryDirectory('selection-replay');
   try {
     // The old selector: every change runs every test.
