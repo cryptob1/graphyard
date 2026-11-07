@@ -11,6 +11,7 @@ import { composeBounds, composeProjectName, composeStack, defaultDocker, dockerE
 import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { trialAdmission, type TrialLoad } from './trial-load.js';
 
 export const trialContainerImage = 'graphyard-trial:local';
 export const trialHarness = '/graphyard-harness';
@@ -21,11 +22,14 @@ export const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve(
 // Resolve the invocation's cwd and environment at spawn time, including the E2E
 // session host's stdin. Docker never receives candidate-controlled launch flags.
 const launch = String.raw`
-import json, math, os, select, signal, subprocess, sys, time, uuid
+import fcntl, glob, json, math, os, select, signal, subprocess, sys, time, uuid
 spec = json.loads(sys.argv[1])
 container_name = 'graphyard-trial-' + uuid.uuid4().hex
 if os.getuid() == 0:
     sys.exit('Graphyard trials require a nonroot launcher')
+${trialAdmission}
+# The slot's fd passes to the guardian, so the slot is held until the container is removed.
+slot = admit() if load else None
 docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
@@ -86,12 +90,12 @@ finally:
         pass
 `;
 
-/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given. */
-export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number }) =>
+/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189). */
+export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad }) =>
   ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify(spec)];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
-export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge', deadline?: number): string[] {
+export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge', deadline?: number, load?: TrialLoad): string[] {
   // The managed allocation is durable. Give this boundary its own empty, sticky
   // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
   const allocation = writable.find((path): path is string => !!path)!;
@@ -132,8 +136,12 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
       ...nestedMounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }
-  return trialContainerLaunch({ image, mounts, network, deadline });
+  return trialContainerLaunch({ image, mounts, network, deadline, load });
 }
+
+/** One trial's container words for any network: every container of the trial stops at `deadline` and counts under `load` (GY-3189), a compose-network group's too. */
+export const trialContainerBoundary = (writable: readonly (string | null)[], dependencies: readonly string[], deadline: number, load: TrialLoad) =>
+  (network?: string) => trialContainerWords(writable, dependencies, undefined, network, deadline, load);
 
 /** Dependencies referenced by a linked checkout and its shared install. */
 export function trialContainerDependencies(root: string): string[] {

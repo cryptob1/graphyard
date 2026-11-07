@@ -5,13 +5,14 @@ import { bootstrapGate, gateLimitMs, gateOutcomeReason, gateRecordPath, mergeFil
 import { appendReleaseNote, releaseNote, releaseNotesPath } from '../release-notes.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
+import { gateTrialKey } from '../merge-writer/trial-load.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
 
 /** The gate's own item key in the trial (a proofless pseudo-item, like a revert's). */
-const gateKey = 'batch-gate';
+const gateKey = gateTrialKey;
 const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(Boolean);
 
 /** What one trial run of `checks` on `commit` failed, as gate check ids; the trial is bounded by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142). */

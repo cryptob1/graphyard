@@ -8,6 +8,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { buildStaticSite, groupBuildShell, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment, type ComposeBounds, type Docker } from '../compose-preview.js';
 import type { Application } from '../project-applications.js';
+import { trialContainerWaiting } from './trial-load.js';
 import type { E2eServe } from '../model/repository-policy.js';
 
 /** A head served by a command until a URL answers: what a graphyard.json `e2e.serve` declares, read as an application. */
@@ -113,7 +114,8 @@ export function serveHead(checkout: string, application: ServedApplication, opti
  * budget's remainder; never past it. The group is killed on close.
  */
 async function serveByCommand(serve: CommandApplication, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = []): Promise<{ origin: string; close(): Promise<void>; ended(): string | null }> {
-  const startedAt = Date.now(), deadline = startedAt + Math.min(serve.readySeconds * 1000, budgetMs);
+  const startedAt = Date.now(), budgetEnd = startedAt + budgetMs, readyMs = serve.readySeconds * 1000;
+  let deadline = Math.min(startedAt + readyMs, budgetEnd);
   // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
   const occupied = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false);
   if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
@@ -147,6 +149,8 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
     // Only a success answers: a server still starting up (503) is not yet the head served.
     const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
     if (answered) return { origin: new URL(serve.url).origin, close, ended: () => exited };
+    // GY-3189: the command's time to answer starts when its container does, however long the start waited.
+    if (trialContainerWaiting(Buffer.concat(chunks).toString('utf8'))) deadline = Math.min(Date.now() + readyMs, budgetEnd);
     if (Date.now() >= deadline) {
       await close();
       const tail = Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500);

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { defaultChildRun } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
+import { trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -35,7 +36,7 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
     if (base.trim()) await defaultChildRun('git', ['update-ref', `refs/remotes/origin/${baseBranch}`, base.trim()], { cwd: tree });
     const env: Record<string, string> = { ...trialEnvironment(), ...trialHomeVariables(home, process.env, true), ...trialTemporaryVariables(temporary), PATH: '/usr/local/bin:/usr/bin:/bin' };
     delete env.NODE_TEST_CONTEXT;
-    const wrapper = trialContainerWords([allocation], trialContainerDependencies(root), undefined, undefined, deadline);
+    const wrapper = trialContainerWords([allocation], trialContainerDependencies(root), undefined, undefined, deadline, await trialLoad(root, 'verification'));
     const lock = (path: string) => readFile(join(path, 'package-lock.json'), 'utf8').catch(() => null);
     const [own, candidate] = await Promise.all([lock(root), lock(tree)]);
     if (own !== null && own === candidate && existsSync(join(root, 'node_modules'))) await symlink(join(root, 'node_modules'), join(tree, 'node_modules'));
