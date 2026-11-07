@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { trialContainerLaunch } from '../src/merge-writer/trial-container.js';
+import { trialContainerBoundary, trialContainerLaunch } from '../src/merge-writer/trial-container.js';
 import { trialContainerCap, trialLoad, trialStartOrder } from '../src/merge-writer/trial-load.js';
 import { serveHead } from '../src/merge-writer/serve-head.js';
 
@@ -154,4 +155,16 @@ test(`${proof} — a serve command's time to answer starts when its container do
   const serving = serveHead(base, { kind: 'command', id: 'app', command, url: `http://127.0.0.1:${port}/`, readySeconds: 1 } as never,
     { sha: 'a'.repeat(40), env: { PATH: process.env.PATH ?? '' }, budgetMs: 20_000, wrapper: [launcher], scratch: base });
   try { assert.equal(await serving.ready, `http://127.0.0.1:${port}`); } finally { await serving.close(); }
+});
+
+test(`${proof} — a trial's compose-network container counts under the same load as its others`, async () => {
+  if (existsSync('/etc/graphyard-trial')) return; // Nested trials start no Docker container.
+  const allocation = await temporaryDirectory('load-network', process.cwd());
+  const load = await trialLoad(allocation, 'merge');
+  const boundary = trialContainerBoundary([allocation], [], Date.now() + 60_000, load);
+  const spec = (words: string[]) => JSON.parse(words.at(-1)!) as { network: string; load: unknown };
+  assert.deepEqual(spec(boundary()).load, load);
+  const network = spec(boundary('container:abc'));
+  assert.equal(network.network, 'container:abc');
+  assert.deepEqual(network.load, load);
 });

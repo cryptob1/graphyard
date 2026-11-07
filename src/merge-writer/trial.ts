@@ -18,7 +18,7 @@ import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
-import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
+import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -800,7 +800,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
-  let env: Record<string, string>, wrapper: string[];
+  let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>;
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -819,7 +819,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
-    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, undefined, Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'));
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'));
+    wrapper = boundary();
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
   };
   const log: string[] = [];
@@ -980,7 +981,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       enterStep('tests: e2e');
       const ran = await containerTrialE2e({
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-        networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network, Date.now() + remaining()),
+        networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.

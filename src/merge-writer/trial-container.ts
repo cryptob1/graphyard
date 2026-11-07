@@ -139,6 +139,10 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
   return trialContainerLaunch({ image, mounts, network, deadline, load });
 }
 
+/** One trial's container words for any network: every container of the trial stops at `deadline` and counts under `load` (GY-3189), a compose-network group's too. */
+export const trialContainerBoundary = (writable: readonly (string | null)[], dependencies: readonly string[], deadline: number, load: TrialLoad) =>
+  (network?: string) => trialContainerWords(writable, dependencies, undefined, network, deadline, load);
+
 /** Dependencies referenced by a linked checkout and its shared install. */
 export function trialContainerDependencies(root: string): string[] {
   return [...new Set([checkoutGitDirectory(root), join(root, 'node_modules'), harnessModules].filter(existsSync))];
