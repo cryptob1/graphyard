@@ -100,6 +100,8 @@ export interface DaemonEffects {
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
   stopOrphanedProcesses?: () => Promise<string[]>;
+  /** Stops running trial containers whose checkout is gone or that outlived twice the trial deadline (GY-3186), answering what was stopped. */
+  stopOrphanTrials?: () => Promise<string[]>;
   /**
    * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the

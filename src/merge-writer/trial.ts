@@ -819,7 +819,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
-    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
+    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, undefined, Date.now() + remaining());
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
   };
   const log: string[] = [];
@@ -980,7 +980,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       enterStep('tests: e2e');
       const ran = await containerTrialE2e({
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-        networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
+        networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network, Date.now() + remaining()),
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.

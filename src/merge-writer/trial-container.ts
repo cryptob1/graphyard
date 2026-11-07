@@ -21,7 +21,7 @@ export const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve(
 // Resolve the invocation's cwd and environment at spawn time, including the E2E
 // session host's stdin. Docker never receives candidate-controlled launch flags.
 const launch = String.raw`
-import json, os, select, signal, subprocess, sys, uuid
+import json, math, os, select, signal, subprocess, sys, time, uuid
 spec = json.loads(sys.argv[1])
 container_name = 'graphyard-trial-' + uuid.uuid4().hex
 if os.getuid() == 0:
@@ -37,7 +37,11 @@ for source, target, readonly in spec['mounts']:
     args += ['--mount', 'type=bind,src=' + source + ',dst=' + target + (',readonly' if readonly else '')]
 for name, value in os.environ.items():
     args += ['--env', name + '=' + value]
-args += ['--entrypoint', '/usr/bin/env', spec['image']] + sys.argv[2:]
+command = sys.argv[2:]
+# The container stops at the trial deadline on its own, even when no launcher or guardian is left to remove it.
+if spec.get('deadline'):
+    command = ['/usr/bin/timeout', '--kill-after=10', str(max(1, math.ceil(spec['deadline'] / 1000 - time.time())))] + command
+args += ['--entrypoint', '/usr/bin/env', spec['image']] + command
 # A separate session owns the container, including after SIGKILL of the launcher
 # or its process group. Only the launcher holds the pipe's write end; exec'd
 # Docker clients cannot keep it alive. Create before start closes the cleanup
@@ -82,8 +86,12 @@ finally:
         pass
 `;
 
-/** The first writable directory is the disposable allocation that owns boundary scratch. */
-export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge'): string[] {
+/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given. */
+export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number }) =>
+  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify(spec)];
+
+/** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
+export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge', deadline?: number): string[] {
   // The managed allocation is durable. Give this boundary its own empty, sticky
   // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
   const allocation = writable.find((path): path is string => !!path)!;
@@ -124,7 +132,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
       ...nestedMounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }
-  return ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ image, mounts, network })];
+  return trialContainerLaunch({ image, mounts, network, deadline });
 }
 
 /** Dependencies referenced by a linked checkout and its shared install. */

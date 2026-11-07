@@ -319,6 +319,8 @@ async function closeStep(cycle: Cycle) {
   await effects.sweepCheckouts?.();
   const orphans = await effects.stopOrphanedProcesses?.() ?? [];
   if (orphans.length) await note(cycle, `orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${orphans.join(', ')}: still running against a removed worktree`);
+  const trials = await effects.stopOrphanTrials?.() ?? [];
+  if (trials.length) await note(cycle, `trial-orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${trials.join(', ')}: a trial container whose checkout is gone or that outlived twice the trial deadline`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
 }
