@@ -20,13 +20,14 @@ export function tallyLeftovers(state: DaemonState, kind: keyof LeftoverCounts, c
 export async function leftoversStep(state: DaemonState, clock: number, disk: (() => Promise<LeftoverDisk>) | undefined, log: (line: string) => void) {
   const day = new Date(clock).toISOString().slice(0, 10), leftovers = state.leftovers;
   if (leftovers.day === day) return;
-  if (leftovers.day) {
-    const readings = disk ? await disk() : { trialRuns: null, worktrees: null, trialCheckouts: null, trialImages: null, buildCache: null };
-    leftovers.report = { day: leftovers.day, counts: leftovers.counts, disk: readings, at: new Date(clock).toISOString() };
-    log(`[graphyard-master] leftovers report ${JSON.stringify(leftovers.report)}`);
-    leftovers.counts = emptyLeftoverCounts();
-  }
+  const ended = leftovers.day, counts = leftovers.counts;
+  // The day turns before the readings are awaited: a walk that outlasts the step's timeout still lands its one report, never a second.
   leftovers.day = day;
+  if (!ended) return;
+  leftovers.counts = emptyLeftoverCounts();
+  const readings = disk ? await disk() : { trialRuns: null, worktrees: null, trialCheckouts: null, trialImages: null, buildCache: null };
+  leftovers.report = { day: ended, counts, disk: readings, at: new Date(clock).toISOString() };
+  log(`[graphyard-master] leftovers report ${JSON.stringify(leftovers.report)}`);
 }
 
 /** The recursive size of a directory in bytes (symlinks not followed), or null when it cannot be read. */
