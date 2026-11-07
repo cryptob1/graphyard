@@ -19,6 +19,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
+import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -382,8 +383,7 @@ export function groupTestFiles(files: readonly string[], size = trialTestGroupSi
   for (let at = 0; at < files.length; at += bound) groups.push(files.slice(at, at + bound));
   return groups;
 }
-/** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test files and the host. */
-export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
+export { trialShardLanes };
 /**
  * The lanes a trial's shards run in and each runner's test concurrency (GY-1832): `trialShardLanes`
  * lanes, never more than the shards, each at its share of the cores. A shard's own
@@ -819,7 +819,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
-    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, undefined, Date.now() + remaining());
+    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, undefined, Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'));
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
   };
   const log: string[] = [];
