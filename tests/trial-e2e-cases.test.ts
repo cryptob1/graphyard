@@ -274,6 +274,6 @@ test('unit:trial-skips-unbound-preview-cases — the trial leaves out, naming th
     runGroup: async (target, proofs) => { groups.push({ target, proofs }); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); },
   });
   assert.deepEqual(cases.map(entry => entry.proof).sort(), ['e2e:create-work-item', 'e2e:fixture-compose-app', 'e2e:preview-serves-change'], 'no left-out case is reported, so none fails');
-  assert.deepEqual(groups.map(group => group.proofs), [['e2e:fixture-compose-app'], ['e2e:preview-serves-change', 'e2e:create-work-item']]);
+  assert.deepEqual(groups.map(group => group.proofs), [['e2e:preview-serves-change', 'e2e:create-work-item'], ['e2e:fixture-compose-app']]);
   for (const proof of leftOut) assert.ok(log.some(line => line.startsWith(`left out ${proof}:`)), `${proof} is named as left out`);
 });

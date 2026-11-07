@@ -65,7 +65,7 @@ test(`${own} — master status shows each case's last run and verdict, and a fai
   assert.deepEqual(again.filed, [], 'a case with its item is not filed again');
 });
 
-test(`${own} — the served run checks the commit out and hands every case to e2e.serve; a commit it cannot serve is not covered`, async () => {
+test(`${own} — the served run checks the commit out and hands each case to its own e2e.serve; a commit it cannot serve is not covered`, async () => {
   const root = await temporaryDirectory('preview-cases');
   const git = (...args: string[]) => defaultChildRun('git', ['-C', root, ...args]);
   await git('init', '-q', '-b', 'main');
@@ -78,7 +78,7 @@ test(`${own} — the served run checks the commit out and hands every case to e2
   const bare = (await git('rev-parse', 'HEAD')).trim();
   const handed: string[][] = [];
   const runs = await runServedPreviewCases({ root, commit: served, hostEnvironment: { PATH: process.env.PATH, HOME: root }, runGroup: async (_target, proofs) => { handed.push([...proofs]); return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 1, failed: 0 })); } });
-  assert.deepEqual(handed, [servedPreviewCases.map(id => `e2e:${id}`)]);
+  assert.deepEqual(handed, servedPreviewCases.map(id => [`e2e:${id}`]), 'each case has its own serve, so one failing stops no other');
   assert.deepEqual(runs.map(entry => [entry.verdict, entry.commit]), servedPreviewCases.map(() => ['passed', served]));
   assert.deepEqual((await runServedPreviewCases({ root, commit: bare, hostEnvironment: { PATH: process.env.PATH, HOME: root } })).map(entry => entry.verdict), ['not covered', 'not covered', 'not covered']);
   assert.deepEqual((await runServedPreviewCases({ root, commit: 'b'.repeat(40), hostEnvironment: { PATH: process.env.PATH, HOME: root } })).map(entry => entry.verdict), ['not covered', 'not covered', 'not covered'], 'a checkout that fails is not covered');

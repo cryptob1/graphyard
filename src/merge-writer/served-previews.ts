@@ -41,8 +41,10 @@ export async function runServedPreviewCases(input: { root: string; commit: strin
     if (!serve) return notCovered(input.commit, at(), 'the commit declares no e2e.serve');
     const env = previewEnvironment(join(directory, 'home'), input.hostEnvironment);
     await mkdir(env.TMPDIR!, { recursive: true });
-    const cases = await (input.runGroup ?? runTrialE2eGroup)(serve, proofs, { worktree, mergeSha: input.commit, proofs, env, scratch: directory, budgetMs: input.budgetMs ?? gateLimitMs,
-      holds: async path => existsSync(join(worktree, path)), log: line => console.log(`Preview cases: ${line}`) });
+    // One serve per case: a failed required case stops its run, and each case's verdict is its own.
+    const cases: TrialE2eCase[] = [];
+    for (const proof of proofs) cases.push(...await (input.runGroup ?? runTrialE2eGroup)(serve, [proof], { worktree, mergeSha: input.commit, proofs: [proof], env, scratch: directory, budgetMs: input.budgetMs ?? gateLimitMs / proofs.length,
+      holds: async path => existsSync(join(worktree, path)), log: line => console.log(`Preview cases: ${line}`) }));
     return previewCaseRuns(cases, input.commit, at());
   } catch (error) {
     return notCovered(input.commit, at(), error instanceof Error ? error.message : String(error));
