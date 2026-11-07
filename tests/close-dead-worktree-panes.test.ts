@@ -54,9 +54,11 @@ test('integration:close-dead-worktree-panes — an exited Graphyard pane in a re
     agents: () => agents, credentials: async () => ({}), snapshot: async () => ({ work: projected, now: new Date(clock).toISOString() }),
     sessionHistory: async item => { fullReads++; assert.equal(item.id, work[0].id); return work[0].sessions!; },
     closeSession: pane => { closed.push(pane); }, dispatch: async () => {}, persist: async () => {}, dispatchTick: async () => {},
+    stopOrphanedProcesses: async () => ['chrome (577131)'],
   };
   await runCycle(config, state, effects, () => clock);
   assert.deepEqual(closed, ['pane-review', 'pane-proof', 'pane-dead']);
+  assert.ok(Object.values(state.actions).some(action => action.kind === 'reclaim' && action.detail.includes('Stopped chrome (577131)')), 'the sweep says what it stopped');
   assert.equal(fullReads, 1, 'one history recovery for the eligible inventory');
 
   // A Graphyard pane whose worktree still exists stays open even after its runtime exited.

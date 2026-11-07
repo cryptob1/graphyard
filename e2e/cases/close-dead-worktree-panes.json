@@ -1,7 +1,7 @@
 {
   "id": "close-dead-worktree-panes",
   "title": "The loop closes exited Graphyard panes left in removed worktrees",
-  "description": "Run a loop cycle over a Herdr inventory holding an exited Graphyard pane in a removed worktree, the master pane, a pane Graphyard did not launch and a pane whose agent still runs. Only the dead Graphyard pane closes.",
+  "description": "Run a loop cycle over a Herdr inventory holding an exited Graphyard pane in a removed worktree, the master pane, a pane Graphyard did not launch and a pane whose agent still runs. Only the dead Graphyard pane closes, and the cycle records the orphaned processes it stopped behind removed worktrees.",
   "target": "any",
   "required": false,
   "steps": [{
