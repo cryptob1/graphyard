@@ -6,6 +6,7 @@ import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { freeBytes } from '../master/worktrees.js';
 import { trialContainerImage } from '../merge-writer/trial-container.js';
+import { diskFloorBytes } from '../merge-writer/trial-load.js';
 import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTemporaryPrefix, trialTemporaryRoots } from '../merge-writer/trial.js';
 import { record } from './effects.js';
 import { tallyLeftovers } from './leftovers.js';
@@ -15,9 +16,6 @@ import { workerVerificationTimeoutMs } from '../merge-writer/worker-verification
 import { trialShareAllowance } from './cycle-merge-writer.js';
 import { defaultMergeWriterParallel } from '../master/merge-writer-settings.js';
 
-/** The free space every volume Graphyard writes keeps, when master.json sets no `run.diskFloorGb`. */
-export const defaultDiskFloorGb = 30;
-export const diskFloorBytes = (config: Pick<MasterConfig, 'run'>) => (config.run.diskFloorGb ?? defaultDiskFloorGb) * 1e9;
 /** The cursor key of the shortage: a failed `attention` row the master is woken by while it stands. */
 export const diskHeadroomKey = 'disk-headroom';
 export interface Volume { path: string; freeBytes: number | null }
