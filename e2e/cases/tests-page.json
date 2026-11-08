@@ -139,6 +139,34 @@
       "status": 200
     },
     {
+      "kind": "http",
+      "name": "link item 5 to this case",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}} link 5",
+        "description": "Created by the tests-page E2E case so its row has many linked items.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The Tests page folds a case's many linked items",
+            "proofs": [
+              "e2e:tests-page"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200
+    },
+    {
       "kind": "browser",
       "action": "open",
       "path": "/?sign-in"

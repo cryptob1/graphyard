@@ -31,7 +31,7 @@ export const LinkedWork = ({ links }: { links: TrackedCase['links'] }) => {
   const newest = [...links].reverse(), rest = newest.slice(linkedShown);
   return <>{links.length} {links.length === 1 ? 'item' : 'items'}
     {newest.slice(0, linkedShown).map(link => <Link key={link.key} link={link}/>)}
-    {rest.length > 0 && <details><summary>and {rest.length} more items</summary>{rest.map(link => <Link key={link.key} link={link}/>)}</details>}</>;
+    {rest.length > 0 && <details><summary>and {rest.length} more {rest.length === 1 ? 'item' : 'items'}</summary>{rest.map(link => <Link key={link.key} link={link}/>)}</details>}</>;
 };
 const percent = (rate: number) => `${Math.round(rate * 100)}%`;
 

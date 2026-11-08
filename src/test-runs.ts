@@ -52,7 +52,8 @@ export async function testSummary(db: Queryable): Promise<{ window: number; case
   const lastFailures = (await db.query(`SELECT DISTINCT ON (scenario) seq, scenario, document FROM scenario_runs WHERE document->>'result' = 'fail' AND NOT (document->>'evidenceId' = ANY($1::text[])) ORDER BY scenario, seq DESC`, [excluded])).rows;
   const links = (await db.query(`SELECT substr(p, 5) AS scenario, document->>'key' AS key, document->>'title' AS title, document->>'stage' AS stage, c->>'id' AS criterion
     FROM work_items, jsonb_array_elements(document->'criteria') c, jsonb_array_elements_text(c->'proofs') p WHERE p LIKE 'e2e:%' ORDER BY number`)).rows;
-  const ids = [...new Set([...definitions.map(d => d.id), ...recent.map(row => row.scenario as string)])].sort();
+  // A case work links to is listed even before its definition is synced or it has run (GY-3194).
+  const ids = [...new Set([...definitions.map(d => d.id), ...recent.map(row => row.scenario as string), ...links.map(row => row.scenario as string)])].sort();
   const cases: CaseSummary[] = [];
   for (const id of ids) {
     const definition = definitions.find(d => d.id === id);
