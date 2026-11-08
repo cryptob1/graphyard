@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
-const start = readme.split('## Setup\n')[1]?.split('\n## ')[0] ?? '';
+const start = readme.split('## Quick start\n')[1]?.split('\n## ')[0] ?? '';
 const cli = new URL('../src/cli.ts', import.meta.url);
 const help = (...args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', cli.pathname, ...args], { encoding: 'utf8' });
 

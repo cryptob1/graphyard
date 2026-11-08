@@ -18,18 +18,18 @@ function mp4Seconds(bytes: Buffer) {
   return duration / scale;
 }
 
-test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough media, README is one short page embedding it with setup steps, and the video shows the current roles and delivery flow', () => {
+test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough media and its re-render steps, README is one short page embedding it with setup steps, and the video shows the current roles and delivery flow', () => {
   const tracked = execFileSync('git', ['ls-files', '--', 'docs'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean).sort();
-  assert.deepEqual(tracked, [gif, video]);
+  assert.deepEqual(tracked, [gif, video, 'docs/walkthrough.md']);
 
   const readme = read('README.md');
   assert.ok(readme.split(/\s+/).length < 600, `README is short: ${readme.split(/\s+/).length} words`);
   assert.ok(readme.includes(`](${gif})](${video})`), 'README embeds the walkthrough GIF linking to the MP4');
-  const setup = readme.split('\n## Setup\n')[1]?.split('\n## ')[0] ?? '';
+  const setup = readme.split('\n## Quick start\n')[1]?.split('\n## ')[0] ?? '';
   assert.deepEqual([...setup.matchAll(/^(\d)\. /gm)].map(match => match[1]), ['1', '2', '3', '4', '5']);
   assert.match(setup, /graphyard up --repo OWNER\/NAME/);
   for (const help of ['graphyard guide TOPIC', 'graphyard master guide']) assert.ok(readme.includes(help), `README points at ${help}`);
-  assert.doesNotMatch(readme, /\]\(docs\/[^)]*\.md/, 'README links no documentation page');
+  assert.deepEqual([...readme.matchAll(/\]\((docs\/[^)]*\.md)/g)].map(match => match[1]), ['docs/walkthrough.md'], 'README links only the walkthrough re-render page');
 
   const seconds = mp4Seconds(readFileSync(new URL(video, root)));
   assert.ok(seconds >= 60 && seconds <= 95, `the video runs ${seconds} s`);
