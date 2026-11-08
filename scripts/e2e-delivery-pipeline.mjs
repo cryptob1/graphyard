@@ -4,7 +4,8 @@ import { chmod, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun } from '../src/child-runner.ts';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
-import { mergeOne, nextToMerge, runMergeTrial } from '../src/merge-writer/executor.ts';
+import { mergeOne, nextToMerge } from '../src/merge-writer/executor.ts';
+import { scratchTrial } from './e2e-delivery-fixture.mjs';
 
 const token = process.argv[2], url = process.env.TARGET_URL;
 assert.ok(token && url, 'Run this case through the E2E runner against scripts/e2e-serve.mjs');
@@ -39,7 +40,7 @@ const events = [];
 const ports = mergeWriterReads({ baseBranch: 'main', repository: 'scratch/delivery', run: { mergeWriter: { deployKeyFile: join(trials, 'unused-key') } } }, root, defaultChildRun, {
   base: trials, merger: async () => 'control-plane',
   // These are the real trial and real children, with all scratch files under the serve directory.
-  trial: input => runMergeTrial({ ...input, checkoutRoots: [trials], temporaryRoots: [trials], retries: 0 }),
+  trial: scratchTrial(trials),
   record: async (_item, event) => { await call(`${work}/merge-record`, coordinatorToken, event); events.push(event); },
 });
 

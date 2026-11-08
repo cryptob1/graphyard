@@ -4,6 +4,14 @@ import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { defaultChildRun } from '../src/child-runner.ts';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
+import { runMergeTrial } from '../src/merge-writer/executor.ts';
+
+/**
+ * The scratch delivery's trial: the real one, every file under `trials`, and no secret scan. The
+ * scan's pinned gitleaks binary is a download, and the diagnostics run this case inside a trial
+ * whose network is unshared, so the scan could never be had there (GY-3196); the scan has its own tests.
+ */
+export const scratchTrial = trials => input => runMergeTrial({ ...input, checkoutRoots: [trials], temporaryRoots: [trials], retries: 0, secretScan: false });
 
 export async function deliveryFixture(directory) {
   const root = join(directory, 'repository'), origin = join(directory, 'origin.git');
