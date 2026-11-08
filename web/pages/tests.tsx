@@ -23,6 +23,16 @@ const E2eRunLine = ({ run, e2e }: { run: CaseRun; e2e: NonNullable<CaseRun['e2e'
   <Result result={run.result}/> {run.sha === 'unknown' ? 'unreported commit' : <Commit sha={run.sha}/>} on {run.environment}
   {' · '}e2e run {run.run.id.slice(0, 40)} · {e2e.baseUrl}{run.scenarioRevision ? ` · v${run.scenarioRevision}` : ''} · {(e2e.durationMs / 1000).toFixed(1)} s · {run.producer} · {day(run.at)}
   {e2e.failingStep && <><br/><small className="fail">failed at step {e2e.failingStep.index + 1} {e2e.failingStep.name}: {e2e.failingStep.reason}</small></>}</>;
+/** How many items link a case, newest first: the latest few shown, the rest folded away (GY-3194). */
+const linkedShown = 3;
+const Link = ({ link }: { link: TrackedCase['links'][number] }) => <div><span className="mono">{link.key}</span> {link.criteria.join(', ')}</div>;
+export const LinkedWork = ({ links }: { links: TrackedCase['links'] }) => {
+  if (!links.length) return <span className="muted">none</span>;
+  const newest = [...links].reverse(), rest = newest.slice(linkedShown);
+  return <>{links.length} {links.length === 1 ? 'item' : 'items'}
+    {newest.slice(0, linkedShown).map(link => <Link key={link.key} link={link}/>)}
+    {rest.length > 0 && <details><summary>and {rest.length} more items</summary>{rest.map(link => <Link key={link.key} link={link}/>)}</details>}</>;
+};
 const percent = (rate: number) => `${Math.round(rate * 100)}%`;
 
 type Filter = 'all' | 'fail' | 'flaky' | 'never';
@@ -94,7 +104,7 @@ export function TestsView({ data, error, loading, filter, setFilter, retry, api,
           <td>{entry.passRate === undefined || entry.passRate === null ? '—' : <>{percent(entry.passRate)} of {entry.history.filter(run => !run.withdrawn && run.result !== 'skipped').length} runs</>}</td>
           <td>{entry.changed ? <>v{entry.revision} · {day(entry.changed.at)}<br/><small>by {entry.changed.by}</small></> : '—'}</td>
           <td>{entry.failures ? <>{entry.failures}<br/><small>last {day(entry.lastFailure!.at)} on <Commit sha={entry.lastFailure!.sha}/></small></> : 'none'}</td>
-          <td>{entry.links.length ? entry.links.map(link => <div key={link.key}><span className="mono">{link.key}</span> {link.criteria.join(', ')}</div>) : <span className="muted">none</span>}</td>
+          <td><LinkedWork links={entry.links}/></td>
         </tr>)}</tbody></table>
       {!shown.length && <p className="muted">No test case matches this filter.</p>}
     </>}
