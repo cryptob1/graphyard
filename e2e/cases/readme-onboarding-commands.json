@@ -1,7 +1,7 @@
 {
   "id": "readme-onboarding-commands",
   "title": "README onboarding commands agree with the installed CLI help",
-  "description": "Read the Start here steps and invoke this checkout's CLI help in real subprocesses to check the documented commands and flags without installing services or changing a repository.",
+  "description": "Read the README Quick start steps and invoke this checkout's CLI help in real subprocesses to check the documented commands and flags without installing services or changing a repository.",
   "target": "any",
   "required": false,
   "steps": [{
