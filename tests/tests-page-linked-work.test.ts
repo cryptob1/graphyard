@@ -16,7 +16,7 @@ const entry = (links: number) => ({ id: 'fixture-static-home', title: 'The home 
 const render = (links: number) => renderToStaticMarkup(createElement(TestsView, { data: { window: 20, cases: [entry(links) as any] }, error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false }));
 const cells = (html: string) => html.split('<tbody>')[1].match(/<t[hd][ >][\s\S]*?<\/t[hd]>(?=<t[hd][ >]|<\/tr>)/g)!;
 
-test('a case linked by 400 items shows the count, the latest three and the rest collapsed', () => {
+test('unit:tests/tests-page-linked-work.test.ts — a case linked by 400 items shows the count, the latest three and the rest collapsed', () => {
   const html = render(400);
   const linked = cells(html).at(-1)!;
   assert.match(linked, /^<td>400 items/);
@@ -29,7 +29,7 @@ test('a case linked by 400 items shows the count, the latest three and the rest 
   assert.equal(folded.match(/class="mono"/g)?.length, 397);
 });
 
-test('every other column is unchanged by the number of linked items', () => {
+test('unit:tests/tests-page-linked-work.test.ts — every other column is unchanged by the number of linked items', () => {
   assert.deepEqual(cells(render(400)).slice(0, -1), cells(render(1)).slice(0, -1));
   assert.match(cells(render(1)).at(-1)!, /^<td>1 item<div><span class="mono">GY-1<\/span> AC-1<\/div><\/td>$/);
   assert.match(cells(render(0)).at(-1)!, /none/);
