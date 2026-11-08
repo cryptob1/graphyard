@@ -80,12 +80,12 @@ async function login(directory: string, name: string, kind: 'claude' | 'codex' |
   return home;
 }
 /** The executor's network: the provider usage endpoint answers per stored login token, everything else is the real control plane. */
-function network(byToken: Record<string, { five: number; seven: number }>): EnvironmentProbe {
+function network(byToken: Record<string, { five: number; seven: number; fiveResetsIn?: number }>): EnvironmentProbe {
   const fetcher = (async (target: string, init: any) => {
     if (!String(target).includes('api.anthropic.com')) return fetch(target, init);
     const entry = byToken[String(init.headers.Authorization).replace('Bearer ', '')];
     if (!entry) return new Response('{}', { status: 401 });
-    return new Response(JSON.stringify({ five_hour: { utilization: entry.five, resets_at: future(2 * hour) }, seven_day: { utilization: entry.seven, resets_at: future(48 * hour) } }));
+    return new Response(JSON.stringify({ five_hour: { utilization: entry.five, resets_at: future(entry.fiveResetsIn ?? 2 * hour) }, seven_day: { utilization: entry.seven, resets_at: future(48 * hour) } }));
   }) as unknown as typeof fetch;
   return { fetch: fetcher, cacheMs: 0 };
 }
@@ -420,7 +420,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   assert.doesNotMatch(bytes, /claude-a|claude-b|codex-a/, 'and it never named an account');
 });
 
-test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer, producer and master all on one exhausted account run on the second usable account with no registry change, and the first account leads again once its hold ends', async () => {
+test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer, producer and master all on one exhausted account run on the second usable account with no registry change, and the first account leads again once its hold ends; a second role account\'s window resetting within the hour with quota unused is spent first', async () => {
   await reset();
   const homes = await temporaryDirectory('homes', scratch);
   const homeA = await login(homes, 'claude-one', 'claude'), homeB = await login(homes, 'claude-two', 'claude');
@@ -458,6 +458,14 @@ test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer,
   assert.equal((await dispatch(root, config, 'worker-a', renewed)).account!.environment, 'claude-one');
   for (const [role, work] of [['reviewer', 'GY-3203'], ['producer', 'GY-3204']] as const)
     assert.equal((await selectAccount(config, role, { name: `${role}-a` }, { ...renewed, work })).account!.name, 'claude-one', `${role} returns to its own account`);
+
+  // With both accounts serving worker, the second one's 5-hour window resetting in 30 minutes at 40% used is spent first, the reason naming its reset (GY-3197).
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-one', 'claude-two'], concurrency: 5 }, reason: 'Both accounts serve worker' });
+  const expiring = network({ 'claude-one-oauth-token': { five: 1, seven: 1 }, 'claude-two-oauth-token': { five: 40, seven: 10, fiveResetsIn: 30 * 60_000 } });
+  const soon = await selectAccount(config, 'worker', { name: 'worker-a' }, { ...expiring, work: 'GY-3205' });
+  assert.equal(soon.account!.name, 'claude-two');
+  assert.ok(soon.account && 'fleet' in soon.account);
+  assert.match(soon.account.fleet.reason, /preference 2 of 2.*chosen first: its 5h window resets at \S+ with 60% unused/);
 });
 
 // ---------------------------------------------------------------------------

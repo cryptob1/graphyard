@@ -204,6 +204,10 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
   return changed;
 }
 
+/** A usage window that resets within the hour with at least 30% of it unused (GY-3197): quota its account loses unless a session spends it now. */
+export function expiringWindow(account: FleetAccount, now: number) {
+  return account.quota.usage.find(usage => usage.resetsAt && Date.parse(usage.resetsAt) > now && Date.parse(usage.resetsAt) - now <= 3_600_000 && usage.percent <= 70) ?? null;
+}
 /** A choice past the role's own accounts (GY-3092): the role, the fleet account that serves it, and why each of the role's own was passed over. */
 export interface RoleFailover { role: FleetRoleName; account: string; reason: string }
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[]; failover: RoleFailover | null }
@@ -240,7 +244,10 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     const failover = own ? null : { role: role.name, account: account.name, reason: passedOwn.map(entry => entry.reason).join('; ') || `role ${role.name}'s own accounts cannot serve it` };
     return { account, runtime, model, policy, skipped: passed, failover, reason: `${account.name} is the first eligible account for ${role.name} (${own ? `preference ${index + 1} of ${order.length}` : `failing over: none of the role's own ${role.accounts.length} accounts can serve it`}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
   }; // the spread trails plans already holding a live session (GY-2943); a diverse reviewer's trial keeps GY-1496's order, which records its shared-provider passes itself; past the role's own accounts the fleet's fallback takes any account the preference leaves standing (GY-3092)
-  for (const [, name] of [...(diverse ? order : planSpreadOrder(registry, order)), ...fleetOrder(registry, role, request.prefer ?? null)].entries()) {
+  // A role's own account whose window is about to reset with quota unused goes first, so that quota is spent before it is wasted (GY-3197).
+  const expiring = new Map(order.flatMap(name => { const account = registry.accounts.find(entry => entry.name === name), window = account && expiringWindow(account, now); return window ? [[name, window] as const] : []; }));
+  const own = diverse ? order : planSpreadOrder(registry, order), trial = [...own.filter(name => expiring.has(name)), ...own.filter(name => !expiring.has(name))];
+  for (const [, name] of [...trial, ...fleetOrder(registry, role, request.prefer ?? null)].entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
     // An unsupported runtime stored before the refusal existed is passed over with its reason, never launched.
     const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
@@ -252,7 +259,8 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
       continue;
     }
     if (diverse && !differs) { const skip = sharedProviderSkip(name, diverse); skipped.push(skip); shared.add(skip); fallback ??= { account: account!, index: order.indexOf(name), skip }; continue; }
-    return chosen(account!, order.indexOf(name), skipped, diverse ? ` on provider ${accountProvider(registry, account!)}, not the implementer's ${diverse.provider}` : '');
+    const window = expiring.get(name), soon = window && order.indexOf(name) > 0 ? `; chosen first: its ${window.window} window resets at ${window.resetsAt} with ${100 - window.percent}% unused` : '';
+    return chosen(account!, order.indexOf(name), skipped, `${soon}${diverse ? ` on provider ${accountProvider(registry, account!)}, not the implementer's ${diverse.provider}` : ''}`);
   }
   if (diverse && busy.length) return { account: null, skipped, reason: busyDifferentProvider(role.name, diverse, busy) };
   for (const list of [skipped, others, busy]) list.sort((first, second) => { const a = order.indexOf(first.account), b = order.indexOf(second.account); return (a < 0 ? 1 : 0) - (b < 0 ? 1 : 0) || a - b; }); // the skips read in the role's own preference order, whatever the plan spread made of the trial, a fleet account that served no role trailing (GY-2943, GY-3092)
