@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 const root = new URL('..', import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), 'utf8');
 
-test('unit:readme-landing — README is a short landing page naming AI coding agents, Claude Code and Codex, with Why, Quick start and Learn more sections', () => {
+test('unit:tests/readme-landing.test.ts — README is a short landing page naming AI coding agents, Claude Code and Codex, with Why, Quick start and Learn more sections', () => {
   const readme = read('README.md');
   const words = readme.trim().split(/\s+/).length;
   assert.ok(words <= 250, `README is at most 250 words: ${words}`);
