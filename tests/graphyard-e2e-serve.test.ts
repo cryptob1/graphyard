@@ -16,6 +16,11 @@ import { parseCase } from '../src/e2e/case.js';
 import { projectCaseSuite } from '../src/release-project.js';
 import { runCases, type E2eReport } from '../src/e2e/runner.js';
 import { trialEnvironment } from '../src/merge-writer/trial.js';
+import { createServer } from 'node:net';
+
+const freePort = () => new Promise<number>((accept, reject) => {
+  const server = createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => accept(port)); });
+});
 
 // GY-2969: Graphyard's own graphyard.json declares e2e.serve, so its user-facing items can carry
 // e2e: proofs. AC-1: the declared command serves this head's control plane and create-work-item
@@ -30,9 +35,13 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
   assert.ok(serve, 'graphyard.json declares e2e.serve');
   const scratch = await temporaryDirectory('e2e-serve');
   const token = `trial-${randomUUID()}`;
+  // GY-3195: the declared port is shared by every serve on the host (a merge trial, another run of
+  // this file); this run serves on a free port of its own so its cases never reach another's server.
+  const port = await freePort();
+  const url = new URL(serve.url); url.port = String(port);
   // The trial's environment: no credential, TMPDIR the trial's own.
   const child = spawn('sh', ['-c', serve.command], { cwd: checkout, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...trialEnvironment(process.env), TMPDIR: scratch, GRAPHYARD_E2E_TOKEN: token } });
+    env: { ...trialEnvironment(process.env), TMPDIR: scratch, GRAPHYARD_E2E_TOKEN: token, GRAPHYARD_E2E_SERVE_PORT: String(port) } });
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   // stdout/stderr stay open while any descendant that inherited them still runs (the shell may exit first).
@@ -45,10 +54,15 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     const deadline = Date.now() + serve.readySeconds * 1000;
     let answered = false;
     while (!answered && Date.now() < deadline && child.exitCode === null) {
-      answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
+      answered = await fetch(url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
       if (!answered) await new Promise(accept => setTimeout(accept, 500));
     }
-    assert.ok(answered, `${serve.url} answered within ${serve.readySeconds}s: ${output.slice(-2000)}`);
+    assert.ok(answered, `${url} answered within ${serve.readySeconds}s: ${output.slice(-2000)}`);
+    await t.test('unit:graphyard-e2e-serve-pinned — the serve command answers on the port the run gives it, with the run\'s token, whatever holds the declared port', async () => {
+      assert.notEqual(url.port, new URL(serve.url).port);
+      const listed = await fetch(new URL('/api/scenarios', url), { headers: { Authorization: `Bearer ${token}` } });
+      assert.equal(listed.status, 200, 'the server on the given port is this run\'s: it accepts the run\'s token');
+    });
     const databases = readdirSync(scratch).filter(name => name.startsWith('graphyard-e2e-serve-'));
     assert.equal(databases.length, 1, 'the database lives in one temporary directory under TMPDIR');
 
@@ -60,7 +74,7 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     let report: E2eReport | null = null;
     await projectCaseSuite(checkout, token, { cases, select: () => true,
       withholdSecrets: true, artifactsDirectory: join(scratch, 'artifacts'), signal: AbortSignal.timeout(180_000), report: value => { report = value; } })
-      .run(new URL(serve.url).origin, null);
+      .run(url.origin, null);
     for (const id of ids) {
       const outcome: E2eReport['cases'][number] | undefined = (report as E2eReport | null)?.cases.find(entry => entry.id === id);
       assert.equal(outcome?.verdict, 'passed', `${id}: ${JSON.stringify(outcome?.failingStep ?? outcome)}`);
@@ -71,7 +85,7 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     await t.test('unit:delivery-pipeline — the case delivers a reviewed exact head and fails after a passing trial when the bare origin is unwritable', async () => {
       const deliveryFile = 'e2e/cases/delivery-pipeline.json';
       const definition = parseCase(deliveryFile, readFileSync(join(checkout, deliveryFile), 'utf8'));
-      const deliveryOptions = { url: new URL(serve.url).origin, token, environment: 'uat', root: checkout,
+      const deliveryOptions = { url: url.origin, token, environment: 'uat', root: checkout,
         retries: 0, withholdSecrets: true, signal: AbortSignal.timeout(180_000), artifactsDirectory: join(scratch, 'delivery-artifacts') };
       const passed = await runCases([{ file: deliveryFile, definition }], deliveryOptions);
       assert.equal(passed.cases[0]?.verdict, 'passed', JSON.stringify(passed.cases[0]?.failingStep));

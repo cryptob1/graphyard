@@ -6,7 +6,8 @@
 // It starts the local runtime (src/install/local-runtime.ts: embedded Postgres, migrations, the
 // control plane) against a fresh database under TMPDIR — its cluster a copy of the warm template
 // cluster and its database a clone of the migrated template (src/e2e/warm-postgres.ts) — serving
-// 127.0.0.1:4391 with one admin principal whose token is GRAPHYARD_E2E_TOKEN (the token the trial's cases authenticate with; one
+// 127.0.0.1:4391 (or GRAPHYARD_E2E_SERVE_PORT, so a run beside another serve on the host keeps its own
+// port, GY-3195) with one admin principal whose token is GRAPHYARD_E2E_TOKEN (the token the trial's cases authenticate with; one
 // is made and printed when unset). On SIGTERM or SIGINT it stops the server and the database and
 // removes the database directory. No credential is read. A case that seeds its own records
 // (scripts/e2e-seed-plain-status.mjs) reads the database URL from .graphyard/e2e-serve.json.
@@ -21,7 +22,7 @@ import { copyTemplateCluster, templateDatabase, warmPassword } from '../src/e2e/
 import { deliveryFixture } from './e2e-delivery-fixture.mjs';
 import { startPreviewLoop } from './e2e-preview-loop.mjs';
 
-const e2eServePort = 4391;
+const e2eServePort = Number(process.env.GRAPHYARD_E2E_SERVE_PORT) || 4391;
 
 const freePort = () => new Promise((accept, reject) => {
   const server = createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => accept(port)); });
