@@ -6,7 +6,7 @@ import type { ConfigReload } from '../master/config.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { defaultChildRun } from '../child-runner.js';
 import { carryUndeclared } from './state.js';
-import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+import { actionLine, acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 export { actionLine } from './state.js';
 import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
