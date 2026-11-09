@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -141,13 +141,75 @@ test('unit:tests/premerge-check-services.test.ts — the TCP readiness wait conn
   assert.match(never.out, new RegExp(`127\\.0\\.0\\.1:${closed} accepted no TCP connection in time`));
 });
 
-// AC-3: a real merge trial on a fixture whose check queries a stock postgres service. It needs Docker, so it runs
-// from the e2e case premerge-check-services on the host-side Compose path, which sets GRAPHYARD_SERVICES_E2E.
+// AC-2: the real merge-trial path inside the Docker-less trial. A stub `docker` first on PATH answers the Compose
+// calls the trial makes and records them; a loopback TCP listener stands in for db, and a preload resolves the
+// service name to it as the Compose network's DNS would. Children run unwrapped: nested bubblewrap cannot start
+// inside the trial, and joining a container's network is the unit tests' concern.
+test('e2e:premerge-check-services — a real trial runs a check beside its stubbed db service: it reaches db through its variables and passes, a failing query fails, and the stack is torn down both times', { timeout: 300_000 }, async () => {
+  const listener = createServer(socket => socket.once('data', query => socket.end(/no_such_table/.test(String(query)) ? 'ERROR: relation "no_such_table" does not exist\n' : '[{"answer":1}]\n')));
+  await new Promise<void>(done => listener.listen(0, '127.0.0.1', done));
+  const port = (listener.address() as { port: number }).port, execPath = process.execPath;
+  try {
+    const stub = await temporaryDirectory('check-services-docker'), log = join(stub, 'docker.log');
+    writeFileSync(join(stub, 'docker'), `#!/bin/sh
+printf '%s\\n' "$*" >> '${log}'
+case "$*" in
+  *" config "*) printf '%s' '{"services":{"db":{"image":"postgres:16-alpine"}}}' ;;
+  "ps --quiet --filter"*) echo 0123456789ab ;;
+esac
+`, { mode: 0o755 });
+    // The trial puts the running Node's directory first on PATH, where a host's real docker may also be: run as a Node in the stub's directory.
+    symlinkSync(process.execPath, join(stub, 'node'));
+    process.execPath = join(stub, 'node');
+    const resolver = join(stub, 'compose-dns.mjs');
+    writeFileSync(resolver, `import dns from 'node:dns';
+const lookup = dns.lookup;
+dns.lookup = (host, options, callback) => lookup(host === 'db' ? '127.0.0.1' : host, options, callback);
+`);
+    const query = (sql: string) => `import net from 'node:net';
+const socket = net.connect({ host: process.env.GRAPHYARD_SERVICE_DB_HOST, port: Number(process.env.GRAPHYARD_SERVICE_DB_PORT) });
+let answer = '';
+socket.on('data', chunk => { answer += chunk; });
+socket.on('end', () => { console.log(answer.trim()); process.exit(answer.startsWith('ERROR') ? 1 : 0); });
+socket.write(${JSON.stringify(sql)});
+`;
+    const fixture = await repository({
+      'compose.yml': 'services:\n  db:\n    image: postgres:16-alpine\n',
+      'graphyard.json': policy([{ check: 'db', command: 'node query.mjs', source: 'script', reason: 'fixture', services: [{ file: 'compose.yml', service: 'db', port }] }]),
+      'query.mjs': query('select 1 as answer'),
+    });
+    const wrappers: (readonly string[])[] = [];
+    const run: ChildRun = (command, args, options = {}) => {
+      if (command === 'git') return defaultChildRun(command, args, options);
+      wrappers.push(options.wrapper ?? []);
+      return defaultChildRun(command, args, { ...options, wrapper: undefined, env: { ...options.env, NODE_OPTIONS: `--import=${resolver}` } });
+    };
+    const trial = (mergeSha: string) => runTrial({ root: fixture.root, base: fixture.base, mergeSha, changedFiles: ['query.mjs'], timeoutMs: 120_000, key: 'GY-3209-E2E', retries: 0,
+      environment: { PATH: process.env.PATH! }, run });
+    const teardowns = () => readFileSync(log, 'utf8').split('\n').filter(line => /^compose -p \S*trial-services-gy-3209-e2e\S* down /.test(line)).length;
+
+    const passing = await trial(fixture.mergeSha);
+    assert.deepEqual(passing.tests, { passed: 1, failed: [], files: 1 }, passing.logTail);
+    assert.match(passing.logTail, /"answer":1/);
+    assert.match(readFileSync(log, 'utf8'), /^compose .* up --detach /m, 'the trial brought the services up through docker compose');
+    assert.ok(wrappers.some(wrapper => joins(wrapper, 'container:0123456789ab')), 'the check joins the services\' container network');
+    assert.equal(teardowns(), 1, 'the stack is torn down after a pass');
+
+    writeFileSync(join(fixture.root, 'query.mjs'), query('select * from no_such_table'));
+    git(fixture.root, 'commit', '-qam', 'a failing query');
+    const failing = await trial(git(fixture.root, 'rev-parse', 'HEAD'));
+    assert.deepEqual(failing.tests.failed, ['db'], failing.logTail);
+    assert.match(failing.logTail, /no_such_table/);
+    assert.equal(teardowns(), 2, 'the stack is torn down after a failure');
+  } finally { process.execPath = execPath; listener.close(); }
+});
+
+// AC-3: the same against a real Docker engine and a stock postgres service, run by hand post-deploy with GRAPHYARD_SERVICES_E2E=1.
 const installedModules = resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..');
-test('e2e:premerge-check-services — a real trial starts a postgres service beside the check: a passing query passes, a failing one fails, and no container is left', {
-  timeout: 900_000, skip: process.env.GRAPHYARD_SERVICES_E2E === '1' ? false : 'runs from e2e case premerge-check-services, where Docker is',
+test('live:premerge-check-services — a real trial starts a postgres service beside the check: a passing query passes, a failing one fails, and no container is left', {
+  timeout: 900_000, skip: process.env.GRAPHYARD_SERVICES_E2E === '1' ? false : 'needs Docker: GRAPHYARD_SERVICES_E2E=1 on a Docker host',
 }, async () => {
-  assert.equal(nested, false, 'the case runs on the host, where Docker is');
+  assert.equal(nested, false, 'runs on a Docker host');
   const query = (sql: string) => `import pg from 'pg';
 const client = new pg.Client({ host: process.env.GRAPHYARD_SERVICE_DB_HOST, port: Number(process.env.GRAPHYARD_SERVICE_DB_PORT), user: 'postgres', password: 'fixture', database: 'postgres' });
 await client.connect();
