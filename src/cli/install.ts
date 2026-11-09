@@ -65,7 +65,7 @@ export const installCommands = defineCommands([
   {
     name: 'up',
     help: [
-      '  up --repo OWNER/NAME [--base-branch NAME] [--provider compose|local]',
+      '  up --repo OWNER/NAME [--base-branch NAME] [--provider compose|local] [--port N]',
       '     [--local] [--master claude|codex] [--agent] [--wait MINUTES]',
       '     [--share-tailnet] [--url URL] [--json]',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
@@ -85,6 +85,8 @@ export const installCommands = defineCommands([
       '                                records one (HTTPS, or HTTP on loopback); --json prints the result as JSON.',
       '                                --base-branch NAME builds on that branch (default: the repository\'s default branch);',
       '                                a rerun without the flag keeps the branch the install recorded.',
+      '                                --port N serves the control plane on 127.0.0.1:N (default: the first free port from',
+      '                                4310); a rerun without the flag keeps the port the install recorded.',
       '                                --wait MINUTES bounds a wait (agent: 20). Exit codes: 0 green, 1 a step failed, 2 a',
       '                                machine prerequisite needs a person, 3 still waiting on a person.',
     ],

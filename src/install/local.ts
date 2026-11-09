@@ -13,10 +13,10 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyObservation, httpHealth, tool, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
+import { emptyObservation, httpHealth, PORT_CANDIDATES, tool, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from './loop-unit.js';
-import type { EnvValue, PreflightItem } from './types.js';
+import { SERVER_PORT, type EnvValue, type PreflightItem } from './types.js';
 import { withLocalBin } from '../herdr-host.js';
 import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
@@ -185,7 +185,11 @@ export const localAdapter: ProviderAdapter = {
     }
     // The server's port is free, or this installation already serves on it; the cluster's is free,
     // or it is the port this installation's cluster recorded.
+    // Without --port, a taken port gives way to the first free one from 4310, which the apply records.
     const serving = !await loopbackPortFree(ctx.port) && await httpHealth(ctx, serverUrl(ctx));
+    if (!serving && !ctx.portExplicit && !await loopbackPortFree(ctx.port)) {
+      for (let port = SERVER_PORT; port < SERVER_PORT + PORT_CANDIDATES; port++) if (await loopbackPortFree(port)) { ctx.port = port; break; }
+    }
     const serverPort = serving || await loopbackPortFree(ctx.port);
     const recorded = existsSync(local.paths.portFile);
     const databasePort = recorded || await loopbackPortFree(local.postgresPort);
