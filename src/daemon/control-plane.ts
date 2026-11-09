@@ -5,8 +5,7 @@
 // staleness the record shows — a check over a day old, or a verified commit first seen over a day
 // ago that the install still does not run.
 import { controlPlaneRecordPath, controlPlaneStaleLines, readControlPlaneRecord, type ControlPlaneRecord } from '../deploy-watch.js';
-import { actionLine } from './run.js';
-import { message, storeAction } from './state.js';
+import { actionLine, message, storeAction } from './state.js';
 import type { Cycle } from './cycle.js';
 
 /** The bug item a failed control-plane upgrade files: one item per verified commit and failed step. */

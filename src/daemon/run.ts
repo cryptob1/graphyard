@@ -7,6 +7,7 @@ import type { MasterConfig } from '../master/profiles.js';
 import { defaultChildRun } from '../child-runner.js';
 import { carryUndeclared } from './state.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+export { actionLine } from './state.js';
 import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
@@ -21,9 +22,6 @@ import { deployUnitOf } from '../install/units.js';
 import { activeCliRoot } from '../install/cli-release.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { noteControlPlane } from './compose-recovery.js';
-
-/** The line the loop logs for each action a cycle took; the tests that pin a logged failure build it from here. */
-export const actionLine = (cycle: number, action: Pick<DaemonAction, 'kind' | 'state' | 'detail'>) => `[graphyard-master] cycle ${cycle} ${action.kind} ${action.state}: ${action.detail}`;
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, masterAgent?: { agent_status?: string }) {
