@@ -20,6 +20,7 @@ import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
 import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
+import { migrateHerdr } from '../herdr-migration.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -429,7 +430,6 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
 export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; herdrInstance?: boolean }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
   const recorded = await readInstallRecord(directory).catch(() => null);
-  // GY-2941: an installation whose own Herdr instance master.json names redeploys with --herdr-instance, though its record predates the field.
   const install = recorded && input.herdrInstance ? { ...recorded, herdrInstance: true } : recorded;
   if (install?.provider !== 'compose' && install?.provider !== 'local') return `the deploy unit needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
   const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) })).then(String);
@@ -504,7 +504,9 @@ export const upgradeCommands = defineCommands([{
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     if (flags.includes('--watch')) {
-      const repoRoot = context.repositoryRoot(), master = await loadMasterConfig(repoRoot);
+      const repoRoot = context.repositoryRoot();
+      await migrateHerdr(repoRoot);
+      const master = await loadMasterConfig(repoRoot);
       // GY-2942: the unit names the install's own checkout; one without it deploys from the launcher's.
       const checkoutIndex = flags.indexOf('--checkout'), cliRoot = checkoutIndex >= 0 ? resolve(flags[checkoutIndex + 1] ?? '') : installationRoot;
       if (cliRoot !== installationRoot) await ensureDeployCheckout(cliRoot, installationRoot, defaultChildRun);
@@ -550,7 +552,7 @@ export const upgradeCommands = defineCommands([{
     if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it; nothing was changed');
     if (!url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz after the redeploy; nothing was changed');
     const result = await runUpgrade(plan, liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')));
-    if (result.ok) { console.log(`upgraded to ${target.version}`); return; }
+    if (result.ok) { await migrateHerdr(repoRoot); console.log(`upgraded to ${target.version}`); return; }
     process.exitCode = 1;
     console.error(`upgrade stopped at ${result.failed}: ${result.error}\nrollback: ${result.rollback}`);
   },

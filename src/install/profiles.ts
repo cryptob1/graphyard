@@ -16,16 +16,18 @@ export async function registerLocalProfiles(request: ProfileRequest): Promise<Pr
     workers: [], reviewers: request.reviewers,
   };
 
+  let workspace: string | undefined;
   const worker = request.workerTokens[0];
   if (worker) {
     try {
-      const result = await setupRepository(request.root, { url: request.url, cliPath: request.cliPath, hostId: request.hostId, token: worker.token }, { herdr: request.herdr.available, herdrRebind: !!request.herdrRebind, herdrInstance: request.herdrInstance ?? null, ...(request.runHerdr ? { runHerdr: request.runHerdr } : {}) });
-      registration.repository = { connected: result.connected, herdr: result.pluginConfigured, detail: result.pluginConfigured ? `repository connected and the Herdr plugin is linked and enabled${request.herdrInstance ? ` in this installation's own Herdr instance (session ${request.herdrInstance.session})` : ''}${result.herdr?.relinked ? ` (repointed from ${result.herdr.previous} by --herdr-rebind)` : ''}` : `repository connected; ${request.herdr.reason}` };
+      const result = await setupRepository(request.root, { url: request.url, cliPath: request.cliPath, hostId: request.hostId, token: worker.token }, { herdr: request.herdr.available, ...(request.runHerdr ? { runHerdr: request.runHerdr } : {}) });
+      workspace = result.herdr?.workspace;
+      registration.repository = { connected: result.connected, herdr: result.pluginConfigured, detail: result.pluginConfigured ? 'repository connected in its Herdr workspace' : `repository connected; ${request.herdr.reason}` };
     } catch (error: any) { registration.repository = { connected: false, herdr: false, detail: `repository setup did not complete: ${error.message}` }; }
   }
 
   try {
-    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, credentialDirectory: request.installDirectory });
+    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, herdrWorkspace: workspace, credentialDirectory: request.installDirectory });
     registration.master = { configured: true, kind: request.masterKind, detail: request.masterKind ? `run: graphyard master start ${request.masterKind}` : 'no authenticated agent runtime was detected for the master session' };
   } catch (error: any) { registration.master = { configured: false, kind: request.masterKind, detail: `master setup did not complete: ${error.message}` }; }
 

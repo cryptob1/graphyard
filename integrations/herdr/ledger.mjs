@@ -5,12 +5,12 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-let config = {};
-try { config = JSON.parse(await readFile(join(process.env.HERDR_PLUGIN_CONFIG_DIR || '.', 'config.json'), 'utf8')); } catch { /* env configuration is also supported */ }
+import { readBinding } from './config.mjs';
+const config = await readBinding();
 const url = process.env.GRAPHYARD_URL || config.url;
 const token = process.env.GRAPHYARD_TOKEN || config.token;
 const hostId = process.env.GRAPHYARD_HOST_ID ?? config.hostId;
-const cliPath = process.env.GRAPHYARD_CLI || config.cliPath || fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
+const cliPath = process.env.GRAPHYARD_CLI || config.cliPath;
 if (!url || !token) { console.error('Configure Graphyard URL and an individual worker/reader token in the Herdr plugin config.json.'); process.exit(1); }
 // Treat server content as text, never terminal control sequences.
 const clean = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');

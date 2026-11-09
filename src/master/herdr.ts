@@ -1,5 +1,4 @@
 // Concern: the Herdr runtime adapter — the instance every herdr call targets, workspace health, agent inventory, panes and tabs.
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -8,45 +7,13 @@ import { type ChildRun, type ChildRunOptions, defaultChildTimeoutMs, type BoundC
 import type { MasterConfig } from './profiles.js';
 import { herdrConnectCommands } from '../herdr-connect.js';
 
-/**
- * A Herdr instance of an install's own (GY-1511). Herdr keeps its graphyard plugin binding under
- * XDG_CONFIG_HOME, which every session on a host shares, so a second install on a host cannot bind
- * the default instance's plugin without taking it from the first. Its own config home isolates the
- * binding, and its own named session isolates the server (and its socket); the host's default
- * instance is never touched.
- */
+/** A legacy private server retained only while its existing panes drain. */
 export interface HerdrInstance { configHome: string; session: string }
+export const herdrSocketPath = (instance: HerdrInstance) => join(instance.configHome, 'herdr/sessions', instance.session, 'herdr-client.sock');
 /** The environment that names the instance to a process the install starts (a pane's supervisor inherits it from the instance's server). */
 export const herdrInstanceEnv = { configHome: 'GRAPHYARD_HERDR_CONFIG_HOME', session: 'GRAPHYARD_HERDR_SESSION' } as const;
-/** The bytes a Unix socket path may hold (sun_path is 108 bytes with its terminator), measured encoded: a multibyte home counts more bytes than characters. */
-export const herdrSocketPathBytes = 107;
-/** The client socket the instance's Herdr server binds under its config home. */
-export const herdrSocketPath = (instance: HerdrInstance) => join(instance.configHome, 'herdr', 'sessions', instance.session, 'herdr-client.sock');
-/**
- * The instance an install whose default Herdr serves another install creates: ~/.config/graphyard/INSTALL/herdr,
- * session graphyard-INSTALL. The first spelling whose socket path fits the byte limit is the one: the
- * session shortens to gy-HASH, then gy; then the config home moves to ~/.config/graphyard/gy-HASH/herdr
- * (a long install id leaves no room beside its own directory) with those two names again. A home under
- * which even that does not fit is refused by name: a session Herdr cannot bind is no instance.
- */
-export function installHerdrInstance(installId: string, home: string = homedir()): HerdrInstance {
-  const id = installId.toLowerCase().replace(/[^a-z0-9._-]/g, '-').replace(/^[^a-z0-9]+/, '');
-  const hash = `gy-${createHash('sha256').update(id).digest('hex').slice(0, 6)}`;
-  const named = join(home, '.config', 'graphyard', id, 'herdr'), hashed = join(home, '.config', 'graphyard', hash, 'herdr');
-  const candidates: HerdrInstance[] = [`graphyard-${id}`.slice(0, 64), hash, 'gy'].map(session => ({ configHome: named, session })).concat([hash, 'gy'].map(session => ({ configHome: hashed, session })));
-  const bytes = (instance: HerdrInstance) => Buffer.byteLength(herdrSocketPath(instance), 'utf8');
-  const fits = candidates.find(instance => bytes(instance) <= herdrSocketPathBytes);
-  if (fits) return fits;
-  const shortest = candidates[candidates.length - 1];
-  throw new Error(`No Herdr instance fits this install's socket path: ${herdrSocketPath(shortest)} is ${bytes(shortest)} bytes and a Unix socket path holds ${herdrSocketPathBytes}; install from a home directory with a shorter path`);
-}
-function environmentInstance(env: NodeJS.ProcessEnv = process.env): HerdrInstance | null {
-  const configHome = env[herdrInstanceEnv.configHome]?.trim(), session = env[herdrInstanceEnv.session]?.trim();
-  return configHome && session ? { configHome, session } : null;
-}
-let processInstance: HerdrInstance | null = environmentInstance();
-/** Sets the instance this process's herdr calls target: the one master.json records, else the one its environment names, else the host's default. */
-export function targetHerdr(instance: HerdrInstance | null | undefined) { processInstance = instance ?? environmentInstance(); }
+let processInstance: HerdrInstance | null = null;
+export function targetHerdr(instance: HerdrInstance | null | undefined) { processInstance = instance ?? null; }
 export const herdrTarget = () => processInstance;
 /** The herdr binary: on PATH, else where Herdr's own installer puts it (~/.local/bin), which a user unit's PATH may lack. */
 export function herdrBinary(env: NodeJS.ProcessEnv = process.env, home: string = homedir()) {
@@ -63,7 +30,11 @@ export const herdrSubcommand = (args: string[]) => args[0] === '--session' ? arg
  * instance, the arguments unchanged. Every herdr spawn in src/ goes through here or herdrCall.
  */
 export function herdrInvocation(args: string[], instance: HerdrInstance | null = processInstance, command: string = herdrBinary()): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
-  if (!instance) return { command, args };
+  if (!instance) {
+    if (!process.env.GRAPHYARD_HERDR_CONFIG_HOME) return { command, args };
+    const { HERDR_SOCKET_PATH: _socket, GRAPHYARD_HERDR_CONFIG_HOME: _home, GRAPHYARD_HERDR_SESSION: _session, ...env } = process.env;
+    return { command, args, env: { ...env, XDG_CONFIG_HOME: join(homedir(), '.config') } };
+  }
   const { HERDR_SOCKET_PATH: _socket, ...env } = process.env;
   return { command, args: ['--session', instance.session, ...args], env: { ...env, XDG_CONFIG_HOME: instance.configHome, [herdrInstanceEnv.configHome]: instance.configHome, [herdrInstanceEnv.session]: instance.session } };
 }
@@ -71,7 +42,7 @@ export function herdrInvocation(args: string[], instance: HerdrInstance | null =
 export function herdrCall<R>(run: (command: string, args: string[], options?: ChildRunOptions) => R, args: string[], options?: ChildRunOptions, instance: HerdrInstance | null = processInstance): R {
   const call = herdrInvocation(args, instance);
   if (!call.env) return options ? run(call.command, call.args, options) : run(call.command, call.args);
-  return run(call.command, call.args, { ...options, env: { ...call.env, ...options?.env, XDG_CONFIG_HOME: instance!.configHome } });
+  return run(call.command, call.args, { ...options, env: { ...call.env, ...options?.env, XDG_CONFIG_HOME: call.env.XDG_CONFIG_HOME } });
 }
 /**
  * The same call for a runner that takes no environment (an install transport, another host's
@@ -113,11 +84,21 @@ export const herdrWorkspaceRefused = () => workspaceRefused;
  * master's own agent runs in, else the first Herdr lists — or null while the configured one lives,
  * Herdr cannot be read, or it lists none.
  */
-export async function liveHerdrWorkspace(config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'>, run?: ChildRun): Promise<{ from: string; to: string; reason: string } | null> {
+export async function liveHerdrWorkspace(config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'> & { repository?: string; root?: string }, run?: ChildRun): Promise<{ from: string; to: string; reason: string } | null> {
   const from = config.herdrWorkspace;
   const listed = from ? await listHerdrWorkspaces(run).catch(() => null) : null;
   workspaceRefused = false;
-  if (!from || !listed?.length || listed.includes(from)) return null;
+  if (!from || !listed || listed.includes(from)) return null;
+  if (config.repository) {
+    const label = `graphyard-${config.repository.toLowerCase().replace(/[^a-z0-9._-]/g, '-')}`;
+    const inventory = await herdrJson(['workspace', 'list'], run);
+    const found = inventory.workspaces?.find((entry: any) => entry.label === label)?.workspace_id;
+    const created = found ? null : await herdrJson(['workspace', 'create', '--cwd', config.root ?? process.cwd(), '--label', label, '--no-focus'], run);
+    const to = found ?? created?.workspace?.workspace_id ?? created?.workspace_id;
+    if (!to) throw new Error('Herdr returned no installation workspace');
+    return { from, to, reason: `Recreated ${label} after workspace ${from} disappeared` };
+  }
+  if (!listed.length) return null;
   const agents = await herdrJson(['agent', 'list'], run).then(result => (result?.agents ?? []) as HerdrAgent[], () => []);
   const own = agents.find(agent => agent.name === config.masterAgentName && agent.workspace_id && listed.includes(agent.workspace_id))?.workspace_id;
   const to = own ?? listed[0];

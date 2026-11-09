@@ -20,7 +20,7 @@ const refusal = '{"error":{"code":"workspace_not_found","message":"workspace w1V
 /** A Herdr that lists WORKSPACES and runs the master agent in w4F. */
 const herdr = (workspaces: string[]) => async (_command: string, args: string[]) => {
   const call = args[0] === '--session' ? args.slice(2) : args;
-  if (call[0] === 'workspace') return JSON.stringify({ result: { workspaces: workspaces.map(workspace_id => ({ workspace_id })) } });
+  if (call[0] === 'workspace') return JSON.stringify({ result: { workspaces: workspaces.map(workspace_id => ({ workspace_id, label: workspace_id === 'w4F' ? 'graphyard-owner-project' : 'other' })) } });
   if (call[0] === 'agent') return JSON.stringify({ result: { agents: [{ name: 'other', workspace_id: 'w2A' }, { name: 'graphyard-master-project', workspace_id: 'w4F' }] } });
   throw new Error(`unexpected herdr ${call.join(' ')}`);
 };
@@ -46,7 +46,7 @@ test('unit:herdr-workspace-reconfigured-when-gone — the cycle reload replaces 
   const live = liveMasterConfig(root, await loadMasterConfig(root), loadMasterConfig, () => Date.parse(at), reresolvingOn(['w2A', 'w4F']));
   const reload = await live.reload(true);
   assert.deepEqual([reload.workspace?.from, reload.workspace?.to], ['w1V', 'w4F'], 'the workspace the master agent runs in is adopted');
-  assert.match(reload.workspace!.reason, /Herdr no longer lists workspace w1V \(it lists w2A, w4F\).*adopted w4F, where the master agent graphyard-master-project runs/);
+  assert.match(reload.workspace!.reason, /graphyard-owner-project/);
   assert.deepEqual(reload.changed, ['herdrWorkspace']);
   assert.equal(live.current.herdrWorkspace, 'w4F', 'the loop launches into the new workspace from this cycle on');
   assert.equal(await stored(root), 'w4F', 'master.json records the switch');

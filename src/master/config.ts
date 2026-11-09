@@ -13,8 +13,9 @@ import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSu
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
-import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
+import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
+import { migrateHerdr } from '../herdr-migration.js';
 import { controlPlaneAttention } from './attention.js';
 
 /** The config names a CLI launcher no launch could run — an absolute path this host does not hold (GY-2995). Every session the config would start is refused before it starts, and the launcher and the loop name the fix as configuration attention instead of relaunching. */
@@ -389,17 +390,18 @@ export function masterConfigChanges(current: MasterConfig, next: MasterConfig) {
 /** The Herdr workspace and instance CONFIG names, applied to this process's herdr calls. */
 export function applyHerdrConfig(config: Pick<MasterConfig, 'herdrWorkspace' | 'herdrInstance'>) {
   scopeHerdr(config.herdrWorkspace);
-  targetHerdr(config.herdrInstance);
+  targetHerdr(null);
 }
 /**
  * Records this install's own Herdr instance and its workspace in .graphyard/master.json (GY-1511),
  * changing nothing else; true when the file changed.
  */
-export async function recordHerdrInstance(root: string, instance: HerdrInstance, workspace: string | null) {
+export async function recordHerdrWorkspace(root: string, workspace: string | null) {
   const stored = await readMasterConfig(root);
-  const next = masterConfigSchema.parse({ ...stored, herdrInstance: instance, ...(workspace ? { herdrWorkspace: workspace } : {}) });
+  const next = masterConfigSchema.parse({ ...stored, ...(workspace ? { herdrWorkspace: workspace } : {}) });
   if (JSON.stringify(next) === JSON.stringify(stored)) return false;
   await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  if (next.herdrInstance) await migrateHerdr(root);
   return true;
 }
 /**
@@ -407,7 +409,7 @@ export async function recordHerdrInstance(root: string, instance: HerdrInstance,
  * .graphyard/master.json, changing nothing else; the switch, or null when none was needed or possible.
  */
 export async function reresolveHerdrWorkspace(root: string, config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'>, resolveLive: typeof liveHerdrWorkspace = liveHerdrWorkspace) {
-  const switched = await resolveLive(config);
+  const switched = await resolveLive({ ...config, root } as Parameters<typeof liveHerdrWorkspace>[0]);
   if (!switched) return null;
   const stored = await readMasterConfig(root);
   await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), masterConfigSchema.parse({ ...stored, herdrWorkspace: switched.to }));
@@ -424,6 +426,7 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
     /** CYCLE (the loop's own reload) first re-resolves a dead Herdr workspace and returns any switch; any reload does after a launch refused with workspace_not_found (GY-2600). */
     async reload(cycle = false): Promise<ConfigReload> {
       const at = new Date(clock()).toISOString();
+      if (cycle && live.current.herdrInstance) await migrateHerdr(root);
       if (live.current.herdrWorkspace && (cycle || herdrWorkspaceRefused())) pending = await reresolve(root, live.current).catch(() => null) ?? pending;
       const workspace = cycle ? pending : null;
       if (cycle) pending = null;

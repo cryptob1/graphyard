@@ -4,7 +4,8 @@ import { knownGoodDirectory, knownGoodState } from './master/known-good.js';
 import { connectionRoots } from './git-checkout-roots.js';
 import { readInstallLoopCode } from './loop-code.js';
 import { shellQuote } from './shell-quote.js';
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -24,7 +25,6 @@ import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { installArgv, packageManager } from './package-manager.js';
 import { pinnedNodePath } from './node-pin.js';
 import { defaultChildRun } from './child-runner.js';
-import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
 export { readInstallLoopCode, readLoopCode, judgeLoopCode, localLoopCodeFiles, unitLauncherCheckout, systemdCommandLineWords, type UnitCode, type LoopCodeReading, type LoopCodeFiles, type LoopCodeFacts } from './loop-code.js';
 export { shellQuote } from './shell-quote.js';
@@ -105,29 +105,14 @@ async function atomicWrite(file: string, content: string, mode: number) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, content, { mode, flag: 'wx' }); await rename(temporary, file); await chmod(file, mode);
 }
-const urlOrigin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
-
-/**
- * The server Herdr's `graphyard` plugin is bound to on this machine, read from the config.json its
- * config directory holds; null when the plugin has no configuration (never linked) or Herdr cannot
- * say where it keeps one. A host already running a Graphyard install has one, and linking the
- * plugin for another server would silently repoint it (GY-1413). A config.json that exists but
- * cannot be read, is not JSON or names no server is a binding nobody can inspect: `url` is null
- * and `bound` says why, so callers refuse to overwrite it without --herdr-rebind rather than
- * mistaking it for no binding at all. READ reads that file: this machine's, or a host's over its
- * transport (GY-1511), whose missing file rejects with code ENOENT.
- */
-export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>, read: (file: string) => Promise<string> = file => readFile(file, 'utf8')): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
-  let configDirectory: string;
-  try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
-  if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
-  const file = resolve(configDirectory, 'config.json');
-  const uninspectable = (reason: string) => ({ configDirectory, url: null, bound: `a configuration that cannot be inspected (${file}: ${reason})` });
-  let text: string;
-  try { text = await read(file); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
-  let config: any;
-  try { config = JSON.parse(text); } catch { return uninspectable('not valid JSON'); }
-  return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');
+/** Read this installation's binding in the shared plugin configuration. */
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>, read: (file: string) => Promise<string> = file => readFile(file, 'utf8'), installId?: string): Promise<{ configDirectory: string; url: string; bound: string } | null> {
+  try {
+    const configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim();
+    const config = JSON.parse(await read(resolve(configDirectory, 'config.json')));
+    const binding = installId ? config.installs?.[installId] : config;
+    return binding?.url ? { configDirectory, url: binding.url, bound: binding.url } : null;
+  } catch { return null; }
 }
 
 /**
@@ -144,17 +129,7 @@ export async function herdrPluginEnabled(runHerdr: (args: string[]) => string | 
   } catch { return null; }
 }
 
-/** True when a plugin binding points anywhere but `target`, an uninspectable one included. */
-export function herdrBoundElsewhere(binding: { url: string | null } | null, target: string | null) {
-  return !!binding && (binding.url === null || target === null || urlOrigin(binding.url) !== urlOrigin(target));
-}
-
-/** The refusal for a plugin bound to another server, shared by `init --herdr` and `install --apply`. */
-export function herdrRebindRefusal(bound: string, target: string, flag = '--herdr-rebind') {
-  return `Herdr's graphyard plugin on this machine is bound to ${bound}; linking it for ${target} would repoint every Herdr session there with a new worker token. Rerun with ${flag} to repoint it on purpose, or without Herdr to leave it bound where it is. Nothing was changed.`;
-}
-
-export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; herdrInstance?: HerdrInstance | null; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch } = {}) {
+export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; workspace?: string; pluginHome?: string; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
@@ -174,13 +149,9 @@ export async function setupRepository(root: string, input: Connection, options: 
   const instructions = managedInstructions(existing);
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
     // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
-    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
+    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, null).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
-  // Refused before any write: a plugin another server owns is repointed only on purpose.
-  const herdrBound = options.herdr ? await herdrPluginBinding(runHerdr) : null;
-  const herdrRelink = herdrBoundElsewhere(herdrBound, connection.url) ? herdrBound!.bound : null;
-  if (herdrRelink && !options.herdrRebind) throw new Error(herdrRebindRefusal(herdrRelink, connection.url));
   const directory = await localDirectory(connectionRoots(root)[0]);
   // GY-1960: setup rewrites connection.json whole from the fields this version declares, so an
   // older or held CLI rerunning it keeps what a newer CLI wrote: only the keys this version does
@@ -198,17 +169,36 @@ export async function setupRepository(root: string, input: Connection, options: 
   const discovery = await saveDiscovery(root);
   let pluginConfigured = false;
   if (options.herdr) {
-    // Configure while disabled, then enable only after private credential persistence succeeds.
-    runHerdr(['plugin', 'link', dirname(dirname(connection.cliPath)), '--disabled']);
+    const installId = installIdFor(detected.repository!);
+    const label = `graphyard-${installId}`;
+    const parsed = (args: string[]) => { const value = JSON.parse(runHerdr(args)); return value.result ?? value; };
+    const workspace = options.workspace ?? parsed(['workspace', 'list']).workspaces?.find((entry: any) => entry.label === label)?.workspace_id
+      ?? parsed(['workspace', 'create', '--cwd', root, '--label', label, '--no-focus']).workspace?.workspace_id;
+    if (!workspace) throw new Error('Herdr returned no workspace for this installation');
+    const pluginRoot = options.pluginHome ?? join(homedir(), '.config/graphyard/herdr-plugin');
+    await mkdir(join(pluginRoot, 'integrations/herdr'), { recursive: true });
+    // The most recently installed/upgraded CLI supplies the shared scripts; bindings retain their own CLI.
+    const release = dirname(dirname(connection.cliPath));
+    await cp(join(release, 'integrations/herdr'), join(pluginRoot, 'integrations/herdr'), { recursive: true });
+    await cp(join(release, 'herdr-plugin.toml'), join(pluginRoot, 'herdr-plugin.toml'));
+    runHerdr(['plugin', 'link', pluginRoot]);
     const configDirectory = runHerdr(['plugin', 'config-dir', 'graphyard']).trim();
     if (!isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) throw new Error('Herdr returned an invalid configuration directory');
     await mkdir(configDirectory, { recursive: true, mode: 0o700 });
-    await atomicWrite(resolve(configDirectory, 'config.json'), JSON.stringify({ url: connection.url, token: connection.token, cliPath: connection.cliPath, hostId: connection.hostId }, null, 2), 0o600);
+    const file = resolve(configDirectory, 'config.json');
+    let config: any = {};
+    try { config = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    const installs = config.installs ?? {};
+    // Preserve a legacy flat binding until its own install refreshes it.
+    if (config.url && config.cliPath) installs.legacy = config;
+    installs[installId] = { url: connection.url, token: connection.token, cliPath: connection.cliPath, hostId: connection.hostId, workspace, repositoryRoot: resolve(root) };
+    await atomicWrite(file, JSON.stringify({ installs }, null, 2), 0o600);
+    options.workspace = workspace;
     runHerdr(['plugin', 'enable', 'graphyard']); pluginConfigured = true;
   }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
     instructions: 'AGENTS.md', pluginConfigured,
-    herdr: options.herdr ? { previous: herdrBound?.bound ?? null, bound: pluginConfigured ? connection.url : null, relinked: !!herdrRelink && pluginConfigured } : null,
+    herdr: options.herdr ? { workspace: options.workspace } : null,
     next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
 }
 export function handoff(work: any, status: any, hostId: string, cliPath: string) {
