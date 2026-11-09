@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
+let root = fileURLToPath(new URL('../', import.meta.url));
+// GY-3214: the published npm package holds no source; it runs the release this host installed.
+if (!existsSync(join(root, 'src', 'cli.ts'))) root = await (await import('./bootstrap.mjs')).releaseRoot(root, args);
 let child;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => child?.kill(signal));
 // Resolve the complete artifact before loading tsx. Retained artifacts also keep lazy imports safe.

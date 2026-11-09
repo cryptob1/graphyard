@@ -22,6 +22,8 @@ import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef } from '../release.js';
+import { publishVerified, type PublishOutcome } from '../publish-verified.js';
+import { installDirectory } from '../install/secrets.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -61,6 +63,12 @@ export interface MergeWriterReads extends MergePorts {
    * reads. Absent (a test's reads without the push), the gate verifies without publishing.
    */
   pushVerified?(commit: string): Promise<void>;
+  /**
+   * GY-3214: publishes the images and the npm package of a commit the batch gate verified, from
+   * the operator's tokens under the install directory; answers the blocker naming a missing token.
+   * Absent, nothing is published.
+   */
+  publishVerified?(commit: string): Promise<PublishOutcome>;
   /**
    * GY-3159: launches one merge flight's trial as a detached run that survives this loop's restart
    * onto a new release. Absent (a test's substituted trial, or a reads set that never detached),
@@ -128,6 +136,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     pushVerified: async commit => {
       await run('git', ['-C', root, 'push', 'origin', `${commit}:${graphyardVerifiedRef}`], { env: pushEnvironment(settings.deployKeyFile, options.environment) });
     },
+    publishVerified: commit => publishVerified(commit, { root, directory: installDirectory(installIdFor(config.repository)), run, env: options.environment }),
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),
     // GY-3159: the merge flights' trials run detached from this process (cycle-merge-writer

@@ -37,15 +37,20 @@ RUN --mount=from=build,source=/app/node_modules,target=/opt/browser-dependencies
 # Native workspace-sandbox regression tool; no login or account is copied in.
 RUN npm install --global @openai/codex@0.166.0
 RUN find /usr/local/lib/node_modules/@openai -type f -name codex -exec ln -s '{}' /usr/local/bin/codex-linux-sandbox ';'
+# Last, so a new commit rebuilds no layer above: the commit a published trial image was built from.
+ARG GRAPHYARD_BUILD_SHA=
+LABEL org.opencontainers.image.revision="${GRAPHYARD_BUILD_SHA}"
 USER node
 
 FROM node:24-bookworm-slim
 ARG GRAPHYARD_VERSION
 ARG GRAPHYARD_BUILD_REVISION
+ARG GRAPHYARD_BUILD_SHA=
 WORKDIR /app
 ENV NODE_ENV=production
 ENV GRAPHYARD_VERSION=${GRAPHYARD_VERSION}
 ENV GRAPHYARD_BUILD_REVISION=${GRAPHYARD_BUILD_REVISION}
+ENV GRAPHYARD_BUILD_SHA=${GRAPHYARD_BUILD_SHA}
 LABEL org.opencontainers.image.title="Graphyard" \
       org.opencontainers.image.description="Evidence-backed coordination for distributed software agents" \
       org.opencontainers.image.version="${GRAPHYARD_VERSION}" \
