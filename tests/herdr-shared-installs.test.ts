@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { execFileSync } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile, mkdir, symlink, copyFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hostname } from 'node:os';
 import { setupRepository } from '../src/repository-setup.js';
 import { setupMaster, loadMasterConfig, reresolveHerdrWorkspace } from '../src/master/config.js';
+import { startMaster } from '../src/master/harness.js';
 import { dispatchWork } from '../src/master/dispatch.js';
 import { liveHerdrWorkspace, scopeHerdr, listHerdrAgents } from '../src/master/herdr.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -61,8 +62,14 @@ test('two installations bind, dispatch and recover independently on one main Her
       roots.push(root);
       execFileSync('git', ['init', '-q', root]);
       execFileSync('git', ['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], { cwd: root });
+      const release = join(home, name);
+      await mkdir(join(release, 'bin'), { recursive: true });
+      await copyFile(launcher, join(release, 'bin/graphyard.mjs'));
+      await symlink(join(dirname(dirname(launcher)), 'integrations'), join(release, 'integrations'));
+      await symlink(join(dirname(dirname(launcher)), 'herdr-plugin.toml'), join(release, 'herdr-plugin.toml'));
+      const cliPath = join(release, 'bin/graphyard.mjs');
       const token = `${name}-worker-token`.padEnd(40, 'x');
-      const result = await setupRepository(root, { url: `https://${name}.example`, token, hostId: hostname(), cliPath: launcher }, {
+      const result = await setupRepository(root, { url: `https://${name}.example`, token, hostId: hostname(), cliPath }, {
         herdr: true, runHerdr: sync, pluginHome,
         fetcher: async () => new Response(JSON.stringify({ repository: `acme/${name}`, actor: { id: name, role: 'worker' } })),
       });
@@ -70,13 +77,15 @@ test('two installations bind, dispatch and recover independently on one main Her
       workspaces.push(workspace);
       await setupMaster(root, { url: `https://${name}.example`, token: 'coordinator'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: workspace },
         async () => new Response(JSON.stringify({ repository: `acme/${name}`, baseBranch: 'main', actor: { id: 'master', role: 'coordinator' } })));
+      const masterPane = await startMaster(root, 'codex', [], [], run);
+      assert.ok(masterPane.pane.startsWith(`${workspace}:`));
       const credentialFile = join(credentials, 'worker.token'); await writeFile(credentialFile, token, { mode: 0o600 });
       const work = { id: 'id-1', key: 'GY-1', type: 'chore', title: 'Dispatch in own workspace', stage: 'ready', ready: true, epoch: 0, lease: null, criteria: [], dependencies: [], workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }], evidence: [], scenarioRequirements: [], policy: { checks: [], review: false } } as unknown as Work;
       const launched = await dispatchWork(root, work, { name, principal: name, agentName: name, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} }, [], run, [work],
         async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 1, new Date().toISOString(), { probe: registryFixture(hostname(), ['codex']).probe });
       assert.ok(launched.pane?.startsWith(`${workspace}:`));
       scopeHerdr(workspace);
-      assert.equal((await listHerdrAgents(run)).length, 1);
+      assert.equal((await listHerdrAgents(run)).length, 2);
     }
     assert.notEqual(workspaces[0], workspaces[1]);
     const config = JSON.parse(await readFile(join(home, 'bindings/config.json'), 'utf8'));
@@ -85,11 +94,13 @@ test('two installations bind, dispatch and recover independently on one main Her
     for (let index = 0; index < roots.length; index++) {
       const binding = config.installs[index ? 'acme-beta' : 'acme-alpha'];
       assert.equal(bindingFor(config, { HERDR_PANE_ID: `${workspaces[index]}:p1` }, roots[1 - index]).url, binding.url);
-      assert.equal(bindingFor(config, {}, join(roots[index], 'nested')).cliPath, launcher);
+      assert.equal(bindingFor(config, {}, join(roots[index], 'nested')).cliPath, join(home, index ? 'beta' : 'alpha', 'bin/graphyard.mjs'));
       await run('herdr', ['forget', workspaces[index]]);
       const master = await loadMasterConfig(roots[index]);
       const switched = await reresolveHerdrWorkspace(roots[index], master, current => liveHerdrWorkspace(current, run));
       assert.ok(switched && !workspaces.includes(switched.to), 'recovery creates its own workspace, never adopts the other install');
+      const inventory = JSON.parse(await run('herdr', ['workspace', 'list'])).result.workspaces;
+      assert.equal(bindingFor(config, { HERDR_WORKSPACE_ID: switched.to }, home, inventory).url, binding.url, 'the plugin recognizes the recovered workspace by its install label');
     }
     assert.match(await readFile(join(pluginHome, 'integrations/herdr/ledger.mjs'), 'utf8'), /readBinding/);
   } finally { scopeHerdr(null); await server.terminate(); }

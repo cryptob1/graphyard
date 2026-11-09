@@ -393,16 +393,16 @@ export function applyHerdrConfig(config: Pick<MasterConfig, 'herdrWorkspace' | '
   targetHerdr(null);
 }
 /**
- * Records this install's own Herdr instance and its workspace in .graphyard/master.json (GY-1511),
+ * Records this install's main Herdr workspace in .graphyard/master.json,
  * changing nothing else; true when the file changed.
  */
 export async function recordHerdrWorkspace(root: string, workspace: string | null) {
   const stored = await readMasterConfig(root);
   const next = masterConfigSchema.parse({ ...stored, ...(workspace ? { herdrWorkspace: workspace } : {}) });
-  if (JSON.stringify(next) === JSON.stringify(stored)) return false;
-  await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
+  const changed = JSON.stringify(next) !== JSON.stringify(stored);
+  if (changed) await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
   if (next.herdrInstance) await migrateHerdr(root);
-  return true;
+  return changed;
 }
 /**
  * GY-2600: replaces a configured Herdr workspace Herdr no longer lists with a live one in

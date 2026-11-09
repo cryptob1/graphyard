@@ -69,7 +69,6 @@ export interface ProfileRequest {
   root: string; url: string; cliPath: string; hostId: string; installDirectory: string;
   coordinatorToken: string; workerTokens: { principal: string; token: string }[];
   runtimes: DetectedRuntime[]; herdr: HerdrState;
-  /** GY-1511: this install's own Herdr instance, where the plugin is linked instead of the host's default one. */
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
   runHerdr?: (args: string[]) => string;
 }
@@ -703,7 +702,7 @@ async function observeHerdr(session: InstallSession) {
 
 /** The plan line for Herdr: link, keep, relink (named, with the server it is bound to now), or leave alone. */
 function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof observeHerdr>> | null): PlanAction {
-  const steps = 'herdr plugin link, write the plugin config.json {url, worker token}, herdr plugin enable';
+  const steps = 'herdr plugin link, write the plugin config.json installs entry, herdr plugin enable';
   if (session.inputs.herdr === 'skip') return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Leave Herdr untouched (--no-herdr): the graphyard plugin is neither linked nor reconfigured' };
   if (!herdr?.state.available) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Herdr is not installed on this machine; nothing to link, and workers start from the CLI' };
   if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.bound}; it keeps that server` };

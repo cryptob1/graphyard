@@ -1,6 +1,6 @@
 id = "graphyard"
 name = "Graphyard"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.1"
 description = "Claim work and inspect evidence-backed delivery gates from Herdr"
 platforms = ["macos", "linux"]

@@ -78,7 +78,7 @@ test('unit:herdr-workspace-switch-on-ledger — the switch is recorded on the lo
   const switched = state.actions[`config:herdr-workspace:${at}`];
   assert.equal(switched?.kind, 'config');
   assert.equal(switched.state, 'done');
-  assert.match(switched.detail, /^Switched herdrWorkspace from w1V to w4F: Herdr no longer lists workspace w1V/);
+  assert.match(switched.detail, /^Switched herdrWorkspace from w1V to w4F: Recreated graphyard-owner-project/);
   assert.ok(noted.some(action => action.detail === switched.detail), 'the loop logs the switch it recorded');
   const health = await herdrWorkspaceHealth(live.current, herdr(['w4F']));
   assert.deepEqual([health.exists, health.reason], [true, null], 'launches go to a workspace Herdr lists, so the setup fault is gone');

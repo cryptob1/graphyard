@@ -4,7 +4,7 @@ import { knownGoodDirectory, knownGoodState } from './master/known-good.js';
 import { connectionRoots } from './git-checkout-roots.js';
 import { readInstallLoopCode } from './loop-code.js';
 import { shellQuote } from './shell-quote.js';
-import { chmod, cp, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, readdir, rmdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -148,7 +148,6 @@ export async function setupRepository(root: string, input: Connection, options: 
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const instructions = managedInstructions(existing);
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
-    // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
     try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, null).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
@@ -172,29 +171,52 @@ export async function setupRepository(root: string, input: Connection, options: 
     const installId = installIdFor(detected.repository!);
     const label = `graphyard-${installId}`;
     const parsed = (args: string[]) => { const value = JSON.parse(runHerdr(args)); return value.result ?? value; };
-    const workspace = options.workspace ?? parsed(['workspace', 'list']).workspaces?.find((entry: any) => entry.label === label)?.workspace_id
-      ?? parsed(['workspace', 'create', '--cwd', root, '--label', label, '--no-focus']).workspace?.workspace_id;
+    const listed = options.workspace ? null : parsed(['workspace', 'list']);
+    const found = options.workspace ?? listed?.workspaces?.find((entry: any) => entry.label === label)?.workspace_id;
+    const created = found ? null : parsed(['workspace', 'create', '--cwd', root, '--label', label, '--no-focus']);
+    const workspace = found ?? created?.workspace?.workspace_id ?? created?.workspace_id;
     if (!workspace) throw new Error('Herdr returned no workspace for this installation');
     const pluginRoot = options.pluginHome ?? join(homedir(), '.config/graphyard/herdr-plugin');
     await mkdir(join(pluginRoot, 'integrations/herdr'), { recursive: true });
-    // The most recently installed/upgraded CLI supplies the shared scripts; bindings retain their own CLI.
-    const release = dirname(dirname(connection.cliPath));
-    await cp(join(release, 'integrations/herdr'), join(pluginRoot, 'integrations/herdr'), { recursive: true });
-    await cp(join(release, 'herdr-plugin.toml'), join(pluginRoot, 'herdr-plugin.toml'));
-    runHerdr(['plugin', 'link', pluginRoot]);
-    const configDirectory = runHerdr(['plugin', 'config-dir', 'graphyard']).trim();
-    if (!isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) throw new Error('Herdr returned an invalid configuration directory');
-    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
-    const file = resolve(configDirectory, 'config.json');
-    let config: any = {};
-    try { config = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-    const installs = config.installs ?? {};
-    // Preserve a legacy flat binding until its own install refreshes it.
-    if (config.url && config.cliPath) installs.legacy = config;
-    installs[installId] = { url: connection.url, token: connection.token, cliPath: connection.cliPath, hostId: connection.hostId, workspace, repositoryRoot: resolve(root) };
-    await atomicWrite(file, JSON.stringify({ installs }, null, 2), 0o600);
-    options.workspace = workspace;
-    runHerdr(['plugin', 'enable', 'graphyard']); pluginConfigured = true;
+    // Installs share this one read/modify/write, including when two upgrades overlap.
+    const lock = join(pluginRoot, '.refresh-lock');
+    for (const deadline = Date.now() + 30_000; ; ) {
+      try { await mkdir(lock); break; }
+      catch (error: any) {
+        if (error.code !== 'EEXIST' || Date.now() >= deadline) throw error;
+        await new Promise(done => setTimeout(done, 50));
+      }
+    }
+    try {
+      // Plugin versions, not installation order, choose the shared scripts. Older installs keep
+      // the newest copy; their binding still names their own CLI release.
+      const release = dirname(dirname(connection.cliPath));
+      const manifest = await readFile(join(release, 'herdr-plugin.toml'), 'utf8');
+      const version = (text: string) => /^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"/m.exec(text)?.slice(1).map(Number) ?? [0, 0, 0];
+      let installed = '';
+      try { installed = await readFile(join(pluginRoot, 'herdr-plugin.toml'), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+      const incoming = version(manifest), current = version(installed);
+      const difference = incoming.map((part, index) => part - current[index]).find(part => part !== 0) ?? 0;
+      if (difference >= 0) {
+        await cp(join(release, 'integrations/herdr'), join(pluginRoot, 'integrations/herdr'), { recursive: true });
+        await atomicWrite(join(pluginRoot, 'herdr-plugin.toml'), manifest, 0o644);
+      }
+      runHerdr(['plugin', 'link', pluginRoot]);
+      const configDirectory = runHerdr(['plugin', 'config-dir', 'graphyard']).trim();
+      if (!isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) throw new Error('Herdr returned an invalid configuration directory');
+      await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+      const file = resolve(configDirectory, 'config.json');
+      let config: any = {};
+      try { config = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+      const installs = config.installs ?? {};
+      // Preserve a legacy flat binding until its own install refreshes it.
+      if (config.url && config.cliPath && config.url !== connection.url) installs.legacy = { ...config, repositoryRoot: dirname(dirname(config.cliPath)) };
+      if (installs.legacy?.url === connection.url) delete installs.legacy;
+      installs[installId] = { url: connection.url, token: connection.token, cliPath: connection.cliPath, hostId: connection.hostId, workspace, repositoryRoot: resolve(root) };
+      await atomicWrite(file, JSON.stringify({ installs }, null, 2), 0o600);
+      options.workspace = workspace;
+      runHerdr(['plugin', 'enable', 'graphyard']); pluginConfigured = true;
+    } finally { await rmdir(lock); }
   }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
     instructions: 'AGENTS.md', pluginConfigured,

@@ -1,16 +1,13 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
 import { readBinding } from './config.mjs';
 const config = await readBinding();
-const url = process.env.GRAPHYARD_URL || config.url;
-const token = process.env.GRAPHYARD_TOKEN || config.token;
-const hostId = process.env.GRAPHYARD_HOST_ID ?? config.hostId;
-const cliPath = process.env.GRAPHYARD_CLI || config.cliPath;
+const url = config.url || process.env.GRAPHYARD_URL;
+const token = config.token || process.env.GRAPHYARD_TOKEN;
+const hostId = config.hostId ?? process.env.GRAPHYARD_HOST_ID;
+const cliPath = config.cliPath || process.env.GRAPHYARD_CLI;
 if (!url || !token) { console.error('Configure Graphyard URL and an individual worker/reader token in the Herdr plugin config.json.'); process.exit(1); }
 // Treat server content as text, never terminal control sequences.
 const clean = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
