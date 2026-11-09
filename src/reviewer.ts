@@ -26,6 +26,7 @@ import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
+import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { underTestRunner } from './runtime-environment.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
@@ -1025,6 +1026,8 @@ export async function launchReview(root: string, work: Work, profileName: string
       const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
+      /** The session the run is on: a headless run moves off a logged-out account (GY-3218). */
+      const on = { current: selected };
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
@@ -1039,11 +1042,18 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
         if (runHeadless) {
+          // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
+          const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
+            const moved = accountLaunch(profile, next.account, { writable });
+            const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
+            return { kind: moved.kind!, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
+              credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
+          });
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
           delivery = 'request';
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-            contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
-            holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
+            contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
+            holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
             answer: output => postHeadlessReview(root, headlessContext!, output, dependencies.run), root, route: 'review', context: headlessContext }));
         } else {
@@ -1084,7 +1094,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no
       // accepted answer settles as a session that finished without one, and the request relaunches.
-      if (answered) void answered.finally(() => selected.release?.(`the headless review of ${work.key} finished`)).then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
+      if (answered) void answered.finally(() => on.current.release?.(`the headless review of ${work.key} finished`)).then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
         .catch(() => { /* reconciliation settles a record this could not write */ });
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,

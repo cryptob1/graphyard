@@ -75,8 +75,9 @@ export const quotaObservationSchema = z.object({
    */
   identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
   /** A session that ran out mid-work reported this exhaustion (GY-1581); it stands against later probes until its reset.
-   * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account. */
-  session: z.enum(['named', 'guessed']).optional(),
+   * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account.
+   * `login`: a session's agent said the account is not logged in (GY-3218), with its message as the reason; no probe lifts it. */
+  session: z.enum(['named', 'guessed', 'login']).optional(),
   /** When the exhaustion reported was observed (GY-3117): one observed at or before an operator's latest quota decision on the account is not applied. */
   since: z.string().datetime().optional(),
 }).strict();
