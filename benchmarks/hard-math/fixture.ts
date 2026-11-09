@@ -23,6 +23,12 @@ import type { RunContext } from './runner.js';
 
 // Keep regexp/string escapes literal in the emitted controlled ES module.
 const app=String.raw`document.querySelector('#form').addEventListener('submit',async event=>{event.preventDefault();const error=document.querySelector('#error'),results=document.querySelector('#results');error.textContent='';results.textContent='';try{const request={coefficients:document.querySelector('#coefficients').value.trim().split(/\s+/),precisionBits:Number(document.querySelector('#precisionBits').value)};const response=await fetch('/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobs:[request]})});const body=await response.json(),result=body.results?.[0];if(body.error||result.error){error.textContent=(body.error||result.error).code;return;}results.textContent=result.roots.map(root=>root.lo.n+'/'+root.lo.d+' .. '+root.hi.n+'/'+root.hi.d+' multiplicity '+root.multiplicity).join('\n');}catch(e){error.textContent=String(e);}});`+'\n';
+/**
+ * The wall clock of one controlled run. Measured canonical trials take ~22s each, so the repair
+ * run's eight merges alone need ~175s; its clock still ends inside the test runner's 300s per-file
+ * bound, so an overrun is a receipt with its reason, not a killed file (GY-3206).
+ */
+export const controlledWallClockSeconds={standard:90,repair:270};
 /** An oracle lookup fixture for controlled tests only; never an implementation solver. */
 export async function writeControlledArtifact(root:string,python:string,oracleFile:string,signal?:AbortSignal) {
   const samples=[1,2,3].flatMap(seed=>generate(seed));
