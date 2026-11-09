@@ -26,17 +26,18 @@ const sharedCache = process.env.npm_config_cache || join(homedir(), '.npm');
 const run: ChildRun = (command, args, { wrapper: _wrapper, ...options } = {}) =>
   defaultChildRun(command, args, { ...options, ...(options.env ? { env: { ...options.env, npm_config_cache: sharedCache } } : {}) });
 const records = "console.log('node ' + process.version);\n";
+const pinned = {
+  'package.json': JSON.stringify({ ...JSON.parse(pnpmWorkspaceFiles['package.json']!), engines: { node: String(pin) } }, null, 2),
+  '.npmrc': 'engine-strict=true\n',
+};
 
 test(`integration:node-pin-trial — a pnpm workspace with engine-strict=true and engines.node ${pin} installs and builds in the merge trial under node ${pin}, not the running node ${process.version}`, async () => {
   const root = await temporaryDirectory('node-pin-trial', tmpdir());
   git(root, 'init', '-q', '-b', 'main');
-  writePnpmWorkspace(root, {
-    'package.json': JSON.stringify({ ...JSON.parse(pnpmWorkspaceFiles['package.json']!), engines: { node: String(pin) } }, null, 2),
-    '.npmrc': 'engine-strict=true\n',
-  });
+  writePnpmWorkspace(root, pinned);
   git(root, 'add', '-A'); git(root, 'commit', '-q', '-m', 'base');
   const base = git(root, 'rev-parse', 'HEAD');
-  writePnpmWorkspace(root, { 'packages/shared/build.mjs': pnpmWorkspaceFiles['packages/shared/build.mjs']! + records });
+  writePnpmWorkspace(root, { ...pinned, 'packages/shared/build.mjs': pnpmWorkspaceFiles['packages/shared/build.mjs']! + records });
   git(root, 'add', '-A'); git(root, 'commit', '-q', '-m', 'change');
   const head = git(root, 'rev-parse', 'HEAD');
   git(root, 'checkout', '-q', '--detach', base);
