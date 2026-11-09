@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import type { Work } from './model.js';
 import type { BuildIdentity } from './protocol-version.js';
+import type { Application } from './model/project-applications.js';
+import { posix } from 'node:path';
 
 /**
  * Production deployment observation for the managed base branch.
@@ -314,4 +316,54 @@ export function startProductionWatch(watch: ProductionWatch, options: { interval
   }, options.intervalMs ?? PRODUCTION_WATCH_TIMER_MS);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };
+}
+
+/** One declared application's observed release: the commit its versionUrl answers against main's tip (GY-3204). */
+export interface ApplicationRelease {
+  id: string; serving: string | null; main: string | null;
+  /**
+   * current: it serves main, or nothing on main since its commit touches its directory; deploying: a
+   * change to its directory is on main for less than ENDPOINT_FRESH_MS; lagging: one has been longer
+   * and it still does not serve it; failed: the endpoint is unreachable, unparseable or names a commit the checkout lacks.
+   */
+  state: 'current' | 'deploying' | 'lagging' | 'failed';
+  reason: string | null;
+}
+
+/** The directory a change must touch to concern an application: a static site's directory, a Compose file's directory. */
+const applicationDirectory = (application: Application) => application.kind === 'static' ? application.directory : posix.dirname(application.file);
+
+/** The commit a version endpoint answers: JSON `commit` or `sha`, else the plain-text body. */
+async function servedCommit(url: string, fetcher: typeof fetch): Promise<string> {
+  const response = await fetcher(url, { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`${url} answered ${response.status}`);
+  const text = (await response.text()).trim();
+  let value: unknown = text;
+  if (text.startsWith('{')) { try { const body = JSON.parse(text); value = body?.commit ?? body?.sha; } catch { /* not JSON: the text is judged as is */ } }
+  if (typeof value !== 'string' || !/^[0-9a-f]{7,40}$/i.test(value.trim())) throw new Error(`${url} names no commit (JSON commit or sha, or plain text)`);
+  return value.trim().toLowerCase();
+}
+
+/**
+ * What each application declaring a versionUrl serves, against main's tip in the managed checkout.
+ * Railway (or any host) deploys each app from git on its own; Graphyard only reads the endpoint,
+ * with no provider credential. A change to the app's directory counts as on main since its committer date.
+ */
+export async function observeApplications(applications: Application[], main: string | null, git: (args: readonly string[]) => Promise<string>, options: { fetcher?: typeof fetch; now?: number } = {}): Promise<ApplicationRelease[]> {
+  const now = options.now ?? Date.now();
+  return Promise.all(applications.filter(application => application.versionUrl).map(async (application): Promise<ApplicationRelease> => {
+    let serving: string;
+    try { serving = await servedCommit(application.versionUrl!, options.fetcher ?? fetch); }
+    catch (error) { return { id: application.id, serving: null, main, state: 'failed', reason: error instanceof Error ? error.message : String(error) }; }
+    try { serving = (await git(['rev-parse', '--verify', `${serving}^{commit}`])).trim(); }
+    catch { return { id: application.id, serving, main, state: 'failed', reason: `serves ${serving.slice(0, 12)}, which the checkout does not hold` }; }
+    if (!main || serving === main) return { id: application.id, serving, main, state: 'current', reason: null };
+    const changes = (await git(['log', '--format=%H %ct', `${serving}..${main}`, '--', applicationDirectory(application)])).trim().split('\n').filter(Boolean)
+      .map(line => { const [sha, at] = line.split(' '); return { sha, at: Number(at) * 1000 }; });
+    if (!changes.length) return { id: application.id, serving, main, state: 'current', reason: null };
+    const stale = changes.filter(change => now - change.at > ENDPOINT_FRESH_MS);
+    if (!stale.length) return { id: application.id, serving, main, state: 'deploying', reason: null };
+    const oldest = stale.at(-1)!;
+    return { id: application.id, serving, main, state: 'lagging', reason: `serves ${serving.slice(0, 12)}; ${oldest.sha.slice(0, 12)} changed it on main ${Math.round((now - oldest.at) / 60_000)} minutes ago` };
+  }));
 }

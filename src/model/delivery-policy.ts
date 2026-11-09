@@ -18,7 +18,7 @@ import type { gateCheckSchema, mergeGateSchema, deliveryPolicySchema } from '../
 
 export const deliveryModes = ['local', 'release-candidate', 'per-pr'] as const;
 export type DeliveryMode = (typeof deliveryModes)[number];
-export const deploymentAdapters = ['railway', 'command'] as const;
+export const deploymentAdapters = ['command'] as const;
 export type GateCheck = z.infer<typeof gateCheckSchema>;
 export type MergeGate = z.infer<typeof mergeGateSchema>;
 export type DeliveryPolicy = z.infer<typeof deliveryPolicySchema>;
