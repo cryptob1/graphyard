@@ -11,6 +11,8 @@ import { applicationProblems, caseIdsOf, detectApplications } from './project-ap
 import { defaultCandidateSchedule, generatedWorkflowFiles, localDeliveryDefaults, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
 import { deliveryPolicySchema } from './model-boundary/delivery-policy.js';
 import { onboardingBranch, onboardingWorkRequest } from './model/onboarding-work.js';
+import { applicationSchema } from './model-boundary/project-applications.js';
+import { discoverWorkspaces } from './onboarding-workspaces.js';
 
 export function repositoryFromRemote(remote: string) {
   const value = remote.trim();
@@ -87,7 +89,7 @@ export interface ScanInput { files: string[]; contents: Record<string, string> }
 // directory keeps discovery bounded without hiding any input it could use.
 const scanExcluded = new Set(['.git', '.graphyard', '.claude', 'node_modules', 'dist', 'build', 'coverage', 'vendor', 'venv', '.venv', '__pycache__', 'test-results', 'playwright-report']);
 const scanInteresting: RegExp[] = [
-  /^package\.json$/, /^pyproject\.toml$/, /^requirements(?:-dev)?\.txt$/, /^setup\.(?:py|cfg)$/, /^Pipfile$/, /^tox\.ini$/,
+  /^(?:.+\/)?package\.json$/, /^pnpm-workspace\.yaml$/, /^pyproject\.toml$/, /^requirements(?:-dev)?\.txt$/, /^setup\.(?:py|cfg)$/, /^Pipfile$/, /^tox\.ini$/,
   /^Dockerfile(?:\.[^/]*)?$/, /^(?:docker-)?compose\.ya?ml$/, /^railway\.(?:json|toml)$/, /^vercel\.json$/, /^fly\.toml$/, /^netlify\.toml$/,
   /^\.nojekyll$/, /^CNAME$/, /^index\.html$/, /^\.env\.example$/, /^pytest\.ini$/, /^conftest\.py$/,
   /^\.github\/workflows\/[^/]+\.ya?ml$/, /^graphyard\.json$/, /^e2e\/cases\/[^/]+\.json$/,
@@ -319,6 +321,9 @@ export function detectDeploy(input: ScanInput, stack: StackDetection): DeployDet
   const find = (name: string) => input.files.find(file => file === name || file.startsWith(`${name}.`));
   const platform = (['railway', 'vercel', 'fly'] as const).find(name => find(name));
   if (platform) return { target: platform, evidence: [find(platform)!], verification: deployVerification[platform], proofName: 'manual:deployed-sha' };
+  // A monorepo deploys each app from its own railway-<app>.json or <package>/railway.json (GY-3202).
+  const railway = discoverWorkspaces(input).railway.map(entry => entry.file);
+  if (railway.length) return { target: 'railway', evidence: railway, verification: deployVerification.railway, proofName: 'manual:deployed-sha' };
   const containerFiles = input.files.some(file => /^Dockerfile(?:\.[^/]*)?$/.test(file)) || input.files.some(file => /^(?:docker-)?compose\.ya?ml$/.test(file));
   const pages = input.files.includes('.nojekyll') || input.files.includes('CNAME') || (stack.name === 'static' && !containerFiles);
   if (pages) return { target: 'github-pages', evidence: input.files.includes('.nojekyll') ? ['.nojekyll'] : input.files.includes('CNAME') ? ['CNAME'] : ['static site without a server runtime'], verification: deployVerification['github-pages'], proofName: 'manual:deployed-sha' };
@@ -441,7 +446,14 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   const mode = overrides.mode ?? committed?.mode ?? (overrides.merger === 'control-plane' ? 'local' : deploy.target === 'none' ? 'per-pr' : 'release-candidate');
   // The local mode generates no workflow, so a repository without CI gets no graphyard-gate to wait on either.
   const mergeGate = committed?.mergeGate ?? (hasNoCi(input) && mode !== 'local' ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
-  const local = mode === 'local' ? { ...localDeliveryDefaults, ...detectApplications(input.files, input.contents, stack.commands.find(command => command.check === 'build')?.command ?? null) } : {};
+  let local = {};
+  if (mode === 'local') {
+    const detected = detectApplications(input.files, input.contents, stack.commands.find(command => command.check === 'build')?.command ?? null);
+    // Workspace packages with a start script join as node applications once that kind parses (GY-3201).
+    const nodeApplications = discoverWorkspaces(input).proposedApplications.filter(application => applicationSchema.safeParse(application).success
+      && !detected.applications.some(existing => existing.id === application.id)) as unknown as typeof detected.applications;
+    local = { ...localDeliveryDefaults, ...detected, applications: [...detected.applications, ...nodeApplications] };
+  }
   const kept = Object.fromEntries((['previews', 'candidateMaxChanges', 'productionVerification', 'applications', 'cases'] as const).filter(key => committed?.[key] !== undefined).map(key => [key, committed![key]]));
   return deliveryPolicySchema.parse({
     mode,
@@ -517,6 +529,10 @@ export const setupProposalSchema = z.object({
     reviewer: z.object({ provider: z.string(), note: z.string() }).strict(),
   }).strict(),
   githubApp: z.object({ name: z.string(), repository: z.string(), flow: z.string() }).strict().nullable(),
+  /** Monorepo discovery (GY-3202); present only when found, so proposals of single-package repositories keep their digest. */
+  workspacePackages: z.array(z.object({ name: z.string(), directory: z.string(), scripts: z.record(z.string(), z.string()) }).strict()).optional(),
+  railway: z.array(z.object({ app: z.string().nullable(), file: z.string() }).strict()).optional(),
+  proposedApplications: z.array(z.object({ id: z.string(), kind: z.literal('node'), directory: z.string(), build: z.string().nullable(), start: z.string() }).strict()).optional(),
   /** The merge gate and release-candidate policy (GY-1102); optional so proposals stored before it still load. */
   delivery: deliveryPolicySchema.optional(),
 }).strict();
@@ -561,6 +577,7 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
       evidenceExpectations: 'Automated proofs are submitted only by a trusted producer credential in protected CI, for the exact candidate SHA with executed > 0 and skipped = 0. Manual proofs are inspected and submitted by a separate operator session. Implementation workers never hold producer or admin credentials.' },
     profiles: { workers, reviewer: { provider: 'github', note: 'An independent reviewer session records its verdict on the submitted code.' } },
     githubApp: options.repository && /^[\w.-]+\/[\w.-]+$/.test(options.repository) ? { name: `Graphyard ${repository.replace('/', '-')}`, repository, flow: 'github-setup' } : null,
+    ...Object.fromEntries(Object.entries(discoverWorkspaces(input)).filter(([, list]) => list.length)),
     delivery,
   });
 }
