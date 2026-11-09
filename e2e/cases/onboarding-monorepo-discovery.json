@@ -1,0 +1,13 @@
+{
+  "id": "onboarding-monorepo-discovery",
+  "title": "init --scan discovers a monorepo's packages and per-app Railway files",
+  "description": "Against a pnpm workspace with apps/web, apps/pm and packages/ui, a root railway-pm.json and apps/web/railway.json, init --scan lists the three packages with their scripts, the Railway file each app deploys from, and a node application proposal for both apps.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "monorepo discovery through the CLI",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/onboarding-monorepo-discovery.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
