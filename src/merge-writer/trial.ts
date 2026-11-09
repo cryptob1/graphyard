@@ -20,6 +20,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
+import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -508,8 +509,8 @@ export class TrialEnvironmentError extends Error {
 }
 /** A repository without a declared or conventional test check never silently passes. */
 export const noTestCheckConfigured = 'no test check configured';
-export type TrialCheckDeclaration = Pick<GateCheck, 'check' | 'command' | 'paths' | 'selection'>;
-export type RepositoryTrialCheck = { check: string; argv: string[]; paths?: string[]; selection?: GateCheck['selection'] };
+export type TrialCheckDeclaration = Pick<GateCheck, 'check' | 'command' | 'paths' | 'selection' | 'services'>;
+export type RepositoryTrialCheck = { check: string; argv: string[]; paths?: string[]; selection?: GateCheck['selection']; services?: GateCheck['services'] };
 const touchesPaths = (files: readonly string[], paths: readonly string[]) =>
   files.some(file => paths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
 /** `npm run test` → `['npm','run','test']`; empty or whitespace-only commands yield null. */
@@ -547,7 +548,7 @@ export function repositoryTrialChecks(input: {
     .filter(entry => entry.command && !/^(?:build|compile)$/i.test(entry.check))
     .flatMap(entry => {
       const argv = checkCommandArgv(entry.command!);
-      return argv ? [{ check: entry.check, argv, ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.selection ? { selection: entry.selection } : {}) }] : [];
+      return argv ? [{ check: entry.check, argv, ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.selection ? { selection: entry.selection } : {}), ...(entry.services ? { services: entry.services } : {}) }] : [];
     });
   if (fromPolicy.length) return fromPolicy;
   const scripts = input.scripts ?? {}, fallback: RepositoryTrialCheck[] = [];
@@ -622,6 +623,8 @@ export interface RunTrialInput {
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
   hidden?: readonly string[];
+  /** GY-3209: starts a check's declared Compose services; `startCheckServices` unless a test injects a fake. */
+  services?: typeof startCheckServices;
 }
 const tailLength = 4000;
 /**
@@ -985,6 +988,33 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     });
     return finish(...verdict);
   };
+  // GY-3209: a check that declares services runs beside them: one Compose project for the whole check, so every
+  // shard of a selection shares it, its children joined to its network with the services' variables, and the
+  // project removed whatever the check answered. Services that never start or accept fail the check, naming why.
+  const withServices = async <T>(check: RepositoryTrialCheck, body: () => Promise<T>): Promise<T | { services: string }> => {
+    if (!check.services?.length) return body();
+    enterStep(`services: ${check.check}`);
+    let started: CheckServices;
+    try { started = await (input.services ?? startCheckServices)({ checkout: worktree, services: check.services, scratch: temporary!, env, key: input.key ?? 'trial', timeoutMs: remaining() }); }
+    catch (error) {
+      const why = `the services of check ${check.check} did not start: ${error instanceof Error ? error.message : String(error)}`;
+      log.push(why);
+      return { services: why };
+    }
+    const outer = { env, wrapper };
+    try {
+      env = { ...env, ...checkServiceVariables(check.services) };
+      wrapper = boundary(started.network);
+      const [command, ...args] = tcpAcceptProbe(check.services.map(({ service, port }) => ({ host: service, port })), Math.min(120_000, remaining()));
+      const ready = await child('tests', command!, args);
+      if (hostEnded(ready)) throw runnerFailure('tests', ready);
+      if (!ready.ok) return { services: `the services of check ${check.check} accepted no TCP connection: ${ready.out.trim().slice(-300)}` };
+      return await body();
+    } finally {
+      ({ env, wrapper } = outer);
+      await started.close();
+    }
+  };
   const runChecks = async (checks: RepositoryTrialCheck[]): Promise<TrialRun> => {
     // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
     if (input.e2eProofs?.length) {
@@ -1016,7 +1046,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     for (const check of checks) {
       if (check.paths && !touchesPaths(input.changedFiles, check.paths)) continue;
       if (check.selection) {
-        const selected = await runSelected(check);
+        const selected = await withServices(check, () => runSelected(check));
+        if ('services' in selected) { failed.push(check.check); detail = { failingCase: selected.services }; runnerExit = null; break; }
         passed += selected.tests.passed; files += selected.tests.files;
         failed.push(...selected.tests.failed); groups.push(...(selected.groups ?? []));
         runnerExit = selected.runnerExit ?? null;
@@ -1025,7 +1056,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
       files++;
       enterStep(`tests: ${check.check}`);
-      const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
+      const ran = await withServices(check, () => child('tests', check.argv[0]!, check.argv.slice(1)));
+      if ('services' in ran) { failed.push(check.check); detail = { failingCase: ran.services }; runnerExit = null; break; }
       if (hostEnded(ran)) throw runnerFailure('tests', ran);
       if (!ran.ok) {
         // GY-2960: name the failing test files and first case from the check's output, not only the check.

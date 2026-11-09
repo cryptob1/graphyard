@@ -1,0 +1,18 @@
+{
+  "id": "premerge-check-services",
+  "title": "A pre-merge check's declared postgres service runs beside it in a real merge trial",
+  "description": "A fixture's preMerge check declares a stock postgres Compose service and queries it at $GRAPHYARD_SERVICE_DB_HOST:$GRAPHYARD_SERVICE_DB_PORT. A real merge trial starts the service on its own Compose network, waits for it to accept TCP, and runs the check joined to that network: a working query passes, a failing one fails the check, and no container is left either way.",
+  "tags": [
+    "compose"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a real trial runs the check beside its postgres service and removes it",
+      "run": "GRAPHYARD_SERVICES_E2E=1 node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:premerge-check-services tests/premerge-check-services.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}
