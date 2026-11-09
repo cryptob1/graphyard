@@ -94,7 +94,7 @@ const statusOf = (root: string, repository: string) => masterStatusReport(root, 
 const servedCommit = async (url: string) => (await (await fetch(url)).text()).trim();
 const escaped = (url: string) => url.replace(/[.:]/g, match => `\\${match}`);
 
-test('unit:managed-repo-main-served-after-merge — the deploy pass serves the node application main declares: installed at the root, built and started in its directory on a free PORT; a merged main moves what the port answers, and master status reports the URL, the served commit and atMain; a failing build keeps the previous commit serving and records the failure', async () => {
+test('unit:tests/managed-serve.test.ts — the deploy pass serves the node application main declares: installed at the root, built and started in its directory on a free PORT; a merged main moves what the port answers, and master status reports the URL, the served commit and atMain; a failing build keeps the previous commit serving and records the failure', async () => {
   const { root, pusher, push } = await managedRepository('managed-serve');
   assert.deepEqual(servedApplication(graphyardJson), application, 'the first node application is the one served; the static site is for previews only');
   try {
@@ -152,7 +152,7 @@ test('unit:managed-repo-main-served-after-merge — the deploy pass serves the n
   } finally { stopServing(root); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a serve that died is served again and the record names the new process, so the next restart tracks what holds the port', async () => {
+test('unit:tests/managed-serve.test.ts — a serve that died is served again and the record names the new process, so the next restart tracks what holds the port', async () => {
   const { root } = await managedRepository('managed-serve-restart');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
@@ -187,7 +187,7 @@ test('unit:managed-repo-main-served-after-merge — a serve that died is served 
   } finally { stopServing(root); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a serve that never answers is recorded as the failure it is, with nothing claimed served', async () => {
+test('unit:tests/managed-serve.test.ts — a serve that never answers is recorded as the failure it is, with nothing claimed served', async () => {
   const { root, pusher, push } = await managedRepository('managed-serve-dead');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
@@ -213,7 +213,7 @@ test('unit:managed-repo-main-served-after-merge — a serve that never answers i
   } finally { stopServing(root); }
 });
 
-test('unit:serve-optional-and-doctor-checks-it — a repository declaring no node application reports exactly what it reported before and the pass does nothing; doctor prints a FAIL line naming the URL when a declared serve does not answer', async () => {
+test('unit:tests/managed-serve.test.ts — a repository declaring no node application reports exactly what it reported before and the pass does nothing; doctor prints a FAIL line naming the URL when a declared serve does not answer', async () => {
   // A managed repository that declares nothing: the pass records nothing, and master status reads
   // exactly what it read before this feature — unconfigured, no served commit, no atMain claim, no
   // failure, main's tip named, and the serve fields null when nothing is declared.
@@ -261,14 +261,14 @@ test('unit:serve-optional-and-doctor-checks-it — a repository declaring no nod
   } finally { await new Promise<void>(done => server.close(() => done())); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a malformed node application is named, never served', () => {
+test('unit:tests/managed-serve.test.ts — a malformed node application is named, never served', () => {
   assert.throws(() => servedApplication(JSON.stringify({ delivery: { applications: [{ id: 'game', kind: 'node', directory: 'apps/game', build: null }] } })), /"game": start/);
   assert.throws(() => servedApplication(JSON.stringify({ delivery: { applications: [{ id: 'game', kind: 'node', directory: 'apps/game', build: null, start: 'node serve.js', port: 4400 }] } })), /Unrecognized key/);
   assert.throws(() => servedApplication('not json'), /not valid JSON/);
   assert.equal(servedApplication('{}'), null);
 });
 
-test('unit:managed-repo-main-served-after-merge — the dashboard release line links the declared serve and names the last build failure', async () => {
+test('unit:tests/managed-serve.test.ts — the dashboard release line links the declared serve and names the last build failure', async () => {
   const { createElement } = await import('react');
   const { renderToStaticMarkup } = await import('react-dom/server');
   const { ReleaseLine } = await import('../web/components/top-bar.js');
