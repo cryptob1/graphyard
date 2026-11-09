@@ -20,6 +20,7 @@ import { onboardingCaseId, onboardingCasePath } from './model/onboarding-work.js
 import { effectiveDelivery } from './project-applications.js';
 import { forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
+import { installArgv, packageManager } from './package-manager.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
 export { readInstallLoopCode, readLoopCode, judgeLoopCode, localLoopCodeFiles, unitLauncherCheckout, systemdCommandLineWords, type UnitCode, type LoopCodeReading, type LoopCodeFiles, type LoopCodeFacts } from './loop-code.js';
@@ -629,14 +630,15 @@ function parseJson(text: string): any {
 }
 
 export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
-/** `npm ci` in the worktree, the full tree (npmCiArgs), its output on stderr so a caller's JSON on stdout stays whole. */
+/** The checkout's full install (`npm ci` with npmCiArgs, or pnpm's frozen install) in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
 export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
   // Contained (containedInstall): the lifecycle scripts it runs cannot open a credential file.
   // An aborted signal stops bubblewrap (SIGTERM), which takes npm with it, and rejects with the abort.
-  const { command, args } = containedInstall(cwd);
+  const argv = installArgv(packageManager(cwd));
+  const { command, args } = containedInstall(cwd, argv);
   const child = spawn(command, args, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
   child.once('error', fail);
-  child.once('close', code => code === 0 ? done() : fail(new Error(`npm ci exited with ${code}`)));
+  child.once('close', code => code === 0 ? done() : fail(new Error(`${argv.join(' ')} exited with ${code}`)));
 });
 export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'failed' | 'none'; install: string | null; reason: string }
 
@@ -648,6 +650,13 @@ export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'fa
  * `signal` is thrown instead, with the signal's reason: the caller no longer holds the right to it.
  */
 export async function ensureWorktreeDependencies(worktree: string, install: DependencyInstaller = npmCi, signal?: AbortSignal): Promise<WorktreeDependencyReport> {
+  // GY-3200: a pnpm checkout always runs its frozen install; pnpm's own lockfile check decides what changes.
+  if (packageManager(worktree).name === 'pnpm') {
+    signal?.throwIfAborted();
+    try { await install(worktree, signal); }
+    catch (error) { if (signal?.aborted) throw signal.reason; return { state: 'failed', install: null, reason: `pnpm install --frozen-lockfile failed: ${error instanceof Error ? error.message : String(error)}` }; }
+    return { state: 'installed', install: resolve(worktree, 'node_modules'), reason: 'installed from pnpm-lock.yaml with pnpm install --frozen-lockfile' };
+  }
   const text = await readFile(resolve(worktree, 'package-lock.json'), 'utf8').catch(() => null);
   if (text === null) return { state: 'none', install: null, reason: 'The checkout has no package-lock.json; nothing is installed for it' };
   const lockfile = parseJson(text);

@@ -175,7 +175,7 @@ export function containmentWorks(bwrap = 'bwrap'): boolean {
 
 export interface ContainedInstall { command: string; args: string[] }
 /**
- * `npm ci` for a checkout whose lifecycle scripts must not reach this host's authority. The
+ * The install `argv` (npm ci, or pnpm's frozen install) for a checkout whose lifecycle scripts must not reach this host's authority. The
  * install runs the checkout's scripts and its dependencies' as the caller's user, outside any agent
  * sandbox, and an environment without the launcher's variables is not enough: the scripts could
  * open ~/.config/graphyard/<install>/tokens/*.token, a GitHub CLI login or an SSH key by path,
@@ -196,7 +196,7 @@ export interface ContainedInstall { command: string; args: string[] }
  * A host without bubblewrap installs nothing rather than install uncontained: the caller reports
  * the failed install, with this reason.
  */
-export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.env, options: { bwrap?: string | null; node?: string; uid?: number } = {}): ContainedInstall {
+export function containedInstall(cwd: string, argv: readonly string[], env: NodeJS.ProcessEnv = process.env, options: { bwrap?: string | null; node?: string; uid?: number } = {}): ContainedInstall {
   const bwrap = options.bwrap === undefined ? onPath('bwrap', env) : options.bwrap;
   if (!bwrap) throw new Error('bubblewrap (bwrap) is not installed, and dependencies are never installed without it: the checkout\'s install scripts would run with this host\'s authority. Install bubblewrap (e.g. apt install bubblewrap) and recreate the worktree');
   const home = resolve(env.HOME || homedir());
@@ -211,10 +211,10 @@ export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.e
     env.GRAPHYARD_CONFIG_HOME, env.XDG_CONFIG_HOME, join(home, '.config'), join(home, '.ssh'),
     env.GRAPHYARD_TOKEN_FILE ? dirname(env.GRAPHYARD_TOKEN_FILE) : undefined,
   ].filter((path): path is string => !!path && isAbsolute(path)).map(path => resolve(path)))].filter(directory);
-  // npm's content cache only: its entries are addressed and verified by integrity. The rest of the
-  // cache folder (npx's installs, logs) stays out of reach.
-  const cache = join(resolve(env.npm_config_cache || join(home, '.npm')), '_cacache');
-  mkdirSync(cache, { recursive: true });
+  // npm's content cache: its entries are addressed and verified by integrity. npx's installs are
+  // writable too, for a manager npm exec runs (pnpm, GY-3200); the rest (logs) stays out of reach.
+  const caches = ['_cacache', '_npx'].map(folder => join(resolve(env.npm_config_cache || join(home, '.npm')), folder));
+  for (const cache of caches) mkdirSync(cache, { recursive: true });
   // node and npm are often installed under the home directory (nvm, mise, fnm): the folder above
   // each one's real executable holds the rest of it (node's prefix; npm's package, for npm-cli.js).
   const tools = [options.node ?? process.execPath, onPath('node', env), onPath('npm', env)].flatMap(path => { try { return path ? [dirname(dirname(realpathSync(path)))] : []; } catch { return []; } });
@@ -239,11 +239,11 @@ export function containedInstall(cwd: string, env: NodeJS.ProcessEnv = process.e
     if (!made.has(path)) { made.add(path); args.push(flag, path, path); }
   };
   for (const path of readable) expose(path, '--ro-bind');
-  const writable = [cache, resolve(cwd)];
+  const writable = [...caches, resolve(cwd)];
   for (const path of writable) args.push('--bind', path, path);
   // Emptied last, so no folder put back above re-exposes one, whether or not it lies in an emptied folder.
   for (const path of credentials) if (!hiddenRoot(path) || [...made, ...writable].some(exposed => within(path, exposed))) args.push('--tmpfs', path);
-  args.push('--chdir', resolve(cwd), '--', 'npm', ...npmCiArgs);
+  args.push('--chdir', resolve(cwd), '--', ...argv);
   return { command: bwrap, args };
 }
 

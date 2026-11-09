@@ -1,0 +1,15 @@
+{
+  "id": "pnpm-workspace-trial",
+  "title": "A pnpm workspace installs frozen and builds only what the change affects in the merge trial",
+  "description": "The merge trial installs a pnpm workspace (two apps and a shared package linked with workspace:*) with pnpm install --frozen-lockfile through npm exec, then builds the changed packages, their dependents and those packages' dependencies: a change to one app builds the shared package and that app but not the other, a change to the shared package builds all three, and a broken build in the affected app fails the trial. Fetches pnpm from the registry on the first run.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a pnpm workspace's trial builds the affected packages and fails on a broken affected build",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/pnpm-workspace-trial.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

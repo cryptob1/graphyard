@@ -6,7 +6,8 @@ import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
-import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
+import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
+import { buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import type { TrialE2eCase } from './e2e-trial.js';
@@ -535,10 +536,12 @@ export function declaredPreMerge(text: string): { preMerge: TrialCheckDeclaratio
   }
   return { preMerge: parsed.data };
 }
-/** Declared checks, with conventional npm scripts as the fallback. Build runs in its own phase. */
+/** Declared checks, with the package manager's conventional scripts as the fallback. Build runs in its own phase. */
 export function repositoryTrialChecks(input: {
   preMerge?: readonly TrialCheckDeclaration[] | null;
   scripts?: Record<string, unknown> | null;
+  /** GY-3200: the package manager's test check and script runner; npm's unless named. */
+  manager?: { test: string[]; run: string[] };
 }): RepositoryTrialCheck[] {
   const fromPolicy = (input.preMerge ?? [])
     .filter(entry => entry.command && !/^(?:build|compile)$/i.test(entry.check))
@@ -548,9 +551,10 @@ export function repositoryTrialChecks(input: {
     });
   if (fromPolicy.length) return fromPolicy;
   const scripts = input.scripts ?? {}, fallback: RepositoryTrialCheck[] = [];
-  if (typeof scripts.test === 'string') fallback.push({ check: 'test', argv: ['npm', 'test'] });
-  if (typeof scripts.typecheck === 'string') fallback.push({ check: 'typecheck', argv: ['npm', 'run', 'typecheck'] });
-  if (typeof scripts['test:browser'] === 'string') fallback.push({ check: 'test:browser', argv: ['npm', 'run', 'test:browser'] });
+  const { test, run } = input.manager ?? { test: ['npm', 'test'], run: ['npm', 'run'] };
+  if (typeof scripts.test === 'string') fallback.push({ check: 'test', argv: test });
+  if (typeof scripts.typecheck === 'string') fallback.push({ check: 'typecheck', argv: [...run, 'typecheck'] });
+  if (typeof scripts['test:browser'] === 'string') fallback.push({ check: 'test:browser', argv: [...run, 'test:browser'] });
   return fallback;
 }
 export function trialTestGateStatus(root: string):
@@ -939,25 +943,32 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   };
   let packageScripts: Record<string, unknown> | undefined;
   let nodePackage = false;
+  let manager: PackageManager = { name: 'npm' };
+  // GY-3200: what a pnpm workspace's affected build and tests are measured against.
+  const base = input.baseTip ?? `${input.mergeSha}^1`;
   const build = async (): Promise<TrialRun | undefined> => {
     enterStep('install');
     nodePackage = await holds('package.json');
     if (nodePackage) {
+      manager = packageManager(worktree);
       const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
       const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
-      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
-      else if (await holds('package-lock.json')) {
-        const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
+      // GY-3200: a pnpm checkout always installs afresh, never through the root's node_modules.
+      if (manager.name === 'npm' && existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
+      else if (manager.name === 'pnpm' || await holds('package-lock.json')) {
+        const [command, ...args] = installArgv(manager);
+        const installed = await child('install', command!, args, { env: npmCiEnvironment(env) });
         if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
         if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
       }
       const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
       // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
       try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
-      if (packageScripts === undefined || packageScripts?.build) {
+      if (packageScripts === undefined || packageScripts?.build || (manager.name === 'pnpm' && manager.workspace)) {
         enter('build');
         enterStep('build');
-        const built = await child('build', 'npm', ['run', 'build']);
+        const [command, ...args] = buildArgv(manager, input.changedFiles, base);
+        const built = await child('build', command!, args);
         if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
         if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
       }
@@ -1115,7 +1126,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         preMerge = declared.preMerge;
       }
-      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts }));
+      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts, manager: { test: testArgv(manager, input.changedFiles, base), run: manager.name === 'pnpm' ? pnpm(manager.version, 'run') : ['npm', 'run'] } }));
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
