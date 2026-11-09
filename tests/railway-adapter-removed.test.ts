@@ -16,7 +16,7 @@ const oldDelivery = { mode: 'release-candidate', mergeGate: { preMerge: [], perC
 const files = { 'package.json': JSON.stringify({ name: 'huck', scripts: { test: 'node --test' } }), 'railway.json': '{}', 'graphyard.json': JSON.stringify({ delivery: oldDelivery }) };
 const scan = { files: Object.keys(files), contents: files as Record<string, string> };
 
-test('unit:railway-adapter-removed — an old graphyard.json naming the railway adapter and a project parses as the command adapter', async () => {
+test('unit:tests/railway-adapter-removed.test.ts — an old graphyard.json naming the railway adapter and a project parses as the command adapter', async () => {
   const policy = deliveryPolicySchema.parse(oldDelivery);
   assert.deepEqual(policy.deploy, { adapter: 'command', uat: null, production: null }, 'adapter railway reads as command and project is dropped');
   const stack = detectStack(scan);
@@ -28,7 +28,7 @@ test('unit:railway-adapter-removed — an old graphyard.json naming the railway 
   assert.equal(loadProjectDelivery({}, root).mode, 'release-candidate', 'the control plane reads the old file without an error');
 });
 
-test('unit:railway-adapter-removed — an old install record holding the railway release adapter still parses, the value dropped', async () => {
+test('unit:tests/railway-adapter-removed.test.ts — an old install record holding the railway release adapter still parses, the value dropped', async () => {
   const directory = await temporaryDirectory('railway-adapter-record');
   await writeFile(join(directory, 'install.json'), JSON.stringify({ version: 1, installId: 'huck', repository: 'acme/huck', provider: 'local', baseBranch: 'main',
     release: { adapter: 'railway', created: ['railway-project'] }, createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' }));
@@ -37,7 +37,7 @@ test('unit:railway-adapter-removed — an old install record holding the railway
   assert.equal(record?.release, undefined);
 });
 
-test('unit:railway-adapter-removed — onboarding, the example proposal and the guide say Railway deploys from git while Graphyard observes each versionUrl', async () => {
+test('unit:tests/railway-adapter-removed.test.ts — onboarding, the example proposal and the guide say Railway deploys from git while Graphyard observes each versionUrl', async () => {
   const stack = detectStack(scan), deploy = detectDeploy(scan, stack);
   assert.equal(deploy.target, 'railway', 'onboarding still detects Railway');
   assert.match(deploy.verification, /^Railway deploys each application from git on its own; Graphyard deploys nothing there\. Declare each app's versionUrl/);
