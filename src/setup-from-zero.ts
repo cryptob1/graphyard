@@ -209,7 +209,7 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
 const userManager: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
 
 /**
- * GY-2976: the declared serve's line. A repository whose main declares .graphyard/serve.json and
+ * GY-2976: the declared serve's line. A repository whose main declares a node application and
  * whose deploy pass has run carries a serve record; the URL it names must answer. A serve that is
  * not answering is one FAIL line naming the URL, so doctor names the product that stopped being
  * served; a repository that declares nothing records no line at all.

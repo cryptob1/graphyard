@@ -161,9 +161,9 @@ export interface PreviewOptions {
   /** Cancels the preview from outside, as its budget running out does. */
   signal?: AbortSignal;
 }
-/** What serves a preview while it runs: the static site's server, or the Compose project (compose-preview.ts). */
+/** What serves a preview while it runs: the static site's server, the Compose project (compose-preview.ts), or the node application's start command. */
 type Served = { url: string | null; close(): Promise<void> };
-/** A preview that passed and is still served: its loopback origin, the built site's directory it serves (or, for a Compose application, `publish`, its served pages, given up once `signal` aborts), and `close`, which ends the server and removes the checkout. */
+/** A preview that passed and is still served: its loopback origin, the built site's directory it serves (or, for a Compose or node application, `publish`, its served pages, given up once `signal` aborts), and `close`, which ends the server and removes the checkout. */
 export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; publish?: (signal?: AbortSignal) => Promise<PreviewSiteFile[]>; close(): Promise<void> }
 
 /**
@@ -249,7 +249,7 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
     if (first === 'stopped') return { verdict: outcome = verdict('error', 'the preview was cancelled'), url: null, close };
     const url = (served as Served | null)?.url ?? null;
     const application = input.application;
-    if (first !== 'expired') return { verdict: outcome = first, url, site: served && application.kind === 'static' ? join(directory, 'checkout', application.directory) : null, ...(application.kind === 'compose' && url ? { publish: (signal?: AbortSignal) => snapshotComposeSite(url, input.fetcher, signal) } : {}), close };
+    if (first !== 'expired') return { verdict: outcome = first, url, site: served && application.kind === 'static' ? join(directory, 'checkout', application.directory) : null, ...(application.kind !== 'static' && url ? { publish: (signal?: AbortSignal) => snapshotComposeSite(url, input.fetcher, signal) } : {}), close };
     // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
     cancel.abort();
     return { verdict: outcome = verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`), url: null, close };

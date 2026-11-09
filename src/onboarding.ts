@@ -467,7 +467,7 @@ export function describeMergeGate(policy: DeliveryPolicy): string[] {
     ...policy.mergeGate.perCandidate.map(entry => `per-candidate — ${line(entry)}`),
     ...(policy.mode === 'local' ? [
       `local: changes preview locally (${policy.previews ?? 'local'}), candidates hold at most ${policy.candidateMaxChanges ?? 5} changes, production verification ${policy.productionVerification === false ? 'off' : 'required'}; no GitHub Actions workflow is generated`,
-      ...(policy.applications ?? []).map(application => `application ${application.id} (${application.kind}: ${application.kind === 'static' ? application.directory : `${application.file} ${application.service}:${application.port}`}), cases ${Object.entries(policy.cases ?? {}).filter(([, id]) => id === application.id).map(([id]) => id).join(', ') || 'none'}`),
+      ...(policy.applications ?? []).map(application => `application ${application.id} (${application.kind}: ${application.kind === 'compose' ? `${application.file} ${application.service}:${application.port}` : application.directory}), cases ${Object.entries(policy.cases ?? {}).filter(([, id]) => id === application.id).map(([id]) => id).join(', ') || 'none'}`),
     ] : [`candidates: ${policy.candidateSchedule ? `cut on schedule ${policy.candidateSchedule} and on demand` : 'cut on demand only'}; deployed to UAT then production through the ${policy.deploy.adapter} adapter`]),
   ];
 }
