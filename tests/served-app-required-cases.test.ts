@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createServer } from 'node:net';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -18,10 +17,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // back.
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
-const freePort = () => new Promise<number>((accept, reject) => {
-  const server = createServer(); server.once('error', reject);
-  server.listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => accept(port)); });
-});
 const stopServing = (root: string) => {
   const pid = readServeRecord(serveRecordPath(root))?.pid;
   if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
@@ -40,10 +35,10 @@ const buildJs = [
   'fs.writeFileSync("dist/index.txt", "served\\n");',
   'if (fs.existsSync("ready.txt")) fs.copyFileSync("ready.txt", "dist/ready.txt");',
 ].join('\n');
-/** The serve the fixture declares: it answers every dist file, 404 for one it has not built. */
+/** The start the fixture declares: it answers every dist file, 404 for one it has not built. */
 const serveJs = [
   'const http = require("node:http"), fs = require("node:fs"), path = require("node:path");',
-  'const port = Number(process.argv[process.argv.indexOf("--port") + 1]);',
+  'const port = Number(process.env.PORT);',
   'http.createServer((request, response) => {',
   '  const url = request.url.split("?")[0];',
   '  const name = url === "/" ? "index.txt" : `${url.slice(1)}.txt`;',
@@ -53,7 +48,8 @@ const serveJs = [
   '  });',
   '}).listen(port, "127.0.0.1");',
 ].join('\n');
-const declarationFile = (port: number) => JSON.stringify({ build: ['node', 'build.js'], serve: ['node', 'serve.js', '--port', String(port)], port });
+/** The node application graphyard.json declares (GY-3201): built and started at the root, on the PORT the pass gives it. */
+const graphyardJson = JSON.stringify({ delivery: { mode: 'local', applications: [{ id: 'app', kind: 'node', directory: '.', build: 'node build.js', start: 'node serve.js' }] } });
 
 /** A minimal npm package and its lockfile, so the fixture's install is the npm ci a real app runs. */
 const packageJson = JSON.stringify({ name: 'fixture-served', version: '1.0.0', private: true }) + '\n';
@@ -63,12 +59,12 @@ const packageLock = `${JSON.stringify({ name: 'fixture-served', version: '1.0.0'
 const caseFile = (id: string, path: string) => `${JSON.stringify({ id, title: `The served app answers ${path}`, tags: ['served'], target: 'any', required: true, steps: [{ kind: 'http', method: 'GET', path, status: 200 }] }, null, 2)}\n`;
 
 /** A fixture managed repository: an origin, a pusher that commits to it, and the launcher checkout, with the serve declaration, the app and its two required cases on main. */
-async function managedRepository(label: string, port: number) {
+async function managedRepository(label: string) {
   const base = await temporaryDirectory(label);
   const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), root = join(base, 'checkout');
   git(base, 'init', '-q', '--bare', '-b', 'main', origin);
   git(base, 'clone', '-q', origin, pusher);
-  await push(pusher, { 'package.json': packageJson, 'package-lock.json': packageLock, 'build.js': buildJs, 'serve.js': serveJs, 'e2e/cases/served-case-home.json': caseFile('served-case-home', '/'), 'e2e/cases/served-case-ready.json': caseFile('served-case-ready', '/ready'), '.graphyard/serve.json': declarationFile(port) }, 'the app and its required cases');
+  await push(pusher, { 'package.json': packageJson, 'package-lock.json': packageLock, 'build.js': buildJs, 'serve.js': serveJs, 'e2e/cases/served-case-home.json': caseFile('served-case-home', '/'), 'e2e/cases/served-case-ready.json': caseFile('served-case-ready', '/ready'), 'graphyard.json': graphyardJson }, 'the app and its required cases');
   git(base, 'clone', '-q', origin, root);
   return { root, pusher, push };
 }
@@ -79,8 +75,7 @@ const statusOf = (root: string, repository: string) => masterStatusReport(root, 
 } as unknown as MasterConfig, async () => ({ work: [], now: new Date().toISOString() }));
 
 test('unit:served-app-runs-required-cases — a served commit is live-verified: its own required cases run against the served URL, the pass records the verdict for that exact commit, and master status reports the same', async () => {
-  const port = await freePort();
-  const { root, pusher, push } = await managedRepository('served-required-cases', port);
+  const { root, pusher, push } = await managedRepository('served-required-cases');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
 
