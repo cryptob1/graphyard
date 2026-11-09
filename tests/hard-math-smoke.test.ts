@@ -10,14 +10,13 @@ import { masterConfigSchema } from '../src/master.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
 import { discover } from '../src/onboarding.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { runFixture } from './helpers/hard-math-fixture.js';
 import { generate, profile } from '../benchmarks/hard-math/generator.js';
 import { oracle, oracleDigest, oracleSource } from '../benchmarks/hard-math/oracle.js';
-import { execute } from '../benchmarks/hard-math/runner.js';
 import { verifyArtifact } from '../benchmarks/hard-math/artifact.js';
 import { benchmarkRoot } from '../benchmarks/hard-math/isolation.js';
 import { pinnedPython } from '../benchmarks/hard-math/python.js';
-import { fixtureExecutor, writeControlledArtifact } from '../benchmarks/hard-math/fixture.js';
-import { validateReceipt, comparison } from '../benchmarks/hard-math/receipt-schema.js';
+import { writeControlledArtifact } from '../benchmarks/hard-math/fixture.js';
 import { routeAccounts } from '../benchmarks/hard-math/routing.js';
 import { emptyRegistry } from '../src/model/registry.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
@@ -64,19 +63,9 @@ test('integration:hard-math-smoke — routing retains eligible models, capabilit
   assert.equal(selected.account?.name,'expensive');assert.ok(selected.skipped.some(s=>s.account==='affordable'));
 });
 
-async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000,mode:'team'|'single'='team',executor:Parameters<typeof execute>[1]=c=>fixtureExecutor(c,options)) {
-  const testRoot=join(process.cwd(),'.graphyard','hard-math-fixtures');
-  await mkdir(testRoot,{recursive:true});
-  const parent=await temporaryDirectory(`hard-math-${label}`,testRoot);
-  // Measured canonical trials take ~22s each: eight merges alone need ~175s.
-  // Only controlled scheduling changes; frozen math and actual-agent limits are unchanged.
-  const wallClockSeconds=options.injectRepair?300:90;
-  return execute({id:`fixture-${label}`,mode,profileVersion:'v1',seed:1,wallClockSeconds,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},executor);
-}
-
 test('integration:hard-math-smoke — fresh local remote supports native preparation and real CLI claims/worktrees', {timeout:120_000},async()=>{
   let prepared=0;
-  const receipt=await runFixture('native-preparation',{},1000,'team',async c=>{
+  const receipt=await runFixture(python,'native-preparation',{},1000,'team',async c=>{
     const config=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile:join(c.install,'benchmark-coordinator.token'),cliPath:join(c.config.sourceRoot,'bin/graphyard.mjs'),repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:'scratch',masterAgentName:'fixture-master',herdrWorkspace:'fixture',
       workers:c.workers.map(w=>({name:w.id,principal:w.id,agentName:w.id,mode:'launch',kind:'pi',credentialFile:join(c.install,`${w.id}.token`)}))});
     await mkdir(join(c.root,'.graphyard'),{recursive:true});
@@ -104,57 +93,6 @@ test('integration:hard-math-smoke — fresh local remote supports native prepara
   assert.equal(prepared,3,JSON.stringify(receipt.failures));
   assert.equal(receipt.outcome,'FAIL','preparation alone is not a delivered artifact');
 });
-
-test('integration:hard-math-smoke — real scratch Postgres/control plane and Git merge eight normal-risk components before native review dispatch/completion, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
-  const receipt=await runFixture('repair',{injectRepair:true,nativePostMerge:true});
-  assert.equal(receipt.outcome,'PASS',`${receipt.reason}\n${JSON.stringify(receipt.failures,null,2)}`);assert.equal(receipt.kind,'controlled-fixture');
-  assert.ok(receipt.overlaps.length);assert.equal(receipt.work.at(-1)?.repairs,1);
-  assert.ok(receipt.failures.some(f=>f.component==='integration'));assert.equal(receipt.cost,null);assert.equal(receipt.costBudgetProven,false);
-  assert.ok(receipt.sessions.some(s=>s.reason.includes('passed over')));
-  for(const edit of [
-    (r:any)=>{r.work[0].record.delivery=null;},
-    (r:any)=>{delete r.work[0].record.pipeline;},(r:any)=>{r.work[0].record.workspaces=[];},(r:any)=>{r.artifact.sha='f'.repeat(40);},
-    (r:any)=>{r.overlaps=[];},(r:any)=>{r.cost=0;},
-  ]) {const bad=structuredClone(receipt);edit(bad);assert.throws(()=>validateReceipt(bad));}
-  for(const edit of [
-    (r:any)=>{r.reviewLaunch.verdict.sha=r.candidate.sha;},
-    (r:any)=>{r.reviewLaunch.baseTip='f'.repeat(40);},
-    (r:any)=>{r.reviewVerdicts.policyRevision++;},
-    (r:any)=>{r.observation.reviews[0].sha='f'.repeat(40);},
-    (r:any)=>{r.observation.reviews[0].state='CHANGES_REQUESTED';},
-    (r:any)=>{r.observation.reviews[0].reviewer=r.candidate.author;},
-    (r:any)=>{r.postMergeReview='owed';},
-  ]) {
-    const bad=structuredClone(receipt),distinct=bad.work.find(w=>w.candidate!==w.merge)!;
-    edit(distinct.record);assert.throws(()=>validateReceipt(bad),/Missing independent approval/);
-  }
-  const unreviewed=structuredClone(receipt);(unreviewed.work[0].record as any).observation.reviews=[];
-  assert.throws(()=>validateReceipt(unreviewed),/Missing independent approval/,'benchmark receipt rejects a missing review regardless of the production queue policy');
-  const uncertified=structuredClone(receipt);(uncertified.work.at(-1)!.record as any).evidence=[];
-  assert.throws(()=>validateReceipt(uncertified),/Missing independent final candidate certification/);
-  assert.throws(()=>comparison(receipt,{...receipt,mode:'single'}),/actual team/);
-});
-
-test('integration:hard-math-smoke — missing pushed delivery and incorrect artifacts cannot produce PASS', {timeout:210_000},async()=>{
-  const missing=await runFixture('missing',{missingDelivery:true},1000,'single');assert.equal(missing.outcome,'FAIL');assert.match(missing.reason,/Missing delivery/);
-  const incorrect=await runFixture('incorrect',{incorrectArtifact:true},1000,'single');assert.equal(incorrect.outcome,'FAIL');assert.equal(incorrect.artifact,null);
-  assert.ok(incorrect.failures.some(f=>f.component==='integration' && /CLI exact oracle rejected/.test(f.reason)),incorrect.reason);
-  assert.ok((incorrect.work[0].record as any).evidence.some((e:any)=>e.proof==='manual:certified-artifact' && e.trusted && e.result==='fail'));
-});
-
-
-test('integration:hard-math-smoke — failed and usage-limited runs release actual scratch leases and sessions', {timeout:210_000},async()=>{
-  for(const [label,options,budget] of [
-    ['early-stop',{haltAfterClaims:true},1000],['usage-stop',{waitAfterClaims:true},3],
-  ] as const) {
-    const receipt=await runFixture(label,options,budget);
-    assert.equal(receipt.outcome,'FAIL');assert.equal(receipt.cleanup.complete,true,receipt.reason);
-    assert.ok(receipt.work.every(w=>!(w.record as any).lease));
-    assert.ok(receipt.sessions.length>=3);assert.ok(receipt.sessions.every(s=>s.endedAt));
-    if(label==='usage-stop') assert.match(receipt.reason,/usage limit|abort/i);
-  }
-});
-
 
 test('integration:hard-math-smoke — private-root trials expose the immutable pinned producer Python environment',async()=>{
   const allocation=await temporaryDirectory('hard-math-oracle-container',process.cwd());

@@ -1,0 +1,16 @@
+{
+  "id": "headless-pinned-binary",
+  "title": "Headless sessions execute the pinned runtime binary",
+  "description": "Spec checks and reviews run pinned Cursor and Pi stub binaries inside the real sandbox even when the host PATH selects failing mise shims; Cursor's interactive agent alias must not bypass its cursor-agent pin.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "pinned runtime sandbox regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-pinned-binary.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
