@@ -30,14 +30,18 @@ export const deliveryPolicySchema = z.object({
   mergeGate: mergeGateSchema,
   /** When the candidate workflow cuts main's tip; null cuts on demand (workflow_dispatch) only. */
   candidateSchedule: cron.nullable(),
-  deploy: z.object({
+  // The retired Railway adapter (GY-3204): Railway deploys from git on its own, so a committed
+  // `adapter: "railway"` reads as the command adapter and a committed `project` is ignored.
+  deploy: z.preprocess(deploy => {
+    if (!deploy || typeof deploy !== 'object') return deploy;
+    const { project: _, ...rest } = deploy as Record<string, unknown>;
+    return rest.adapter === 'railway' ? { ...rest, adapter: 'command' } : rest;
+  }, z.object({
     adapter: z.enum(deploymentAdapters),
-    /** Railway only: the existing project whose uat and production environments the adapter uses; null plans a new one. */
-    project: z.string().trim().min(1).max(200).nullable().default(null),
     /** Command adapter only: the command that deploys $GRAPHYARD_CANDIDATE_SHA to UAT, and to production. Never guessed. */
     uat: z.string().trim().min(1).max(1000).nullable().default(null),
     production: z.string().trim().min(1).max(1000).nullable().default(null),
-  }).strict(),
+  }).strict()),
   ...projectDeliveryShape,
 }).strict().superRefine((policy, context) => {
   for (const message of applicationProblems(policy)) context.addIssue({ code: 'custom', path: ['cases'], message });

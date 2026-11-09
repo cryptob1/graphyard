@@ -1,0 +1,13 @@
+{
+  "id": "railway-observed-deploys",
+  "title": "Master status observes each application's versionUrl against main",
+  "description": "Two local stub version endpoints and an unreachable one, against a scratch repository with back-dated commits: master status lists one app current, one lagging and one failed, with an attention line for each lagging or failed app.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "observed application deploys",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/railway-observed-deploys.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

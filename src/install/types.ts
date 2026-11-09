@@ -59,7 +59,7 @@ export interface InstallPlan {
    * `committed` is false while graphyard.json holds no reviewed policy yet: protection then keeps
    * the discovered checks until `graphyard init --scan --apply` records the split.
    */
-  delivery: { mode: 'local' | 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[]; adapter: 'railway' | 'command' };
+  delivery: { mode: 'local' | 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[] };
   /** `--observe-only` (GY-1846): only the control plane is deployed; every `held` action is left to a later full install. */
   observeOnly?: boolean;
 }

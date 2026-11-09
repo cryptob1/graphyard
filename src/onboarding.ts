@@ -310,7 +310,7 @@ export type DeployTarget = 'railway' | 'vercel' | 'fly' | 'github-pages' | 'cont
 export interface DeployDetection { target: DeployTarget; evidence: string[]; verification: string; proofName: string }
 
 const deployVerification: Record<Exclude<DeployTarget, 'none'>, string> = {
-  railway: 'Deploy the candidate to an isolated Railway environment and verify the reported RAILWAY_GIT_COMMIT_SHA (or an equivalent version endpoint) equals the candidate SHA before recording deploy evidence.',
+  railway: 'Railway deploys each application from git on its own; Graphyard deploys nothing there. Declare each app\'s versionUrl in graphyard.json delivery.applications (an endpoint answering the commit it serves, such as RAILWAY_GIT_COMMIT_SHA); Graphyard observes it and master status names an app that lags main or fails to answer.',
   vercel: 'Inspect the Vercel deployment for the candidate (VERCEL_GIT_COMMIT_SHA in its build metadata or the deployments API) and compare it with the candidate SHA before recording deploy evidence.',
   fly: 'Run fly status (or the releases API) for the application and confirm the active release was built from the candidate SHA before recording deploy evidence.',
   'github-pages': 'Publish a versioned artifact (for example version.json containing the commit SHA) during the Pages build, then fetch it from the deployed site and compare it with the candidate SHA before recording deploy evidence.',
@@ -446,8 +446,6 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   const mode = overrides.mode ?? committed?.mode ?? (overrides.merger === 'control-plane' ? 'local' : deploy.target === 'none' ? 'per-pr' : 'release-candidate');
   // The local mode generates no workflow, so a repository without CI gets no graphyard-gate to wait on either.
   const mergeGate = committed?.mergeGate ?? (hasNoCi(input) && mode !== 'local' ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
-  // The local mode deploys through commands the operator names, never a Railway adapter it would depend on.
-  const adapter = mode === 'local' || deploy.target !== 'railway' ? 'command' : 'railway';
   let local = {};
   if (mode === 'local') {
     const detected = detectApplications(input.files, input.contents, stack.commands.find(command => command.check === 'build')?.command ?? null);
@@ -461,8 +459,8 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
     mode,
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
-    // Switching a committed Railway pipeline to local drops the adapter that belonged to the old mode.
-    deploy: committed?.deploy && !(mode === 'local' && committed.deploy.adapter === 'railway') ? committed.deploy : { adapter, project: null, uat: null, production: null },
+    // Graphyard deploys through commands the operator names; Railway deploys from git on its own.
+    deploy: committed?.deploy ?? { adapter: 'command', uat: null, production: null },
     ...local, ...kept,
   });
 }

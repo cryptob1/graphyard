@@ -4,7 +4,7 @@ import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import type { Work } from '../model.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
-import { type ProductionReport, attentionLines } from '../production-watch.js';
+import { type ProductionReport, type ApplicationRelease, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
 import { humanOnlyDecisions } from '../model/human-request.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
@@ -134,4 +134,11 @@ export function productionSummary(report: Partial<ProductionReport>) {
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
     attention: attentionLines({ serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null }) };
+}
+
+/** One line per application its versionUrl shows lagging behind main or failing to answer (GY-3204); its host deploys it from git, so the fix is that deploy. */
+export function applicationAttention(applications: ApplicationRelease[]) {
+  return applications.filter(app => app.state === 'lagging' || app.state === 'failed').map(app => ({ subject: `application ${app.id}`,
+    text: app.state === 'lagging' ? `Application ${app.id} lags main: ${app.reason}` : `Application ${app.id}'s versionUrl failed: ${app.reason}`,
+    next: `Check the ${app.id} deploy on its host (Railway deploys it from git); Graphyard only reads its versionUrl` }));
 }

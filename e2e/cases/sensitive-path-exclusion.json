@@ -1,0 +1,15 @@
+{
+  "id": "sensitive-path-exclusion",
+  "title": "A risk.sensitive !glob excludes its matches from every sensitive rule",
+  "description": "With risk.sensitive [{rule:'per-app manifests', glob:'!apps/*/package.json'}], the generic positive list stays in force: a change to apps/pm/package.json classifies normal and the merge gate decision does not wait for approval, while root package.json and pnpm-lock.yaml stay sensitive and wait; a repository with no exclusions classifies as before.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Classify and gate excluded and still-sensitive paths",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/sensitive-path-exclusion.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
