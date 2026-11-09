@@ -9,8 +9,9 @@ import { managedServePorts } from '../src/cli/upgrade.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-2993: a commit counts as served only when the answer on the declared port is the serve the
-// pass started. When another process already holds the port, the restarted serve exits without
+// GY-2993: a commit counts as served only when the answer on the served port is the serve the
+// pass started. The port is chosen once and kept in served.json (GY-3201); when another process
+// has since taken it, the restarted serve exits without
 // binding it and the pass records the commit as failed, with a reason naming the port — never as
 // served, and its required cases never run against the foreign holder, whose answers would
 // otherwise stand in for the serve's own (the verified-true-against-the-wrong-process report).
@@ -28,7 +29,7 @@ const buildJs = [
 ].join('\n');
 const serveJs = [
   'const http = require("node:http"), fs = require("node:fs"), path = require("node:path");',
-  'const port = Number(process.argv[process.argv.indexOf("--port") + 1]);',
+  'const port = Number(process.env.PORT);',
   'http.createServer((request, response) => {',
   '  const url = request.url.split("?")[0];',
   '  const name = url === "/" ? "index.txt" : `${url.slice(1)}.txt`;',
@@ -38,7 +39,8 @@ const serveJs = [
   '  });',
   '}).listen(port, "127.0.0.1");',
 ].join('\n');
-const declarationFile = (port: number) => JSON.stringify({ build: ['node', 'build.js'], serve: ['node', 'serve.js', '--port', String(port)], port });
+/** The node application graphyard.json declares (GY-3201): built and started at the root, on the PORT the pass gives it. */
+const graphyardJson = JSON.stringify({ delivery: { mode: 'local', applications: [{ id: 'app', kind: 'node', directory: '.', build: 'node build.js', start: 'node serve.js' }] } });
 const packageJson = JSON.stringify({ name: 'fixture-foreign-port', version: '1.0.0', private: true }) + '\n';
 const packageLock = `${JSON.stringify({ name: 'fixture-foreign-port', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'fixture-foreign-port', version: '1.0.0', license: 'ISC' } } }, null, 2)}\n`;
 /** The required case the foreign holder would pass: GET / expecting 200 is exactly what it answers. */
@@ -52,23 +54,26 @@ test('integration:serve-refuses-foreign-port-holder — a serve that cannot bind
   git(base, 'clone', '-q', origin, pusher);
   const files: Record<string, string> = {
     'package.json': packageJson, 'package-lock.json': packageLock, 'build.js': buildJs, 'serve.js': serveJs,
-    'e2e/cases/served-case-home.json': caseFile, '.graphyard/serve.json': declarationFile(port),
+    'e2e/cases/served-case-home.json': caseFile, 'graphyard.json': graphyardJson,
   };
   for (const [name, text] of Object.entries(files)) { await mkdir(join(pusher, name, '..'), { recursive: true }); await writeFile(join(pusher, name), text); }
   git(pusher, 'add', '.'); git(pusher, 'commit', '-q', '-m', 'the app'); git(pusher, 'push', '-q', 'origin', 'HEAD:main');
   git(base, 'clone', '-q', origin, root);
   const tip = git(root, 'rev-parse', 'refs/remotes/origin/main');
 
-  // A process the serve pass did not start holds the declared port — on 0.0.0.0, like the
-  // listener the report saw — and answers what the required case asks for.
+  // The record keeps the port an earlier serve was given, and a process the serve pass did not
+  // start now holds it — on 0.0.0.0, like the listener the report saw — and answers what the
+  // required case asks for.
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(serveRecordPath(root), JSON.stringify({ commit: null, url, failed: null, reason: null, pid: null, at: new Date().toISOString() }));
   const holder = spawn('node', ['-e', `require("node:http").createServer((request, response) => response.writeHead(200).end("foreign\\n")).listen(${port}, "0.0.0.0")`], { stdio: 'ignore' });
   try {
     const deadline = Date.now() + 10_000;
     while (!(await answering(url)) && Date.now() < deadline && holder.exitCode === null) await new Promise(accept => setTimeout(accept, 100));
-    assert.equal(await answering(url), true, 'the foreign holder answers the declared port before the pass runs');
+    assert.equal(await answering(url), true, 'the foreign holder answers the recorded port before the pass runs');
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
 
-    // The declared serve exits without binding: the pass records the commit as failed, with a
+    // The started serve exits without binding: the pass records the commit as failed, with a
     // reason naming the port — not as served, with no case run against the holder.
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'failed');
     const record = readServeRecord(serveRecordPath(root));

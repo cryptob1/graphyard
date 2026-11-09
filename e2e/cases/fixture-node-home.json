@@ -1,0 +1,25 @@
+{
+  "id": "fixture-node-home",
+  "title": "The fixture node app's page shows the change",
+  "description": "The declared node application of the fixture project, started on the port Graphyard gives it in a change's local preview: its page shows the app, and the change on it.",
+  "tags": [
+    "fixture",
+    "preview"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "browser",
+      "name": "open the node app's preview",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture node app",
+      "exact": false
+    }
+  ]
+}

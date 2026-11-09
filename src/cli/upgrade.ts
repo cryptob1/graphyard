@@ -18,12 +18,11 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
+import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
-import { installArgv, packageManager } from '../package-manager.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -244,7 +243,7 @@ export async function ensureDeployCheckout(checkout: string, source: string, run
   await run('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', checkout, 'HEAD']);
 }
 
-/** How long an install or build step of the declared serve may run. */
+/** How long an install or build step of the served application may run. */
 const serveInstallTimeoutMs = 1_800_000;
 
 /** The kernel start time of the process named `pid`, or null when none runs under it (or /proc is absent, off Linux). */
@@ -290,7 +289,7 @@ const listeningInodes = (port: number): Set<string> => {
   return inodes;
 };
 
-/** Whether the declared port is still held by the serve's own process group: the kernel names every listening socket and the group of whoever owns one, so an answer from a process the restart did not start — a foreign holder the serve could not bind over — is told from the serve's own listener (GY-2993). Null when this cannot be checked (no tracked pid, no /proc, off Linux): the pass then trusts the answer. */
+/** Whether the served port is still held by the serve's own process group: the kernel names every listening socket and the group of whoever owns one, so an answer from a process the restart did not start — a foreign holder the serve could not bind over — is told from the serve's own listener (GY-2993). Null when this cannot be checked (no tracked pid, no /proc, off Linux): the pass then trusts the answer. */
 const answersFromRestart = (port: number, tracked: { pid?: number | null }): boolean | null => {
   if (!tracked.pid || !existsSync('/proc')) return null;
   const inodes = listeningInodes(port);
@@ -312,7 +311,7 @@ const answersFromRestart = (port: number, tracked: { pid?: number | null }): boo
   return false;
 };
 
-/** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own checkout (whose remote-tracking ref master status reads too), npm ci and the declared build in its serve checkout, and the declared serve command spawned detached. */
+/** The ports the deploy unit's serve pass (GY-2976, GY-3201) runs against the managed repository's main: git in the install's own checkout (whose remote-tracking ref master status reads too), the npm install at its serve checkout's root and the node application's build in its directory, and its start command spawned detached there with PORT set. */
 export function managedServePorts(input: { root: string; baseBranch: string; run: ChildRun }): ServePorts {
   const checkout = serveCheckoutPath(input.root);
   const baselineCheckout = serveBaselineCheckoutPath(input.root);
@@ -325,65 +324,57 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     await mkdir(resolve(checkout, '..'), { recursive: true });
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
+  // The install runs once at the repository root, where a workspace's lockfile is (GY-3200's package manager); a repository with no package.json builds without one.
   // GY-3207: install, build and serve run under the Node major the checkout declares.
   const environment = (at: string) => serveEnvironment(at, async (command, args) => String(await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs })));
   const installIn = async (at: string) => {
-    // npm ci needs a lockfile; a repository without one installs, and a pnpm-lock.yaml installs through pnpm (GY-3200). A repository with no package.json builds without npm.
-    if (!existsSync(join(at, 'package.json'))) return;
-    const manager = packageManager(at), locked = existsSync(join(at, 'package-lock.json'));
-    const [command, ...args] = manager.name === 'pnpm' ? installArgv(manager) : ['npm', locked ? 'ci' : 'install', '--no-audit', '--no-fund'];
-    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
+    const [command, ...args] = installCommand(at) ?? [];
+    if (command) await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
   };
-  const buildIn = (at: string) => async (declaration: ServeDeclaration) => {
-    const [command, ...args] = declaration.build;
-    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
+  const buildIn = (at: string) => async (application: ServeDeclaration) => {
+    if (application.build) await input.run('sh', ['-c', application.build], { cwd: join(at, application.directory), timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
+  };
+  const start = async (at: string, application: ServeDeclaration, port: number) => {
+    const child = spawn('sh', ['-c', application.start], { cwd: join(at, application.directory), env: { ...await environment(at), PORT: String(port) }, detached: true, stdio: 'ignore' });
+    // A start that cannot spawn must not crash the watch; the pass records it as a serve that never answered.
+    child.on('error', () => {});
+    child.unref();
+    const pid = child.pid ?? null;
+    return { pid, started: pid ? startedAt(pid) : null };
   };
   return {
     // The fetch lands in the managed root — the serve checkout is its worktree and shares its refs —
     // so declaration() reads the root's remote-tracking ref before any serve checkout exists: a
-    // repository that declares no serve.json never gets one created (or fetched into).
+    // repository that declares no node application never gets one created (or fetched into).
     fetch: async () => {
       await oneFetchAtATime(() => rootGit('fetch', '--quiet', 'origin', input.baseBranch));
       return rootGit('rev-parse', ref);
     },
     declaration: async () => {
-      const shown = await rootGit('show', `${ref}:.graphyard/serve.json`).catch(() => null);
-      return shown === null ? null : parseServeDeclaration(shown);
+      const shown = await rootGit('show', `${ref}:graphyard.json`).catch(() => null);
+      return shown === null ? null : servedApplication(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
     install: () => installIn(checkout),
     build: buildIn(checkout),
-    restart: async serve => {
+    restart: async (application, port) => {
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
-      const [command, ...args] = serve;
-      const child = spawn(command!, args, { cwd: checkout, env: await environment(checkout), detached: true, stdio: 'ignore' });
-      // A serve command that cannot start (ENOENT) must not crash the watch; the pass records it as a serve that never answered.
-      child.on('error', () => {});
-      child.unref();
-      const pid = child.pid ?? null;
-      return { pid, started: pid ? startedAt(pid) : null };
+      return start(checkout, application, port);
     },
     // GY-2993: the answer the pass waits for must be this serve's own, so a commit whose serve could not bind a held port is recorded as the failure it is, never as served against the holder.
     answersFromRestart: (port, tracked) => answersFromRestart(port, tracked),
-    // GY-2985: what was live keeps serving on the port beside the declared one, in its own
-    // baseline checkout, so a compare case judges a new build against what users had. The declared
-    // serve command serves there with the declared port rewritten to the baseline's — the port the
-    // declaration names is the one a serve command is given, by convention in its arguments.
-    baseline: async (commit, declaration) => {
+    // GY-2985: what was live keeps serving on a free port of its own, in its own baseline
+    // checkout, so a compare case judges a new build against what users had.
+    baseline: async (commit, application, port) => {
       if (existsSync(join(baselineCheckout, '.git'))) await baselineGit('checkout', '--detach', '--quiet', commit);
       else {
         await mkdir(resolve(baselineCheckout, '..'), { recursive: true });
         await rootGit('worktree', 'add', '--detach', '--quiet', baselineCheckout, commit);
       }
       await installIn(baselineCheckout);
-      await buildIn(baselineCheckout)(declaration);
+      await buildIn(baselineCheckout)(application);
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
-      const [command, ...args] = declaration.serve;
-      const child = spawn(command!, args.map(argument => argument === String(declaration.port) ? String(declaration.port + 1) : argument), { cwd: baselineCheckout, env: await environment(baselineCheckout), detached: true, stdio: 'ignore' });
-      child.on('error', () => {});
-      child.unref();
-      const pid = child.pid ?? null;
-      return { pid, started: pid ? startedAt(pid) : null };
+      return start(baselineCheckout, application, port);
     },
     // The served commit is live-verified (GY-2983): the required cases the served commit itself
     // declares under e2e/cases/ run against the URL it serves, in its own serve checkout, and the
@@ -531,9 +522,9 @@ export const upgradeCommands = defineCommands([{
       const handover = releaseHandover(() => {
         try { return git(runningRoot, 'rev-parse', 'HEAD'); } catch { return null; } // a tree with no git history names no running commit
       }, () => stopping.abort()); // the serve half stops after the pass it is in; nothing is torn mid-flight
-      // The managed repository's own serving (GY-2976): a main that declares .graphyard/serve.json is
-      // checked out into the install's own serve checkout, built and served by the same unit's pass;
-      // a repository that declares nothing gives the serve pass nothing to do.
+      // The managed repository's own serving (GY-2976, GY-3201): the first node application main's
+      // graphyard.json declares is checked out into the install's own serve checkout, built and served
+      // by the same unit's pass; a repository that declares none gives the serve pass nothing to do.
       const intervalMs = master.run.intervalSeconds * 1000, once = flags.includes('--once');
       return Promise.all([
         watchMain(deployRecordPath(repoRoot), ports, { intervalMs, once, signal: stopping.signal, repository: servedRepository(cliRoot), handover }),

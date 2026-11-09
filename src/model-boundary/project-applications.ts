@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { previewModes, maxCandidateChanges, boundCaseId, applicationProblems, declarationKeys, projectDeliveryVariable, type ProjectDelivery, effectiveDelivery } from '../model/project-applications.js';
 // ---------------------------------------------------------------------------
 // What a managed repository declares about the applications its cases exercise, in graphyard.json's
-// `delivery` beside the merge gate: each application (a static site, or a Compose project), and
+// `delivery` beside the merge gate: each application (a static site, a Compose project or a Node app), and
 // which E2E case runs against which application. A change whose cases need an application gets a
 // local preview of it; the rapid path's defaults (local previews, candidates of at most five changes,
 // required verification of the exact live release) are what normal onboarding commits. Pure and
@@ -19,7 +19,9 @@ const applicationId = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,39}$/, 'An a
 export const staticApplicationSchema = z.object({ id: applicationId, kind: z.literal('static'), directory: relativePath('A static application directory'), build: z.string().trim().min(1).max(500).nullable().default(null), versionUrl }).strict();
 /** A Compose project: its file, the service that answers HTTP and that service's container port. */
 export const composeApplicationSchema = z.object({ id: applicationId, kind: z.literal('compose'), file: relativePath('A Compose file'), service: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'A Compose service name'), port: z.number().int().min(1).max(65535), versionUrl }).strict();
-export const applicationSchema = z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema]);
+/** A Node application (GY-3201): its directory, the command that builds it there (null: none) and the command that starts it there, listening on the PORT Graphyard assigns; the repository's install runs at its root first. */
+export const nodeApplicationSchema = z.object({ id: applicationId, kind: z.literal('node'), directory: relativePath('A node application directory'), build: z.string().trim().min(1).max(500).nullable().default(null), start: z.string().trim().min(1).max(500), versionUrl }).strict();
+export const applicationSchema = z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema, nodeApplicationSchema]);
 
 /** The fields `delivery` gains for the rapid path; every one optional, so a policy committed before them still parses. */
 export const projectDeliveryShape = {

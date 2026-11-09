@@ -330,7 +330,7 @@ export type GitRead = (args: readonly string[]) => Promise<string>;
 
 /**
  * What serves the managed repository now (GY-2976): the deploy record naming it as the one it
- * serves, or — when main declares `.graphyard/serve.json` and the deploy unit's serve pass has run
+ * serves, or — when main declares a node application in graphyard.json and the deploy unit's serve pass has run
  * — what that pass serves: the served commit, whether it is main, how far main is ahead, the last
  * build failure, and the declared serve's URL (null while nothing is declared). The serve record
  * is the repository's own serving truth, so it stands even beside an unconfigured deploy record;

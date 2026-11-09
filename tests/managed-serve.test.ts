@@ -8,14 +8,15 @@ import { join } from 'node:path';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { managedServePorts } from '../src/cli/upgrade.js';
-import { parseServeDeclaration, readServeRecord, serveOnce, serveRecordPath } from '../src/serve-app.js';
+import { readServeRecord, servedApplication, serveOnce, serveRecordPath } from '../src/serve-app.js';
 import { setupFromZeroChecks, setupLine, type SetupCheck } from '../src/setup-from-zero.js';
 import type { MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-2976: a managed repository declaring .graphyard/serve.json has its main built and served on a
-// loopback port after every merge, and master status, the dashboard and doctor report it. A
-// repository that declares nothing reports exactly what it reported before.
+// GY-2976, GY-3201: a managed repository whose graphyard.json declares a node application has its
+// main installed at the root, built in the application's directory and started there on a loopback
+// port (PORT) after every merge, and master status, the dashboard and doctor report it. A
+// repository that declares none reports exactly what it reported before.
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 const freePort = () => new Promise<number>((accept, reject) => {
@@ -40,7 +41,7 @@ const untilSilent = async (url: string) => {
 };
 const stopServing = (root: string) => {
   const pid = readServeRecord(serveRecordPath(root))?.pid;
-  if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  if (pid) try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
 };
 /** Commits `files` to the pusher and pushes them to main; answers the new tip. */
 const push = async (pusher: string, files: Record<string, string>, what: string) => {
@@ -49,36 +50,38 @@ const push = async (pusher: string, files: Record<string, string>, what: string)
   return git(pusher, 'rev-parse', 'HEAD');
 };
 
-/** The build the fixture declares: it fails when main's fail.txt says so, else it writes the head commit as the app's answer. */
+/** The build the fixture declares, run in apps/game: it fails when main's fail.txt says so, else it writes the head commit as the app's answer. */
 const buildJs = [
   'const fs = require("node:fs"), { execSync } = require("node:child_process");',
   'if (fs.readFileSync("fail.txt", "utf8").trim() === "yes") { console.error("the build was told to fail"); process.exit(1); }',
   'fs.mkdirSync("dist", { recursive: true });',
   'fs.writeFileSync("dist/commit.txt", String(execSync("git rev-parse HEAD", { encoding: "utf8" })).trim());',
 ].join('\n');
-/** The serve the fixture declares: it answers the commit its build built, on the declared port. */
+/** The start the fixture declares: it answers the commit its build built, on the PORT it is given. */
 const serveJs = [
   'const http = require("node:http"), fs = require("node:fs");',
-  'const port = Number(process.argv[process.argv.indexOf("--port") + 1]);',
+  'const port = Number(process.env.PORT);',
   'http.createServer((request, response) => {',
   '  let commit = "unknown"; try { commit = fs.readFileSync("dist/commit.txt", "utf8").trim(); } catch {}',
   `  response.writeHead(200, { "Content-Type": "text/plain" }).end(commit + "\\n");`,
   '}).listen(port, "127.0.0.1");',
 ].join('\n');
-const declarationFile = (port: number) => JSON.stringify({ build: ['node', 'build.js'], serve: ['node', 'serve.js', '--port', String(port)], port });
+/** The workspace app graphyard.json declares: its lockfile at the root, its build and start in apps/game. */
+const application = { id: 'game', kind: 'node', directory: 'apps/game', build: 'node build.js', start: 'node serve.js' };
+const graphyardJson = JSON.stringify({ delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'public', build: null }, application] } });
 
 /** A minimal npm package and its lockfile, so the fixture's install is the npm ci a real app runs. */
 const packageJson = JSON.stringify({ name: 'fixture-game', version: '1.0.0', private: true }) + '\n';
 const packageLock = `${JSON.stringify({ name: 'fixture-game', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'fixture-game', version: '1.0.0', license: 'ISC' } } }, null, 2)}\n`;
 
-/** A fixture managed repository: an origin, a pusher that commits to it, and the launcher checkout, with the serve declaration on main. */
-async function managedRepository(label: string, port: number) {
+/** A fixture managed repository: an origin, a pusher that commits to it, and the launcher checkout, with the node application declared on main. */
+async function managedRepository(label: string) {
   const base = await temporaryDirectory(label);
   const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), root = join(base, 'checkout');
   git(base, 'init', '-q', '--bare', '-b', 'main', origin);
   git(base, 'clone', '-q', origin, pusher);
-  await push(pusher, { 'package.json': packageJson, 'package-lock.json': packageLock, 'build.js': buildJs, 'serve.js': serveJs, 'fail.txt': 'no' }, 'the build and its serve');
-  await push(pusher, { '.graphyard/serve.json': declarationFile(port) }, 'declare the serve');
+  await push(pusher, { 'package.json': packageJson, 'package-lock.json': packageLock, 'apps/game/build.js': buildJs, 'apps/game/serve.js': serveJs, 'apps/game/fail.txt': 'no' }, 'the build and its serve');
+  await push(pusher, { 'graphyard.json': graphyardJson }, 'declare the node application');
   git(base, 'clone', '-q', origin, root);
   return { root, pusher, push };
 }
@@ -91,21 +94,20 @@ const statusOf = (root: string, repository: string) => masterStatusReport(root, 
 const servedCommit = async (url: string) => (await (await fetch(url)).text()).trim();
 const escaped = (url: string) => url.replace(/[.:]/g, match => `\\${match}`);
 
-test('unit:managed-repo-main-served-after-merge — the deploy pass checks a declared main out, builds and serves it; a merged main moves what the port answers, and master status reports the URL, the served commit and atMain; a failing build keeps the previous commit serving and records the failure', async () => {
-  const port = await freePort(), url = `http://127.0.0.1:${port}`;
-  const { root, pusher, push } = await managedRepository('managed-serve', port);
-  const declaration = parseServeDeclaration(declarationFile(port), 'serve.json');
-  assert.deepEqual(declaration, { build: ['node', 'build.js'], serve: ['node', 'serve.js', '--port', String(port)], port });
+test('unit:tests/managed-serve.test.ts — the deploy pass serves the node application main declares: installed at the root, built and started in its directory on a free PORT; a merged main moves what the port answers, and master status reports the URL, the served commit and atMain; a failing build keeps the previous commit serving and records the failure', async () => {
+  const { root, pusher, push } = await managedRepository('managed-serve');
+  assert.deepEqual(servedApplication(graphyardJson), application, 'the first node application is the one served; the static site is for previews only');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
 
     // First pass: main's tip (the declaration commit) is checked out into the install's own serve
-    // checkout, built and served on the declared loopback port.
+    // checkout, installed, built and started on a free loopback port.
     const first = git(root, 'rev-parse', 'refs/remotes/origin/main');
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
     const record = readServeRecord(serveRecordPath(root));
     assert.equal(record?.commit, first);
-    assert.equal(record?.url, url);
+    const url = record!.url!;
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
     await untilAnswers(url);
     assert.equal(await servedCommit(url), first, 'the port answers the commit the pass served');
 
@@ -122,14 +124,14 @@ test('unit:managed-repo-main-served-after-merge — the deploy pass checks a dec
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
     await untilAnswers(url);
     assert.equal(await servedCommit(url), second, 'the served commit moved to the new main');
-    assert.equal(readServeRecord(serveRecordPath(root))?.commit, second);
+    assert.deepEqual({ commit: readServeRecord(serveRecordPath(root))?.commit, url: readServeRecord(serveRecordPath(root))?.url }, { commit: second, url }, 'the URL stays the same across deploys');
     const secondStatus = (await statusOf(root, 'owner/game')).serving;
     assert.deepEqual(
       { commit: secondStatus.commit, main: secondStatus.main, atMain: secondStatus.atMain },
       { commit: second.slice(0, 12), main: second.slice(0, 12), atMain: true });
 
     // A build that fails on the next commit: the previous commit keeps serving, the failure is recorded.
-    const third = await push(pusher, { 'game.txt': 'C\n', 'fail.txt': 'yes' }, 'C');
+    const third = await push(pusher, { 'game.txt': 'C\n', 'apps/game/fail.txt': 'yes' }, 'C');
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'failed');
     const failed = readServeRecord(serveRecordPath(root));
     assert.deepEqual({ commit: failed?.commit, failed: failed?.failed }, { commit: second, failed: third });
@@ -142,7 +144,7 @@ test('unit:managed-repo-main-served-after-merge — the deploy pass checks a dec
       { commit: failedStatus.commit, atMain: failedStatus.atMain, tip: failedStatus.failedDeploy?.tip, restoring: failedStatus.failedDeploy?.restoring },
       { commit: second.slice(0, 12), atMain: false, tip: third.slice(0, 12), restoring: null });
     assert.match(failedStatus.failedDeploy?.reason ?? '', /the build was told to fail/, 'the failure is recorded with why');
-    assert.equal(failedStatus.serve.url, url, 'the URL is still the declared one');
+    assert.equal(failedStatus.serve.url, url, 'the URL is still the served one');
     assert.match(failedStatus.serve.failure?.reason ?? '', /the build was told to fail/);
 
     // The failed tip waits for the next one, like every deploy watch.
@@ -150,19 +152,19 @@ test('unit:managed-repo-main-served-after-merge — the deploy pass checks a dec
   } finally { stopServing(root); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a serve that died is served again and the record names the new process, so the next restart tracks what holds the port', async () => {
-  const port = await freePort(), url = `http://127.0.0.1:${port}`;
-  const { root } = await managedRepository('managed-serve-restart', port);
+test('unit:tests/managed-serve.test.ts — a serve that died is served again and the record names the new process, so the next restart tracks what holds the port', async () => {
+  const { root } = await managedRepository('managed-serve-restart');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
     const first = readServeRecord(serveRecordPath(root));
+    const url = first!.url!;
     assert.ok(first?.pid);
     const commit = first.commit as string;
     await untilAnswers(url);
 
     // The serve process dies (a reboot, a crash): the record keeps the commit, the port goes dead.
-    process.kill(first.pid!, 'SIGKILL');
+    process.kill(-first.pid!, 'SIGKILL');
     await untilSilent(url);
 
     // The re-serve path serves the build the checkout already holds and writes the NEW pid, so the
@@ -176,7 +178,7 @@ test('unit:managed-repo-main-served-after-merge — a serve that died is served 
       assert.doesNotThrow(() => process.kill(again!.pid!, 0), 'the recorded pid is alive');
       await untilAnswers(url);
       assert.equal(await servedCommit(url), commit, 'the same commit serves again');
-      process.kill(again!.pid!, 'SIGKILL');
+      process.kill(-again!.pid!, 'SIGKILL');
       await untilSilent(url);
       const kept = readServeRecord(serveRecordPath(root));
       assert.deepEqual({ commit: kept?.commit, failed: kept?.failed }, { commit, failed: null });
@@ -185,17 +187,17 @@ test('unit:managed-repo-main-served-after-merge — a serve that died is served 
   } finally { stopServing(root); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a serve that never answers is recorded as the failure it is, with nothing claimed served', async () => {
-  const port = await freePort(), url = `http://127.0.0.1:${port}`;
-  const { root, pusher, push } = await managedRepository('managed-serve-dead', port);
+test('unit:tests/managed-serve.test.ts — a serve that never answers is recorded as the failure it is, with nothing claimed served', async () => {
+  const { root, pusher, push } = await managedRepository('managed-serve-dead');
   try {
     const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
+    const url = readServeRecord(serveRecordPath(root))!.url!;
     await untilAnswers(url);
 
     // The next commit's serve command exits without ever binding the port: the restart stopped the
     // previous serve, nothing answers, and the pass records the failure instead of the commit.
-    const dead = await push(pusher, { 'serve.js': 'process.exit(0);\n' }, 'a serve that exits');
+    const dead = await push(pusher, { 'apps/game/serve.js': 'process.exit(0);\n' }, 'a serve that exits');
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}, { answerTimeoutMs: 1_000 }), 'failed');
     const record = readServeRecord(serveRecordPath(root));
     assert.deepEqual({ commit: record?.commit, failed: record?.failed }, { commit: null, failed: dead });
@@ -203,7 +205,7 @@ test('unit:managed-repo-main-served-after-merge — a serve that never answers i
     await untilSilent(url);
     const status = (await statusOf(root, 'owner/game')).serving;
     assert.deepEqual({ unconfigured: status.unconfigured, commit: status.commit, atMain: status.atMain }, { unconfigured: true, commit: null, atMain: null });
-    assert.equal(status.serve?.url, url, 'the declared URL is still reported');
+    assert.equal(status.serve?.url, url, 'the served URL is still reported');
     assert.match(status.serve?.failure?.reason ?? '', /the serve did not answer/);
 
     // A serve failure waits for the next merge, like a build failure.
@@ -211,7 +213,7 @@ test('unit:managed-repo-main-served-after-merge — a serve that never answers i
   } finally { stopServing(root); }
 });
 
-test('unit:serve-optional-and-doctor-checks-it — a repository without serve.json reports exactly what it reported before and the pass does nothing; doctor prints a FAIL line naming the URL when a declared serve does not answer', async () => {
+test('unit:tests/managed-serve.test.ts — a repository declaring no node application reports exactly what it reported before and the pass does nothing; doctor prints a FAIL line naming the URL when a declared serve does not answer', async () => {
   // A managed repository that declares nothing: the pass records nothing, and master status reads
   // exactly what it read before this feature — unconfigured, no served commit, no atMain claim, no
   // failure, main's tip named, and the serve fields null when nothing is declared.
@@ -219,7 +221,7 @@ test('unit:serve-optional-and-doctor-checks-it — a repository without serve.js
   const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), root = join(base, 'checkout');
   git(base, 'init', '-q', '--bare', '-b', 'main', origin);
   git(base, 'clone', '-q', origin, pusher);
-  await push(pusher, { 'game.txt': 'the game\n' }, 'the game');
+  await push(pusher, { 'game.txt': 'the game\n', 'graphyard.json': JSON.stringify({ delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'public', build: null }] } }) }, 'the game, declaring only a static site');
   git(base, 'clone', '-q', origin, root);
   const main = git(root, 'rev-parse', 'refs/remotes/origin/main');
 
@@ -259,14 +261,14 @@ test('unit:serve-optional-and-doctor-checks-it — a repository without serve.js
   } finally { await new Promise<void>(done => server.close(() => done())); }
 });
 
-test('unit:managed-repo-main-served-after-merge — a malformed declaration is named, never served', () => {
-  assert.throws(() => parseServeDeclaration('{"build": "npm run build", "port": 4400}', '.graphyard/serve.json'), /serve\.json: build/);
-  assert.throws(() => parseServeDeclaration('not json'), /not valid JSON/);
-  assert.throws(() => parseServeDeclaration('{"build": ["npm", "run", "build"], "serve": ["npx", "vite"], "port": "4400"}'), /port/);
-  assert.equal(parseServeDeclaration(''), null);
+test('unit:tests/managed-serve.test.ts — a malformed node application is named, never served', () => {
+  assert.throws(() => servedApplication(JSON.stringify({ delivery: { applications: [{ id: 'game', kind: 'node', directory: 'apps/game', build: null }] } })), /"game": start/);
+  assert.throws(() => servedApplication(JSON.stringify({ delivery: { applications: [{ id: 'game', kind: 'node', directory: 'apps/game', build: null, start: 'node serve.js', port: 4400 }] } })), /Unrecognized key/);
+  assert.throws(() => servedApplication('not json'), /not valid JSON/);
+  assert.equal(servedApplication('{}'), null);
 });
 
-test('unit:managed-repo-main-served-after-merge — the dashboard release line links the declared serve and names the last build failure', async () => {
+test('unit:tests/managed-serve.test.ts — the dashboard release line links the declared serve and names the last build failure', async () => {
   const { createElement } = await import('react');
   const { renderToStaticMarkup } = await import('react-dom/server');
   const { ReleaseLine } = await import('../web/components/top-bar.js');

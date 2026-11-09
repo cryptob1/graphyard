@@ -76,6 +76,7 @@ export function capacityLimitRedispatchRevision(createdAt = new Date().toISOStri
  */
 export const fixtureStaticHomeScenario = 'fixture-static-home';
 export const fixtureComposeAppScenario = 'fixture-compose-app';
+export const fixtureNodeHomeScenario = 'fixture-node-home';
 const fixtureCase = (id: string, what: string, title: string, description: string, heading: string): E2eCase => caseSchema.parse({
   id, title, description, tags: ['fixture', 'preview'], target: 'any', required: false,
   steps: [{ kind: 'browser', name: `open the ${what}'s preview`, action: 'open', path: '/' }, { kind: 'browser', action: 'expectText', text: heading, exact: false }],
@@ -86,6 +87,8 @@ export const fixtureCases = (): E2eCase[] => [
     "The declared static site of the fixture project, served in a change's local preview: its home page shows the site, and the change on it.", 'Fixture static site'),
   fixtureCase(fixtureComposeAppScenario, 'compose app', "The fixture compose app's page shows the change",
     "The declared Compose-backed application of the fixture project, served in a change's local preview against its own database: its page shows the running app, and the change on it.", 'Fixture compose app'),
+  fixtureCase(fixtureNodeHomeScenario, 'node app', "The fixture node app's page shows the change",
+    "The declared node application of the fixture project, started on the port Graphyard gives it in a change's local preview: its page shows the app, and the change on it.", 'Fixture node app'),
 ];
 
 /**

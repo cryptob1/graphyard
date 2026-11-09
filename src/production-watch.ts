@@ -330,8 +330,8 @@ export interface ApplicationRelease {
   reason: string | null;
 }
 
-/** The directory a change must touch to concern an application: a static site's directory, a Compose file's directory. */
-const applicationDirectory = (application: Application) => application.kind === 'static' ? application.directory : posix.dirname(application.file);
+/** The directory a change must touch to concern an application: a static site's or node application's directory, a Compose file's directory. */
+const applicationDirectory = (application: Application) => application.kind === 'compose' ? posix.dirname(application.file) : application.directory;
 
 /** The commit a version endpoint answers: JSON `commit` or `sha`, else the plain-text body. */
 async function servedCommit(url: string, fetcher: typeof fetch): Promise<string> {
