@@ -18,7 +18,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
+import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
@@ -325,16 +325,18 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     await mkdir(resolve(checkout, '..'), { recursive: true });
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
+  // GY-3207: install, build and serve run under the Node major the checkout declares.
+  const environment = (at: string) => serveEnvironment(at, async (command, args) => String(await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs })));
   const installIn = async (at: string) => {
     // npm ci needs a lockfile; a repository without one installs, and a pnpm-lock.yaml installs through pnpm (GY-3200). A repository with no package.json builds without npm.
     if (!existsSync(join(at, 'package.json'))) return;
     const manager = packageManager(at), locked = existsSync(join(at, 'package-lock.json'));
     const [command, ...args] = manager.name === 'pnpm' ? installArgv(manager) : ['npm', locked ? 'ci' : 'install', '--no-audit', '--no-fund'];
-    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
+    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
   };
   const buildIn = (at: string) => async (declaration: ServeDeclaration) => {
     const [command, ...args] = declaration.build;
-    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
+    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
   };
   return {
     // The fetch lands in the managed root — the serve checkout is its worktree and shares its refs —
@@ -354,7 +356,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     restart: async serve => {
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
       const [command, ...args] = serve;
-      const child = spawn(command!, args, { cwd: checkout, detached: true, stdio: 'ignore' });
+      const child = spawn(command!, args, { cwd: checkout, env: await environment(checkout), detached: true, stdio: 'ignore' });
       // A serve command that cannot start (ENOENT) must not crash the watch; the pass records it as a serve that never answered.
       child.on('error', () => {});
       child.unref();
@@ -377,7 +379,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       await buildIn(baselineCheckout)(declaration);
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
       const [command, ...args] = declaration.serve;
-      const child = spawn(command!, args.map(argument => argument === String(declaration.port) ? String(declaration.port + 1) : argument), { cwd: baselineCheckout, detached: true, stdio: 'ignore' });
+      const child = spawn(command!, args.map(argument => argument === String(declaration.port) ? String(declaration.port + 1) : argument), { cwd: baselineCheckout, env: await environment(baselineCheckout), detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
       const pid = child.pid ?? null;

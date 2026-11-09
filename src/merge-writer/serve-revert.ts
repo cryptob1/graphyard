@@ -6,7 +6,8 @@
 // gave it); the culprit is the one whose own `e2e:` proof names the failing case, else the newest
 // landing when every landing names its item. The revert is a commit on the base tip that takes
 // exactly that landing back out, made without a worktree like the trial's own
-// merges, and rides the writer's normal trial (as a proofless pseudo-item) and push. The loop files one `Re-land GY-N` item
+// merges, and rides the writer's normal trial (as a proofless pseudo-item, under the Node major the
+// repository declares like every trial, GY-3207) and push. The loop files one `Re-land GY-N` item
 // carrying the original criteria plus the failing case, linked to GY-N and the failing serve.
 import type { Work } from '../model.js';
 import { e2eProofsOf, failureIsBase, trialFailureReason, type MergeTrialRun } from './executor.js';

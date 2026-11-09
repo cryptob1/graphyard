@@ -8,6 +8,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
 import { buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
+import { pinnedNodePath } from '../node-pin.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import type { TrialE2eCase } from './e2e-trial.js';
@@ -951,6 +952,13 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     nodePackage = await holds('package.json');
     if (nodePackage) {
       manager = packageManager(worktree);
+      // GY-3207: every child from here on (install, build, selection, tests) runs under the Node
+      // major the checkout declares, fetched into the trial's own npm cache inside the install step.
+      env = { ...env, PATH: (await pinnedNodePath(worktree, env.PATH, async (command, args) => {
+        const ran = await child('install', command, args, { env: npmCiEnvironment(env) });
+        if (!ran.ok) throw runnerFailure('install', ran);
+        return ran.out;
+      }))! };
       const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
       const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
       // GY-3200: a pnpm checkout always installs afresh, never through the root's node_modules.

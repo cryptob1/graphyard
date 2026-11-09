@@ -10,6 +10,7 @@ import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from '.
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiEnvironment } from '../cli/test-isolation.js';
 import { installArgv, packageManager } from '../package-manager.js';
+import { pinnedNodePath } from '../node-pin.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -38,6 +39,8 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
     const env: Record<string, string> = { ...trialEnvironment(), ...trialHomeVariables(home, process.env, true), ...trialTemporaryVariables(temporary), PATH: '/usr/local/bin:/usr/bin:/bin' };
     delete env.NODE_TEST_CONTEXT;
     const wrapper = trialContainerWords([allocation], trialContainerDependencies(root), undefined, undefined, deadline, await trialLoad(root, 'verification'));
+    // GY-3207: the candidate's install and checks run under the Node major it declares.
+    env.PATH = (await pinnedNodePath(tree, env.PATH, (command, args) => defaultChildRun(command, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining() })))!;
     const lock = (path: string) => readFile(join(path, 'package-lock.json'), 'utf8').catch(() => null);
     const [own, candidate] = await Promise.all([lock(root), lock(tree)]);
     if (own !== null && own === candidate && existsSync(join(root, 'node_modules'))) await symlink(join(root, 'node_modules'), join(tree, 'node_modules'));

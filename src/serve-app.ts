@@ -17,6 +17,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { pinnedNodePath } from './node-pin.js';
 
 /** What a repository declares in .graphyard/serve.json: how to build the app and how to serve it. */
 export interface ServeDeclaration { build: string[]; serve: string[]; port: number }
@@ -208,3 +209,7 @@ export async function watchServe(file: string, ports: ServePorts, options: { int
 export const serveCheckoutPath = (root: string) => join(root, '.graphyard', 'serve-checkout');
 /** The baseline checkout (GY-2985): a second detached worktree holding the previously served build, which keeps serving on the port beside the served one. */
 export const serveBaselineCheckoutPath = (root: string) => join(root, '.graphyard', 'serve-checkout-baseline');
+
+/** GY-3207: the environment the serve checkout's install, build and serve commands run under: the host's, with the Node major the checkout declares first on PATH. */
+export const serveEnvironment = async (checkout: string, run: (command: string, args: string[]) => Promise<string>, host: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> =>
+  ({ ...host, PATH: await pinnedNodePath(checkout, host.PATH, run) });

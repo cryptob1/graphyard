@@ -36,6 +36,8 @@ The watch keeps the control plane's state in \`.graphyard/control-plane.json\` â
 
 Railway deploys each application from git on its own; Graphyard deploys nothing there and uses no Railway credential for it. It observes each app's versionUrl (declared in graphyard.json delivery.applications; an endpoint answering the commit it serves, as JSON commit or sha or plain text): master status lists applications[] as current, deploying, lagging (a change to its directory on main for over 15 minutes that it does not serve) or failed (no commit answered), and names each lagging or failed app under attention.
 
+A managed repository's install, build, tests and serve run under the Node major it declares: the first of .nvmrc, .node-version, mise.toml, .tool-versions and package.json engines.node that names one (22, v22.1.0, 22.x; in engines also ^22 or ~22.1), fetched through npm when the running node differs; anything else (lts/*, >=22, nothing declared) runs under the default node.
+
 A dedicated master coordinator keeps cycling: run master status and act on what it names, until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip.
 
 To set Graphyard up or find what its setup is missing, follow the setup steps in Graphyard's README: \`doctor\` prints one PASS or FAIL line per prerequisite under \`setupFromZero\`, and each FAIL line names the checklist step that fixes it.`,

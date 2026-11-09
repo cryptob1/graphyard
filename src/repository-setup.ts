@@ -21,6 +21,8 @@ import { effectiveDelivery } from './project-applications.js';
 import { forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { installArgv, packageManager } from './package-manager.js';
+import { pinnedNodePath } from './node-pin.js';
+import { defaultChildRun } from './child-runner.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
 export { readInstallLoopCode, readLoopCode, judgeLoopCode, localLoopCodeFiles, unitLauncherCheckout, systemdCommandLineWords, type UnitCode, type LoopCodeReading, type LoopCodeFiles, type LoopCodeFacts } from './loop-code.js';
@@ -631,15 +633,23 @@ function parseJson(text: string): any {
 
 export type DependencyInstaller = (cwd: string, signal?: AbortSignal) => Promise<void>;
 /** The checkout's full install (`npm ci` with npmCiArgs, or pnpm's frozen install) in the worktree, its output on stderr so a caller's JSON on stdout stays whole. */
-export const npmCi: DependencyInstaller = (cwd, signal) => new Promise((done, fail) => {
+export const npmCi: DependencyInstaller = async (cwd, signal) => {
   // Contained (containedInstall): the lifecycle scripts it runs cannot open a credential file.
   // An aborted signal stops bubblewrap (SIGTERM), which takes npm with it, and rejects with the abort.
+  const env = npmCiEnvironment();
+  // GY-3207: under the Node major the checkout declares, fetched inside the same containment.
+  env.PATH = await pinnedNodePath(cwd, env.PATH, (command, args) => {
+    const contained = containedInstall(cwd, [command, ...args]);
+    return defaultChildRun(contained.command, contained.args, { cwd, env, timeoutMs: 600_000, ...(signal ? { signal } : {}) });
+  });
   const argv = installArgv(packageManager(cwd));
   const { command, args } = containedInstall(cwd, argv);
-  const child = spawn(command, args, { cwd, env: npmCiEnvironment(), stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
-  child.once('error', fail);
-  child.once('close', code => code === 0 ? done() : fail(new Error(`${argv.join(' ')} exited with ${code}`)));
-});
+  await new Promise<void>((done, fail) => {
+    const child = spawn(command, args, { cwd, env, stdio: ['ignore', 2, 2], ...(signal ? { signal } : {}) });
+    child.once('error', fail);
+    child.once('close', code => code === 0 ? done() : fail(new Error(`${argv.join(' ')} exited with ${code}`)));
+  });
+};
 export interface WorktreeDependencyReport { state: 'current' | 'installed' | 'failed' | 'none'; install: string | null; reason: string }
 
 /**
