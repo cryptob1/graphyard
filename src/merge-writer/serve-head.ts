@@ -8,6 +8,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { buildStaticSite, groupBuildShell, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment, type ComposeBounds, type Docker } from '../compose-preview.js';
 import type { Application } from '../project-applications.js';
+import { freePort, installCommand } from '../serve-app.js';
 import { trialContainerWaiting } from './trial-load.js';
 import type { E2eServe } from '../model/repository-policy.js';
 
@@ -17,6 +18,9 @@ export type CommandApplication = { id: string; kind: 'command' } & E2eServe;
 export type ServedApplication = Application | CommandApplication;
 /** graphyard.json's `e2e.serve`, migrated to the application it declares. */
 export const commandApplication = (serve: E2eServe): CommandApplication => ({ id: 'serve', kind: 'command', ...serve });
+
+/** How long a started node application has to answer on its PORT. */
+export const nodeReadySeconds = 120;
 
 /** How long a stopped serve command has to end before its group is killed. */
 const closeGraceMs = 20_000;
@@ -79,13 +83,30 @@ export interface ServeHeadOptions {
 /**
  * The one way a head is served from `checkout`: a static application built (its `build` in the
  * preview environment) and served on loopback, a Compose application brought up as its own bounded
- * project, or a command application's command run until its URL answers.
+ * project, a command application's command run until its URL answers, or a node application (GY-3201)
+ * installed at the repository root, built in its directory and started there as a command application
+ * on a free port it is given as PORT.
  */
 export function serveHead(checkout: string, application: ServedApplication, options: ServeHeadOptions): ServingHead {
   let close: () => Promise<void> = async () => {}, ended: () => string | null = () => null;
   const ready = (async () => {
     if (application.kind === 'command') {
       const served = await serveByCommand(application, checkout, options.env, options.budgetMs, options.log ?? (() => {}), options.wrapper);
+      close = served.close; ended = served.ended;
+      return served.origin;
+    }
+    if (application.kind === 'node') {
+      const shell = options.shell ?? groupBuildShell(options.budgetMs, options.wrapper);
+      const install = installCommand(checkout), directory = join(checkout, application.directory);
+      for (const [command, cwd] of [[install && install.join(' '), checkout], [application.build, directory]] as const) {
+        if (!command) continue;
+        const built = await shell(command, cwd, options.signal, options.env);
+        if (!built.ok) throw new Error(`the node application's \`${command}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`);
+        options.signal?.throwIfAborted();
+      }
+      const port = await freePort();
+      const served = await serveByCommand({ id: application.id, kind: 'command', command: application.start, url: `http://127.0.0.1:${port}`, readySeconds: nodeReadySeconds },
+        directory, { ...options.env, PORT: String(port) }, options.budgetMs, options.log ?? (() => {}), options.wrapper);
       close = served.close; ended = served.ended;
       return served.origin;
     }

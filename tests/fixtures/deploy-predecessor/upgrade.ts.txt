@@ -16,7 +16,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
+import { servedApplication, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -314,8 +314,8 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       return rootGit('rev-parse', ref);
     },
     declaration: async () => {
-      const shown = await rootGit('show', `${ref}:.graphyard/serve.json`).catch(() => null);
-      return shown === null ? null : parseServeDeclaration(shown);
+      const shown = await rootGit('show', `${ref}:graphyard.json`).catch(() => null);
+      return shown === null ? null : servedApplication(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
     install: () => npmIn(checkout),

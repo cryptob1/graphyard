@@ -7,7 +7,7 @@ import type { Dashboard } from '../pages/dashboard';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The board's one release line (GY-1979). A repository that declares `.graphyard/serve.json`
+ * The board's one release line (GY-1979). A repository that declares a node application
  * (GY-2976) renders what the deploy unit's serve pass last served — "Serving <commit>" with the
  * merged changes main holds since it, the last build failure, a link to the declared URL, and the
  * served commit's required cases' verdict (GY-2983): "verified", "failing <case>: <step>" once a

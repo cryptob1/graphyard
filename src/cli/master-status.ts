@@ -80,7 +80,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const serving = {
     unconfigured: report.unconfigured, commit: short(report.commit), main: short(report.main), atMain: report.atMain,
     failedDeploy: report.failedDeploy ? { tip: short(report.failedDeploy.tip), reason: report.failedDeploy.reason, restoring: short(report.failedDeploy.restoring) } : null,
-    // A repository that declares no serve.json reports exactly what it reported before it (GY-2976), with the serve fields null.
+    // A repository that declares no node application reports exactly what it reported before it (GY-2976), with the serve fields null.
     ...(report.serve ? { pending: report.pending, serve: report.serve } : { serve: null }),
   };
   // GY-3204: each declared application with a versionUrl, as its host serves it against main.

@@ -1,40 +1,52 @@
-// Concern: the application a managed repository declares in .graphyard/serve.json (GY-2976).
-// The install's deploy unit checks the merged main out into its own serve checkout, runs npm ci
-// and the declared build, and restarts the declared serve command on the declared loopback port —
-// only when the build passed, so the previous build keeps serving through a failing one. It
-// records the served commit, the URL and the last build failure in .graphyard/served.json, which
-// master status, the dashboard and doctor read. A commit counts as served only when the answer on
-// the declared port is the restarted serve's own: a port another process already holds is one the
+// Concern: the node application a managed repository declares first in graphyard.json's
+// delivery.applications (GY-2976, GY-3201). The install's deploy unit
+// checks the merged main out into its own serve checkout, runs the npm install at its root and the
+// application's build in its directory, and restarts its start command there with PORT set — only
+// when the build passed, so the previous build keeps serving through a failing one. The port is a
+// free loopback port chosen on the first serve and kept in .graphyard/served.json, so the URL stays
+// the same across deploys. The record holds the served commit, the URL and the last build failure,
+// which master status, the dashboard and doctor read. A commit counts as served only when the answer on
+// the port is the restarted serve's own: a port another process already holds is one the
 // serve cannot bind, recorded as a failure whose reason names the port, and no required case runs
 // against the foreign holder (GY-2993). Once a new commit serves, the pass runs that
 // commit's own required E2E cases against the served URL (GY-2983) and records the verdict for
 // that exact commit beside it: a failing case is the release health the master acts on, never a
-// reason to stop serving or roll back. The previously served build keeps serving on the port
-// beside the served one as BASELINE_URL, so a compare case judges a new build against what was
-// live (GY-2985). A repository that declares nothing is untouched.
+// reason to stop serving or roll back. The previously served build keeps serving on a free port of
+// its own as BASELINE_URL, so a compare case judges a new build against what was live (GY-2985).
+// A repository that declares no node application is untouched.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { z } from 'zod';
+import { nodeApplicationSchema } from './model-boundary/project-applications.js';
+import { installArgv, packageManager } from './package-manager.js';
+import type { Application } from './project-applications.js';
 
-/** What a repository declares in .graphyard/serve.json: how to build the app and how to serve it. */
-export interface ServeDeclaration { build: string[]; serve: string[]; port: number }
+/** The application the serve pass serves: the first node application main's graphyard.json declares. */
+export type ServeDeclaration = Extract<Application, { kind: 'node' }>;
 
-const declarationSchema = z.object({
-  build: z.array(z.string().min(1)).min(1).max(20),
-  serve: z.array(z.string().min(1)).min(1).max(20),
-  port: z.number().int().min(1).max(65_535),
-}).strict();
-
-/** The declaration a main tip carries, or null when it declares none; a malformed one names why. */
-export function parseServeDeclaration(source: string, file = '.graphyard/serve.json'): ServeDeclaration | null {
-  if (!source.trim()) return null;
-  let raw: unknown;
-  try { raw = JSON.parse(source); } catch (error) { throw new Error(`${file} is not valid JSON: ${(error as Error).message}`); }
-  const parsed = declarationSchema.safeParse(raw);
-  if (!parsed.success) throw new Error(`${file}: ${parsed.error.issues.map(issue => `${issue.path.join('.') || '(declaration)'} ${issue.message}`).join('; ')}`);
+/** The first node application a graphyard.json declares, or null when it declares none; a malformed one names why. */
+export function servedApplication(source: string): ServeDeclaration | null {
+  let raw: any;
+  try { raw = JSON.parse(source); } catch (error) { throw new Error(`graphyard.json is not valid JSON: ${(error as Error).message}`); }
+  const declared = (Array.isArray(raw?.delivery?.applications) ? raw.delivery.applications : []).find((application: any) => application?.kind === 'node');
+  if (!declared) return null;
+  const parsed = nodeApplicationSchema.safeParse(declared);
+  if (!parsed.success) throw new Error(`graphyard.json delivery.applications ${JSON.stringify(declared.id ?? '')}: ${parsed.error.issues.map(issue => `${issue.path.join('.') || '(application)'} ${issue.message}`).join('; ')}`);
   return parsed.data;
+}
+
+/** A loopback port no process holds right now: what a node application is given as PORT (GY-3201). */
+export const freePort = () => new Promise<number>((accept, reject) => {
+  const server = createServer().once('error', reject);
+  server.listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => accept(port)); });
+});
+/** The repository's install at `root`, run once before a node application builds (GY-3200's package manager): npm ci with a lockfile, npm install without, pnpm's frozen install with a pnpm-lock.yaml; null when `root` holds no package.json. */
+export function installCommand(root: string): string[] | null {
+  if (!existsSync(join(root, 'package.json'))) return null;
+  const manager = packageManager(root);
+  return manager.name === 'pnpm' ? installArgv(manager) : ['npm', existsSync(join(root, 'package-lock.json')) ? 'ci' : 'install', '--no-audit', '--no-fund'];
 }
 
 /** The served commit's required cases, as the pass ran them against the URL it serves; `case`, `step` and `reason` name the first required case that failed, and are null when verified. */
@@ -63,10 +75,10 @@ export const answering = (url: string) => fetch(url, { signal: AbortSignal.timeo
 /** How long a restarted serve has to answer before the pass records the commit as unserved (a serve that cannot bind, a command that fails). */
 export const serveAnswerTimeoutMs = 30_000;
 
-/** The answer the pass waited for must be the restarted serve's own (GY-2993): when the ports can tell who holds the declared port, an answer from a process the pass did not start means the serve left without binding the port another process already holds — a failure whose reason names the port, never a served commit. Ports that cannot tell (no /proc, off Linux) leave the answer standing. */
-const servedByRestart = (ports: ServePorts, declaration: ServeDeclaration, url: string, served: ServeProcess) => {
-  if (ports.answersFromRestart && served.pid && ports.answersFromRestart(declaration.port, served) === false) {
-    throw new Error(`a process the serve pass did not start answers ${url}: the restarted serve exited without binding port ${declaration.port}`);
+/** The answer the pass waited for must be the restarted serve's own (GY-2993): when the ports can tell who holds the port, an answer from a process the pass did not start means the serve left without binding the port another process already holds — a failure whose reason names the port, never a served commit. Ports that cannot tell (no /proc, off Linux) leave the answer standing. */
+const servedByRestart = (ports: ServePorts, port: number, url: string, served: ServeProcess) => {
+  if (ports.answersFromRestart && served.pid && ports.answersFromRestart(port, served) === false) {
+    throw new Error(`a process the serve pass did not start answers ${url}: the restarted serve exited without binding port ${port}`);
   }
 };
 
@@ -84,18 +96,18 @@ async function waitAnswer(url: string, timeoutMs: number): Promise<boolean> {
 export interface ServePorts {
   /** Fetches the base branch and answers its tip. */
   fetch(): Promise<string>;
-  /** The declaration the fetched tip carries, or null when it declares none; a malformed one throws. */
+  /** The node application the fetched tip declares first, or null when it declares none; a malformed one throws. */
   declaration(): Promise<ServeDeclaration | null>;
   checkout(commit: string): Promise<void>;
   install(): Promise<void>;
   build(declaration: ServeDeclaration): Promise<void>;
-  /** Stops the recorded serve process and starts the declared serve command; answers the new process's identity (pid and kernel start time). */
-  restart(serve: readonly string[]): Promise<ServeProcess>;
-  /** Once a new commit serves (GY-2985): keeps `commit`'s build serving on the port beside the declared one, so a compare case judges the new build against what was live. Answers the started process's identity. */
-  baseline?(commit: string, declaration: ServeDeclaration): Promise<ServeProcess>;
+  /** Stops the recorded serve process and starts the application's start command with PORT set to `port`; answers the new process's identity (pid and kernel start time). */
+  restart(declaration: ServeDeclaration, port: number): Promise<ServeProcess>;
+  /** Once a new commit serves (GY-2985): keeps `commit`'s build serving on `port`, a free port of its own, so a compare case judges the new build against what was live. Answers the started process's identity. */
+  baseline?(commit: string, declaration: ServeDeclaration, port: number): Promise<ServeProcess>;
   /** Once a new commit serves: runs that commit's own required E2E cases against the served URL and answers their verdict; the pass records it for that exact commit. A case that fails here neither stops serving nor rolls back. `baselineUrl` is what was live's URL, or null when none serves (GY-2985). */
   check?(url: string, baselineUrl?: string | null): Promise<ServeCheck>;
-  /** Whether the declared port is still held by the process `restart` started — its process group — so the answer the pass waited for is that serve's own and not a foreign holder's (GY-2993); null when the ports cannot tell (no /proc, off Linux). */
+  /** Whether the served port is still held by the process `restart` started — its process group — so the answer the pass waited for is that serve's own and not a foreign holder's (GY-2993); null when the ports cannot tell (no /proc, off Linux). */
   answersFromRestart?(port: number, process: ServeProcess): boolean | null;
 }
 
@@ -119,15 +131,17 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   let declaration: ServeDeclaration | null = null;
   try { declaration = await ports.declaration(); } catch (error) { log(`[graphyard-serve] ${message(error)}`); }
   if (!declaration) return 'absent';
-  const url = `http://127.0.0.1:${declaration.port}`;
   const record = readServeRecord(file);
-  if (record?.commit === tip && (record.url ?? url) === url) {
+  // The port is chosen once, free, and kept in the record, so the URL stays the same across deploys and reboots.
+  const port = Number(record?.url ? new URL(record.url).port : 0) || await freePort();
+  const url = `http://127.0.0.1:${port}`;
+  if (record?.commit === tip) {
     if (await answering(url)) return 'unchanged';
     let served: ServeProcess | null = null;
     try {
-      served = await ports.restart(declaration.serve);
+      served = await ports.restart(declaration, port);
       if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the restarted serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-      servedByRestart(ports, declaration, url, served);
+      servedByRestart(ports, port, url, served);
       // The same commit serves again, so the verdict its cases earned still stands, and the baseline it was judged against keeps serving.
       await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: record?.check ?? null, baseline: record?.baseline ?? null });
       log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`);
@@ -153,20 +167,20 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   // The restart stopped the previous serve, so the new one must answer before the commit is recorded as served.
   let served: ServeProcess | null = null;
   // GY-2985: what was live before keeps serving beside the new build — the previously served
-  // commit, on the port beside the declared one, as BASELINE_URL — so a compare case judges the
+  // commit, on a free port of its own, as BASELINE_URL — so a compare case judges the
   // new build against what users had. Nothing served before (the first serve), no baseline; the
   // record keeps the baseline it tracked until a new one answers, and the baseline start stops
   // the tracked process only once its own build can replace it.
-  const baselineUrl = `http://127.0.0.1:${declaration.port + 1}`;
   let baseline: ServeBaseline | null = record?.baseline ?? null;
   try {
-    served = await ports.restart(declaration.serve);
+    served = await ports.restart(declaration, port);
     if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-    servedByRestart(ports, declaration, url, served);
+    servedByRestart(ports, port, url, served);
     const candidate = record?.commit ?? record?.baseline?.commit ?? null;
     if (candidate && ports.baseline) {
+      const baselinePort = await freePort(), baselineUrl = `http://127.0.0.1:${baselinePort}`;
       try {
-        const started = await ports.baseline(candidate, declaration);
+        const started = await ports.baseline(candidate, declaration, baselinePort);
         if (!(await waitAnswer(baselineUrl, answerTimeoutMs))) throw new Error(`the baseline serve did not answer ${baselineUrl} within ${Math.round(answerTimeoutMs / 1000)}s`);
         baseline = { commit: candidate, url: baselineUrl, pid: started.pid, started: started.started };
       } catch (error) { log(`[graphyard-serve] the baseline serve of ${candidate.slice(0, 12)} failed: ${message(error)}`); }
