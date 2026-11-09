@@ -25,7 +25,7 @@ const turboWorkspace = async () => {
   return root;
 };
 
-test('unit:npm-checkout-unchanged — a package-lock.json checkout keeps npm ci, npm run build and npm test, and containedInstall runs the command it is given', async () => {
+test('unit:tests/package-manager.test.ts — npm checkout unchanged: a package-lock.json checkout keeps npm ci, npm run build and npm test, and containedInstall runs the command it is given', async () => {
   const root = await temporaryDirectory('package-manager', tmpdir());
   write(root, { 'package.json': '{"name":"x"}', 'package-lock.json': '{}' });
   const manager = packageManager(root);
@@ -37,7 +37,7 @@ test('unit:npm-checkout-unchanged — a package-lock.json checkout keeps npm ci,
   assert.deepEqual(contained.args.slice(contained.args.indexOf('--') + 1), ['npm', ...npmCiArgs]);
 });
 
-test('unit:pnpm-install-paths — a pnpm checkout installs with pnpm install --frozen-lockfile in worktree setup, the serve pass and the trial (never through a node_modules link)', async () => {
+test('unit:tests/package-manager.test.ts — pnpm install paths: a pnpm checkout installs with pnpm install --frozen-lockfile in worktree setup, the serve pass and the trial (never through a node_modules link)', async () => {
   const root = await temporaryDirectory('package-manager', tmpdir());
   writePnpmWorkspace(root);
   assert.deepEqual(installArgv(packageManager(root)), [...pnpm10, 'install', '--frozen-lockfile']);
@@ -78,7 +78,7 @@ test('unit:pnpm-install-paths — a pnpm checkout installs with pnpm install --f
   ]);
 });
 
-test('unit:turbo-build-and-test — with turbo.json and a turbo devDependency the build and tests run through turbo on the affected packages, and a root-trigger change selects everything', async () => {
+test('unit:tests/package-manager.test.ts — turbo build and test: with turbo.json and a turbo devDependency the build and tests run through turbo on the affected packages, and a root-trigger change selects everything', async () => {
   const manager = packageManager(await turboWorkspace());
   assert.deepEqual(manager, { name: 'pnpm', version: '10.34.9', workspace: true, turbo: true });
   assert.deepEqual(buildArgv(manager, ['apps/one/page.tsx'], 'abc'), [...pnpm10, 'exec', 'turbo', 'run', 'build', '--filter=...[abc]']);
