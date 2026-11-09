@@ -1,4 +1,4 @@
-import { type RepositoryPolicy, type CompiledRule, compiledRules } from '../model/repository-policy.js';
+import { type RepositoryPolicy, type CompiledRule, compiledRules, compiledExclusion } from '../model/repository-policy.js';
 import { repositoryPolicy } from './repository-policy.js';
 import { compiled, type DeltaFile, type RiskVerdict, deltaPaths, unknownChangeReason, sensitiveReason, type DeltaSource, riskDelta, type RiskClass } from '../model/risk-class.js';
 import type { Work } from '../model/work.js';
@@ -8,18 +8,25 @@ export function riskRules(policy: RepositoryPolicy = repositoryPolicy()): readon
   if (!rules) compiled.set(policy, rules = compiledRules(policy));
   return rules;
 }
+const exclusions = new WeakMap<RepositoryPolicy, RegExp | null>();
+/** The one matcher over the policy's exclusions (`!glob`), null when it excludes nothing. */
+const exclusionOf = (policy: RepositoryPolicy) => {
+  if (!exclusions.has(policy)) exclusions.set(policy, compiledExclusion(policy));
+  return exclusions.get(policy)!;
+};
 /** The rules in force when this module loaded; readers that must follow a replaced policy call `riskRules()`. */
 export const sensitiveRules: readonly CompiledRule[] = riskRules();
 
 /**
  * The class of a delta under the repository's policy. Each sensitive path yields one reason per rule it matches, naming the
  * path and the rule; a normal delta has no reasons; an empty delta is sensitive with the one
- * reason `unknown change`.
+ * reason `unknown change`. A path an exclusion (`!glob`) matches yields no reason, whatever rule it matches.
  */
 export function classifyRisk(files: readonly DeltaFile[], policy: RepositoryPolicy = repositoryPolicy()): RiskVerdict {
   const paths = deltaPaths(files);
   if (!paths.length) return { risk: 'sensitive', reasons: [unknownChangeReason] };
-  const reasons = paths.flatMap(path => riskRules(policy).filter(({ pattern }) => pattern.test(path)).map(({ rule }) => sensitiveReason(path, rule)));
+  const excluded = exclusionOf(policy);
+  const reasons = paths.filter(path => !excluded?.test(path)).flatMap(path => riskRules(policy).filter(({ pattern }) => pattern.test(path)).map(({ rule }) => sensitiveReason(path, rule)));
   return reasons.length ? { risk: 'sensitive', reasons } : { risk: 'normal', reasons: [] };
 }
 

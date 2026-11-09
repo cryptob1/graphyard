@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { pendingOutcomeRules, releaseFailureActions, type RepositoryPolicy, defaultRepositoryPolicy, type Source, policySections, repositoryPolicyVariable, gitToplevel, configFile } from '../model/repository-policy.js';
+import { pendingOutcomeRules, releaseFailureActions, type RepositoryPolicy, type SensitiveEntry, defaultRepositoryPolicy, genericSensitiveRules, type Source, policySections, repositoryPolicyVariable, gitToplevel, configFile } from '../model/repository-policy.js';
 // ---- Per-repository policy (GY-1843) -------------------------------------------------------------
 
 /**
@@ -11,7 +11,9 @@ import { pendingOutcomeRules, releaseFailureActions, type RepositoryPolicy, defa
  * anywhere in a tree, and Graphyard's own graphyard.json declares its list like any other repository.
  *
  * A sensitive entry is one glob (documentation-glob syntax: `dir/` a tree, `*` within a segment,
- * `**` across segments) and the rule a reason cites; several entries may share a rule.
+ * `**` across segments) and the rule a reason cites; several entries may share a rule. A glob
+ * starting with `!` excludes (GY-3203): its rule says why, it removes any match of the positive
+ * list, and a list holding only exclusions keeps `genericSensitiveRules` as that positive list.
  *
  * Retired keys a policy written before GY-2876 still carries parse and are dropped: `review` and an
  * entry's `only`, whose `lane` entries only ever counted for the retired lanes, never for review.
@@ -44,11 +46,16 @@ export const repositoryPolicySchema = z.object({
   gate: z.object({ core: z.array(z.string().trim().regex(/^[a-z0-9][a-z0-9-]*$/)).max(50) }).strict().optional(),
 }).strict();
 
+/** The declared positive entries, else the generic ones, followed by every exclusion (`!glob`). */
+const sensitiveInForce = (entries: SensitiveEntry[]) => {
+  const positive = entries.filter(entry => !entry.glob.startsWith('!'));
+  return [...(positive.length ? positive : genericSensitiveRules), ...entries.filter(entry => entry.glob.startsWith('!'))];
+};
 /** The policy in force for a declaration: each section it declares, every other section's default. */
 export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
   const declared = repositoryPolicySchema.parse(input ?? {});
   return {
-    risk: declared.risk ? { sensitive: declared.risk.sensitive.filter(entry => entry.only !== 'lane').map(({ rule, glob }) => ({ rule, glob })), declared: true } : defaultRepositoryPolicy.risk,
+    risk: declared.risk ? { sensitive: sensitiveInForce(declared.risk.sensitive.filter(entry => entry.only !== 'lane').map(({ rule, glob }) => ({ rule, glob }))), declared: true } : defaultRepositoryPolicy.risk,
     e2e: {
       pendingOutcomes: declared.e2e?.pendingOutcomes ?? defaultRepositoryPolicy.e2e.pendingOutcomes,
       serve: declared.e2e?.serve ?? null,
