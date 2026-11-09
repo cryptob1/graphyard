@@ -8,7 +8,8 @@ import { trialContainerDependencies, trialContainerWords, trialHarness } from '.
 import { trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
-import { npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
+import { npmCiEnvironment } from '../cli/test-isolation.js';
+import { installArgv, packageManager } from '../package-manager.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -40,7 +41,10 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
     const lock = (path: string) => readFile(join(path, 'package-lock.json'), 'utf8').catch(() => null);
     const [own, candidate] = await Promise.all([lock(root), lock(tree)]);
     if (own !== null && own === candidate && existsSync(join(root, 'node_modules'))) await symlink(join(root, 'node_modules'), join(tree, 'node_modules'));
-    else if (candidate !== null) await defaultChildRun('npm', npmCiArgs, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining() });
+    else if (candidate !== null || packageManager(tree).name === 'pnpm') {
+      const [command, ...args] = installArgv(packageManager(tree));
+      await defaultChildRun(command!, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining() });
+    }
     const result = join(allocation, 'result.json'), script = join(allocation, 'verify.mjs');
     await writeFile(script, `
 import { verifyWorkingTree } from '${trialHarness}/src/cli/verify.ts';

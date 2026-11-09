@@ -23,6 +23,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
+import { installArgv, packageManager } from '../package-manager.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -324,11 +325,12 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     await mkdir(resolve(checkout, '..'), { recursive: true });
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
-  const npmIn = async (at: string) => {
-    // npm ci needs a lockfile; a repository without one installs. A repository with no package.json builds without npm.
+  const installIn = async (at: string) => {
+    // npm ci needs a lockfile; a repository without one installs, and a pnpm-lock.yaml installs through pnpm (GY-3200). A repository with no package.json builds without npm.
     if (!existsSync(join(at, 'package.json'))) return;
-    const locked = existsSync(join(at, 'package-lock.json'));
-    await input.run('npm', [locked ? 'ci' : 'install', '--no-audit', '--no-fund'], { cwd: at, timeoutMs: serveInstallTimeoutMs });
+    const manager = packageManager(at), locked = existsSync(join(at, 'package-lock.json'));
+    const [command, ...args] = manager.name === 'pnpm' ? installArgv(manager) : ['npm', locked ? 'ci' : 'install', '--no-audit', '--no-fund'];
+    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
   };
   const buildIn = (at: string) => async (declaration: ServeDeclaration) => {
     const [command, ...args] = declaration.build;
@@ -347,7 +349,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       return shown === null ? null : parseServeDeclaration(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
-    install: () => npmIn(checkout),
+    install: () => installIn(checkout),
     build: buildIn(checkout),
     restart: async serve => {
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
@@ -371,7 +373,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
         await mkdir(resolve(baselineCheckout, '..'), { recursive: true });
         await rootGit('worktree', 'add', '--detach', '--quiet', baselineCheckout, commit);
       }
-      await npmIn(baselineCheckout);
+      await installIn(baselineCheckout);
       await buildIn(baselineCheckout)(declaration);
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
       const [command, ...args] = declaration.serve;
