@@ -10,6 +10,7 @@ import { composeProjectName } from '../compose-preview.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { type Application } from '../project-applications.js';
+import { isPlaceholderServe, onboardingCaseId, placeholderServeRefusal } from '../model/onboarding-work.js';
 import { commandApplication, serveHead, type CommandApplication, type ServedApplication } from './serve-head.js';
 
 /** How one bound case came out of the trial's run against the served head. */
@@ -94,6 +95,12 @@ export async function runTrialE2eCases(input: {
     // daily run proves it on the host (GY-3193, merge-writer/served-previews.ts).
     if (id === 'serve' && await needsComposePreview(input.worktree, name)) {
       input.log(`left out ${proof}: it needs a Compose item preview, which the daily served run proves`);
+      continue;
+    }
+    // GY-3208: onboarding's placeholder serve runs none of the application, so only onboarding's own
+    // first case (the head answers) may pass against it; every other case fails naming it.
+    if (id === 'serve' && isPlaceholderServe(declared.serve) && name !== onboardingCaseId) {
+      cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: placeholderServeRefusal });
       continue;
     }
     if (!target) {

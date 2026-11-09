@@ -23,6 +23,8 @@ import type { FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention } from '../master/attention.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
+import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
+import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
 
 /** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
 export async function itemLedger(masterApi: (path: string) => Promise<any>, id: string): Promise<SpeedEvent[] | null> {
@@ -108,10 +110,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
       events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
+  // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
+  let placeholder = false;
+  try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...stopped, ...applicationAttention(observed)] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...stopped, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

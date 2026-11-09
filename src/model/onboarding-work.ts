@@ -23,6 +23,23 @@ export const onboardingCaseId = 'served-head';
 export const onboardingCasePath = `e2e/cases/${onboardingCaseId}.json`;
 
 /**
+ * The serve declaration onboarding writes when nothing previewable serves a head: a server that
+ * needs nothing but Node answering on a loopback port with graphyard.json. It is a placeholder
+ * (GY-3208): no case run against it exercises the application, so the merge trial fails every case
+ * but onboarding's own first one against it, and master status names it, until the repository
+ * declares the serve that runs its application.
+ */
+export const onboardingServe = {
+  command: `node -e "require('http').createServer((request,response)=>{response.setHeader('content-type','application/json');response.end(require('fs').readFileSync('graphyard.json'))}).listen(43911,'127.0.0.1')"`,
+  url: 'http://127.0.0.1:43911/',
+  readySeconds: 60,
+};
+/** Whether `serve` is the placeholder onboarding wrote, unchanged. */
+export const isPlaceholderServe = (serve: { command?: string } | null | undefined) => serve?.command === onboardingServe.command;
+/** Why a case cannot run against the placeholder, and what to declare instead. */
+export const placeholderServeRefusal = 'e2e.serve is onboarding\'s placeholder serve, which answers with graphyard.json and runs none of the application: declare the command that serves the application in graphyard.json "e2e": { "serve": { "command", "url", "readySeconds" } }, or a previewable application in delivery.applications';
+
+/**
  * The work item that carries the onboarding commit on `graphyard/onboarding` through the normal
  * gates: a chore that requires independent review and CHECKS (the repository's own, else the
  * control plane's default), so once the loop runs its reviewer reviews the head and the control
