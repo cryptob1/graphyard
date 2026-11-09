@@ -41,7 +41,7 @@ const untilSilent = async (url: string) => {
 };
 const stopServing = (root: string) => {
   const pid = readServeRecord(serveRecordPath(root))?.pid;
-  if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  if (pid) try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
 };
 /** Commits `files` to the pusher and pushes them to main; answers the new tip. */
 const push = async (pusher: string, files: Record<string, string>, what: string) => {
@@ -164,7 +164,7 @@ test('unit:tests/managed-serve.test.ts — a serve that died is served again and
     await untilAnswers(url);
 
     // The serve process dies (a reboot, a crash): the record keeps the commit, the port goes dead.
-    process.kill(first.pid!, 'SIGKILL');
+    process.kill(-first.pid!, 'SIGKILL');
     await untilSilent(url);
 
     // The re-serve path serves the build the checkout already holds and writes the NEW pid, so the
@@ -178,7 +178,7 @@ test('unit:tests/managed-serve.test.ts — a serve that died is served again and
       assert.doesNotThrow(() => process.kill(again!.pid!, 0), 'the recorded pid is alive');
       await untilAnswers(url);
       assert.equal(await servedCommit(url), commit, 'the same commit serves again');
-      process.kill(again!.pid!, 'SIGKILL');
+      process.kill(-again!.pid!, 'SIGKILL');
       await untilSilent(url);
       const kept = readServeRecord(serveRecordPath(root));
       assert.deepEqual({ commit: kept?.commit, failed: kept?.failed }, { commit, failed: null });

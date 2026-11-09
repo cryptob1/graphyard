@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 const stopServing = (root: string) => {
   const pid = readServeRecord(serveRecordPath(root))?.pid;
-  if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  if (pid) try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
 };
 /** Commits `files` to the pusher and pushes them to main; answers the new tip. */
 const push = async (pusher: string, files: Record<string, string>, what: string) => {
@@ -110,7 +110,7 @@ test('unit:served-app-runs-required-cases — a served commit is live-verified: 
       { commit: fixed.slice(0, 12), atMain: true, check: { verified: true, case: null, step: null, reason: null } });
 
     // The same commit served again keeps the verdict its cases earned.
-    process.kill(fixedRecord!.pid!, 'SIGKILL');
+    process.kill(-fixedRecord!.pid!, 'SIGKILL');
     assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'restarted');
     assert.deepEqual(readServeRecord(serveRecordPath(root))?.check, { verified: true, case: null, step: null, reason: null });
 
