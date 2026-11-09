@@ -17,7 +17,7 @@ import { specCheckCurrent, specCheckGaps } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
-import { stoppedRoles } from '../master/stopped-roles.js';
+import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import type { FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
@@ -110,7 +110,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
-    attention: [...stopped, ...applicationAttention(observed)],
+    // GY-3204: and each application whose versionUrl lags main or fails to answer.
+    attention: [...stopped, ...applicationAttention(observed)] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

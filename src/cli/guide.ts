@@ -13,7 +13,8 @@ export const guideCommands = defineCommands([
     help: [
       '  guide TOPIC                   Print one procedure topic',
       '                                (topics: claim, sync, complete, park, blocked, review, proof, upgrade, master);',
-      '                                guide with no topic lists them',
+      '                                guide with no topic lists them; guide master says how',
+      '                                Railway deploys apps from git and Graphyard observes each versionUrl',
     ],
     async run(context) { console.log(context.id ? guideText(context.id) : guideList()); },
   },

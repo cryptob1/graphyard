@@ -43,7 +43,8 @@ test('detectors classify stacks, deploy targets, CI checks, and candidate-bound 
   assert.deepEqual(node.testLayout, ['tests/']);
   const nodeDeploy = detectDeploy(scan(nodeRailway), node);
   assert.equal(nodeDeploy.target, 'railway');
-  assert.match(nodeDeploy.verification, /RAILWAY_GIT_COMMIT_SHA/);
+  assert.match(nodeDeploy.verification, /Railway deploys each application from git on its own; Graphyard deploys nothing there/);
+  assert.match(nodeDeploy.verification, /versionUrl/);
   const nodeProposal = buildProposal(scan(nodeRailway), { repository: 'owner/orders-api', runtimes: ['codex'] });
   assert.deepEqual(nodeProposal.checks, ['test', 'typecheck', 'build']);
   assert.deepEqual(nodeProposal.proofs.filter(proof => proof.command).map(proof => proof.name), ['integration:test', 'unit:typecheck']);

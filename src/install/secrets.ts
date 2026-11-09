@@ -74,8 +74,8 @@ export const installRecordSchema = z.object({
   herdrInstance: z.boolean().default(false),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
-  /** The release pipeline's deployment adapter and the plan actions --apply created for it (GY-1102). */
-  release: z.object({ adapter: z.enum(['railway', 'command']), created: z.array(z.string()).default([]) }).strict().optional(),
+  /** Retired (GY-3204): the schema-only deployment adapter a record before it stored; still read, then dropped. */
+  release: z.unknown().optional().transform(() => undefined),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 }).strict();

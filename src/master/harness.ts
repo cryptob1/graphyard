@@ -37,10 +37,11 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig, root: str
   const owned: HarnessRule[] = [
     { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values. Changing it goes through master config, which writes only the fields the master owns.' },
     ...units.allow,
-    { rule: 'Bash(railway status:*)', why: 'Read which release the deployment serves while verifying a delivery.' },
-    { rule: 'Bash(railway logs:*)', why: 'Read deployment logs when a release does not serve a delivery.' },
-    { rule: 'Bash(railway deployment:*)', why: 'List deployments and their commits to find the exact release to verify or redeploy.' },
-    { rule: 'Bash(railway redeploy:*)', why: 'Redeploy the current release after an infrastructure failure; it builds only what the base branch already holds.' },
+    // Railway deploys each application from git on its own; Graphyard observes each app's versionUrl.
+    { rule: 'Bash(railway status:*)', why: 'Railway deploys from git and Graphyard observes each app\'s versionUrl: read which release a service serves when master status names it lagging or failed.' },
+    { rule: 'Bash(railway logs:*)', why: 'Read a service\'s deploy logs when its versionUrl does not answer main: Railway builds from git, Graphyard only observes.' },
+    { rule: 'Bash(railway deployment:*)', why: 'List a service\'s deployments and their commits when its versionUrl lags main.' },
+    { rule: 'Bash(railway redeploy:*)', why: 'Redeploy a service\'s current release after an infrastructure failure; Railway builds only what the base branch already holds.' },
     { rule: 'Bash(gh run list:*)', why: 'Find the CI and workflow runs of a candidate or delivery.' },
     { rule: 'Bash(gh run view:*)', why: 'Read a run\'s jobs and logs when a gate reports a failing check.' },
     { rule: 'Bash(gh run watch:*)', why: 'Follow a run the loop is waiting on.' },
