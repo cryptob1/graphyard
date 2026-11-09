@@ -38,10 +38,12 @@ export type HeadlessExec = (command: string, args: string[], options: { cwd: str
  * last argument, or takes a registry contract's `{request}` place. A runtime without a form here
  * keeps its pane session.
  */
-const headlessForms: Record<string, { before: string[]; flags: string[]; drop?: string[] }> = {
+const headlessForms: Record<string, { program?: string; before: string[]; flags: string[]; drop?: string[] }> = {
   claude: { before: [], flags: ['-p'] },
   codex: { before: ['exec'], flags: ['--skip-git-repo-check'], drop: ['--ask-for-approval', '-a'] },
-  cursor: { before: [], flags: ['-p'] },
+  // Print mode accepts cursor-agent directly. The interactive `agent` alias can point to a
+  // host mise wrapper outside the runtime's pinned PATH and resolve a different installation.
+  cursor: { program: 'cursor-agent', before: [], flags: ['-p'] },
   pi: { before: [], flags: ['-p'] },
   opencode: { before: ['run'], flags: [] },
 };
@@ -175,7 +177,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
     let refused = '';
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? request : `${request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
-      const argv = [...wrapper, launchProgram(input.kind), ...headlessArgs(input.kind, args, prompt)];
+      const argv = [...wrapper, headlessForms[input.kind]?.program ?? launchProgram(input.kind), ...headlessArgs(input.kind, args, prompt)];
       let output: string | null = null;
       try {
         output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, input.environment), timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
