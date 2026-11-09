@@ -1,0 +1,168 @@
+{
+  "id": "node-application-preview",
+  "title": "A declared node application gets a local preview its bound case runs against",
+  "description": "The fixture project declares a node application (a directory, a build and a start command, no port). A change whose bound case needs it gets a local preview: the app is built in its directory and started on a port Graphyard assigns, the bound case passes against it, and the preview link shows the change. A change that breaks the app gets a preview whose bound case fails.",
+  "tags": [
+    "api",
+    "dashboard",
+    "preview",
+    "node-application"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create a change needing the node app",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-node-home"
+            ],
+            "text": "The fixture node app's page shows this change"
+          }
+        ],
+        "description": "A change whose declared application case needs the fixture's node application.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}}",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "id": "id",
+        "key": "key"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "create a change that breaks the node app",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "criteria": [
+          {
+            "id": "AC-1",
+            "proofs": [
+              "e2e:fixture-node-home"
+            ],
+            "text": "The fixture node app's page shows this change"
+          }
+        ],
+        "description": "A change whose declared application case needs the fixture's node application.",
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "priority": 3,
+        "title": "E2E case {{case}} run {{run}} broken",
+        "type": "feature"
+      },
+      "status": 200,
+      "expect": [],
+      "save": {
+        "idB": "id",
+        "keyB": "key"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the change's node app preview runs and its bound case passes",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.path",
+          "equals": "/preview/{{key}}"
+        },
+        {
+          "path": "preview.state",
+          "equals": "running"
+        },
+        {
+          "path": "preview.runner",
+          "equals": "local"
+        },
+        {
+          "path": "preview.application",
+          "equals": "web"
+        },
+        {
+          "path": "preview.cases.0.case",
+          "equals": "fixture-node-home"
+        },
+        {
+          "path": "preview.cases.0.result",
+          "equals": "pass"
+        }
+      ],
+      "waitSeconds": 300
+    },
+    {
+      "kind": "http",
+      "name": "the node app preview serves",
+      "method": "GET",
+      "path": "/preview/{{key}}",
+      "status": 200,
+      "expect": []
+    },
+    {
+      "kind": "browser",
+      "name": "open the node app's preview",
+      "action": "open",
+      "path": "/preview/{{key}}"
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "Fixture node app",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "http",
+      "name": "the broken app's preview fails its bound case",
+      "method": "GET",
+      "path": "/api/work/{{idB}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "preview.state",
+          "equals": "failed"
+        },
+        {
+          "path": "preview.application",
+          "equals": "web"
+        },
+        {
+          "path": "preview.cases.0.case",
+          "equals": "fixture-node-home"
+        },
+        {
+          "path": "preview.cases.0.result",
+          "equals": "fail"
+        }
+      ],
+      "waitSeconds": 300
+    }
+  ]
+}
