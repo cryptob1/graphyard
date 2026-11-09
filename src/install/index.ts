@@ -700,7 +700,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
 function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
   const { policy, committed } = session.delivery;
   return { mode: policy.mode, committed, preMerge: requiredPullRequestChecks(policy),
-    perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
+    perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check) };
 }
 
 
@@ -743,7 +743,7 @@ export interface InstallSummary {
   deployKey: string | null;
   health: boolean; status: { actor: string; role: string; repository: string };
   profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
-  release: { mode: 'local' | 'release-candidate' | 'per-pr'; adapter: 'railway' | 'command'; created: string[]; pending: { id: string; command?: string; human?: string }[] };
+  release: { mode: 'local' | 'release-candidate' | 'per-pr' };
   /** `--observe-only` (GY-1846): every action the plan held, which a later full install performs. */
   held?: { id: string; title: string; held: string }[];
 }
@@ -900,7 +900,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const deployKey = observeOnly ? null : await ensure(session.directory, session.inputs.repository, gh);
   if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
 
-  const release: InstallSummary['release'] = { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] };
+  const release: InstallSummary['release'] = { mode: session.delivery.policy.mode };
 
   const status = await authenticatedStatus(session, url);
   const profiles = observeOnly ? observedProfiles() : await registerProfiles(session, url);
@@ -922,7 +922,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: tokenFile(session.directory, principal.id) })),
     deployKey,
     health, status, profiles, drift: plan.drift,
-    nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : [...nextSteps(session, url, profiles), ...release.pending.map(action => `${action.human ?? 'Pending'} Command: ${action.command}`)],
+    nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : nextSteps(session, url, profiles),
     release,
     ...(observeOnly ? { held: plan.actions.filter(action => action.state === 'held').map(action => ({ id: action.id, title: action.title, held: action.held! })) } : {}),
   };

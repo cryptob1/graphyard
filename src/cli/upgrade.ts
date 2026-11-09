@@ -18,7 +18,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { npmInstallArguments, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
+import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
@@ -324,10 +324,10 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     await mkdir(resolve(checkout, '..'), { recursive: true });
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
-  // The install runs once at the repository root, where a workspace's lockfile is; a repository with no package.json builds without npm.
-  const npmIn = async (at: string) => {
-    const install = npmInstallArguments(at);
-    if (install) await input.run('npm', install, { cwd: at, timeoutMs: serveInstallTimeoutMs });
+  // The install runs once at the repository root, where a workspace's lockfile is (GY-3200's package manager); a repository with no package.json builds without one.
+  const installIn = async (at: string) => {
+    const [command, ...args] = installCommand(at) ?? [];
+    if (command) await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
   };
   const buildIn = (at: string) => async (application: ServeDeclaration) => {
     if (application.build) await input.run('sh', ['-c', application.build], { cwd: join(at, application.directory), timeoutMs: serveInstallTimeoutMs });
@@ -353,7 +353,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       return shown === null ? null : servedApplication(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
-    install: () => npmIn(checkout),
+    install: () => installIn(checkout),
     build: buildIn(checkout),
     restart: async (application, port) => {
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
@@ -369,7 +369,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
         await mkdir(resolve(baselineCheckout, '..'), { recursive: true });
         await rootGit('worktree', 'add', '--detach', '--quiet', baselineCheckout, commit);
       }
-      await npmIn(baselineCheckout);
+      await installIn(baselineCheckout);
       await buildIn(baselineCheckout)(application);
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
       return start(baselineCheckout, application, port);

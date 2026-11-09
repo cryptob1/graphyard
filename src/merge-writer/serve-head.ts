@@ -8,7 +8,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import { buildStaticSite, groupBuildShell, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment, type ComposeBounds, type Docker } from '../compose-preview.js';
 import type { Application } from '../project-applications.js';
-import { freePort, npmInstallArguments } from '../serve-app.js';
+import { freePort, installCommand } from '../serve-app.js';
 import { trialContainerWaiting } from './trial-load.js';
 import type { E2eServe } from '../model/repository-policy.js';
 
@@ -97,8 +97,8 @@ export function serveHead(checkout: string, application: ServedApplication, opti
     }
     if (application.kind === 'node') {
       const shell = options.shell ?? groupBuildShell(options.budgetMs, options.wrapper);
-      const install = npmInstallArguments(checkout), directory = join(checkout, application.directory);
-      for (const [command, cwd] of [[install && `npm ${install.join(' ')}`, checkout], [application.build, directory]] as const) {
+      const install = installCommand(checkout), directory = join(checkout, application.directory);
+      for (const [command, cwd] of [[install && install.join(' '), checkout], [application.build, directory]] as const) {
         if (!command) continue;
         const built = await shell(command, cwd, options.signal, options.env);
         if (!built.ok) throw new Error(`the node application's \`${command}\` failed: ${built.output.trim().split('\n').slice(-5).join(' | ').slice(0, 900)}`);

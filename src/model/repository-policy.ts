@@ -52,11 +52,16 @@ const globSource = (pattern: string) => {
   const source = glob.endsWith('/') ? `${glob}**` : glob;
   return source.split(/(\*\*\/?|\*|\?)/).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('');
 };
-/** The rules a policy applies to `use`, grouped by rule name in declaration order. */
+/** The rules a policy applies to `use`, grouped by rule name in declaration order; exclusions (`!glob`) are left to `compiledExclusion`. */
 export function compiledRules(policy: Pick<RepositoryPolicy, 'risk'>): CompiledRule[] {
   const rules = new Map<string, string[]>();
-  for (const entry of policy.risk.sensitive) rules.set(entry.rule, [...(rules.get(entry.rule) ?? []), entry.glob]);
+  for (const entry of policy.risk.sensitive) if (!entry.glob.startsWith('!')) rules.set(entry.rule, [...(rules.get(entry.rule) ?? []), entry.glob]);
   return [...rules].map(([rule, globs]) => ({ rule, globs, pattern: new RegExp(`^(?:${globs.map(globSource).join('|')})$`) }));
+}
+/** One matcher over every exclusion (GY-3203): a path it matches is sensitive under no rule. Null when the policy excludes nothing. */
+export function compiledExclusion(policy: Pick<RepositoryPolicy, 'risk'>): RegExp | null {
+  const globs = policy.risk.sensitive.filter(entry => entry.glob.startsWith('!')).map(entry => entry.glob.slice(1));
+  return globs.length ? new RegExp(`^(?:${globs.map(globSource).join('|')})$`) : null;
 }
 /**
  * The literal head of a glob, up to its first wildcard: the surface a directory scope must overlap to

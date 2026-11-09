@@ -17,9 +17,12 @@ import { specCheckCurrent, specCheckGaps } from '../model/spec-check.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
-import { stoppedRoles } from '../master/stopped-roles.js';
+import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import type { FleetView } from '../model/registry.js';
+import { observeApplications } from '../production-watch.js';
+import { applicationAttention } from '../master/attention.js';
+import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 
 /** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
 export async function itemLedger(masterApi: (path: string) => Promise<any>, id: string): Promise<SpeedEvent[] | null> {
@@ -78,6 +81,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // A repository that declares no node application reports exactly what it reported before it (GY-2976), with the serve fields null.
     ...(report.serve ? { pending: report.pending, serve: report.serve } : { serve: null }),
   };
+  // GY-3204: each declared application with a versionUrl, as its host serves it against main.
+  let declared: ReturnType<typeof loadProjectDelivery>['applications'] = [];
+  try { declared = loadProjectDelivery({}, root).applications; } catch { /* an unparseable graphyard.json declares nothing to observe */ }
+  const observed = await observeApplications(declared, report.main, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
+  const applications = observed.map(app => ({ id: app.id, serving: short(app.serving), main: short(app.main), state: app.state, ...(app.reason ? { reason: app.reason } : {}) }));
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
@@ -102,7 +110,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
-    attention: stopped,
+    // GY-3204: and each application whose versionUrl lags main or fails to answer.
+    attention: [...stopped, ...applicationAttention(observed)] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -110,6 +119,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     controlPlaneUpdate: controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now),
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
+    applications,
     // GY-3101: the stalled-yard alert. On, with the stop it last recorded; off names itself, because no run.alertUrl is configured.
     alerts: master.run.alertUrl
       ? { on: true, url: master.run.alertUrl, minutes: alertMinutesOf(master.run), stoppedAt: state?.alerts.stoppedAt ?? null, lastAlertAt: state?.alerts.lastAlertAt ?? null }

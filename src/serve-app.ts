@@ -20,6 +20,7 @@ import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { nodeApplicationSchema } from './model-boundary/project-applications.js';
+import { installArgv, packageManager } from './package-manager.js';
 import type { Application } from './project-applications.js';
 
 /** The application the serve pass serves: the first node application main's graphyard.json declares. */
@@ -41,9 +42,12 @@ export const freePort = () => new Promise<number>((accept, reject) => {
   const server = createServer().once('error', reject);
   server.listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => accept(port)); });
 });
-/** The repository's npm install at `root`, run once before a node application builds: npm ci with a lockfile, npm install without; null when `root` holds no package.json. */
-export const npmInstallArguments = (root: string): string[] | null =>
-  existsSync(join(root, 'package.json')) ? [existsSync(join(root, 'package-lock.json')) ? 'ci' : 'install', '--no-audit', '--no-fund'] : null;
+/** The repository's install at `root`, run once before a node application builds (GY-3200's package manager): npm ci with a lockfile, npm install without, pnpm's frozen install with a pnpm-lock.yaml; null when `root` holds no package.json. */
+export function installCommand(root: string): string[] | null {
+  if (!existsSync(join(root, 'package.json'))) return null;
+  const manager = packageManager(root);
+  return manager.name === 'pnpm' ? installArgv(manager) : ['npm', existsSync(join(root, 'package-lock.json')) ? 'ci' : 'install', '--no-audit', '--no-fund'];
+}
 
 /** The served commit's required cases, as the pass ran them against the URL it serves; `case`, `step` and `reason` name the first required case that failed, and are null when verified. */
 export interface ServeCheck { verified: boolean; case: string | null; step: string | null; reason: string | null }
