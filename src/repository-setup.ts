@@ -16,7 +16,8 @@ import { parseRepositoryConfig } from './model-boundary/documentation.js';
 import { repositoryConfigFile, type RepositoryConfig } from './model/documentation.js';
 import { deliveryPolicySchema } from './model-boundary/delivery-policy.js';
 import { generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
-import { onboardingCaseId, onboardingCasePath } from './model/onboarding-work.js';
+import { onboardingCaseId, onboardingCasePath, onboardingServe } from './model/onboarding-work.js';
+export { onboardingServe };
 import { effectiveDelivery } from './project-applications.js';
 import { forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
@@ -449,18 +450,6 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
   }
   return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: [], applied, unchanged, drift, wroteServe: writeServe, firstCase };
 }
-
-/**
- * The serve declaration onboarding writes when nothing previewable serves a head: a server that
- * needs nothing but Node answering on a loopback port, so a trial can serve any checkout and run
- * its cases against it. A repository with a real application replaces it with the declaration that
- * serves that application.
- */
-export const onboardingServe = {
-  command: `node -e "require('http').createServer((request,response)=>{response.setHeader('content-type','application/json');response.end(require('fs').readFileSync('graphyard.json'))}).listen(43911,'127.0.0.1')"`,
-  url: 'http://127.0.0.1:43911/',
-  readySeconds: 60,
-};
 
 /** The first case onboarding writes (e2e/cases/served-head.json): the served head answers. */
 const onboardingFirstCase = () => ({

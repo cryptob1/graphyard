@@ -1,0 +1,14 @@
+{
+  "id": "placeholder-serve-fails",
+  "title": "A case run against onboarding's placeholder serve fails, naming the placeholder",
+  "description": "In a fixture repository onboarded with no application, so onboarding wrote its placeholder e2e.serve, an HTTP case the merge trial runs fails with a reason naming the placeholder serve, and master status carries the placeholder line; once the repository declares a real serve command, the same case runs against it and passes and the line is gone.",
+  "tags": ["onboarding", "serve"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the placeholder serve fails a case, then a declared serve passes it",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/placeholder-serve-fails.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
