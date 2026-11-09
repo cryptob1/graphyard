@@ -59,11 +59,11 @@ test('unit:tests/node-pin.test.ts — no declaration leaves PATH unchanged and r
   const ran: string[][] = [];
   const running = (version: string) => async (command: string, args: string[]) => {
     ran.push([command, ...args]);
-    return command === 'node' ? `${version}\n` : 'npm notice run npx\n/cache/_npx/abc/node_modules/node/bin/node\n';
+    return command === 'node' ? `${version}\n` : 'npm notice run npx\n/cache/_npx/abc/node_modules/node-linux-x64/bin/node\n';
   };
-  assert.equal(await pinnedNodePath(pinned, '/shims:/usr/bin', running('26.13.0')), '/cache/_npx/abc/node_modules/node/bin:/shims:/usr/bin');
+  assert.equal(await pinnedNodePath(pinned, '/shims:/usr/bin', running('26.13.0')), '/cache/_npx/abc/node_modules/node-linux-x64/bin:/shims:/usr/bin');
   assert.deepEqual(ran, [['node', '-p', 'process.versions.node'], nodeFetchArgv(22)]);
-  assert.deepEqual(nodeFetchArgv(22), ['npm', 'exec', '--yes', '--allow-scripts=node', '--package=node@22', '--', 'node', '-p', 'process.execPath']);
+  assert.deepEqual(nodeFetchArgv(22), ['npm', 'exec', '--yes', `--package=node-${process.platform}-${process.arch}@22`, '--', 'node', '-p', 'process.execPath']);
   // The running node already is the pinned major: nothing is fetched.
   ran.length = 0;
   assert.equal(await pinnedNodePath(pinned, '/shims:/usr/bin', running('22.4.0')), '/shims:/usr/bin');

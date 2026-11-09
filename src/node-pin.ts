@@ -38,11 +38,11 @@ export function nodePin(root: string): number | null {
 
 /**
  * Prints the path of a node of that major, fetched once into npm's cache (_npx) and reused from it.
- * `--package`, not `-p`: `npm exec -p` is npm's --parseable, which runs the package with `node -p …`
- * as its script. npm 12 runs an install script only for a package it is allowed for, and the node
- * package places its binary in one; npm 11 runs it regardless.
+ * `--package`, not `-p` (`npm exec -p` is npm's --parseable), and the platform's own binary package
+ * rather than `node`, which only places that binary from an install script: npm 12 runs none unless
+ * allowed, and npm 11.19 refuses the allowance in the script's own nested install.
  */
-export const nodeFetchArgv = (pin: number) => ['npm', 'exec', '--yes', '--allow-scripts=node', `--package=node@${pin}`, '--', 'node', '-p', 'process.execPath'];
+export const nodeFetchArgv = (pin: number) => ['npm', 'exec', '--yes', `--package=node-${process.platform}-${process.arch}@${pin}`, '--', 'node', '-p', 'process.execPath'];
 
 /**
  * `path` with the pinned major's node first, or `path` itself when the checkout pins nothing or

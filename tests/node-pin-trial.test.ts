@@ -49,7 +49,7 @@ test(`integration:node-pin-trial — a pnpm workspace with engine-strict=true an
     timeoutMs: 300_000, environment: { PATH: process.env.PATH! }, run, retries: 0,
   });
   assert.equal(trial.build, 'pass', trial.logTail);
-  assert.match(trial.logTail, new RegExp(`--package=node@${pin} -- node -p process\\.execPath`));
+  assert.match(trial.logTail, new RegExp(`--package=node-${process.platform}-${process.arch}@${pin} -- node -p process\\.execPath`));
   const built = /^packages\/shared build: node (v\d+)\./m.exec(trial.logTail)?.[1];
   assert.equal(built, `v${pin}`, trial.logTail);
   assert.deepEqual(trial.tests.failed, [], trial.logTail);
