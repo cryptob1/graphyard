@@ -11,12 +11,14 @@ import { previewModes, maxCandidateChanges, boundCaseId, applicationProblems, de
 
 const relativePath = (what: string) => z.string().trim().min(1).max(300)
   .refine(path => !path.startsWith('/') && !path.split('/').some(segment => segment === '..') && !/[\s\u0000-\u001f]/.test(path), `${what} is a repository-relative path without .. segments or whitespace`);
+/** Where the deployed application answers the commit it serves (JSON `commit` or `sha`, or plain text); Graphyard only reads it. */
+const versionUrl = z.string().trim().url().max(500).refine(url => /^https?:/.test(url), 'A versionUrl is an http or https URL').optional();
 const applicationId = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,39}$/, 'An application id is 1-40 lowercase letters, digits or hyphens, starting with a letter or digit');
 
 /** A static site: the directory its build writes, and the command that builds it (null: the directory is served as committed). */
-export const staticApplicationSchema = z.object({ id: applicationId, kind: z.literal('static'), directory: relativePath('A static application directory'), build: z.string().trim().min(1).max(500).nullable().default(null) }).strict();
+export const staticApplicationSchema = z.object({ id: applicationId, kind: z.literal('static'), directory: relativePath('A static application directory'), build: z.string().trim().min(1).max(500).nullable().default(null), versionUrl }).strict();
 /** A Compose project: its file, the service that answers HTTP and that service's container port. */
-export const composeApplicationSchema = z.object({ id: applicationId, kind: z.literal('compose'), file: relativePath('A Compose file'), service: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'A Compose service name'), port: z.number().int().min(1).max(65535) }).strict();
+export const composeApplicationSchema = z.object({ id: applicationId, kind: z.literal('compose'), file: relativePath('A Compose file'), service: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'A Compose service name'), port: z.number().int().min(1).max(65535), versionUrl }).strict();
 export const applicationSchema = z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema]);
 
 /** The fields `delivery` gains for the rapid path; every one optional, so a policy committed before them still parses. */
