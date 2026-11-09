@@ -812,6 +812,8 @@ export async function mergeWriterStep(cycle: Cycle) {
   }
   // GY-3182: each flight settles on its own, while the others run on.
   const settled = [...live].filter(flight => flight.settled);
+  // GY-3205: the heads whose flight recorded its own last word (kept, refused, merged) after this cycle's snapshot was read: the reconcile below must not settle the intent the snapshot still shows open.
+  const settledNow = new Set<string>();
   for (const flight of settled) {
     changed = true;
     const settledAs = flight.settled!;
@@ -843,6 +845,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           continue;
         }
         const { outcome } = result;
+        settledNow.add(itemKey);
         if (outcome.outcome === 'merged' || outcome.outcome === 'reconciled') {
           writer.lastMergeAt = at();
           // GY-2079: this head's trial passed — the yields' evidence that the host completes trials.
@@ -925,7 +928,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
   if (busy.size < parallel && ![...live].some(flight => flight.revert || flight.alone) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {
-    const free = snapshot.work.filter(item => !busy.has(item.key));
+    const free = snapshot.work.filter(item => !busy.has(item.key) && !settledNow.has(item.key));
     const ledger = snapshotLedger(free);
     // Intents a crash left open are settled against the base before any new merge (AC-5); the next cycle reads the snapshot they changed.
     // Each item's reconcile is its own attempt (GY-1852), so a pushed or reconciled record retried later never reuses a key with a new instant or tip.

@@ -1,0 +1,15 @@
+{
+  "id": "merge-kept-trial-once",
+  "title": "A head whose trial passed ahead of review is not trialled a second time",
+  "description": "The real merge writer over a real temporary Postgres control plane and a scratch remote: an unreviewed head's trial passes and settles as kept in the same cycle whose snapshot still shows the flight's intent open. The reconcile leaves that intent alone, the kept-trial marker stays on the ledger, no second trial starts while review is pending, and the head lands on the kept result once approved — exactly one trial run.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a kept trial survives the cycle that settled it and is run once",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-kept-trial-once.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
