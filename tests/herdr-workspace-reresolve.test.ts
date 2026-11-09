@@ -41,7 +41,7 @@ async function installed(workspace: string) {
 const stored = async (root: string) => JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8')).herdrWorkspace;
 const reresolvingOn = (workspaces: string[]) => (root: string, config: MasterConfig) => reresolveHerdrWorkspace(root, config, current => liveHerdrWorkspace(current, herdr(workspaces)));
 
-test('unit:herdr-workspace-reconfigured-when-gone — the cycle reload replaces a workspace Herdr no longer lists with the master agent\'s live one, and leaves a live one alone', async () => {
+test('unit:herdr-workspace-reconfigured-when-gone — the cycle reload replaces a workspace Herdr no longer lists with its own labelled one, and leaves a live one alone', async () => {
   const root = await installed('w1V');
   const live = liveMasterConfig(root, await loadMasterConfig(root), loadMasterConfig, () => Date.parse(at), reresolvingOn(['w2A', 'w4F']));
   const reload = await live.reload(true);
@@ -51,8 +51,8 @@ test('unit:herdr-workspace-reconfigured-when-gone — the cycle reload replaces 
   assert.equal(live.current.herdrWorkspace, 'w4F', 'the loop launches into the new workspace from this cycle on');
   assert.equal(await stored(root), 'w4F', 'master.json records the switch');
   assert.equal((await live.reload(true)).workspace, null, 'a live workspace is left as it is');
-  // With no master agent in any workspace, the first Herdr lists is taken.
-  assert.equal((await liveHerdrWorkspace({ herdrWorkspace: 'w1V', masterAgentName: 'absent' }, herdr(['w2A', 'w4F'])))?.to, 'w2A');
+  // Without an install identity, never guess which workspace belongs to it.
+  assert.equal(await liveHerdrWorkspace({ herdrWorkspace: 'w1V', masterAgentName: 'absent' }, herdr(['w2A', 'w4F'])), null);
   assert.equal(await liveHerdrWorkspace({ herdrWorkspace: 'w1V', masterAgentName: 'absent' }, herdr([])), null, 'nothing to adopt when Herdr lists no workspace');
 });
 
@@ -78,7 +78,7 @@ test('unit:herdr-workspace-switch-on-ledger — the switch is recorded on the lo
   const switched = state.actions[`config:herdr-workspace:${at}`];
   assert.equal(switched?.kind, 'config');
   assert.equal(switched.state, 'done');
-  assert.match(switched.detail, /^Switched herdrWorkspace from w1V to w4F: Recreated graphyard-owner-project/);
+  assert.match(switched.detail, /^Switched herdrWorkspace from w1V to w4F: Recovered graphyard-owner-project/);
   assert.ok(noted.some(action => action.detail === switched.detail), 'the loop logs the switch it recorded');
   const health = await herdrWorkspaceHealth(live.current, herdr(['w4F']));
   assert.deepEqual([health.exists, health.reason], [true, null], 'launches go to a workspace Herdr lists, so the setup fault is gone');

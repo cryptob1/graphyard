@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
@@ -54,6 +56,9 @@ test('retired private-instance and rebind options are unknown, and redeploy stop
   for (const flag of ['--herdr-instance', '--herdr-rebind']) {
     assert.throws(() => installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/app', flag]), /Unknown option/);
   }
+  const rejected = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), 'init', '--herdr-rebind'], { encoding: 'utf8' });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /Unknown option.*herdr-rebind/);
   const args = redeployArguments({ repository: 'acme/app', provider: 'compose', baseBranch: 'main', herdrInstance: true, principals: [] } as any, 'image');
   assert.ok(!args.includes('--herdr-instance'));
   assert.ok(!args.includes('--observe-only'), 'a legacy full install remains a full install');

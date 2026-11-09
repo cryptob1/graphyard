@@ -53,8 +53,7 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new LauncherUnavailableError('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new LauncherUnavailableError('Configured Graphyard CLI launcher is unavailable: restore the deploy checkout it names, or set cliPath with graphyard master setup'); }
-  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441), and
-  // every herdr call reaches the install's own instance when it records one (GY-1511).
+  // Every new launch and sweep uses this install's workspace on the main server.
   applyHerdrConfig(config);
   return config;
 }

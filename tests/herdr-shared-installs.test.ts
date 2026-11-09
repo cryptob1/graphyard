@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { execFileSync } from 'node:child_process';
-import { readFile, writeFile, mkdir, symlink, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, symlink, copyFile, appendFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hostname } from 'node:os';
@@ -73,6 +73,11 @@ test('two installations bind, dispatch and recover independently on one main Her
         herdr: true, runHerdr: sync, pluginHome,
         fetcher: async () => new Response(JSON.stringify({ repository: `acme/${name}`, actor: { id: name, role: 'worker' } })),
       });
+      if (name === 'alpha') {
+        const manifest = await readFile(join(pluginHome, 'herdr-plugin.toml'), 'utf8');
+        await writeFile(join(pluginHome, 'herdr-plugin.toml'), manifest.replace('0.2.0', '0.3.0'));
+        await appendFile(join(pluginHome, 'integrations/herdr/ledger.mjs'), '\n// newer plugin release\n');
+      }
       const workspace = result.herdr!.workspace!;
       workspaces.push(workspace);
       await setupMaster(root, { url: `https://${name}.example`, token: 'coordinator'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: workspace },
@@ -102,6 +107,6 @@ test('two installations bind, dispatch and recover independently on one main Her
       const inventory = JSON.parse(await run('herdr', ['workspace', 'list'])).result.workspaces;
       assert.equal(bindingFor(config, { HERDR_WORKSPACE_ID: switched.to }, home, inventory).url, binding.url, 'the plugin recognizes the recovered workspace by its install label');
     }
-    assert.match(await readFile(join(pluginHome, 'integrations/herdr/ledger.mjs'), 'utf8'), /readBinding/);
+    assert.match(await readFile(join(pluginHome, 'integrations/herdr/ledger.mjs'), 'utf8'), /newer plugin release/, 'an older CLI cannot downgrade the shared plugin');
   } finally { scopeHerdr(null); await server.terminate(); }
 });

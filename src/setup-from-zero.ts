@@ -11,7 +11,6 @@ import { installUnitsFile, parseInstallUnits } from './install/units.js';
 import { defaultChildRun } from './child-runner.js';
 import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrServerUnit } from './herdr-host.js';
-import { installIdFor } from './install/types.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { landlockRefusal } from './landlock.js';
 
@@ -189,9 +188,7 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
   let units;
   try { units = parseInstallUnits(await readFile(resolve(root, installUnitsFile), 'utf8'), installUnitsFile, () => { throw new Error('absent'); }); } catch { return []; }
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'unit-overrides', status, step: setupSteps.unitOverrides, detail });
-  // The Herdr server this install runs: its own instance's unit when master.json records one, else the host's default.
-  const master = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(JSON.parse).catch(() => null);
-  const herdr = herdrServerUnit(master?.herdrInstance && typeof master.repository === 'string' ? installIdFor(master.repository) : null);
+  const herdr = herdrServerUnit(null);
   const overrides = new Map<string, string>();
   try {
     for (const unit of [units.master, herdr]) {

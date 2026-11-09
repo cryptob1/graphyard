@@ -80,9 +80,7 @@ const listHerdrWorkspaces = async (run?: ChildRun): Promise<string[]> => {
 let workspaceRefused = false;
 export const herdrWorkspaceRefused = () => workspaceRefused;
 /**
- * GY-2600: the live workspace to replace a configured one Herdr no longer lists — the one the
- * master's own agent runs in, else the first Herdr lists — or null while the configured one lives,
- * Herdr cannot be read, or it lists none.
+ * Recover a missing workspace by this install's label. Never adopt another install's workspace.
  */
 export async function liveHerdrWorkspace(config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'> & { repository?: string; root?: string }, run?: ChildRun): Promise<{ from: string; to: string; reason: string } | null> {
   const from = config.herdrWorkspace;
@@ -96,13 +94,9 @@ export async function liveHerdrWorkspace(config: Pick<MasterConfig, 'herdrWorksp
     const created = found ? null : await herdrJson(['workspace', 'create', '--cwd', config.root ?? process.cwd(), '--label', label, '--no-focus'], run);
     const to = found ?? created?.workspace?.workspace_id ?? created?.workspace_id;
     if (!to) throw new Error('Herdr returned no installation workspace');
-    return { from, to, reason: `Recreated ${label} after workspace ${from} disappeared` };
+    return { from, to, reason: `Recovered ${label} after workspace ${from} disappeared` };
   }
-  if (!listed.length) return null;
-  const agents = await herdrJson(['agent', 'list'], run).then(result => (result?.agents ?? []) as HerdrAgent[], () => []);
-  const own = agents.find(agent => agent.name === config.masterAgentName && agent.workspace_id && listed.includes(agent.workspace_id))?.workspace_id;
-  const to = own ?? listed[0];
-  return { from, to, reason: `Herdr no longer lists workspace ${from} (it lists ${listed.join(', ')}), so every launch into it refused; adopted ${to}, ${own ? `where the master agent ${config.masterAgentName} runs` : 'the first workspace Herdr lists'}` };
+  return null;
 }
 
 export type HerdrAgent = { name?: string; pane_id?: string; workspace_id?: string; agent?: string | null; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };

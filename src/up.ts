@@ -24,7 +24,7 @@ import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
-import { herdrAttachCommand, type HerdrInstance } from './master/herdr.js';
+import { herdrAttachCommand } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, removeHeldCliPin, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
@@ -226,14 +226,14 @@ export interface UpDependencies {
 export interface UpHerdr {
   /** The herdr binary, installed with Herdr's own installer when missing. */
   binary(): Promise<{ binary: string; installed: boolean }>;
-  /** The instance's server running (a user unit when it was not); for an own instance, its workspace for this repository too. */
-  server(binary: string, instance: HerdrInstance | null, installId: string): Promise<{ started: boolean; unit: string | null; workspace: string | null }>;
-  /** Records the own instance and its workspace in .graphyard/master.json. */
-  record(instance: HerdrInstance | null, workspace: string | null): Promise<void>;
-  /** The server the graphyard plugin in INSTANCE (null: the default) is bound to and whether Herdr reports it enabled; null when it is not configured. */
-  plugin(instance: HerdrInstance | null): Promise<{ url: string; enabled: boolean } | null>;
-  /** Enables the graphyard plugin in INSTANCE; a refusal is a HerdrSetupFailure of step plugin. */
-  enable(instance: HerdrInstance | null): Promise<void>;
+  /** The main server running, with this install's named workspace. */
+  server(binary: string, installId: string): Promise<{ started: boolean; unit: string | null; workspace: string | null }>;
+  /** Records the main workspace and drains any legacy private server. */
+  record(workspace: string | null): Promise<void>;
+  /** This install's main-server binding and whether Herdr reports the shared plugin enabled. */
+  plugin(): Promise<{ url: string; enabled: boolean } | null>;
+  /** Enables the shared graphyard plugin. */
+  enable(): Promise<void>;
 }
 
 export interface UpResult {
@@ -656,9 +656,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     let herdrWorkspace: string | null = null;
     if (herdrHost && herdrBinary && !state.noHerdr) {
       try {
-        const server = await herdrHost.server(herdrBinary, null, installIdFor(request.repository));
+        const server = await herdrHost.server(herdrBinary, installIdFor(request.repository));
         herdrWorkspace = server.workspace;
-        if (herdrWorkspace) await herdrHost.record(null, herdrWorkspace).catch(() => {});
+        if (herdrWorkspace) await herdrHost.record(herdrWorkspace).catch(() => {});
         if (server.started) deps.emit({ kind: 'note', text: `The Herdr server was not running; it now runs as the user unit ${server.unit}, which restarts it after a failure or a reboot.` });
       } catch (error) { await leaveHerdrOut(error); }
     }
@@ -710,7 +710,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const where = " in the host's main Herdr";
       const disabled = 'bound to this install\'s server but not enabled';
       const unbound = async () => {
-        const plugin = await herdrHost.plugin(null).catch(() => null);
+        const plugin = await herdrHost.plugin().catch(() => null);
         if (!plugin) return 'not configured';
         if (!server || plugin.url !== server) return `bound to ${plugin.url}`;
         return plugin.enabled ? null : disabled;
@@ -725,14 +725,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       let refused: HerdrSetupFailure | null = null;
       if (wrong === disabled) {
         deps.emit({ kind: 'note', text: `Herdr's graphyard plugin is ${disabled}; enabling it` });
-        try { await herdrHost.enable(null); wrong = await unbound(); } catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; refused = error; }
+        try { await herdrHost.enable(); wrong = await unbound(); } catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; refused = error; }
       }
       if (refused) await leaveHerdrOut(refused);
       else if (wrong === disabled) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${where} is bound to ${server} but Herdr still reports it disabled after enabling it`));
       else if (wrong) await leaveHerdrOut(new HerdrSetupFailure('plugin', `the graphyard plugin${where} is ${wrong} after the install linked it, not to ${server ?? 'this install\'s server'}`));
     }
     // Persist the workspace after setup creates master.json, and drain any legacy private server.
-    if (herdrHost && !state.noHerdr) await herdrHost.record(null, herdrWorkspace);
+    if (herdrHost && !state.noHerdr) await herdrHost.record(herdrWorkspace);
     if (herdrHost && !state.noHerdr) herdrAttach = herdrAttachCommand(null);
     if (herdrAttach) deps.emit({ kind: 'note', text: `Watch this install's agents in Herdr: ${herdrAttach}` });
 
@@ -1319,19 +1319,19 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
 export function upHerdr(root: string, repository: string, deps: HerdrHostDeps = hostHerdrDeps()): UpHerdr {
   return {
     binary: () => ensureHerdrBinary(deps),
-    server: async (binary, instance, installId) => {
-      const server = await ensureHerdrServer(deps, binary, instance, installId);
+    server: async (binary, installId) => {
+      const server = await ensureHerdrServer(deps, binary, null, installId);
       return { ...server, workspace: await ensureHerdrWorkspace(deps, binary, null, root, `graphyard-${installId}`) };
     },
-    record: async (instance, workspace) => { await recordHerdrWorkspace(root, workspace); },
-    plugin: async instance => {
-      const run = (args: string[]) => herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance);
+    record: async workspace => { await recordHerdrWorkspace(root, workspace); },
+    plugin: async () => {
+      const run = (args: string[]) => herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, null);
       const url = (await herdrPluginBinding(run, undefined, installIdFor(repository)))?.url;
       return url ? { url, enabled: await herdrPluginEnabled(run) === true } : null;
     },
-    enable: async instance => {
-      try { herdrSync(['plugin', 'enable', 'graphyard'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, instance); }
-      catch (error: any) { throw new HerdrSetupFailure('plugin', `herdr plugin enable graphyard${instance ? ` in session ${instance.session}` : ''} exited ${error?.status ?? 'abnormally'}: ${`${error?.stderr ?? ''}`.trim().split('\n').slice(-3).join(' ').slice(0, 300) || error?.message || 'no output'}`); }
+    enable: async () => {
+      try { herdrSync(['plugin', 'enable', 'graphyard'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }, null); }
+      catch (error: any) { throw new HerdrSetupFailure('plugin', `herdr plugin enable graphyard exited ${error?.status ?? 'abnormally'}: ${`${error?.stderr ?? ''}`.trim().split('\n').slice(-3).join(' ').slice(0, 300) || error?.message || 'no output'}`); }
     },
   };
 }
