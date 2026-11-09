@@ -12,7 +12,7 @@ export const guideCommands = defineCommands([
     readsConnection: () => false,
     help: [
       '  guide TOPIC                   Print one procedure topic',
-      '                                (topics: claim, sync, complete, park, blocked, review, proof, master);',
+      '                                (topics: claim, sync, complete, park, blocked, review, proof, upgrade, master);',
       '                                guide with no topic lists them',
     ],
     async run(context) { console.log(context.id ? guideText(context.id) : guideList()); },

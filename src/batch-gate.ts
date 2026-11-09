@@ -70,6 +70,13 @@ export interface GateRecord {
   lastOutcome: GateLastOutcome | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
   attempt: { recuts: number; timeouts: number };
+  /**
+   * GY-3199: the commit last published at `refs/graphyard/verified` on Graphyard's own repository,
+   * which every install's deploy watch reads. Optional only for records an older loop wrote; the
+   * gate publishes each newly verified commit, and a loop that adopted a record whose publication
+   * never landed catches it up.
+   */
+  published?: string | null;
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
   held: { tip: string; reason: string; at: string } | null;
   /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
@@ -137,6 +144,13 @@ export interface GatePorts {
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`; answers the item it filed, when it names one. */
   file(input: { title: string; description: string; key: string }): Promise<{ item: string | null } | void>;
+  /**
+   * GY-3199: publishes `commit` at `refs/graphyard/verified` on Graphyard's own repository through
+   * the merge writer's deploy key, where every install's deploy watch reads it. Absent on an
+   * install that does not gate Graphyard itself; a publish that fails never undoes the
+   * verification — it is one gate note, caught up on a later cycle.
+   */
+  publish?(commit: string): Promise<void>;
   /**
    * Called whenever the record changed mid-flight — the cut, and each step a run finished — so a
    * loop restart adopts the batch as it stood, its finished steps with it.
@@ -327,6 +341,12 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
         .map(landing => ({ sha: landing.sha, item: landing.item!.key, reverted: false }))].slice(-revertRateWindow);
       record.verified = tip; record.verifiedAt = at(); record.attempt = { recuts: 0, timeouts: 0 };
       record.results = Object.fromEntries(Object.entries(record.results).filter(([commit]) => commit === tip));
+      // GY-3199: the verified commit is published where every install's deploy watch reads it. A
+      // failed publish never undoes the verification — it is one gate note, and the loop's catch-up
+      // publish retries it.
+      try { await ports.publish?.(tip); record.published = tip; } catch (error) {
+        record.notes = [...record.notes ?? [], `verified-ref: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200)].slice(-filingNotesWindow);
+      }
       return { outcome: 'verified', tip, checks, flakes, knownRed };
     }
     const check = confirmed[0]!;

@@ -207,6 +207,8 @@ export const daemonStateSchema = z.object({
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()
     .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 }, report: null })),
+  /** GY-3199: the UTC day the control-plane diagnostics last ran, so the staleness lines log once a day. */
+  controlPlaneDay: z.string().max(10).nullable().default(null),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
   failureRuns: z.record(z.string(), failureRunSchema).default({}),
   /** GY-3101: the stalled-yard alert's own bookkeeping, kept on the cursor so a restarted loop neither re-alerts at once nor loses the all-clear. */

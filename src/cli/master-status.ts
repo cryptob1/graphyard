@@ -8,7 +8,7 @@ import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/st
 import { profileHealth } from '../daemon/sessions.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
-import { servingReport } from '../deploy-watch.js';
+import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
 import { gateRecordPath, gateSummary, readGateRecord } from '../batch-gate.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
@@ -103,6 +103,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     attention: stopped,
+    // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
+    // last check and last update, the step of a failed upgrade, and the staleness the daily
+    // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
+    // that the install still does not run). Never the managed repository's serving (GY-2955).
+    controlPlaneUpdate: controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now),
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     // GY-3101: the stalled-yard alert. On, with the stop it last recorded; off names itself, because no run.alertUrl is configured.

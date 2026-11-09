@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { GitRunner } from './merge-writer/local-observation.js';
 import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
 import { servedVerified } from './batch-gate.js';
+import { graphyardRepository } from './scenarios.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -29,10 +30,84 @@ async function writeDeployRecord(file: string, record: Omit<DeployRecord, 'at'>)
   await rename(`${file}.tmp`, file);
 }
 
+/**
+ * The control plane's own update record (GY-3199), beside the deploy record but never standing in
+ * for it: the Graphyard commit this install's server, loop and CLI run, when the watch last
+ * checked for a verified commit, when it last moved the control plane, and the step of the last
+ * failed upgrade. The deploy record stays the managed repository's serving and rollback state;
+ * this is the control plane's update clock, which master status and the daily diagnostics read.
+ */
+export interface ControlPlaneRecord {
+  /** The Graphyard commit the control plane runs; null before the first pass learned one. */
+  commit: string | null;
+  /** When the watch last completed a check for a verified commit. */
+  checkedAt: string | null;
+  /** When the control plane last moved to a new Graphyard commit. */
+  updatedAt: string | null;
+  /** The latest verified commit the check has seen, and when this install first saw it: the ref carries no publication time, so the first sighting is the staleness clock. */
+  verified: string | null;
+  verifiedSeenAt: string | null;
+  /** The step of the last failed control-plane upgrade, why it failed, and when; null after a passing one. */
+  failedStep: string | null;
+  failedReason: string | null;
+  failedAt: string | null;
+  at: string;
+}
+export const controlPlaneRecordPath = (root: string) => join(root, '.graphyard', 'control-plane.json');
+export function readControlPlaneRecord(file: string): ControlPlaneRecord | null {
+  if (!existsSync(file)) return null;
+  try { return JSON.parse(readFileSync(file, 'utf8')) as ControlPlaneRecord; } catch { return null; }
+}
+export async function writeControlPlaneRecord(file: string, record: Omit<Partial<ControlPlaneRecord>, 'at'>) {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(`${file}.tmp`, `${JSON.stringify({ ...record, at: new Date().toISOString() }, null, 2)}\n`);
+  await rename(`${file}.tmp`, file);
+}
+
+/** A control-plane upgrade that failed retries once its failure is this old: the pass cadence keeps a day the ceiling (GY-3199). */
+export const controlPlaneRetryMs = 60 * 60_000;
+/** How old a check, or a first sighting of an unrun verified commit, may be before the daily diagnostics reports it (GY-3199). */
+export const controlPlaneStaleAfterMs = 24 * 60 * 60_000;
+
+/** The control plane's staleness, as the daily diagnostics reports it: a check over a day old, or a verified commit first seen over a day ago that the install still does not run. */
+export function controlPlaneStaleLines(record: ControlPlaneRecord | null, now: number): string[] {
+  if (!record) return [];
+  const age = (at: string) => {
+    const ms = now - Date.parse(at);
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const checked = record.checkedAt ? age(record.checkedAt) : null;
+  const seen = record.verifiedSeenAt ? age(record.verifiedSeenAt) : null;
+  return [
+    ...(checked !== null && checked > controlPlaneStaleAfterMs ? [`the last check for a verified Graphyard commit is ${Math.round(checked / 3_600_000)} hours old (over 24 hours)`] : []),
+    ...(record.verified && record.commit !== record.verified && seen !== null && seen > controlPlaneStaleAfterMs
+      ? [`the control plane still runs ${record.commit?.slice(0, 12) ?? 'no recorded commit'} while the verified commit ${record.verified.slice(0, 12)} was first seen ${Math.round(seen / 3_600_000)} hours ago (over 24 hours)`]
+      : []),
+  ];
+}
+
+/** What master status shows of the control plane's own update record (GY-3199), with the staleness the daily diagnostics reports. */
+export function controlPlaneSummary(record: ControlPlaneRecord | null, now: number) {
+  if (!record) return null;
+  const short = (sha: string | null) => sha ? sha.slice(0, 12) : null;
+  return { commit: short(record.commit), checkedAt: record.checkedAt, updatedAt: record.updatedAt,
+    verified: short(record.verified), verifiedSeenAt: record.verifiedSeenAt,
+    failedStep: record.failedStep, failedReason: record.failedReason,
+    stale: controlPlaneStaleLines(record, now) };
+}
+
 /** What one deploy runs a commit through, each throwing its failure's reason. */
 export interface DeployWatchPorts {
   /** Fetches origin and answers the base branch's tip. */
   fetch(): Promise<string>;
+  /**
+   * GY-3199: the latest batch-gate-verified Graphyard commit as `refs/graphyard/verified` on
+   * Graphyard's canonical upstream names it — a constant in the code, fetched with the host's
+   * existing git access; null when the ref resolves to nothing. An install that does not gate
+   * Graphyard itself serves only this commit, never the fetched main tip. Absent, the watch
+   * deploys the fetched tip as before.
+   */
+  verifiedUpstream?(): Promise<string | null>;
   /** The commit the checkout holds now: the tip served before the watch recorded one. */
   head(): Promise<string>;
   /** Publishes the ready CLI after health; production ports move a pointer, preserving loaded trees. */
@@ -70,15 +145,37 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  * as served, unless the database reads at a generation the previous tip supports. A rollback that
  * fails is retried on later passes, up to rollbackAttempts, and is recorded as served only once it
  * succeeds; a new base tip is deployed in its place.
+ *
+ * GY-3199: an install that does not gate this checkout's repository — every install for another
+ * repository — serves only the commit Graphyard's own gate publishes at refs/graphyard/verified on
+ * its canonical upstream, never a fetched main tip the gate has not verified; a failed upgrade
+ * retries once its failure is an hour old. Every pass writes the control plane's own record
+ * (.graphyard/control-plane.json: the commit it runs, last check, last update, last failed step),
+ * separate from the deploy record.
  */
 export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line), owner: string | null = null): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
   // GY-3119: once the loop's batch gate names this repository, only its latest verified commit serves, never the fetched main tip.
   const fetched = await ports.fetch();
   const verified = servedVerified(join(dirname(file), 'main-gate.json'), owner);
-  const tip = verified ?? fetched;
-  const stored = readDeployRecord(file);
+  const followsUpstream = !verified && !!ports.verifiedUpstream && owner?.toLowerCase() === graphyardRepository;
+  const upstream = followsUpstream ? await ports.verifiedUpstream!() : null;
+  const gated = verified ?? upstream;
+  const tip = verified ?? (followsUpstream ? upstream : fetched) as string | null;
+  const controlFile = controlPlaneRecordPath(dirname(dirname(file)));
+  let stored = readDeployRecord(file);
+  // A failed control-plane upgrade retries once its failure is an hour old: the verified ref it failed
+  // on may not move for days, and a stuck install must not wait for it to.
+  if (followsUpstream && stored?.failed === tip && !stored.restore) {
+    const control = readControlPlaneRecord(controlFile);
+    if (control?.failedAt && Date.now() - Date.parse(control.failedAt) >= controlPlaneRetryMs) stored = { ...stored, failed: null };
+  }
   const record = stored ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
+  const previous = record.restore ?? record.tip;
   const write = (entry: Omit<DeployRecord, 'at' | 'repository'>) => writeDeployRecord(file, { ...entry, repository: owner });
+  const noteControl = async (entry: Partial<Omit<ControlPlaneRecord, 'at'>>) => {
+    const current = readControlPlaneRecord(controlFile) ?? { commit: previous, checkedAt: null, updatedAt: null, verified: null, verifiedSeenAt: null, failedStep: null, failedReason: null, failedAt: null };
+    await writeControlPlaneRecord(controlFile, { ...current, commit: current.commit ?? previous, ...entry });
+  };
   const run = async (commit: string) => { for (const step of steps) { log(`[graphyard-deploy] ${step} ${commit.slice(0, 12)}`); try { await ports[step](commit); } catch (error) { throw Object.assign(new Error(`${step} failed: ${message(error)}`), { step }); } } };
   const restore = async (previous: string, failed: string, reason: string, attempts: number) => {
     try { await run(previous); } catch (error) {
@@ -89,14 +186,22 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     await write({ tip: previous, failed, reason });
     return 'rolled-back' as const;
   };
+  // The check itself is a fact of the record: when it ran and which verified commit it saw (the
+  // first sighting of a new one starts the staleness clock, GY-3199).
+  {
+    const current = readControlPlaneRecord(controlFile);
+    const firstSeen = current?.verified !== gated && gated ? new Date().toISOString() : current?.verifiedSeenAt ?? null;
+    await noteControl({ checkedAt: new Date().toISOString(), verified: gated, verifiedSeenAt: firstSeen });
+  }
+  // Nothing verified to adopt upstream: never fall back to a main tip the gate has not verified.
+  if (tip === null) return 'unchanged';
   if (record.restore && tip === record.failed) {
     const attempts = (record.attempts ?? 0) + 1;
     if (attempts > rollbackAttempts) return 'unchanged';
     return restore(record.restore, tip, record.reason ?? '', attempts);
   }
-  const previous = record.restore ?? record.tip;
   // GY-3137: serving only moves forward: a verified commit the served one already contains (or that diverges from it) never deploys.
-  const behind = verified && previous && tip !== previous && ports.contains ? !(await ports.contains(previous, tip).catch(() => false)) : false;
+  const behind = gated && previous && tip !== previous && ports.contains ? !(await ports.contains(previous, tip).catch(() => false)) : false;
   if (behind) return 'unchanged';
   if (tip === previous || tip === record.failed) {
     // The base tip is what the checkout already serves: nothing to deploy, but a record an older
@@ -109,15 +214,18 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   try {
     await run(tip);
     await write({ tip, failed: null, reason: null });
+    await noteControl({ commit: tip, updatedAt: new Date().toISOString(), failedStep: null, failedReason: null, failedAt: null });
     log(`[graphyard-deploy] serving ${tip.slice(0, 12)}`);
     await ports.prune(previous ? [tip, previous] : [tip]);
     return 'deployed';
   } catch (error) {
     const reason = message(error), step = (error as { step?: string }).step;
-    if (!previous) { await write({ tip: null, failed: tip, reason }); return 'rolled-back'; }
+    const failedControl = () => noteControl({ failedStep: step ?? null, failedReason: reason.slice(0, 2000), failedAt: new Date().toISOString() });
+    if (!previous) { await write({ tip: null, failed: tip, reason }); await failedControl(); return 'rolled-back'; }
     if (step === 'build') {
       // No server or published CLI changed: leave the healthy pairing running.
       await write({ tip: previous, failed: tip, reason });
+      await failedControl();
       return 'rolled-back';
     }
     // From the restart on — health and, since GY-2978, the checkout move too — the server has started on the tip's
@@ -132,11 +240,14 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
         // The server serves the kept tip, so the CLI checkout follows it too, best-effort like the pin.
         await ports.checkout(tip).catch(failed => log(`[graphyard-deploy] the checkout of ${tip.slice(0, 12)} failed: ${message(failed)}`));
         await write({ tip, failed: null, reason: `${reason}; kept because ${why}` });
+        await noteControl({ commit: tip, updatedAt: new Date().toISOString(), failedStep: null, failedReason: null, failedAt: null });
         return 'kept';
       }
     }
     log(`[graphyard-deploy] ${tip.slice(0, 12)} ${reason}; rolling back to ${previous.slice(0, 12)}`);
-    return restore(previous, tip, reason, 1);
+    const outcome = await restore(previous, tip, reason, 1);
+    await failedControl();
+    return outcome;
   }
 }
 

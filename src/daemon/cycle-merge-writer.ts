@@ -21,6 +21,7 @@ import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type T
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { graphyardVerifiedRef } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -54,6 +55,12 @@ export interface MergeWriterReads extends MergePorts {
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
   /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
   gate?: { root: string; repository: string; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
+  /**
+   * GY-3199: publishes `commit` at `refs/graphyard/verified` on this checkout's origin with the
+   * merge writer's deploy key alone, like every other push — the ref every install's deploy watch
+   * reads. Absent (a test's reads without the push), the gate verifies without publishing.
+   */
+  pushVerified?(commit: string): Promise<void>;
   /**
    * GY-3159: launches one merge flight's trial as a detached run that survives this loop's restart
    * onto a new release. Absent (a test's substituted trial, or a reads set that never detached),
@@ -117,6 +124,10 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
       catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw pushFailureWithStderr(error); }
     },
+    // GY-3199: the batch gate's own publication — the verified commit at refs/graphyard/verified, pushed with the deploy key alone like every other push.
+    pushVerified: async commit => {
+      await run('git', ['-C', root, 'push', 'origin', `${commit}:${graphyardVerifiedRef}`], { env: pushEnvironment(settings.deployKeyFile, options.environment) });
+    },
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),
     // GY-3159: the merge flights' trials run detached from this process (cycle-merge-writer
@@ -174,7 +185,7 @@ function sharedTurns(state: DaemonState, reads: MergeWriterReads): MergeWriterRe
     held.turn = next.catch(() => {});
     return next;
   };
-  return { ...reads, fetch: serial(reads.fetch), merge: serial(reads.merge), push: serial(reads.push) };
+  return { ...reads, fetch: serial(reads.fetch), merge: serial(reads.merge), push: serial(reads.push), ...(reads.pushVerified ? { pushVerified: serial(reads.pushVerified) } : {}) };
 }
 /** GY-3182: `inFlight` names the first head in flight, with its flight's attempt; nothing in flight clears both. */
 function nameFlight(state: DaemonState) {

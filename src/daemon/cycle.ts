@@ -43,6 +43,7 @@ import { syncProjectMemory } from '../project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
+import { controlPlaneStep } from './control-plane.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -170,6 +171,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);
+    // GY-3199: the control plane's own update record — one item while an upgrade keeps failing, and the daily staleness line.
+    if (!config.forPerson) await controlPlaneStep(cycle);
     if (!config.forPerson) await leftoversStep(state, clock, effects.leftoverDisk, log);
   });
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: read.snapshot.work.filter(item => item.stage !== 'done').length, actions: performed.length, steps });

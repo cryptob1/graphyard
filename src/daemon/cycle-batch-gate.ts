@@ -2,7 +2,8 @@
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
 import { bootstrapGate, gateLimitMs, type DiagnosePort, gateOutcomeReason, gateRecordPath, mergeFilings, readGateRecord, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../batch-gate.js';
-import { appendReleaseNote, releaseNote, releaseNotesPath } from '../release-notes.js';
+import { graphyardRepository } from '../scenarios.js';
+import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-notes.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
@@ -55,6 +56,8 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   return {
     now: reads.now,
     fetch: reads.fetch,
+    // GY-3199: only the install gating Graphyard itself publishes the verified ref; every other install's gate verifies another repository, whose verified commits no control plane follows.
+    ...(reads.gate?.repository.toLowerCase() === graphyardRepository && reads.pushVerified ? { publish: (commit: string) => reads.pushVerified!(commit) } : {}),
     landings: async (from, to) => serveLandings(await serveRangeCommits(git, from, to), work),
     files: async (from, to) => lines(await git(['diff', '--name-only', from, to])),
     catalog,
@@ -141,6 +144,18 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     // never through the cycle's own actions, whose logging already passed (GY-3141).
     cycle.log(actionLine(cycle.state.cycle, entry));
   };
+  // GY-3199: a verified commit the record never published — a gate whose publish failed, or a
+  // record adopted from before the ref existed — is caught up here, before the gate flight adopts
+  // the record. A no-op push is one round trip; a failure is one journal line and runs again.
+  if (ports.publish && record.verified && record.published !== record.verified) {
+    try {
+      await ports.publish(record.verified);
+      record.published = record.verified;
+      await mergeGateRecord(file, latest => ({ ...(latest ?? record!), published: record!.published }));
+    } catch (error) {
+      note('batch-gate:verified-ref', 'failed', `Could not publish the verified commit ${record!.verified!.slice(0, 12)} at refs/graphyard/verified: ${message(error)}`);
+    }
+  }
   if (!live.gate) {
     const current = record;
     live.gate = (async () => {

@@ -1,0 +1,14 @@
+{
+  "id": "install-daily-upgrade",
+  "title": "Every install updates its own control plane to the latest verified Graphyard commit daily",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane for Graphyard's own repository and a scratch bare Git remote: the batch gate publishes its verified commit as refs/graphyard/verified through the merge writer's push, and a second install's deploy watch for another repository — a CLI checkout cloned from that origin, its own records root — fetches the ref on its pass, adopts exactly the verified commit (never a main tip the gate has not verified), writes .graphyard/control-plane.json beside deploy.json, keeps its previous version when the upgrade fails, records the failed step, retries, and clears it once the upgrade passes.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Upgrade an install's control plane to the gate-verified commit on the watch's own pass",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/install-daily-upgrade.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

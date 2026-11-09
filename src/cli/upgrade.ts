@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
-import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, imageRepository, installationRoot, type Release } from '../release.js';
+import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -209,6 +209,18 @@ export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchP
     contains: async (ancestor, commit) => { try { await git('merge-base', '--is-ancestor', ancestor, commit); return true; } catch { return false; } },
     checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
   };
+}
+
+/**
+ * GY-3199: the latest batch-gate-verified Graphyard commit, fetched from Graphyard's canonical
+ * upstream — a constant in the code, never the install's own origin — with the host's existing git
+ * access. The ref lands in the checkout's own refs so the pass may build and compare against it;
+ * null when it resolves to no commit.
+ */
+export async function fetchVerifiedRef(git: (...args: string[]) => Promise<string>, url: string = graphyardUpstreamUrl): Promise<string | null> {
+  await git('fetch', '--quiet', '--no-tags', '--force', url, `${graphyardVerifiedRef}:${graphyardVerifiedRef}`);
+  const sha = (await git('rev-parse', '--verify', graphyardVerifiedRef)).trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -436,8 +448,12 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
   };
   const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
   const tree = gitWatchPorts(cliRoot, input.run);
+  const gitIn = async (...args: string[]) => String(await input.run('git', ['-C', cliRoot, ...args], { timeoutMs: 120_000 })).trim();
   return {
     ...tree,
+    // GY-3199: the verified ref from Graphyard's canonical upstream — the only commit an install for
+    // another repository adopts, at least once a day, without a command or a new setting.
+    verifiedUpstream: () => fetchVerifiedRef(gitIn),
     build: async commit => {
       await prepareCliRelease(directory, cliRoot, commit, input.run);
     },
@@ -480,7 +496,15 @@ export const upgradeCommands = defineCommands([{
     '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
     '                                each new base tip, build, restart, check /healthz, and roll back',
     '                                to the previous tip on failure; the watch then restarts on the',
-    '                                code it served; DIR is the install\'s own checkout',
+    '                                code it served; DIR is the install\'s own checkout.',
+    '                                An install for another repository upgrades its own control plane',
+    '                                by itself: each pass (at least daily) checks the commit Graphyard\'s',
+    '                                batch gate verified, as refs/graphyard/verified on Graphyard\'s',
+    '                                canonical upstream — never an unverified main tip — and runs the',
+    '                                upgrade steps to exactly that commit, keeping its state in',
+    '                                .graphyard/control-plane.json (commit, last check, last update,',
+    '                                last failed step); a failed upgrade keeps the previous version and',
+    '                                retries; see `graphyard guide upgrade`',
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);

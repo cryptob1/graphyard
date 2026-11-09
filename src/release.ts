@@ -16,6 +16,14 @@ export const datedVersionPattern = /^(\d{4})\.([1-9]\d?)\.([1-9]\d?)(?:\.([1-9]\
 /** Graphyard's own base branch: every install follows its tip, whatever base branch the managed repository uses. */
 export const graphyardBaseBranch = 'main';
 export const imageRepository = 'ghcr.io/cryptob1/graphyard';
+/**
+ * GY-3199: Graphyard's canonical upstream — the URL every install's deploy watch fetches the
+ * latest batch-gate-verified commit from, a constant in the code and never an install's own origin
+ * (which may be a fork or a mirror), over the host's existing git access.
+ */
+export const graphyardUpstreamUrl = 'https://github.com/cryptob1/graphyard';
+/** GY-3199: the ref Graphyard's own batch gate moves to its latest verified commit, which every install's watch reads. */
+export const graphyardVerifiedRef = 'refs/graphyard/verified';
 
 /**
  * The version a promotion on `date` (its UTC calendar day) takes, given the tags that exist:

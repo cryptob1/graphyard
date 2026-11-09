@@ -78,13 +78,13 @@ async function writeFiles(root: string, files: Record<string, string | null>) {
   }
 }
 
-/** The plane, the remote and the checkout, with `extra` fixture files in the base commit. */
-export async function pipelineWorld(label: string, extra: Record<string, string> = {}): Promise<World> {
+/** The plane, the remote and the checkout, with `extra` fixture files in the base commit. `repo` overrides the managed repository (GY-3199: a world that gates Graphyard itself). */
+export async function pipelineWorld(label: string, extra: Record<string, string> = {}, repo: string = repository): Promise<World> {
   const root = await temporaryDirectory(label);
   const origin = join(root, 'origin.git'), checkout = join(root, 'checkout'), trials = join(root, 'trials');
   const database = await databaseUrl(label);
   const store = new Store(database); await store.init();
-  const engine = new Engine(store, 120, repository);
+  const engine = new Engine(store, 120, repo);
   const http: Server = server(engine, [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }, { ...operator, token: adminToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -97,7 +97,7 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
   const base = git(origin, 'rev-parse', 'main');
   git(checkout, 'checkout', '-q', '--detach');
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
-  const config = masterConfigSchema.parse({ version: 1, repository, baseBranch: 'main', url, credentialFile: '/unused', cliPath: '/unused', githubAppId: 1, hostId: 'fixture',
+  const config = masterConfigSchema.parse({ version: 1, repository: repo, baseBranch: 'main', url, credentialFile: '/unused', cliPath: '/unused', githubAppId: 1, hostId: 'fixture',
     masterAgentName: 'fixture', workers: [], run: { mergeWriter: { deployKeyFile: join(root, 'unused-key'), parallel: 2 } } });
   let branches = 0;
   const work = async () => (await Promise.all((await store.list()).map(async item => (await store.workDocument(item.id))!)));
@@ -181,7 +181,8 @@ export function loopReads(where: Where, options: { gate: boolean }): MergeWriter
       where.filings?.push({ key, gate: readGateRecord(gateRecordPath(where.checkout)) });
       return post(where.url, adminToken, 'work', input, key);
     },
-    ...(options.gate ? { gate: { root: where.checkout, repository } } : {}) };
+    // The gate record this loop keeps is its own managed repository's (GY-3199: a world may gate Graphyard itself).
+    ...(options.gate ? { gate: { root: where.checkout, repository: where.config.repository } } : {}) };
 }
 
 /** One loop process: its own daemon state and effects over the world; `cycle()` runs one coordination cycle. */
