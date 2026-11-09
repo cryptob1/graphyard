@@ -119,7 +119,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (!registry.runtimes.some(runtime => runtime.name === account.runtime)) return `${account.name} runs ${account.runtime}, which is not a registered runtime`;
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
-  if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
+  if (account.quota.loggedIn === false) return `${account.name} is not logged in${account.quota.session === 'login' ? `: its agent reported "${account.quota.reason}"; held until cleared with master registry account quota ${account.name} available` : ''}`;
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && smokeTestedKinds.includes(runtime.launch.kind));
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   const plan = deriveAccountPlan(account, registry.accounts);
