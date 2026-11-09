@@ -453,7 +453,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     ...tree,
     // GY-3199: the verified ref from Graphyard's canonical upstream — the only commit an install for
     // another repository adopts, at least once a day, without a command or a new setting.
-    verifiedUpstream: () => fetchVerifiedRef(gitIn),
+    verifiedUpstream: () => oneFetchAtATime(() => fetchVerifiedRef(gitIn)),
     build: async commit => {
       await prepareCliRelease(directory, cliRoot, commit, input.run);
     },
