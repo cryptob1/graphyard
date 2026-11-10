@@ -4,6 +4,7 @@ import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
 import { sessionCommands } from './session-commands.js';
+import { inviteCommand } from './invite.js';
 import { registryHelp } from './master-registry.js';
 import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
@@ -73,6 +74,7 @@ export const masterCommands = defineCommands([
     },
   },
   ...sessionCommands,
+  inviteCommand,
 ]);
 
 export { derivedIntent } from './master/intent.js';

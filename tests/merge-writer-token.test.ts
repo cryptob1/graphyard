@@ -79,3 +79,12 @@ test('unit:tests/merge-writer-token.test.ts — a token install plans github.mer
     assert.equal(fixture.commandLines().filter(line => line.startsWith('gh repo deploy-key')).length, 0, 'no deploy key is registered');
   } finally { await fixture.cleanup(); }
 });
+
+test('unit:tests/merge-writer-token.test.ts — an org that disables deploy keys is refused naming the token, and a token install passes', async () => {
+  const fixture = await harness({ provider: 'compose', serverUrl: 'http://127.0.0.1:4310', extraResponses: [{ match: 'gh api orgs/owner', result: '{"deploy_keys_enabled_for_repositories":false}' }] });
+  try {
+    const refusal = async (...extra: string[]) => (await buildPlan(await prepareInstall(fixture.root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', ...extra, '--plan']).request, fixture.deps, 'plan'))).preflight.find(item => item.name === 'Organization deploy keys');
+    assert.match((await refusal())?.fix ?? '', /--merge-token-stdin/);
+    assert.equal(await refusal('--merge-token-stdin'), undefined);
+  } finally { await fixture.cleanup(); }
+});

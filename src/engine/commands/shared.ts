@@ -67,6 +67,8 @@ export function refuseRenewedDeferral(work: Work, all: Work[]) {
   }
 }
 
-export function assertHumanOwner(engine: Engine, owner: string | null | undefined) {
-  demand(owner == null || engine.principals.some(person => person.id === owner && person.sessionKind === 'human'), 'Owner must name a person principal (sessionKind: human)');
+/** An owner is a configured human principal or a teammate the operator invited (GY-3215, team_members). */
+export async function assertHumanOwner(engine: Engine, db: Queryable, owner: string | null | undefined) {
+  if (owner == null || engine.principals.some(person => person.id === owner && person.sessionKind === 'human')) return;
+  demand((await db.query('SELECT 1 FROM team_members WHERE name=$1', [owner])).rows.length, 'Owner must name a person principal (sessionKind: human) or an invited teammate');
 }

@@ -376,6 +376,6 @@ test('unit:architecture — source files never call the GitHub API or mint App i
     assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
     assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
     assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
-    assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through gh api`);
+    if (file !== 'src/install/org-deploy-keys.ts') assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through gh api`);
   }
 });
