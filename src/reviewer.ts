@@ -23,7 +23,7 @@ import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
-import { sessionConfinement } from './master/launch.js';
+import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
@@ -524,6 +524,14 @@ export async function anchorSessionCheckout(root: string, directory: string, run
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
   return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
 }
+/**
+ * GY-3235: the checkout a reviewer's, spec checker's or producer's session is confined against is
+ * the repository it serves, as GY-3224 made worker launches — never the launcher's own CLI release
+ * checkout, which on Huck's install is another repository whose confinement left the served `.git`
+ * read-only to the sandbox probe. Only under the test runner, with no sandbox probe, is nothing confined.
+ */
+export const sessionCoordinatorRoot = (root: string, dependencies: { coordinatorRoot?: string; sandbox?: SessionSandboxProbe }) =>
+  dependencies.coordinatorRoot ?? (dependencies.sandbox || launcherCoordinatorRoot() ? root : undefined);
 /** Where a reviewer's or producer's sandbox probe runs: on the host by default, never under the test runner unless a test substitutes one. */
 export type SessionSandboxProbe = SandboxExec | 'host' | null;
 /**
@@ -883,6 +891,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   /** How a headless review's one child runs (headless-session.ts); the host's by default, and a runtime with no one-shot form keeps its pane session. */
   headless?: HeadlessExec | null;
 } = {}) {
+  dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const now = dependencies.now ?? (() => new Date());
   const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
