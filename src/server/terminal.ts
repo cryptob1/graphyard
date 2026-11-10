@@ -8,12 +8,11 @@ import type { Principal } from '../model.js';
 import { loopPanesRegistry } from '../model/loop-presence.js';
 import { herdrInvocation, herdrTarget } from '../master/herdr.js';
 import { authenticate } from './auth.js';
+import { canTypeIntoMasterPane } from './principals.js';
 import type { Services } from './routes.js';
 
 /** The history event each line a human types into the master's pane is recorded as. */
 export const terminalInputEvent = 'master.terminal.input';
-/** Who may type into the master's pane: a signed-in human admin (the operator; maintainers once GY-3215 lands). Everyone else watches. */
-export const mayType = (actor: Principal) => actor.sessionKind === 'human' && actor.role === 'admin';
 
 const refuse = (socket: Duplex, status: number, text: string) => { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
 /** One unfragmented server frame: text (1), binary (2), close (8) or pong (10). */
@@ -46,7 +45,7 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const pane = url.searchParams.get('pane') || master;
   if (!pane) return refuse(socket, 404, 'Not Found');
   if (pane !== master && !(await services.engine.store.pool.query('SELECT 1 FROM work_items WHERE document->\'sessions\' @> $1::jsonb LIMIT 1', [JSON.stringify([{ pane, state: 'running' }])])).rowCount) return refuse(socket, 404, 'Not Found');
-  const control = pane === master && mayType(actor);
+  const control = pane === master && canTypeIntoMasterPane(actor);
   const size = (name: string, fallback: number) => String(Math.min(500, Math.max(10, Number(url.searchParams.get(name)) || fallback)));
   socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade',
     `Sec-WebSocket-Accept: ${createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}`,

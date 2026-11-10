@@ -1,6 +1,6 @@
 {
   "id": "master-page-terminal",
-  "title": "The Master page shows the master's live terminal; only the operator types",
+  "title": "The Master page shows the master's live terminal; only the operator and maintainers type",
   "description": "A real browser against the real control plane, with a stub herdr whose terminal session echoes input: the signed-in operator opens the Master page, sees the pane's screen, types a line, sees it echoed and finds it in history under their name; an unauthenticated handshake is refused; a reader watches read-only; a worker pane opens read-only from Workers; leaving the page releases the stream and closes no pane.",
   "tags": ["dashboard", "master"],
   "target": "any",
