@@ -24,7 +24,7 @@ import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
-import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
+import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { underTestRunner } from './runtime-environment.js';
@@ -884,7 +884,9 @@ export async function launchReview(root: string, work: Work, profileName: string
   headless?: HeadlessExec | null;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
-  const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
+  // GY-3237: inside the master session's confinement a headless child would need a bubblewrap of
+  // its own, which Landlock forbids there; the review runs in a Herdr pane the host starts instead.
+  const headless = dependencies.headless !== undefined ? dependencies.headless : insideMasterConfinement() ? null : defaultHeadlessExec();
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
   const postMerge = dependencies.postMerge;

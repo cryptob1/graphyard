@@ -454,8 +454,16 @@ export const confinementRefusalText = (kind: string, coordinatorRoot: string, pr
   return `${head}: this host refuses the unprivileged namespaces bubblewrap needs, ${own}. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host with bubblewrap available.`;
 };
 
+/** The variable the master session's wrapper sets: its `master restart` then asks the loop to restart itself instead of the host's systemd, which the confinement hides. */
+export const masterConfinementVariable = 'GRAPHYARD_CONFINEMENT';
+/** Whether this process runs inside the master session's confinement (GY-3237). */
+export const insideMasterConfinement = (env: NodeJS.ProcessEnv = process.env) => env[masterConfinementVariable] === 'master';
 /** Whether bubblewrap can build the mount namespace here; a host may refuse unprivileged namespaces. Probed through the asynchronous runner once per executable and cached; the probe asks for the pid namespace and a fresh /proc too, because that is what the wrapper itself requires. */
 export async function sessionMountNamespaceWorks(bwrap = 'bwrap'): Promise<boolean> {
+  // GY-3237: inside the master session's own confinement the host's bubblewrap already built this
+  // namespace, and Landlock forbids building another, so a local probe always fails; the sessions
+  // the master launches run from Herdr panes the host starts, outside it.
+  if (insideMasterConfinement()) return true;
   if (!mountNamespaceProbes.has(bwrap)) {
     const probe = defaultChildRun(bwrap, ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--', 'true'], { timeoutMs: 20_000 })
       .then(value => { mountNamespaceAnswers.set(bwrap, true); return true; }, () => { mountNamespaceAnswers.set(bwrap, false); return false; });

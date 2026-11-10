@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,7 +44,7 @@ const shellAnswers = (args: string[]): string | null => {
   const pane = args[1] === 'process-info' ? args[3] : args[2];
   const kind = paneKinds.get(pane) ?? 'claude';
   const json = (result: unknown) => JSON.stringify({ result });
-  if (args[0] === 'pane' && args[1] === 'read') return `${kind} ready\n`;
+  if (args[0] === 'pane' && args[1] === 'read') return `${kind === 'claude' ? 'Claude Code' : kind} ready\n`;
   if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: kind, agent_status: 'idle', pane_id: pane } });
   if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [kind] }] } });
   if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, agent_status: 'idle', name: args[3] } });
@@ -147,10 +147,6 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       '',
     ].join('\n'));
     chmodSync(join(localBin, 'herdr'), 0o755);
-    // The reviewer `master review` launches runs headless, as the CLI does outside a test runner.
-    writeFileSync(join(localBin, 'claude'), '#!/usr/bin/env node\nconsole.log(\'Claude Code ready\');\n');
-    chmodSync(join(localBin, 'claude'), 0o755);
-
     // What the confined master session runs: the two recovery steps the migration left it owing.
     const sessionScript = join(root, '.graphyard', 'master-session-fixture.mjs');
     writeFileSync(sessionScript, [
@@ -166,10 +162,12 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       '',
     ].join('\n'));
 
-    // The main server's answers: every reply through the socket. The reviewer `master review`
-    // launches runs headless the way the CLI does outside a test runner, so the session asks the
-    // server for the inventories its launch reads, never for a pane.
+    // The main server's answers: the pane surface a real Herdr serves, every reply through the
+    // socket. Inside the master's confinement Landlock forbids a nested bubblewrap, so the reviewer
+    // `master review` launches runs in a pane this server starts on the host, its own confinement
+    // in the line it types.
     let connections = 0, agentLists = 0;
+    const reviewLaunches: string[] = [];
     const herdrNet = herdrServer = createServer(connection => {
       connections++;
       let buffer = '';
@@ -183,6 +181,11 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
         let answer = '';
         if (args[0] === 'agent' && args[1] === 'list') { agentLists++; answer = json({ agents: [] }); }
         else if (args[0] === 'pane' && args[1] === 'list') answer = json({ panes: [] });
+        else if (args[0] === 'tab' && args[1] === 'create') answer = json({ root_pane: { pane_id: 'wMain:review', tab_id: 'wMain:review-tab' } });
+        else if (args[0] === 'pane' && args[1] === 'run') {
+          recordTypedRuntime(args);
+          reviewLaunches.push(readFileSync(`${/GY=(\S+);/.exec(args[3])![1]}.launch`, 'utf8'));
+        }
         else answer = shellAnswers(args) ?? '';
         connection.end(`${answer}\n`);
       });
@@ -211,7 +214,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
         // never spawnSync — the socket server below must keep answering while the session runs.
         masterOutput = await new Promise<string>((resolve, reject) =>
           execFile('/bin/bash', ['-ec', args[3]], { encoding: 'utf8', timeout: 300_000, cwd: root, env: { ...paneEnvironment, HOME: home } },
-            (error, stdout, stderr) => error ? reject(new Error(`the confined master session exited: ${`${stdout ?? ''}\n${stderr ?? ''}`.slice(-1200)}`)) : resolve(`${stdout ?? ''}\n${stderr ?? ''}`)));
+            (error, stdout, stderr) => error ? reject(new Error(`the confined master session exited: ${`${stdout ?? ''}\n${stderr ?? ''}`.slice(-4000)}`)) : resolve(`${stdout ?? ''}\n${stderr ?? ''}`)));
         return '';
       }
       return shellAnswers(args) ?? JSON.stringify({ result: {} });
@@ -229,10 +232,12 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
 
     // Both recovery steps ran inside the confinement and reached the main server through its socket:
     // the fixture's own `herdr agent list`, and `master review GY-1`'s launch, which registers the
-    // control-plane review and reads the session inventory the same way.
+    // control-plane review and starts its reviewer in a main-server pane under its own confinement.
     assert.ok(masterOutput.includes('MASTER-AGENT-LIST-OK'), `herdr agent list ran inside the confinement: ${masterOutput.slice(-800)}`);
     assert.ok(masterOutput.includes('MASTER-REVIEW-OK'), `master review GY-1 ran inside the confinement: ${masterOutput.slice(-800)}`);
     assert.ok(agentLists >= 2, 'the main Herdr served both inventory reads, the session\'s and the review launch\'s');
+    assert.equal(reviewLaunches.length, 1, 'the main Herdr started the reviewer master review launched');
+    assert.match(reviewLaunches[0], /bwrap .*--unshare-pid/, 'the reviewer pane carries its own confinement, built on the host by Herdr');
     assert.ok(connections >= 2, 'every answer came through the main server\'s own socket');
   } finally {
     if (herdrServer) await new Promise<void>(resolve => (herdrServer as NonNullable<typeof herdrServer>).close(() => resolve()));
