@@ -24,7 +24,7 @@ import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
-import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
+import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { underTestRunner } from './runtime-environment.js';
@@ -545,7 +545,8 @@ export type SessionSandboxProbe = SandboxExec | 'host' | null;
  * not probed here.
  */
 export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false, credentialMask?: CredentialMask, coordinatorRoot?: string) {
-  const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
+  // Inside the master session's confinement no bubblewrap can run (GY-3237): the pane's own launch, started by Herdr on the host, carries the confinement.
+  const run = probe === undefined ? (underTestRunner() || insideMasterConfinement() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
   const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask }, coordinatorRoot);
@@ -895,7 +896,9 @@ export async function launchReview(root: string, work: Work, profileName: string
 } = {}) {
   dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const now = dependencies.now ?? (() => new Date());
-  const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
+  // GY-3237: inside the master session's confinement a headless child would need a bubblewrap of
+  // its own, which Landlock forbids there; the review runs in a Herdr pane the host starts instead.
+  const headless = dependencies.headless !== undefined ? dependencies.headless : insideMasterConfinement() ? null : defaultHeadlessExec();
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
   const postMerge = dependencies.postMerge;

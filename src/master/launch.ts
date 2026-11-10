@@ -15,7 +15,8 @@ import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
 import { assertIsolatableHostControlEndpoints } from './confinement.js';
-import { bwrapOnPath, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, assertCredentialsMasked, type CoordinatorConfinement, type ConfinementInput, type CredentialMask, type MaskProbe } from './confinement.js';
+import { dataDirectory } from '../install/worktree-root.js';
+import { bwrapOnPath, masterConfinementVariable, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, assertCredentialsMasked, type CoordinatorConfinement, type ConfinementInput, type CredentialMask, type MaskProbe } from './confinement.js';
 import { runtimeLoginHomes, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, coordinatorCheckoutRoot } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
@@ -167,8 +168,7 @@ export function prepareConfinedGitPaths(root: string): void {
   const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
-/** The variable the master session's wrapper sets: its `master restart` then asks the loop to restart itself instead of the host's systemd, which the confinement hides. */
-export const masterConfinementVariable = 'GRAPHYARD_CONFINEMENT';
+export { masterConfinementVariable };
 /** What a master-session confinement is judged against; tests name an absent bubblewrap or another platform. */
 export interface MasterConfinementProbe { bwrap?: string | null; platform?: string; mountNamespaceWorks?: boolean }
 /**
@@ -179,7 +179,7 @@ export interface MasterConfinementProbe { bwrap?: string | null; platform?: stri
  * proxy stands in for the session bus), and GRAPHYARD_CONFINEMENT=master set. A host that cannot
  * build it refuses the launch with the named reason: the master is never started unconfined.
  */
-export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}, writable: readonly string[] = [], environment?: NodeJS.ProcessEnv, credentialMask?: CredentialMask): Promise<CoordinatorConfinement> {
+export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}, writable: readonly string[] = [], environment?: NodeJS.ProcessEnv, credentialMask?: CredentialMask, herdrPaths?: readonly string[]): Promise<CoordinatorConfinement> {
   const refusal = await coordinatorConfinementRefusal({ kind, args: [], coordinatorRoot: root, sessionDirectory: root, ...probe });
   if (refusal) throw new Error(`${refusal} The master session is refused rather than started with the checkout writable (GY-1658).`);
   prepareConfinedGitPaths(root);
@@ -187,24 +187,34 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   if (existsSync(checkoutGitDirectory(root))) mkdirSync(join(checkoutGitDirectory(root), 'worktrees'), { recursive: true });
   const managed = join(resolve(root), '.graphyard');
   mkdirSync(managed, { recursive: true, mode: 0o700 });
-  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ...writable], environment, ...(credentialMask ? { credentialMask } : {}) });
+  // GY-3237: the Herdr socket and config the install records now — the main server after a
+  // GY-3212 migration, a private instance while it drains — so `herdr agent list` and
+  // `master review GY-N` reach it from inside the confinement.
+  // GY-3237: the host's review-ledger lock directory, shared with the loop, which `master review` takes.
+  const ledgerLocks = join(dataDirectory(), 'review-ledger');
+  mkdirSync(ledgerLocks, { recursive: true });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ledgerLocks, ...writable], environment, ...(credentialMask ? { credentialMask } : {}), ...(herdrPaths?.length ? { herdrPaths } : {}) });
   const records = masterRecords(root);
   mkdirSync(records, { recursive: true, mode: 0o700 });
   // Mount options precede the socket-confinement command inside bubblewrap.
   const command = words.indexOf('--');
-  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words.slice(0, command), '--ro-bind', records, records, ...words.slice(command)];
+  // GY-3237: the session's HOME is a scratch home, so the host's data directory is named outright:
+  // the checkouts its `master review` allocates land in the host's managed worktree root, where
+  // the Herdr pane the host starts for the reviewer finds them.
+  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', '--setenv', 'GRAPHYARD_DATA_HOME', dataDirectory(), ...words.slice(0, command), '--ro-bind', records, records, ...words.slice(command)];
   await assertCredentialsMasked(wrapper, { coordinatorRoot: root, sessionDirectory: root, credentialMask });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
 /** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
-async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment' | 'masterStateDirectory' | 'contract' | 'credentialMask'>): Promise<CoordinatorConfinement | null> {
+async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment' | 'masterStateDirectory' | 'stateDirectories' | 'contract' | 'credentialMask' | 'herdrPaths'>): Promise<CoordinatorConfinement | null> {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
   if (root) {
     return masterSessionConfinement(kind, root, options.confinementProbe, [
       ...runtimeLoginHomes(options.environment, options.contract?.homeVariable),
       ...(options.masterStateDirectory ? [options.masterStateDirectory] : []),
-    ], options.environment, options.credentialMask);
+      ...(options.stateDirectories ?? []),
+    ], options.environment, options.credentialMask, options.herdrPaths);
   }
   const undetermined = launcherRootUndetermined();
   if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
@@ -539,6 +549,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   confinementProbe?: MasterConfinementProbe;
   /** The master's private coordinator state beside its credential, granted explicitly by its launcher. */
   masterStateDirectory?: string;
+  /** GY-3237: install state the master session's own recovery commands write — the managed worktree root its launches allocate checkouts under, the reviewer bindings beside the credential — granted writable like `masterStateDirectory`, where each already exists. */
+  stateDirectories?: readonly string[];
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
   /** The session must never read the operator's credentials, so the confinement gives it no route to the operator's keyring (GY-1039). */
@@ -547,6 +559,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   secretsBus?: null;
   /** The install's credential locations the session must not read (GY-1856), with its own kept: computed by the launcher from the master config and the session's own credential. */
   credentialMask?: CredentialMask;
+  /** GY-3237: the Herdr socket and config directories the master session's confinement grants read-only — the server the install records now: the main Herdr, and a private instance while its panes drain. */
+  herdrPaths?: readonly string[];
   /** Judges the keyring endpoint the confinement binds (keyringEndpointWarning unless a caller supplies its own); `started` settles true once the launch succeeds, false when it fails. */
   keyringWarning?: (name: string, confinement: CoordinatorConfinement | null, started: Promise<boolean>) => Promise<string | null>;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
