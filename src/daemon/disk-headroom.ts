@@ -5,7 +5,7 @@ import { stat } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { freeBytes } from '../master/worktrees.js';
-import { trialContainerImage } from '../merge-writer/trial-container.js';
+import { trialContainerImage, trialImage } from '../merge-writer/trial-container.js';
 import { diskFloorBytes } from '../merge-writer/trial-load.js';
 import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTemporaryPrefix, trialTemporaryRoots } from '../merge-writer/trial.js';
 import { record } from './effects.js';
@@ -107,10 +107,13 @@ export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporar
   const removed = await reclaimJobLeftovers(run, roots);
   const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
   try {
-    const current = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, repository = trialContainerImage.split(':')[0]!;
-    for (const image of await docker(['images', repository, '--format', '{{.Repository}}:{{.Tag}}'])) {
-      if (image === current || !image.startsWith(`${repository}:`) || image.endsWith(':<none>')) continue;
-      try { await docker(['image', 'rm', image]); removed.push(`image ${image}`); } catch { /* in use, or already gone */ }
+    // The image built here and the published one an install pulled (GY-3214) each have their own repository.
+    const current = trialImage();
+    for (const repository of new Set([trialContainerImage.split(':')[0]!, current.slice(0, current.lastIndexOf(':'))])) {
+      for (const image of await docker(['images', repository, '--format', '{{.Repository}}:{{.Tag}}'])) {
+        if (image === current || !image.startsWith(`${repository}:`) || image.endsWith(':<none>')) continue;
+        try { await docker(['image', 'rm', image]); removed.push(`image ${image}`); } catch { /* in use, or already gone */ }
+      }
     }
   } catch { /* no Docker on this host */ }
   return removed;

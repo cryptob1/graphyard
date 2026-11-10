@@ -1,6 +1,6 @@
 // The outer trial has a private filesystem, rather than a host Landlock domain:
 // its tests can establish their own mount namespaces before applying Landlock.
-import { chmodSync, existsSync, lstatSync, mkdtempSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory } from '../master/checkout-git.js';
@@ -14,6 +14,13 @@ import { randomUUID } from 'node:crypto';
 import { trialAdmission, type TrialLoad } from './trial-load.js';
 
 export const trialContainerImage = 'graphyard-trial:local';
+/** GY-3214: where an install names the published trial image it pulled for the release tree at `root`. */
+export const pulledTrialImageFile = (root: string) => join(root, '.graphyard', 'trial-image');
+/** The image trials run: GRAPHYARD_TRIAL_IMAGE, else the published image the install pulled for this release, else the one built on this host. */
+export function trialImage(root = fileURLToPath(new URL('../..', import.meta.url))): string {
+  if (process.env.GRAPHYARD_TRIAL_IMAGE) return process.env.GRAPHYARD_TRIAL_IMAGE;
+  try { return readFileSync(pulledTrialImageFile(root), 'utf8').trim() || trialContainerImage; } catch { return trialContainerImage; }
+}
 export const trialHarness = '/graphyard-harness';
 const sourceRoot = fileURLToPath(new URL('../../', import.meta.url));
 /** The module tree the running code resolves its imports from (tsx among them): what a detached child of this code runs with. */
@@ -95,7 +102,7 @@ export const trialContainerLaunch = (spec: { image: string; mounts: [string, str
   ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify(spec)];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
-export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge', deadline?: number, load?: TrialLoad): string[] {
+export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = trialImage(), network = 'bridge', deadline?: number, load?: TrialLoad): string[] {
   // The managed allocation is durable. Give this boundary its own empty, sticky
   // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
   const allocation = writable.find((path): path is string => !!path)!;

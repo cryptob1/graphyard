@@ -2,9 +2,9 @@ import { execFileSync } from 'node:child_process';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
-import { checkoutRelease } from '../release.js';
+import { checkoutRelease, publishedImages } from '../release.js';
 import { localAdapter } from './local.js';
-import { buildTrialImage, trialImagePlan } from './trial-image.js';
+import { provisionTrialImage, trialImagePlan } from './trial-image.js';
 
 export interface AdapterContext {
   provider: Provider;
@@ -288,6 +288,17 @@ export function imageBuildArgs(sourceRoot: string, dirty = sourceTreeDirty) {
   return ['--build-arg', `GRAPHYARD_VERSION=${release.version}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${release.revision}`];
 }
 
+/**
+ * GY-3214: the images Graphyard published for the source checkout's commit, which an install pulls
+ * instead of building — the commit a deploy vouches (GY-2167), else a clean checkout's HEAD. Null
+ * for a checkout with changes HEAD does not hold: no published image has its bytes.
+ */
+export function publishedSourceImages(sourceRoot: string, dirty = sourceTreeDirty) {
+  const named = process.env.GRAPHYARD_VERSION?.trim() && process.env.GRAPHYARD_BUILD_REVISION?.trim();
+  const commit = named || (dirty(sourceRoot) ? null : checkoutRelease(sourceRoot).revision);
+  return commit && /^[0-9a-f]{40}$/.test(commit) ? publishedImages(commit) : null;
+}
+
 export const composeAdapter: ProviderAdapter = {
   provider: 'compose',
   async preflight(ctx) {
@@ -310,14 +321,24 @@ export const composeAdapter: ProviderAdapter = {
     return observation;
   },
   plan(ctx, observation) {
+    const published = publishedSourceImages(ctx.sourceRoot), build = ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ');
     return [
-      trialImagePlan(ctx),
-      { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ') },
+      trialImagePlan(ctx, published?.trial ?? null),
+      published
+        ? { id: 'provider.image', target: 'provider', title: `Pull the Graphyard image ${published.server} as ${ctx.image}, or build it from ${ctx.sourceRoot} when it is not published`, state: 'update', command: `docker pull ${published.server} && docker tag ${published.server} ${ctx.image} || ${build}` }
+        : { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: build },
       ...composeActions(ctx, observation),
     ];
   },
   async provision(ctx) {
-    await buildTrialImage(ctx);
+    const published = publishedSourceImages(ctx.sourceRoot);
+    await provisionTrialImage(ctx, published?.trial ?? null);
+    if (published && (await ctx.transport.exec('docker', ['pull', published.server], { allowFailure: true, timeout: 1_800_000 })).code === 0) {
+      // The install keeps naming, pruning and rolling back its own tag; the registry's name is dropped, the layers stay.
+      await ctx.transport.exec('docker', ['tag', published.server, ctx.image]);
+      await ctx.transport.exec('docker', ['image', 'rm', published.server], { allowFailure: true });
+      return;
+    }
     await ctx.transport.exec('docker', ['build', ...imageBuildArgs(ctx.sourceRoot), '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
   },
   async setEnv(ctx, values) {
