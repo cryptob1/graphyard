@@ -233,7 +233,7 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
       let report: E2eReport | null = null;
       // The cases come from the change itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
       const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, hostEnvironment: environment,
-        cases: selected, select: () => true, withholdSecrets: true, report: value => { report = value; } });
+        cases: selected, select: () => true, withholdSecrets: true, versionPath: input.application.versionPath, report: value => { report = value; } });
       const result = await suite.run(origin, { id: `preview-${input.mergeSha.slice(0, 12)}` });
       cancelled();
       const ran = report as E2eReport | null;
