@@ -1,0 +1,16 @@
+{
+  "id": "runtime-bypasses-mise-shim",
+  "title": "Agent launches run the runtime's real binary behind a failing mise shim",
+  "description": "A fixture Cursor runtime whose agent and cursor-agent on PATH are mise shims failing 'No version is set for shim' in the launch environment: worker and reviewer pane launches, and a headless reviewer run, execute the installed binary from mise's installs directory and start.",
+  "tags": ["runtime"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "mise shim launch regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/runtime-bypasses-mise-shim.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

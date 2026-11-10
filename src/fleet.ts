@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
 import { launchRecipe } from './harness.js';
+import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
 import { runtimeAdapter } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
-import { basename, dirname, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
@@ -275,7 +275,6 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
 
 export interface HostLogin { name: string; runtime: string; home: string | null; loggedIn: boolean | null; quota: EnvironmentHealth['quota']; reason: string | null; login: string | null; source: 'environment' | 'default-home' | 'executable' }
 const onPath = (executable: string) => { try { execFileSync('which', [executable], { stdio: 'ignore' }); return true; } catch { return false; } };
-const output = (command: string, args: string[]) => { try { return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')[0] || null; } catch { return null; } };
 
 /**
  * The directory `program` is installed in on this host (GY-3090). A mise shim — a link to mise
@@ -283,11 +282,10 @@ const output = (command: string, args: string[]) => { try { return execFileSync(
  * registry pins the real install and no launch depends on the user's global mise config.
  */
 export function installDirectory(program: string): string | null {
-  const found = output('which', [program]);
+  const found = onSearchPath(program);
   if (!found) return null;
-  const shim = basename(dirname(found)) === 'shims' || basename(realpathSync(found)) === 'mise';
-  const installed = shim ? output('mise', ['which', program]) : found;
-  return installed ? dirname(installed) : null;
+  const real = realRuntimeBinary(program);
+  return real !== program ? dirname(real) : isMiseShim(found) ? null : dirname(found);
 }
 
 /** A proposed runtime launched from its resolved install directory, with mise kept off every config. */

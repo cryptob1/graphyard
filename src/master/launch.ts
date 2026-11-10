@@ -9,6 +9,7 @@ import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js'
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, launchRecipe } from '../harness.js';
 import { runtimeAdapter } from './runtimes.js';
+import { realRuntimeBinary } from '../runtime-binary.js';
 import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
@@ -245,7 +246,7 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
 }
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
 export const launchProgram = (kind: string) => launchRecipe(kind)?.program ?? kind;
-/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
+/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime (its real binary, never a mise shim: GY-3236), its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = [], environment: Record<string, string> = {}) {
   if (wrap.length) args = confinedRuntimeArgs(kind, args);
   const role = files.role ? runtimeAdapter(kind)?.role?.(roleReference) : undefined;
@@ -256,7 +257,7 @@ export function launchCommand(kind: string, args: string[], files: LaunchFiles, 
   const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
   // Reapply the selected environment after interactive shell startup (which can reset PATH).
   const selected = Object.entries(environment).map(([key, value]) => shellWord(`${key}=${value}`));
-  const runtime = [...(selected.length ? ['/usr/bin/env', ...selected] : []), ...prefix.map(shellWord), ...wrap.map(shellWord), launchProgram(kind), ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const runtime = [...(selected.length ? ['/usr/bin/env', ...selected] : []), ...prefix.map(shellWord), ...wrap.map(shellWord), shellWord(realRuntimeBinary(launchProgram(kind), { ...process.env, ...environment })), ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
   let command = [...binding, runtime].join(' ');
   // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
   // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
