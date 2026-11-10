@@ -1,3 +1,4 @@
+import { readSecretFromStdin } from './cli/context.js';
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
 import { supervisingUnit } from './master/loop-restart.js';
@@ -85,6 +86,8 @@ export interface UpRequest {
    * pointed at the recorded address (this, else master.json, else the install record), never a default port.
    */
   url?: string | null;
+  /** GY-3220: the merge writer's fine-grained token read from stdin (`--merge-token-stdin`), forwarded to every install child; the deploy-key step is skipped. */
+  mergeToken?: string;
 }
 /** Agent mode's default wait on a person: 20 minutes (GY-1457). */
 export const upAgentWaitMs = 1_200_000;
@@ -95,8 +98,9 @@ export type UpEvent =
   | { kind: 'step'; step: UpStep; state: 'start' | 'done' | 'skipped' | 'waiting'; detail?: string }
   /**
    * GY-1641: a started step that did not finish: the outcome of every step-start that has no done.
-   * ARGV is the failed child's graphyard arguments and STDERR its first stderr line (both redacted),
-   * null when the step failed without a child; EXITCODE is up's own (upExitCodes).
+   * ARGV is the failed child's arguments (a graphyard command, or the git command a step ran
+   * directly, GY-3221) and STDERR its first stderr line (both redacted), null when the step failed
+   * without a child; EXITCODE is up's own (upExitCodes).
    */
   | { kind: 'step-failed'; step: UpStep; exitCode: number; argv: string[] | null; stderr: string | null; detail: string }
   | { kind: 'waiting'; setupUrl: string; waitingFor: SetupItemId[]; sentence: string }
@@ -263,9 +267,10 @@ export interface UpResult {
 /** Exit codes: 0 green, 1 a step failed, 2 a machine prerequisite needs a person, 3 still waiting on a person (rerun resumes). */
 export const upExitCodes = { green: 0, failed: 1, prerequisite: 2, waiting: 3 } as const;
 
-class UpStop extends Error { constructor(message: string, readonly exitCode: number) { super(message); } }
+/** GY-3221: a child's stderr a stop carries, so the step's event records it; null when no command failed. */
+class UpStop extends Error { constructor(message: string, readonly exitCode: number, readonly stderr: string | null = null) { super(message); } }
 /** GY-1641: a step stopped by a failed child command, carrying what its step-failed event names. */
-class ChildStop extends UpStop { constructor(message: string, exitCode: number, readonly argv: string[], readonly stderr: string | null) { super(message, exitCode); } }
+class ChildStop extends UpStop { constructor(message: string, exitCode: number, readonly argv: string[], stderr: string | null) { super(message, exitCode, stderr); } }
 interface UpState {
   version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean;
   /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
@@ -453,6 +458,19 @@ async function provisioned(root: string) {
   return (await Promise.all(identities.map(identity => readFile(identity.credentialFile, 'utf8').then(text => text.trim().length >= 32, () => false)))).every(Boolean);
 }
 
+/** GY-3221: Graphyard's own branch namespace: onboarding's `graphyard/onboarding` and worker branches `graphyard/gy-N-EPOCH` live under it. */
+export const branchNamespace = 'graphyard';
+/**
+ * GY-3221: why BRANCH cannot be up's base branch, or null when it can: it is Graphyard's own
+ * branch namespace or inside it, and GitHub refuses to create `graphyard/…` refs beside a ref
+ * named `graphyard` ("cannot lock ref"), so the onboarding push and every worker branch would
+ * fail mid-run. `up` refuses it in preflight, before any step runs, naming the namespace.
+ */
+export function baseBranchNamespaceRefusal(branch: string): string | null {
+  return branch === branchNamespace || branch.startsWith(`${branchNamespace}/`)
+    ? `--base-branch ${branch} is Graphyard's own branch namespace: ${onboardingBranch} and the worker branches (${branchNamespace}/gy-N-EPOCH) live under ${branchNamespace}/, and GitHub refuses to create those refs beside it, so the onboarding push and every worker branch would fail. Run graphyard up again with a base branch outside ${branchNamespace}/` : null;
+}
+
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
   const state = await readState(deps.root, request);
   const pollMs = deps.pollMs ?? 5_000;
@@ -572,7 +590,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return result.stdout;
   };
   // install registers no GitHub App (GY-2010): it registers the merge writer's deploy key instead.
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), ...(request.port ? ['--port', String(request.port)] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : [])];
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), ...(request.port ? ['--port', String(request.port)] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : []), ...(request.mergeToken ? ['--merge-token-stdin'] : [])];
+  const installInput = request.mergeToken ? { stdin: request.mergeToken } : {};
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch '${request.baseBranch}'` : ''}${request.port ? ` --port ${request.port}` : ''}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
@@ -580,11 +599,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const view = await deps.gh(['repo', 'view', request.repository, '--json', 'name']);
     if (view.code === 0) return;
     const created = await deps.gh(['repo', 'create', request.repository, '--private', '--source', '.', '--push']);
-    if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} --source . --push exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite);
+    if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} --source . --push exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite, childFirstStderr(created));
     // GY-2940: gh leaves origin at its https url, which the merge writer's SSH deploy key cannot push with; origin is the SSH form.
     const ssh = sshOrigin(request.repository);
     const set = await deps.git(['remote', 'set-url', 'origin', ssh]);
-    if (set.code !== 0) throw new UpStop(`preflight: setting origin to ${ssh} failed: ${(set.stderr || set.stdout || 'no output').split('\n')[0].slice(0, 300)}; run git remote set-url origin ${ssh} in ${deps.root}, then rerun ${rerun()}`, upExitCodes.failed);
+    if (set.code !== 0) throw new UpStop(`preflight: setting origin to ${ssh} failed: ${(set.stderr || set.stdout || 'no output').split('\n')[0].slice(0, 300)}; run git remote set-url origin ${ssh} in ${deps.root}, then rerun ${rerun()}`, upExitCodes.failed, childFirstStderr({ stderr: set.stderr || set.stdout || '' }));
     deps.emit({ kind: 'note', text: `Created private repository ${request.repository} with gh repo create (operator's gh login); origin is ${ssh} for the merge writer's deploy key.` });
   };
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
@@ -597,12 +616,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // anything else a step-failed naming the child that failed; an unexpected error fails the step (exit 1).
       const stop = error instanceof UpStop ? error : new UpStop(`${name}: ${String((error as any)?.message ?? error).split('\n')[0].slice(0, 500)}`, upExitCodes.failed);
       if (stop.exitCode === upExitCodes.waiting) deps.emit({ kind: 'step', step: name, state: 'waiting', detail: stop.message.split('\n')[0] });
-      else deps.emit({ kind: 'step-failed', step: name, exitCode: stop.exitCode, argv: stop instanceof ChildStop ? stop.argv : null, stderr: stop instanceof ChildStop ? stop.stderr : null, detail: stop.message.split('\n')[0] });
+      else deps.emit({ kind: 'step-failed', step: name, exitCode: stop.exitCode, argv: stop instanceof ChildStop ? stop.argv : null, stderr: stop.stderr, detail: stop.message.split('\n')[0] });
       throw stop;
     }
   };
 
   try {
+    // GY-3221: a base branch in Graphyard's own branch namespace is refused before anything runs:
+    // GitHub cannot hold the onboarding and worker refs beside it, so the run would fail mid-way.
+    // Checked outside the resumable steps, so a rerun naming the namespace is refused whatever an
+    // earlier run already completed.
+    if (request.baseBranch) {
+      const namespace = baseBranchNamespaceRefusal(request.baseBranch);
+      if (namespace) throw new UpStop(`preflight: ${namespace}`, upExitCodes.prerequisite);
+    }
+
     // GY-1480: the loop refuses to start from a CLI checkout holding uncommitted work, so that is
     // found here, before anything is installed, rather than as a loop that never cycles.
     const cleanCli = async (name: UpStep) => {
@@ -643,7 +671,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (landlock) throw new UpStop(`preflight: ${landlock}. Boot a newer kernel, then rerun ${rerun()}; nothing was installed.`, upExitCodes.prerequisite);
       // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
       await ensureRepository();
-      const planned = await run('preflight', installArgs('--plan'));
+      const planned = await run('preflight', installArgs('--plan'), installInput);
       const plan = parseJson(planned);
       await rememberSignIn(deps.root, state, planned);
       const failed: { name: string; detail?: string; fix?: string }[] = (plan?.preflight ?? []).filter((check: any) => check && check.ok === false);
@@ -665,7 +693,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const controlPlane = () => step('control-plane', async () => {
       // The control plane is the merge writer (GY-1552): the install registers no App, no App page
       // is served or driven, and the merge writer's deploy key is its only GitHub access.
-      const result = await deps.cli(installArgs('--apply'));
+      const result = await deps.cli(installArgs('--apply'), installInput);
       claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
       if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
       return 'control plane installed without a GitHub App';
@@ -756,7 +784,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
         return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
       } : null;
-      await step('deploy-key', async () => {
+      if (request.mergeToken) deps.emit({ kind: 'step', step: 'deploy-key', state: 'skipped', detail: 'the merge writer uses the fine-grained token the install stored' });
+      else await step('deploy-key', async () => {
         const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
           if (!gh) throw new UpStop('deploy-key: the merge writer needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
           return ensureDeployKey(installDir, repository, gh);
@@ -793,7 +822,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // so the install runs again once, this run, before the item that carries it is filed.
       const firstCase: string[] = typeof applied?.delivery?.firstCase === 'string' ? [applied.delivery.firstCase] : [];
       if (applied?.delivery?.serve === true || firstCase.length) {
-        const result = await deps.cli(installArgs('--apply'));
+        const result = await deps.cli(installArgs('--apply'), installInput);
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
       }
@@ -801,7 +830,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // delivered, so they are published as one commit on `graphyard/onboarding` (the base is
       // protected, never pushed to) and the commit is submitted as a work item by head sha, exactly
       // as a worker's `complete --head` submits (GY-2938): no pull request is opened.
-      const published = await deps.publishOnboarding([...workflows, ...firstCase]).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+      const published = await deps.publishOnboarding([...workflows, ...firstCase]).catch((error: any) => {
+        if (error instanceof UpStop) throw error;
+        // GY-3221: the failed git child's own stderr is what explains the failure ('unable to
+        // auto-detect email address', say), so it rides the stop into the step's event and the
+        // printed error (trimmed) — never a bare 'Command failed: git …'.
+        const stderr = String(error?.stderr ?? '').trim();
+        const argv = Array.isArray(error?.argv) && error.argv.every((word: unknown) => typeof word === 'string') ? (error.argv as string[]).map(redactLine) : null;
+        const said = stderr ? redactLine(stderr.split('\n').map(line => line.trim()).filter(Boolean).slice(-3).join(' ').slice(0, 300)) : String(error?.message ?? error).split('\n')[0].slice(0, 400);
+        const message = `onboarding: publishing the onboarding files failed: ${said}; rerun graphyard up to retry`;
+        throw argv ? new ChildStop(message, upExitCodes.failed, argv, childFirstStderr({ stderr })) : new UpStop(message, upExitCodes.failed, childFirstStderr({ stderr }));
+      });
       const carried = [...workflows, ...firstCase].length ? `onboarding files with ${[...workflows, ...firstCase].join(', ')}` : 'onboarding files (no delivery workflow was written)';
       if (!published) return `${carried}: the base branch already holds them`;
       // GY-1478: the commit is filed as a work item the loop owns, so its reviewer reviews it,
@@ -1033,6 +1072,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
  */
 export async function upCommand(root: string, cliPath: () => Promise<string>, args: string[]): Promise<UpResult> {
   const request = upRequestFromArgs(args, recordedUp(root));
+  if (request.mergeToken !== undefined) {
+    request.mergeToken = await readSecretFromStdin(10000);
+    if (!request.mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
+  }
   const refusal = await upUrlRefusal(root, request.url);
   if (refusal) throw new Error(refusal);
   const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
@@ -1070,7 +1113,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses (GY-1510). */
-export const upOptions = { 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
+export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -1094,7 +1137,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, master: values.master ?? 'claude',
-    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(port !== null ? { port } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
+    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(port !== null ? { port } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}), ...(values['merge-token-stdin'] ? { mergeToken: '' } : {}) };
 }
 
 /** A one-time dashboard sign-in address minted with the operator's admin credential, TOKEN or the one in FILE (as `graphyard login` mints it). */
@@ -1126,6 +1169,12 @@ export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', onb
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
+/**
+ * GY-3221: the identity Graphyard's own commits are authored under, so onboarding commits need no
+ * host git identity: the environment names the author and committer for `git commit-tree`, and a
+ * host with no global user.name/user.email commits all the same.
+ */
+export const graphyardGitIdentity = { GIT_AUTHOR_NAME: 'Graphyard', GIT_AUTHOR_EMAIL: 'graphyard@localhost', GIT_COMMITTER_NAME: 'Graphyard', GIT_COMMITTER_EMAIL: 'graphyard@localhost' } as const;
 
 /**
  * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`.
@@ -1134,31 +1183,38 @@ export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
  * commit is submitted by head sha (GY-2938) and the control plane reads it from this checkout's own
  * object store. The commit is dated from the base tip, so a rerun over the same files publishes the
  * identical commit and pushes nothing new; when the base branch already holds them, nothing is
- * published.
+ * published. Authored under Graphyard's own identity (GY-3221), so no host git identity is needed.
  */
 export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ commit: string } | null> {
+  // GY-3221: a failed child's stderr is what explains it; the command and its stderr stay on the
+  // error, so the failing step's event and printed error carry them instead of a bare
+  // 'Command failed: git …'.
+  const child = (program: string, args: string[], env?: Record<string, string>) => {
+    try { return run(program, args, env); } catch (error: any) { error.argv = [program, ...args]; if (typeof error?.stderr !== 'string') error.stderr = ''; throw error; }
+  };
   // GY-1480: every file the publish means to carry must be on disk; one that is not is refused by
   // name, never skipped, so the change never claims a file it does not hold.
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
   if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
   const record = await readInstallRecord(installDirectory(installIdFor(repository))).catch(() => null);
-  const base = record?.baseBranch ?? run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
-  run('git', ['fetch', '--quiet', 'origin', base]);
-  const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
+  const base = record?.baseBranch ?? child('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
+  child('git', ['fetch', '--quiet', 'origin', base]);
+  const baseCommit = child('git', ['rev-parse', 'FETCH_HEAD']).trim();
   const index = resolve(root, '.graphyard', `onboarding-index.${process.pid}`);
   await mkdir(dirname(index), { recursive: true });
   try {
     const env = { GIT_INDEX_FILE: index };
-    run('git', ['read-tree', baseCommit], env);
+    child('git', ['read-tree', baseCommit], env);
     const present = [...new Set([...onboardingFiles, ...workflows])].filter(file => existsSync(resolve(root, file)));
-    if (present.length) run('git', ['add', '--', ...present], env);
-    const tree = run('git', ['write-tree'], env).trim();
-    if (tree === run('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
+    if (present.length) child('git', ['add', '--', ...present], env);
+    const tree = child('git', ['write-tree'], env).trim();
+    if (tree === child('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
     // Dated from the base tip, so the same files above the same tip always yield this one commit.
-    const dated = { ...env, GIT_AUTHOR_DATE: run('git', ['show', '-s', '--format=%cI', baseCommit]), GIT_COMMITTER_DATE: run('git', ['show', '-s', '--format=%cI', baseCommit]) };
-    const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], dated).trim();
+    const dated = { ...env, ...graphyardGitIdentity,
+      GIT_AUTHOR_DATE: child('git', ['show', '-s', '--format=%cI', baseCommit]), GIT_COMMITTER_DATE: child('git', ['show', '-s', '--format=%cI', baseCommit]) };
+    const commit = child('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], dated).trim();
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
-    run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
+    child('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
     return { commit };
   } finally { await rm(index, { force: true }); }
 }

@@ -1,4 +1,5 @@
 // Concern: the control-plane merge executor (GY-1524) — the queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
+import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
 import { riskOf } from '../model-boundary/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
@@ -335,12 +336,23 @@ export const pushInheritedVariables = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG'
  * The push child's environment (AC-2): the allowlisted variables above, git's global and system
  * configuration off, no terminal prompt, and the one credential, the deploy key, as GIT_SSH_COMMAND.
  */
-export function pushEnvironment(deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function pushEnvironment(credential: string | { deployKeyFile?: string; tokenFile?: string }, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept = Object.fromEntries(pushInheritedVariables.flatMap(name => typeof environment[name] === 'string' ? [[name, environment[name]!] as const] : []));
-  return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile) };
+  const { deployKeyFile, tokenFile } = typeof credential === 'string' ? { deployKeyFile: credential, tokenFile: undefined } : credential;
+  const base = { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+  // GY-3220: a token reaches git only through the askpass helper beside it, which reads the file; the token is never in an argument or URL.
+  return tokenFile ? { ...base, GIT_ASKPASS: join(dirname(tokenFile), mergeAskpassName), GRAPHYARD_MERGE_TOKEN_FILE: tokenFile } : { ...base, GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile!) };
 }
+/** The GIT_ASKPASS helper's file name, written beside the token (`writeMergeToken`). */
+export const mergeAskpassName = 'merge-writer-askpass';
+/**
+ * Where the merge writer fetches and pushes: `origin` (SSH, the deploy key) or, with a token, the
+ * explicit https URL of the repository. GRAPHYARD_MERGE_WRITER_GIT_URL replaces that URL for tests.
+ */
+export const mergeWriterRemote = (repository: string, tokenFile: string | undefined, environment: NodeJS.ProcessEnv = process.env) =>
+  tokenFile ? environment.GRAPHYARD_MERGE_WRITER_GIT_URL || `https://github.com/${repository}.git` : 'origin';
 /** `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE`: the merge commit lands only on the tip it was tested on. */
-export const pushArgs = (base: string, baseTip: string, mergeSha: string) => ['push', 'origin', `--force-with-lease=refs/heads/${base}:${baseTip}`, `${mergeSha}:refs/heads/${base}`];
+export const pushArgs = (base: string, baseTip: string, mergeSha: string, remote = 'origin') => ['push', remote, `--force-with-lease=refs/heads/${base}:${baseTip}`, `${mergeSha}:refs/heads/${base}`];
 /**
  * Whether a failed push was rejected because the tip moved under its lease: git words exactly that
  * `! [rejected] … (stale info)`. A remote's own refusal (`! [remote rejected] … (protected branch

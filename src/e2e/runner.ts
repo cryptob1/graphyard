@@ -128,6 +128,8 @@ export interface RunOptions {
    * the step it is in; a case not yet started is unrun, `stoppedBy` naming `cancelledRun`.
    */
   signal?: AbortSignal;
+  /** The path the served application declares it answers its commit at (`versionPath`): read before /healthz. */
+  versionPath?: string;
 }
 /** What a case a cancelled run never started names in `stoppedBy`. */
 export const cancelledRun = 'cancelled';
@@ -144,8 +146,26 @@ const servedRevision = (health: any): string | null => {
   return null;
 };
 
-/** The commit the target's /healthz reports serving, or null when it reports none in time. */
-async function readServed(url: string, fetcher: typeof fetch, timeoutMs: number) {
+/** The commit a declared version path answers: a full SHA in JSON `commit`, `revision`, `sha` or `version`, or as plain text. */
+const versionRevision = (text: string): string | null => {
+  let body: any = null;
+  try { body = JSON.parse(text); } catch { /* plain text */ }
+  for (const commit of [text.trim(), body?.commit, body?.revision, body?.sha, body?.version]) {
+    const sha = servedRevision({ commit });
+    if (sha) return sha;
+  }
+  return null;
+};
+
+/** The commit the target reports serving — at its declared version path, else at /healthz — or null when it reports none in time. */
+async function readServed(url: string, fetcher: typeof fetch, timeoutMs: number, versionPath?: string) {
+  if (versionPath) {
+    try {
+      const response = await fetcher(new URL(versionPath, url), { signal: AbortSignal.timeout(timeoutMs) });
+      const sha = response.ok ? versionRevision(await response.text()) : null;
+      if (sha) return sha;
+    } catch { /* /healthz is read next */ }
+  }
   try { const response = await fetcher(new URL('/healthz', url), { signal: AbortSignal.timeout(timeoutMs) }); return response.ok ? servedRevision(await response.json()) : null; } catch { return null; }
 }
 
@@ -350,7 +370,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   let launcher: E2eLauncher | undefined = options.launcher;
   const launch = async () => launcher ??= (await import('@playwright/test')).chromium as unknown as E2eLauncher;
   const startedAt = new Date(now()).toISOString();
-  const sha = await readServed(options.url, fetcher, stepTimeoutMs);
+  const sha = await readServed(options.url, fetcher, stepTimeoutMs, options.versionPath);
   const outcomes: CaseOutcome[] = [];
   const created: CreatedWork[] = [];
   let stoppedBy: string | null = null;
@@ -610,6 +630,8 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   uat?: boolean;
   /** GY-2997: how command and agent steps spawn; the merge trial hands a confined runner. */
   processRunner?: ProcessRunner;
+  /** The served application's declared `versionPath`, when the run is against one application. */
+  versionPath?: string;
   /** The run's clock and pause between asks; tests substitute a fake clock (GY-1938). */
   now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) => ({
   name: 'e2e',
@@ -623,7 +645,7 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const suspendedPreviews = applicationSuspendedCases(selected, probed.previewsServed);
     const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended, ...suspendedPreviews], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy, processRunner: options.processRunner });
+      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy, processRunner: options.processRunner, versionPath: options.versionPath });
     if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
     if (suspendedPreviews.length) report.suspendedPreviews = { cases: suspendedPreviews };
     if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';

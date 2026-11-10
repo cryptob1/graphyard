@@ -74,12 +74,14 @@ export const bwrapOnPath = (env: NodeJS.ProcessEnv = process.env): string | null
  * is never the session's (GY-957, review finding).
  */
 export const sessionGitAdminDirectory = (sessionDirectory: string, root: string): string | null => {
-  const directory = resolve(sessionDirectory), checkout = resolve(root);
+  const directory = canonicalPath(resolve(sessionDirectory)), checkout = canonicalPath(resolve(root));
   if (directory === checkout) return null;
-  const coordinatorAdmin = checkoutWorktreeAdminDirectory(checkout);
-  const shared = join(checkoutGitDirectory(checkout), 'worktrees');
+  const admin = checkoutWorktreeAdminDirectory(checkout);
+  const coordinatorAdmin = admin && canonicalPath(admin);
+  const shared = canonicalPath(join(checkoutGitDirectory(checkout), 'worktrees'));
   for (const candidate of [directory, join(directory, 'checkout')]) {
-    const gitDir = gitPointerAdminDirectory(candidate);
+    const pointer = gitPointerAdminDirectory(candidate);
+    const gitDir = pointer && canonicalPath(pointer);
     if (gitDir && gitDir !== coordinatorAdmin && gitDir.startsWith(`${shared}${sep}`) && isDirectoryPath(gitDir)) return gitDir;
   }
   return null;
@@ -149,7 +151,7 @@ export interface CredentialMask {
  * on the runtime's home variable) readable; `home` overrides the operator config home (tests).
  */
 export function credentialMaskFor(
-  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
+  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
   own: { credentialFile?: string | null; runtimeHomes?: readonly string[] },
   home?: string,
 ): CredentialMask {
@@ -158,7 +160,7 @@ export function credentialMaskFor(
   const launcher = recorded(config.cliPath)[0];
   return {
     configHome: operatorHome,
-    extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
+    extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.run?.mergeWriter?.tokenFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
     // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
     // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
@@ -275,8 +277,8 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv }): readonly string[] {
-  const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
-  const gitDir = checkoutGitDirectory(root);
+  const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
+  const gitDir = canonicalPath(checkoutGitDirectory(root));
   const adminDirectory = sessionGitAdminDirectory(directory, root);
   const sharedDirectories = [
     join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes'),

@@ -1,0 +1,13 @@
+{
+  "id": "up-preflight-branch-identity",
+  "title": "Up refuses a base branch in Graphyard's namespace and commits without a host git identity",
+  "description": "On a scratch repository with HOME pointing at an empty git config, up refuses --base-branch graphyard and graphyard/x before any action runs naming the branch namespace, onboarding commits are authored by Graphyard's own identity, and a failing step's event and printed error carry the command's stderr.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "up preflight branch namespace, commit identity and step stderr",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/up-preflight-branch-identity.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

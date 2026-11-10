@@ -1,0 +1,8 @@
+{
+  "id": "sandbox-worktree-admin-layout",
+  "title": "Worker Git admin writes across checkout layouts",
+  "description": "Reproduces Huck's repository separate from its CLI release, self-hosting, relative pointers, symlink aliases and linked coordinators; confined commits succeed while sibling admin writes fail.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "confined worktree commits", "run": "node --import tsx tests/helpers/run-tests.ts tests/sandbox-worktree-admin-layout.test.ts", "timeoutSeconds": 600 }]
+}

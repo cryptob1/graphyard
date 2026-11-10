@@ -42,12 +42,12 @@ export async function deliveryFixture(directory) {
   // GY-3201: a node application in its own directory, started on the PORT Graphyard gives it. Its page
   // shows the change's title; a change titled "broken" breaks it, so its bound case fails.
   await mkdir(join(root, 'web'));
-  await writeFile(join(root, 'web/server.mjs'), 'import { createServer } from "node:http";\nconst title = (process.env.GRAPHYARD_PREVIEW_TITLE ?? "").replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);\nconst page = /broken/i.test(title) ? "<h1>Out of order</h1>" : `<h1>Fixture node app</h1>\\n<p>${title}</p>`;\ncreateServer((_request, response) => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<!doctype html><title>Node fixture</title>\\n${page}\\n`); }).listen(Number(process.env.PORT), "127.0.0.1");\n');
+  await writeFile(join(root, 'web/server.mjs'), 'import { createServer } from "node:http";\nconst title = (process.env.GRAPHYARD_PREVIEW_TITLE ?? "").replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);\nconst page = /broken/i.test(title) ? "<h1>Out of order</h1>" : `<h1>Fixture node app</h1>\\n<p>${title}</p>`;\ncreateServer((request, response) => {\n  // GY-3223: the app answers the commit it serves at its declared versionPath; its /healthz names none.\n  if (request.url === "/api/meta/version") { response.setHeader("Content-Type", "application/json"); return response.end(JSON.stringify({ version: process.env.GRAPHYARD_PREVIEW_SHA })); }\n  response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<!doctype html><title>Node fixture</title>\\n${page}\\n`);\n}).listen(Number(process.env.PORT), "127.0.0.1");\n');
   await writeFile(join(root, 'graphyard.json'), JSON.stringify({ e2e: { serve: {
     command: 'node serve.mjs', url: `http://127.0.0.1:${port}`, readySeconds: 10,
   } }, delivery: { mode: 'local', previews: 'local',
     applications: [{ id: 'site', kind: 'static', directory: 'public', build: 'node build.mjs' }, { id: 'app', kind: 'compose', file: 'compose/compose.yml', service: 'web', port: 8080 },
-      { id: 'web', kind: 'node', directory: 'web', build: 'node --check server.mjs', start: 'node server.mjs' }],
+      { id: 'web', kind: 'node', directory: 'web', build: 'node --check server.mjs', start: 'node server.mjs', versionPath: '/api/meta/version' }],
     cases: { 'fixture-static-home': 'site', 'fixture-compose-app': 'app', 'fixture-node-home': 'web' } } }));
   await mkdir(join(root, 'e2e/cases'), { recursive: true });
   for (const id of ['fixture-static-home', 'fixture-compose-app', 'fixture-node-home']) await cp(`e2e/cases/${id}.json`, join(root, `e2e/cases/${id}.json`));

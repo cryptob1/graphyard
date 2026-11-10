@@ -167,8 +167,8 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
   return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: installedBrowsers ? '/opt/graphyard-browsers' : join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
-export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
-  [...new Set([configHome(environment.GRAPHYARD_CONFIG_HOME), deployKeyFile, environment.XDG_RUNTIME_DIR, uid === undefined ? undefined : `/run/user/${uid}`].filter((path): path is string => !!path && isAbsolute(path)))];
+export const trialHiddenPaths = (credentialFile: string | undefined, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
+  [...new Set([configHome(environment.GRAPHYARD_CONFIG_HOME), credentialFile, environment.XDG_RUNTIME_DIR, uid === undefined ? undefined : `/run/user/${uid}`].filter((path): path is string => !!path && isAbsolute(path)))];
 /**
  * The bubblewrap words every trial child runs under: a read-only host, private devices and
  * scratch, host launch sockets hidden, credential masks, then only the trial's allocated
