@@ -24,6 +24,12 @@ export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 
   return 0;
 }
 
+/**
+ * GY-3229: how a trial that could not write a read-only file system names itself; the control plane
+ * records that reason as the item's blocker, and the queue holds the head while the blocker stands.
+ */
+export const readOnlyTrialBlocker = 'Read-only file system';
+
 /** One queued control-plane candidate, highest priority first, oldest on ties. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
 export interface MergeQueue {
@@ -95,7 +101,7 @@ export function keptTrialAheadOfReview(candidate: Work['candidate'], state: Merg
 export function awaitsMerge(item: Work, ledger: Readonly<Record<string, MergeLedgerState>>, now: number): boolean {
   const candidate = item.candidate;
   if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
-  if (!gate(item, 'build')) return false;
+  if (!gate(item, 'build') || item.blocker?.startsWith(readOnlyTrialBlocker)) return false;
   const state = ledger[item.key];
   // GY-3164: the trial already passed; only the review gate still stands between the head and its landing.
   if (keptTrialAheadOfReview(candidate, state)) return gate(item, 'review');

@@ -224,6 +224,9 @@ export const serveCheckoutPath = (root: string) => join(root, '.graphyard', 'ser
 /** The baseline checkout (GY-2985): a second detached worktree holding the previously served build, which keeps serving on the port beside the served one. */
 export const serveBaselineCheckoutPath = (root: string) => join(root, '.graphyard', 'serve-checkout-baseline');
 
-/** GY-3207: the environment the serve checkout's install, build and serve commands run under: the host's, with the Node major the checkout declares first on PATH. */
+/**
+ * GY-3207: the environment the serve checkout's install, build and serve commands run under: the host's, with the Node major the checkout declares first on PATH.
+ * GY-3229: turbo's cache is the install's own, beside the serve checkouts, never the served repository's root.
+ */
 export const serveEnvironment = async (checkout: string, run: (command: string, args: string[]) => Promise<string>, host: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> =>
-  ({ ...host, PATH: await pinnedNodePath(checkout, host.PATH, run) });
+  ({ ...host, TURBO_CACHE_DIR: join(dirname(checkout), 'turbo-cache'), PATH: await pinnedNodePath(checkout, host.PATH, run) });

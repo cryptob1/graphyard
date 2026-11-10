@@ -1,0 +1,15 @@
+{
+  "id": "turbo-writable-cache",
+  "title": "turbo builds with its cache under the run's scratch, and a read-only file system blocks the item instead of asking for a new head",
+  "description": "A pnpm + turbo workspace whose checkout root is read-only builds in the merge trial: turbo's cache goes under the trial's own scratch (TURBO_CACHE_DIR, which worker verification and the serve pass also set), and no .turbo directory appears in the checkout. A build step failing with 'Read-only file system' records one blocker naming the path, is not retried, and leaves the item unreworked. Fetches pnpm and turbo from the registry on the first run.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a read-only checkout root builds with turbo's cache in scratch; a read-only build failure blocks the item once",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/turbo-writable-cache.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

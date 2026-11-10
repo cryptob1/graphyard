@@ -15,6 +15,7 @@ import type { TrialE2eCase } from './e2e-trial.js';
 import { underTestRunner } from '../runtime-environment.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
+import { readOnlyTrialBlocker } from '../model/merge-queue.js';
 import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
 import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
@@ -322,8 +323,12 @@ export const trialCheckoutPrefix = 'gy-c';
  * in it. mkdtemp's own 0700 is not sticky: every merged head failed runner-executor on it.
  */
 export const trialTemporaryMode = 0o1700;
-/** The variables that point the trial child's temporary files at `directory`. */
-export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory });
+/**
+ * The variables that point the trial child's temporary files at `directory`, turbo's cache among them
+ * (GY-3229): in a linked worktree turbo otherwise writes the main checkout's `.turbo/cache`, which
+ * the trial and worker verification mount read-only.
+ */
+export const trialTemporaryVariables = (directory: string) => ({ TMPDIR: directory, TMP: directory, TEMP: directory, TURBO_CACHE_DIR: join(directory, 'turbo') });
 
 /**
  * A trial's verdict. `runnerExit` is how the test runner process ended: its exit status, 128 plus the
@@ -482,6 +487,27 @@ export class TrialRunnerError extends Error {
     super(`The trial's ${phase} runner exited (${signal ? `signal ${signal}` : `status ${status ?? 'unknown'}`}) naming no failing test${files.length ? `; ${finished} of its ${files.length} file(s) finished` : ''}`);
     this.name = 'TrialRunnerError';
   }
+}
+/**
+ * GY-3229: a trial step failed writing a read-only file system — a host or checkout-layout fault,
+ * not the head's. It reaches no verdict and is not retried; the control plane records it as the
+ * item's one blocker (server/merge-record.ts) and the queue holds the head until it is unblocked.
+ */
+export class TrialReadOnlyError extends Error {
+  constructor(phase: string, readonly path: string) {
+    super(`${readOnlyTrialBlocker}: the trial's ${phase} could not write ${path}. This is a host or checkout-layout fault, not the head's: make it writable, then unblock the item`);
+    this.name = 'TrialReadOnlyError';
+  }
+}
+/** The path a 'Read-only file system' failure names in `out` — the quoted absolute path nearest the failure, for Node's EROFS names it after the phrase and turbo's wrapped report before it — or null when it names none. */
+export function readOnlyPath(out: string): string | null {
+  const flat = out.replace(ansiEscape, '').replace(/\n[ \t]*[|`]?(?:->)?[ \t]*/g, '');
+  const at = flat.search(/read-only file system/i);
+  if (at < 0) return null;
+  const from = Math.max(0, at - 600), phraseFrom = at - from, phraseTo = phraseFrom + 'read-only file system'.length;
+  return [...flat.slice(from, at + 300).matchAll(/[`'"](\/[^`'"\s]+)[`'"]/g)]
+    .map(match => ({ path: match[1]!, distance: match.index! + match[0].length <= phraseFrom ? phraseFrom - (match.index! + match[0].length) : match.index! - phraseTo }))
+    .sort((a, b) => a.distance - b.distance)[0]?.path ?? null;
 }
 /**
  * A trial directory could not be removed afterwards, so it is left behind: the session directory
@@ -768,7 +794,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -895,6 +921,17 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const diagnostic = ended.out.replace(ansiEscape, '');
     return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
+  // GY-3229: a read-only failure is the host's fault only when it blocks a directory the trial itself
+  // grants writable — the checkout (with its worktree and git dir), its short place, its temporary
+  // directory and its home, exactly what the boundary mounts writable. A write past them is the trial's
+  // own containment refusing the candidate (GY-1565 keeps the parent of the temporary directory
+  // read-only on purpose), a failed build like any other, so the head still gets its verdict.
+  const readOnly = (phase: string, ended: Ended) => {
+    if (ended.ok) return;
+    const path = readOnlyPath(ended.out);
+    const granted = [checkout.directory, place, temporary, home].filter((directory): directory is string => !!directory);
+    if (path && granted.some(directory => path === directory || path.startsWith(`${directory}/`))) throw new TrialReadOnlyError(phase, path);
+  };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
@@ -970,6 +1007,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         const [command, ...args] = installArgv(manager);
         const installed = await child('install', command!, args, { env: npmCiEnvironment(env) });
         if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
+        readOnly('install', installed);
         if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
       }
       const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
@@ -981,6 +1019,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         const [command, ...args] = buildArgv(manager, input.changedFiles, base);
         const built = await child('build', command!, args);
         if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
+        readOnly('build', built);
         if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
       }
     }
