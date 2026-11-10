@@ -1,6 +1,7 @@
 // Concern: `graphyard master status` — one page: the managed repository's served commit against its base tip (only what a deployment provider records; unconfigured when none does), each open item, the merge writer, live sessions and free worker profiles.
 import { latestReleaseNote, releaseNotesPath } from '../release-notes.js';
-import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
+import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from '../master.js';
+import { readSessionScreenOrError } from '../master/prompt-delivery.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
@@ -91,8 +92,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
-  let screenError: string | null = null;
-  const masterScreen = session?.agentName ? await readSessionScreen(masterAgent?.pane_id ?? session.agentName, run, 80, error => { screenError = error instanceof Error ? error.message : String(error); }) : undefined;
+  const { screen: masterScreen, error: screenError } = session?.agentName ? await readSessionScreenOrError(masterAgent?.pane_id ?? session.agentName, run) : { screen: undefined, error: null };
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null,
