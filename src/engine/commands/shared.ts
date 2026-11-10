@@ -9,7 +9,7 @@ export function authorizeOperatorCommand(actor: Principal, command: Command, dat
   demand(operatorCommands.has(command), 'This operation is not available to operator agents', 403);
   demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
   if (work) demand(operatorScopeIncludes(actor, work), 'Work item is outside this operator-agent scope', 403);
-  demand(command === 'evidence' || data.reason, 'Operator-agent mutations require a reason', 400);
+  demand(data.reason, 'Operator-agent mutations require a reason', 400);
   if (command === 'create') demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
 }
 
