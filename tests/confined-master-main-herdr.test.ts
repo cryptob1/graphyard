@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,7 +167,9 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
     // `master review` launches runs in a pane this server starts on the host, its own confinement
     // in the line it types.
     let connections = 0, agentLists = 0;
-    const reviewLaunches: string[] = [];
+    const reviewLaunches: string[] = [], reviewPaneLines: string[] = [];
+    // The managed worktree root a host's dispatches have already created, granted to the master.
+    mkdirSync(worktreeRoot(root, migrated), { recursive: true });
     const herdrNet = herdrServer = createServer(connection => {
       connections++;
       let buffer = '';
@@ -184,7 +186,9 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
         else if (args[0] === 'tab' && args[1] === 'create') answer = json({ root_pane: { pane_id: 'wMain:review', tab_id: 'wMain:review-tab' } });
         else if (args[0] === 'pane' && args[1] === 'run') {
           recordTypedRuntime(args);
-          reviewLaunches.push(readFileSync(`${/GY=(\S+);/.exec(args[3])![1]}.launch`, 'utf8'));
+          reviewPaneLines.push(args[3]);
+          const launchFile = `${/GY=(\S+);/.exec(args[3])![1]}.launch`;
+          reviewLaunches.push(existsSync(launchFile) ? readFileSync(launchFile, 'utf8') : `no launch file at ${launchFile}`);
         }
         else answer = shellAnswers(args) ?? '';
         connection.end(`${answer}\n`);
@@ -238,6 +242,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
     assert.ok(agentLists >= 2, 'the main Herdr served both inventory reads, the session\'s and the review launch\'s');
     assert.equal(reviewLaunches.length, 1, 'the main Herdr started the reviewer master review launched');
     assert.match(reviewLaunches[0], /bwrap .*--unshare-pid/, 'the reviewer pane carries its own confinement, built on the host by Herdr');
+    assert.ok(reviewPaneLines[0].includes(worktreeRoot(root, migrated)), `the reviewer checkout lies in the host's managed worktree root, where the host pane finds it: ${reviewPaneLines[0]}`);
     assert.ok(connections >= 2, 'every answer came through the main server\'s own socket');
   } finally {
     if (herdrServer) await new Promise<void>(resolve => (herdrServer as NonNullable<typeof herdrServer>).close(() => resolve()));
