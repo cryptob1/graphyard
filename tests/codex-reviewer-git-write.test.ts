@@ -39,17 +39,21 @@ before(async () => {
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); });
 
-test('e2e:codex-reviewer-git-write — a codex reviewer launched for a repository separate from its CLI release passes the confined sandbox probe on the served .git and records its verdict', async () => {
+// The served checkout is the repository itself, or a linked worktree of it whose .git is a pointer file.
+for (const layout of ['repository', 'linked-worktree'] as const)
+test(`e2e:codex-reviewer-git-write — ${layout}: a codex reviewer launched for a checkout separate from its CLI release passes the confined sandbox probe on the served .git and records its verdict`, async () => {
   const base = await temporaryDirectory('codex-reviewer-git-write');
   const credentialDirectory = await temporaryDirectory('codex-reviewer-credentials');
   try {
-    const root = join(base, 'served-repository');
-    const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    execFileSync('git', ['init', '-q', '-b', 'main', root]);
-    git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.com');
-    git('commit', '-q', '--allow-empty', '-m', 'base'); const baseSha = git('rev-parse', 'HEAD');
-    git('commit', '-q', '--allow-empty', '-m', 'candidate'); const head = git('rev-parse', 'HEAD');
-    git('remote', 'add', 'origin', `https://github.com/${repository}.git`);
+    const repo = join(base, 'served-repository');
+    const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    gitIn(repo, 'config', 'user.name', 'Fixture'); gitIn(repo, 'config', 'user.email', 'fixture@example.com');
+    gitIn(repo, 'commit', '-q', '--allow-empty', '-m', 'base'); const baseSha = gitIn(repo, 'rev-parse', 'HEAD');
+    gitIn(repo, 'commit', '-q', '--allow-empty', '-m', 'candidate'); const head = gitIn(repo, 'rev-parse', 'HEAD');
+    gitIn(repo, 'remote', 'add', 'origin', `https://github.com/${repository}.git`);
+    const root = layout === 'repository' ? repo : join(base, 'coordinator');
+    if (layout === 'linked-worktree') gitIn(repo, 'worktree', 'add', '-q', '--detach', root);
     await setupMaster(root, { url, token: credentials[0].token, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: join(base, 'sessions') } });
     await saveReviewerProfile(root, { name: 'reviewer-codex', agentName: 'review-codex-1', kind: 'codex' });
     const now = new Date().toISOString();
@@ -74,7 +78,7 @@ test('e2e:codex-reviewer-git-write — a codex reviewer launched for a repositor
         return execFileSync(command, shell, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       } }).catch(error => { if (error instanceof WorkerSandboxError) assert.fail(`the probe must pass: ${error.message}`); throw error; });
     assert.equal(probed.length, 1);
-    assert.ok(probed[0].includes(join(root, '.git')), 'the served repository\'s .git is a probed, writable path');
+    assert.ok(probed[0].includes(join(repo, '.git')), 'the served repository\'s .git is a probed, writable path');
 
     // The session it started posts its verdict with its own launch token, and the control plane records it.
     const tab = calls.find(args => args[0] === 'tab' && args[1] === 'create')!;
