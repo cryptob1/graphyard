@@ -31,9 +31,10 @@ export const herdrSubcommand = (args: string[]) => args[0] === '--session' ? arg
  */
 export function herdrInvocation(args: string[], instance: HerdrInstance | null = processInstance, command: string = herdrBinary()): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
   if (!instance) {
-    if (!process.env.GRAPHYARD_HERDR_CONFIG_HOME) return { command, args };
+    // A caller inside an old pane can retain its socket after the install has moved to the main server.
+    if (!process.env.GRAPHYARD_HERDR_CONFIG_HOME && !process.env.HERDR_SOCKET_PATH) return { command, args };
     const { HERDR_SOCKET_PATH: _socket, GRAPHYARD_HERDR_CONFIG_HOME: _home, GRAPHYARD_HERDR_SESSION: _session, ...env } = process.env;
-    return { command, args, env: { ...env, XDG_CONFIG_HOME: join(homedir(), '.config') } };
+    return { command, args, env: { ...env, ...(process.env.GRAPHYARD_HERDR_CONFIG_HOME ? { XDG_CONFIG_HOME: join(homedir(), '.config') } : {}) } };
   }
   const { HERDR_SOCKET_PATH: _socket, ...env } = process.env;
   return { command, args: ['--session', instance.session, ...args], env: { ...env, XDG_CONFIG_HOME: instance.configHome, [herdrInstanceEnv.configHome]: instance.configHome, [herdrInstanceEnv.session]: instance.session } };

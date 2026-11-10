@@ -1,0 +1,15 @@
+{
+  "id": "status-master-screen-after-migration",
+  "title": "Master status reads the live master after migration to the main Herdr",
+  "description": "Migrate a fixture install while a private worker drains. With a stale inherited socket and cursor pane, status reads the live main-server master, reports working, idle and done, and retains the error when its screen cannot be read.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Read the migrated master and expose screen errors",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/status-master-screen-after-migration.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
