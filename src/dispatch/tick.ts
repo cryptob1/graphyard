@@ -84,7 +84,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const herdr = inventoryRead ? (inventoryRead.available ? sessionAgents(inventoryRead) : null) : await effects.agents();
   // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
   try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
-  const { reviews, released } = await effects.reconcileReviews(snapshot.work, herdr);
+  // GY-3234: read once per tick — a pending review whose pane and registry session are both gone
+  // settles here, and the registry sweep below judges the same document.
+  const registry = herdr && effects.registry ? await effects.registry() : null;
+  const { reviews, released } = await effects.reconcileReviews(snapshot.work, herdr, registry);
   const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
@@ -121,7 +124,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
     }
   })();
-  if (herdr) await sweepRegistrySessions(config.hostId, cursor, effects, herdr, [...reviews, ...producers], clock, snapshot.work, tick);
+  if (herdr && registry) await sweepRegistrySessions(config.hostId, cursor, effects, registry, herdr, [...reviews, ...producers], clock, snapshot.work, tick);
   // An unreadable inventory cannot confirm whether a launch name is already running.
   // A released pane is matched by its (pane, name) pair, as the reconcile pass matched it, in the
   // inventory and in the recorded handles alike (GY-1075): `observeSessions` above read the
