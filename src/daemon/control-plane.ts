@@ -1,12 +1,19 @@
-// Concern: GY-3199 — the control plane's own daily update, as the loop sees it. The deploy watch
-// keeps .graphyard/control-plane.json; this step reads it each cycle: while an upgrade keeps
-// failing it files one item naming the failed step (never one per retry — the record's verified
-// commit and failed step are the filing's idempotency key), and once a day it reports the
-// staleness the record shows — a check over a day old, or a verified commit first seen over a day
-// ago that the install still does not run.
+// Concern: GY-3199, GY-3233 — the control plane's own faults, as the loop sees them. The deploy
+// watch keeps .graphyard/control-plane.json; this step reads it each cycle, and the cycle hands it
+// the steps that ran past their timeout. A fault belongs to Graphyard, not to the managed
+// repository: it is filed once to the configured upstream install (`upstream` in master.json),
+// into this install only when it manages Graphyard itself, and otherwise raised as one attention
+// line — never filed again per cycle. Once a day it reports the staleness the record shows.
 import { controlPlaneRecordPath, controlPlaneStaleLines, readControlPlaneRecord, type ControlPlaneRecord } from '../deploy-watch.js';
+import { readCredentialFile } from '../private-file.js';
+import { serverOrigin } from '../repository-setup.js';
+import { graphyardRepository } from '../scenarios.js';
+import type { MasterConfig } from '../master/profiles.js';
 import { actionLine, message, storeAction } from './state.js';
 import type { Cycle } from './cycle.js';
+
+/** How long a failed upstream filing waits before the loop asks again. */
+export const upstreamRetryMs = 3_600_000;
 
 /** The bug item a failed control-plane upgrade files: one item per verified commit and failed step. */
 export function controlPlaneUpgradeItem(record: ControlPlaneRecord) {
@@ -25,29 +32,66 @@ export function controlPlaneUpgradeItem(record: ControlPlaneRecord) {
   };
 }
 
+/** The bug item a loop step that ran past its timeout files upstream. */
+export function stepStallItem(step: string, repository: string) {
+  return {
+    title: `Loop ${step} step stalls past its timeout`.slice(0, 200),
+    type: 'bug' as const,
+    priority: 1,
+    description: `The master loop's ${step} step on the install for ${repository} ran past its cycle timeout. The loop logs the stall each cycle in its journal; find what the step waits on and bound it.`,
+    dependencies: [],
+    criteria: [{ id: 'AC-1', text: `The loop's ${step} step finishes within its timeout; a new test pins the cause and fails without the fix`, proofs: ['unit:loop-step-bounded'] }],
+    reason: 'Filed by the master loop from a stalled cycle step (GY-3233)',
+  };
+}
+export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem>;
+
+/** Production upstream filer: POSTs the item to the upstream install as its credential's principal, idempotent on the fault's key. */
+export function upstreamFiler(upstream: NonNullable<MasterConfig['upstream']>, fetcher: typeof fetch = fetch) {
+  return async (input: FaultItem, key: string): Promise<{ key?: string }> => {
+    const token = await readCredentialFile(upstream.credentialFile);
+    const response = await fetcher(`${serverOrigin(upstream.url)}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(input), signal: AbortSignal.timeout(30_000) });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`the upstream install refused it (${response.status}): ${text.slice(0, 200)}`);
+    return JSON.parse(text) as { key?: string };
+  };
+}
+
 /**
- * The control plane's own record, read beside the cycle: one item while an upgrade keeps failing,
- * and the daily staleness line. Nothing here writes the record — the deploy watch owns it.
+ * Reports one fault once: filed upstream when one is configured, into this install only when it
+ * manages Graphyard's own repository, otherwise one attention line. A failed upstream filing
+ * stands as its attention line and is asked again an hour later; nothing else repeats.
  */
-export async function controlPlaneStep(cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log'>) {
-  const reads = cycle.effects.mergeWriter, root = reads?.gate?.root;
-  if (!reads?.createWork || !root) return;
-  const note = (key: string, state: 'done' | 'failed', detail: string) => {
-    const entry = storeAction(cycle.state, key, { kind: 'attention', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.clock).toISOString() });
+async function reportFault(cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>, key: string, item: FaultItem, fault: string) {
+  const row = cycle.state.actions[key], upstream = cycle.effects.fileUpstream;
+  if (row && (row.state === 'done' || !upstream || cycle.clock - Date.parse(row.at) < upstreamRetryMs)) return;
+  const note = (state: 'done' | 'failed', detail: string) => {
+    const entry = storeAction(cycle.state, key, { kind: 'attention', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: (row?.attempts ?? 0) + 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.clock).toISOString() });
     cycle.log(actionLine(cycle.state.cycle, entry));
   };
+  const local = cycle.config.repository?.toLowerCase() === graphyardRepository ? cycle.effects.mergeWriter?.createWork : undefined;
+  const file = upstream ?? local;
+  if (!file) return note('failed', `Graphyard fault: ${fault}. No upstream install is configured (upstream in master.json), so it is not filed; report it to Graphyard, never as work in ${cycle.config.repository}`);
+  try {
+    const filed = await file(item, key);
+    note('done', `Filed ${filed?.key ?? 'an item'}${upstream ? ' to the upstream install' : ''}: ${fault}`);
+  } catch (error) { note('failed', `Graphyard fault: ${fault}. Could not file it${upstream ? ' to the upstream install' : ''}: ${message(error)}`); }
+}
+
+/**
+ * The control plane's own faults, read beside the cycle: a stuck upgrade from the record, the
+ * steps this cycle saw stall, and the daily staleness line. Nothing here writes the record — the
+ * deploy watch owns it.
+ */
+export async function controlPlaneStep(cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>, stalledSteps: readonly string[] = []) {
+  for (const step of stalledSteps) await reportFault(cycle, `loop-step-stall:${step}`, stepStallItem(step, cycle.config.repository), `the loop's ${step} step ran past its timeout`);
+  const root = cycle.effects.mergeWriter?.gate?.root;
+  if (!root) return;
   const record = readControlPlaneRecord(controlPlaneRecordPath(root));
-  if (record?.failedStep && record.verified) {
-    // One item per verified commit and failed step: a retry, or a later pass still failing at the
-    // same step of the same commit, files nothing new.
-    const key = `control-plane-upgrade:${record.verified}:${record.failedStep}`;
-    if (cycle.state.actions[key]?.state !== 'done') {
-      try {
-        const filed = await reads.createWork(controlPlaneUpgradeItem(record), key);
-        await note(key, 'done', `Filed ${(filed as { key?: string } | null)?.key ?? 'an item'}: the control-plane upgrade to ${record.verified.slice(0, 12)} keeps failing at ${record.failedStep}, so the install still runs ${record.commit?.slice(0, 12) ?? 'its previous version'}`);
-      } catch (error) { await note(key, 'failed', `Could not file the stuck control-plane upgrade (${record.failedStep} at ${record.verified.slice(0, 12)}): ${message(error)}`); }
-    }
-  }
+  // One fault per verified commit and failed step: a retry, or a later pass still failing at the
+  // same step of the same commit, reports nothing new.
+  if (record?.failedStep && record.verified)
+    await reportFault(cycle, `control-plane-upgrade:${record.verified}:${record.failedStep}`, controlPlaneUpgradeItem(record), `the control-plane upgrade to ${record.verified.slice(0, 12)} keeps failing at ${record.failedStep}, so the install still runs ${record.commit?.slice(0, 12) ?? 'its previous version'}`);
   // The daily diagnostics: each staleness line once per UTC day, in the journal the leftovers
   // report writes to. Nothing stale logs nothing.
   const day = new Date(cycle.clock).toISOString().slice(0, 10);

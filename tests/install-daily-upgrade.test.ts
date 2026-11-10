@@ -103,12 +103,12 @@ test('unit:tests/install-daily-upgrade.test.ts — a failed upgrade keeps the pr
     'a passing upgrade moves the commit, clears the failed step and advances the update clock');
 });
 
-test('unit:tests/install-daily-upgrade.test.ts — the master loop files one item naming the failed step, not one per retry', async () => {
+test('unit:tests/install-daily-upgrade.test.ts — the master loop of Graphyard\'s own install files one item naming the failed step, not one per retry', async () => {
   const root = await temporaryDirectory('install-daily-upgrade-filing');
   await writeControlPlaneRecord(controlPlaneRecordPath(root), { commit: b, verified: c, verifiedSeenAt: new Date().toISOString(), failedStep: 'health', failedReason: 'health failed: /healthz reports the server unhealthy', failedAt: new Date().toISOString() });
   const filed: { title: string; description: string; key: string }[] = [];
-  const config = { url: 'http://127.0.0.1:5', repository: 'owner/game', hostId: 'test-host' } as unknown as MasterConfig;
-  const cycle = { state: emptyDaemonState(config), clock: Date.now(), log: () => {}, effects: { mergeWriter: { gate: { root }, createWork: async (input: { title: string; description: string }, key: string) => { filed.push({ ...input, key }); return { key: 'GY-999' }; } } } } as unknown as Parameters<typeof controlPlaneStep>[0];
+  const config = { url: 'http://127.0.0.1:5', repository: graphyardRepository, hostId: 'test-host' } as unknown as MasterConfig;
+  const cycle = { config, state: emptyDaemonState(config), clock: Date.now(), log: () => {}, effects: { mergeWriter: { gate: { root }, createWork: async (input: { title: string; description: string }, key: string) => { filed.push({ ...input, key }); return { key: 'GY-999' }; } } } } as unknown as Parameters<typeof controlPlaneStep>[0];
   await controlPlaneStep(cycle);
   await controlPlaneStep(cycle); // the retry reads the same record and files nothing
   assert.equal(filed.length, 1, 'one item, however many passes fail at the same step of the same commit');

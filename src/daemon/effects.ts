@@ -14,6 +14,7 @@ import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopReleas
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
 import type { ComposeServer } from './compose-recovery.js';
+import type { FaultItem } from './control-plane.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** GY-1713: body `error` + zod `issues` so a refusal names the refused field; else stringify. */
@@ -148,6 +149,8 @@ export interface DaemonEffects {
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /** POSTs one plain-text line to the operator's alert webhook (GY-3101: `run.alertUrl`, any receiver that takes a body, such as an ntfy topic). Absent, no alert is sent. */
   alertWebhook?: (text: string) => Promise<void>;
+  /** GY-3233: files a control-plane fault to the upstream install master.json's `upstream` names. Absent, no upstream is configured. */
+  fileUpstream?: (input: FaultItem, key: string) => Promise<{ key?: string } | null>;
   /** The release this process loaded, read once at startup. */
   loadedRelease?: LoopRelease | null;
   persist: (state: DaemonState) => Promise<void>;

@@ -135,12 +135,12 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   const own = !launcher, launches = launcher ?? new Launcher(Number.POSITIVE_INFINITY);
   if (!own) launches.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const steps: CycleStep[] = [];
-  const timeoutMs = stepTimeoutMs(config);
+  const timeoutMs = stepTimeoutMs(config), stalled: string[] = [];
   const step = async <T>(name: CycleStep, body: () => Promise<T>): Promise<T | undefined> => {
     steps.push(name);
     let timer: NodeJS.Timeout | undefined;
     try {
-      return await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)), timeoutMs); timer.unref?.(); })]);
+      return await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => { stalled.push(name); reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)); }, timeoutMs); timer.unref?.(); })]);
     } catch (error) {
       if (name === 'snapshot') throw error;
       log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`);
@@ -179,8 +179,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);
-    // GY-3199: the control plane's own update record — one item while an upgrade keeps failing, and the daily staleness line.
-    if (!config.forPerson) await controlPlaneStep(cycle);
+    // GY-3199, GY-3233: the control plane's own faults — a stuck upgrade, a stalled step — reported upstream once, and the daily staleness line.
+    if (!config.forPerson) await controlPlaneStep(cycle, stalled);
     if (!config.forPerson) await leftoversStep(state, clock, effects.leftoverDisk, log);
   });
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: read.snapshot.work.filter(item => item.stage !== 'done').length, actions: performed.length, steps });
