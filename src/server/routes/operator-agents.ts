@@ -1,6 +1,6 @@
 import { demand } from '../../model.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
-import { defineRoutes, parseJson } from '../routes.js';
+import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle. */
@@ -39,4 +39,13 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   } },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.
   { method: 'POST', path: '/api/sign-in-links', handle: async ({ actor, services }) => humanSignIn(services).issue(actor, services.principals.some(entry => entry.actor.id === actor.id && entry.actor.role === 'admin')) },
+  // GY-3215: the operator invites a teammate (a one-time link to their own session) or revokes one.
+  { method: 'POST', path: '/api/invites', handle: async context => {
+    const { name, role } = await parseJson(context) as { name: string; role: string };
+    return humanSignIn(context.services).invite(context.actor, configuredIds(context.services), name, role);
+  } },
+  { method: 'POST', path: /^\/api\/invites\/([^/]+)\/revoke$/, handle: async ({ actor, services }, [name]) => humanSignIn(services).revoke(actor, configuredIds(services), decodeURIComponent(name)) },
 ]);
+
+/** Every configured principal id; the issuer must be one of them, and no invite may take one's name. */
+const configuredIds = (services: Services) => services.principals.map(entry => entry.actor.id);

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { demand, operatorScopeIncludes, type Principal } from '../model.js';
-import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
+import { laneOnlyProducer, teamRoles, type Credential, type PrincipalGrant, type TeamRole } from './principals.js';
 import { readImports } from '../validation-import.js';
 import type { Store } from '../store.js';
 import type { Engine } from '../engine.js';
@@ -149,28 +149,58 @@ export const signInLinkTtlMs = 10 * 60_000;
 export const signInSessionTtlMs = 90 * 86_400_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
+/**
+ * Only a configured admin credential declared a human session issues a link or an invite: never an agent identity, a reader, or a worker, and
+ * never an admin declared an AI session or declaring nothing, since redeeming the link declares the session human.
+ */
+function operatorOnly(issuer: Principal, configured: boolean) {
+  demand(configured && issuer.role === 'admin', 'Only the operator\'s own admin credential issues a sign-in link', 403);
+  demand(issuer.sessionKind === 'human', `A sign-in link opens a human session; ${issuer.id} is ${issuer.sessionKind === 'ai' ? 'declared an AI session' : 'not declared "sessionKind": "human"'} and issues none`, 403);
+}
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 export class HumanSignIn {
   private readonly links = new Map<string, { principal: Principal; expiresAt: number }>();
   constructor(private readonly store: Store, private readonly clock: () => number = Date.now) {}
 
-  /**
-   * A link for the issuing principal. Only a configured admin credential declared a human session
-   * issues one: never an agent identity, a reader, or a worker, and never an admin declared an AI
-   * session or declaring nothing, since redeeming the link declares the session human and would hand
-   * whoever holds that credential the decisions only a human may make. An install declares its
-   * operator human (install/index.ts), and the server treats an undeclared session as never human.
-   */
+  /** A link for the issuing operator (`operatorOnly`). An install declares its operator human (install/index.ts); an undeclared session is never human. */
   issue(issuer: Principal, configured: boolean) {
-    demand(configured && issuer.role === 'admin', 'Only the operator\'s own admin credential issues a sign-in link', 403);
-    demand(issuer.sessionKind === 'human', `A sign-in link opens a human session; ${issuer.id} is ${issuer.sessionKind === 'ai' ? 'declared an AI session' : 'not declared "sessionKind": "human"'} and issues none`, 403);
-    const now = this.prune(), code = randomBytes(32).toString('base64url');
+    operatorOnly(issuer, configured);
     // The session keeps the issuer's roster --proof patterns: proof authority is the roster's alone.
     const { displayName, proofs } = issuer;
+    return this.link({ id: issuer.id, role: 'admin', ...(displayName ? { displayName } : {}), ...(proofs ? { proofs: [...proofs] } : {}) });
+  }
+
+  /**
+   * GY-3215: the operator invites a teammate. NAME is recorded as a human principal with its team role
+   * (inviting it again changes the role and issues a fresh link), and the link opens that teammate's own
+   * session: role reader, so it reads everything; a maintainer also files work.
+   */
+  async invite(issuer: Principal, configured: string[], name: string, team: string) {
+    operatorOnly(issuer, configured.includes(issuer.id));
+    demand(typeof name === 'string' && /^[^\s\u0000-\u001f\u007f]{1,100}$/.test(name), 'NAME is a label of 1-100 characters without spaces, such as an email or GitHub login', 400);
+    demand((teamRoles as readonly string[]).includes(team), `--role is one of ${teamRoles.join(', ')}`, 400);
+    demand(!configured.includes(name), `${name} is a configured principal; invite a teammate under a name of their own`, 409);
+    await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
+      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(this.clock())]);
+    return { ...this.link({ id: name, role: 'reader', team: team as TeamRole, displayName: name }), role: team };
+  }
+
+  /** GY-3215: revoking a teammate removes them, their unopened links and every session they hold, at once. */
+  async revoke(issuer: Principal, configured: string[], name: string) {
+    operatorOnly(issuer, configured.includes(issuer.id));
+    for (const [key, entry] of this.links) if (entry.principal.team && entry.principal.id === name) this.links.delete(key);
+    const { rowCount } = await this.store.pool.query('DELETE FROM team_members WHERE name=$1', [name]);
+    demand(!!rowCount, `${name} is not an invited teammate`, 404);
+    const sessions = await this.store.pool.query(`DELETE FROM human_sign_in_sessions WHERE actor->>'id'=$1 AND actor ? 'team'`, [name]);
+    return { revoked: name, sessionsEnded: sessions.rowCount ?? 0 };
+  }
+
+  private link(principal: Principal) {
+    const now = this.prune(), code = randomBytes(32).toString('base64url');
     bounded(this.links, maxSignInLinks - 1);
-    this.links.set(digest(code), { principal: { id: issuer.id, role: 'admin', ...(displayName ? { displayName } : {}), ...(proofs ? { proofs: [...proofs] } : {}) }, expiresAt: now + signInLinkTtlMs });
-    return { code, principal: issuer.id, expiresAt: new Date(now + signInLinkTtlMs).toISOString() };
+    this.links.set(digest(code), { principal, expiresAt: now + signInLinkTtlMs });
+    return { code, principal: principal.id, expiresAt: new Date(now + signInLinkTtlMs).toISOString() };
   }
 
   /** Redeem a link once: it is gone whether or not it was still valid, and a live one opens a human session for its principal. */

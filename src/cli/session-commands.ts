@@ -215,11 +215,15 @@ export const openCommand: CliCommand = {
     return context.print(opened ? { opened: true, principal: link.principal } : { opened: false, signIn: link.url, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
   },
 };
+/** With no credential named, the install's recorded operator credential stands in for GRAPHYARD_TOKEN (the request helper reads it on first use). */
+export async function asRecordedOperator(root: string) {
+  const recorded = process.env.GRAPHYARD_TOKEN_FILE || process.env.GRAPHYARD_TOKEN ? null : await recordedOperator(root);
+  if (recorded) process.env.GRAPHYARD_TOKEN = recorded.token;
+  return recorded;
+}
 /** A one-time sign-in link minted with the install's recorded operator credential; `remote` links to the tailnet address when the dashboard is served there. */
 async function signInLink({ api, base, repositoryRoot }: Parameters<CliCommand['run']>[0], remote: boolean) {
-  const recorded = process.env.GRAPHYARD_TOKEN_FILE || process.env.GRAPHYARD_TOKEN ? null : await recordedOperator(repositoryRoot());
-  // The request helper reads its credential on first use: the recorded one stands in for GRAPHYARD_TOKEN.
-  if (recorded) process.env.GRAPHYARD_TOKEN = recorded.token;
+  const recorded = await asRecordedOperator(repositoryRoot());
   const link = await api('sign-in-links', {}) as { code: string; principal: string; expiresAt: string };
   return { url: `${((remote ? recorded?.reachableUrl : null) ?? base).replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt };
 }
