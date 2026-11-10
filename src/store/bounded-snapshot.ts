@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { settledSummariesSql } from './summary-sql.js';
@@ -8,8 +9,9 @@ if (!settledSummariesSql.includes(settledScan)) throw new Error('settledSummarie
 const settledByIdSql = settledSummariesSql.replace('SELECT d.number,', 'SELECT d.id::text AS id, d.number,').replace(settledScan, 'FROM work_index i WHERE i.settled AND i.id = ANY($1::uuid[]) OFFSET 0');
 /** A summary is rebuilt at least this often, so sessions leave its 24-hour window (GY-3187). */
 const summaryMaxAgeMs = 3_600_000;
-type Cached = { version: string; readAt: number; row: { number: string; document: Work } };
-const summaryCaches = new WeakMap<pg.Pool, Map<string, Cached>>();
+/** `built` numbers the rebuild that wrote the entry, so a cursor names exactly what a reader already holds. */
+type Cached = { version: string; readAt: number; built: number; row: { number: string; document: Work } };
+const summaryCaches = new WeakMap<pg.Pool, { id: string; built: number; entries: Map<string, Cached> }>();
 
 /**
  * The work snapshot every reader polls (GY-422): open items whole, and each settled delivery —
@@ -20,24 +22,31 @@ const summaryCaches = new WeakMap<pg.Pool, Map<string, Cached>>();
  * Settled summaries are kept per pool (GY-3187): every write to an item rewrites its index row, so
  * the row's `xmin` versions the summary, and a poll reads the settled index rows alone, rebuilding
  * only the summaries whose row changed (or aged past `summaryMaxAgeMs`), never every settled document.
+ *
+ * Every answer carries a `cursor`. A poll that passes the previous one as `since` (GY-3231: the
+ * dashboard) gets the open items whole and only the settled summaries rebuilt after it, marked
+ * `delta: true`, instead of every settled delivery again: 26 MB every five seconds outran a remote
+ * browser's poll, so newly filed items never showed. A cursor from another process is answered whole.
  */
-export async function boundedSnapshot(pool: pg.Pool): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
+export async function boundedSnapshot(pool: pg.Pool, since?: string | null): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; cursor: string; delta?: true }> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const cache = summaryCaches.get(pool) ?? new Map<string, Cached>();
-    summaryCaches.set(pool, cache);
+    const caches = summaryCaches.get(pool) ?? { id: randomUUID(), built: 0, entries: new Map<string, Cached>() };
+    summaryCaches.set(pool, caches);
+    const cache = caches.entries;
     const versions = new Map<string, string>((await client.query('SELECT i.id::text AS id, i.xmin::text AS version FROM work_index i WHERE i.settled')).rows.map(row => [row.id, row.version]));
     const now = Date.now();
     const stale = [...versions].filter(([id, version]) => cache.get(id)?.version !== version || now - cache.get(id)!.readAt > summaryMaxAgeMs).map(([id]) => id);
     for (const id of cache.keys()) if (!versions.has(id)) cache.delete(id);
-    if (stale.length) for (const { id, ...row } of (await client.query(settledByIdSql, [stale])).rows) cache.set(id, { version: versions.get(id)!, readAt: now, row });
-    const settled = [...versions.keys()].map(id => cache.get(id)?.row).filter(row => row !== undefined);
+    if (stale.length) { const rows = (await client.query(settledByIdSql, [stale])).rows, built = ++caches.built; for (const { id, ...row } of rows) cache.set(id, { version: versions.get(id)!, readAt: now, built, row }); }
+    const [sinceId, sinceAt] = since?.split(':') ?? [], after = sinceId === caches.id ? Number(sinceAt) : Number.NaN, cursor = `${caches.id}:${caches.built}`;
+    const settled = [...versions.keys()].map(id => cache.get(id)).filter(entry => entry !== undefined && !(entry.built <= after)).map(entry => entry!.row);
     const live = (await client.query('SELECT w.number, w.document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled)')).rows;
     const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
     await client.query('COMMIT');
     const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
-    return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs };
+    return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs, cursor, ...(Number.isFinite(after) ? { delta: true as const } : {}) };
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
   finally { client.release(); }
 }

@@ -26,6 +26,17 @@ function App() {
   const [signingIn, setSigningIn] = useState(wantsSignIn);
   const [draftToken, setDraftToken] = useState('');
   const [work, setWork] = useState<Work[]>([]);
+  // The last snapshot's cursor (GY-3231): a poll asks for what changed since it, and a delta answer
+  // keeps the settled summaries it already holds, so a poll carries the open items, not the ledger.
+  const snapshotCursor = useRef('');
+  const keepSnapshot = (items: { work: Work[]; cursor?: string; delta?: boolean }) => {
+    snapshotCursor.current = items.cursor ?? '';
+    setWork(previous => {
+      if (!items.delta) return items.work;
+      const fresh = new Set(items.work.map(w => w.id)), number = (w: Work) => Number(w.key.split('-').pop());
+      return [...items.work, ...previous.filter(w => (w.summary as unknown) === true && !fresh.has(w.id))].sort((a, b) => number(a) - number(b));
+    });
+  };
   const [status, setStatus] = useState<any>(null);
   const [board, setBoard] = useState<Board | null>(null), keepBoard = (value: unknown) => { if (isBoard(value)) setBoard(value); }; // GET /api/board (GY-200): the Work page's groups; the last one read stands through a failed read
   const [error, setError] = useState('');
@@ -52,16 +63,16 @@ function App() {
         if (!response.ok && response.status !== 401) throw new Error('Unable to sign out. Please retry.');
       } catch { setError('Unable to sign out. Check your connection and retry.'); return; }
     }
-    sessionEpoch.current++; setSigningIn(true); setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+    sessionEpoch.current++; snapshotCursor.current = ''; setSigningIn(true); setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   /** The sign-in page's first read: once the status reply accepts the token, the work snapshot, then the dashboard. */
   async function firstLoad(system: any, signal: AbortSignal) {
     const epoch = sessionEpoch.current, headers = { Authorization: `Bearer ${token}` }, response = await fetch('/api/work-snapshot', { headers, signal });
     if (response.status === 401 || response.status === 403) throw Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true });
     if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}).`);
     const items = await response.json(), served = await fetch('/api/board', { headers, signal }).then(r => r.ok ? r.json() : null, () => null); if (signal.aborted || epoch !== sessionEpoch.current) throw new Error('Superseded');
-    setWork(items.work); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError('');
+    keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError('');
   }
-  async function refresh(epoch: number) { const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current) return; setWork(items.work); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+  async function refresh(epoch: number) { const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current) return; keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   // The sign-in page verifies the token first (web/pages/login.tsx); polling starts once it is accepted.
   const live = !!status;
   useEffect(() => {
@@ -76,16 +87,18 @@ function App() {
           if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}). Retrying automatically.`);
           return response.json();
         };
-        const [items, system, served] = await Promise.all([read('work-snapshot'), read('status'), read('board').catch(() => null)]);
-        if (active && epoch === sessionEpoch.current) { setWork(items.work); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+        const [items, system, served] = await Promise.all([read(snapshotCursor.current ? `work-snapshot?since=${encodeURIComponent(snapshotCursor.current)}` : 'work-snapshot'), read('status'), read('board').catch(() => null)]);
+        if (active && epoch === sessionEpoch.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
         if (!active || epoch !== sessionEpoch.current) return;
         if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
       } finally { pending = false; }
     };
-    void load(); const timer = setInterval(load, 5000);
-    return () => { active = false; controller.abort(); clearInterval(timer); };
+    // A hidden tab's timers are throttled to once a minute, so returning to the tab reads at once.
+    const visible = () => { if (document.visibilityState === 'visible') void load(); };
+    void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
+    return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   // A read answered while the same item is still open is kept even when a work poll re-ran the effect meanwhile, so a later failed read never leaves history empty.

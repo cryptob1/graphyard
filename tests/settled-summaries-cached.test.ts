@@ -48,7 +48,7 @@ test('unit:tests/settled-summaries-cached.test.ts — an unchanged poll reads no
   assert.ok(readsSettledDocuments(one.seen), 'the first read builds the settled summary');
   const two = await queriesDuring(store.pool, () => boundedSnapshot(store.pool));
   assert.equal(readsSettledDocuments(two.seen), false, `the second read reads no settled document: ${two.seen.join('\n')}`);
-  const strip = (snapshot: any) => ({ ...snapshot, now: undefined, jobs: undefined });
+  const strip = (snapshot: any) => ({ ...snapshot, now: undefined, jobs: undefined, cursor: undefined });
   assert.deepEqual(strip(two.result), strip(one.result), 'the second response equals the first');
   const summary = (one.result as any).work.find((work: any) => work.id === first.id);
   assert.equal(summary.summary, true);
@@ -58,4 +58,22 @@ test('unit:tests/settled-summaries-cached.test.ts — an unchanged poll reads no
   const settled = (three.result as any).work.find((work: any) => work.id === open.id);
   assert.equal(settled.summary, true, 'the newly settled item is served as its summary in the next read');
   assert.equal((three.result as any).work.find((work: any) => work.id === first.id).summary, true);
+});
+
+test('unit:tests/settled-summaries-cached.test.ts — a poll since the last cursor carries open items and only the settled summaries rebuilt after it', async () => {
+  const settled = await create('Settled before the cursor'), changed = await create('Settled after the cursor');
+  await settle(settled.id);
+  const full = await boundedSnapshot(store.pool);
+  assert.equal(full.delta, undefined);
+  assert.ok(full.work.some(work => work.id === settled.id), 'a read without a cursor carries every settled summary');
+  const quiet = await boundedSnapshot(store.pool, full.cursor);
+  assert.equal(quiet.delta, true);
+  assert.equal(quiet.work.some(work => work.id === settled.id), false, 'an unchanged settled summary is not sent again');
+  assert.ok(quiet.work.some(work => work.id === changed.id), 'open items are always whole');
+  const filed = await create('Filed after the cursor');
+  await settle(changed.id);
+  const next = await boundedSnapshot(store.pool, quiet.cursor);
+  assert.ok(next.work.some(work => work.id === filed.id), 'a newly filed item is in the next poll');
+  assert.equal((next.work.find(work => work.id === changed.id) as any)?.summary, true, 'a newly settled item is sent as its summary');
+  assert.equal((await boundedSnapshot(store.pool, 'another-process:0')).delta, undefined, "another process's cursor is answered whole");
 });

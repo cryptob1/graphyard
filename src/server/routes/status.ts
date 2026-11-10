@@ -137,7 +137,7 @@ export const statusRoutes = defineRoutes('status', [
         const page = scope(await snapshotPage(services.engine.store.pool, view as 'bounded' | 'full', { cursor, pageSize, visible }));
         return view === 'bounded' ? { ...page, view } : page;
       }
-      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
+      if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool, url.searchParams.get('since'))), view };
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
       // leave it whole, and what the SQL cut is added to what the view says it left out.
