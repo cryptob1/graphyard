@@ -1,0 +1,8 @@
+{
+  "id": "codex-reviewer-git-write",
+  "title": "Codex reviewer writes the served repository's .git",
+  "description": "A codex reviewer launched for a repository separate from its CLI release passes the sandbox probe behind that repository's confinement and records its verdict.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "confined reviewer probe and verdict", "run": "node --import tsx tests/helpers/run-tests.ts tests/codex-reviewer-git-write.test.ts", "timeoutSeconds": 600 }]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "launch-probe-backoff",
+  "title": "A profile failing its launch probe is backed off",
+  "description": "The first reviewer profile fails its sandbox probe twice; the next cycle launches the next profile and master status names the backed-off profile with its cause.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "probe backoff and status", "run": "node --import tsx tests/helpers/run-tests.ts tests/launch-probe-backoff.test.ts", "timeoutSeconds": 600 }]
+}
