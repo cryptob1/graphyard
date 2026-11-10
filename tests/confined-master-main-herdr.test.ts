@@ -155,7 +155,9 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       "const list = run('herdr', ['agent', 'list']);",
       'if (!Array.isArray(JSON.parse(list).result?.agents)) throw new Error(`herdr agent list did not answer an inventory: ${list}`);',
       "console.log('MASTER-AGENT-LIST-OK');",
-      "const review = run(process.execPath, [process.env.GRAPHYARD_CLI, 'master', 'review', 'GY-1'], { cwd: process.env.GRAPHYARD_REPOSITORY_ROOT });",
+      "let review;",
+      "try { review = run(process.execPath, [process.env.GRAPHYARD_CLI, 'master', 'review', 'GY-1'], { cwd: process.env.GRAPHYARD_REPOSITORY_ROOT }); }",
+      "catch (error) { console.log('MASTER-REVIEW-FAILED ' + String(error.stderr || error.message).replace(/\\s+/g, ' ').slice(0, 1500)); process.exit(1); }",
       "const record = JSON.parse(review);",
       "if (record.work !== 'GY-1' || record.mode !== 'control-plane' || !record.launch) throw new Error(`master review did not launch the control-plane review: ${review.slice(0, 400)}`);",
       "console.log('MASTER-REVIEW-OK ' + record.agentName);",
@@ -218,7 +220,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
         // never spawnSync — the socket server below must keep answering while the session runs.
         masterOutput = await new Promise<string>((resolve, reject) =>
           execFile('/bin/bash', ['-ec', args[3]], { encoding: 'utf8', timeout: 300_000, cwd: root, env: { ...paneEnvironment, HOME: home } },
-            (error, stdout, stderr) => error ? reject(new Error(`the confined master session exited: ${`${stdout ?? ''}\n${stderr ?? ''}`.slice(-4000)}`)) : resolve(`${stdout ?? ''}\n${stderr ?? ''}`)));
+            (error, stdout, stderr) => error ? reject(new Error(`the confined master session exited: ${`${stdout ?? ''} ${stderr ?? ''}`.replace(/\s+/g, ' ').slice(-2000)}`)) : resolve(`${stdout ?? ''}\n${stderr ?? ''}`)));
         return '';
       }
       return shellAnswers(args) ?? JSON.stringify({ result: {} });
