@@ -46,10 +46,8 @@ async function dispatchFixture() {
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
     // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
     specCheck: readySpecCheck(new Date().toISOString()) } as unknown as Work;
-  const { probe } = registryFixture((await loadMasterConfig(fixture.main)).hostId!, ['codex']);
-  return { ...fixture, profile, item, probe, cleanup: async () => { await rm(fixture.root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
+  return { ...fixture, profile, item, cleanup: async () => { await rm(fixture.root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
-
 
 for (const kind of ['codex', 'pi']) test(`unit:tests/sandbox-probe-parks.test.ts — ${kind} probe blocks once without failing accounts and waits for unblock`, async t => {
   // Give Pi a test sandbox so its probe runs through the injected executor without nesting bwrap.
@@ -61,6 +59,8 @@ for (const kind of ['codex', 'pi']) test(`unit:tests/sandbox-probe-parks.test.ts
     master.workers = [profile];
     await writeFile(join(fixture.main, '.graphyard/master.json'), JSON.stringify(master));
     const registry = registryFixture(master.hostId!, [kind]);
+    const observations = t.mock.fn(registry.client.observe!);
+    registry.client.observe = observations;
     const state = emptyDaemonState(master);
     const item = fixture.item;
     item.description = 'Change src/master/dispatch.ts';
@@ -99,6 +99,7 @@ for (const kind of ['codex', 'pi']) test(`unit:tests/sandbox-probe-parks.test.ts
     assert.equal(registry.sessions().length, 1, 'no fallback account');
     assert.ok(registry.sessions()[0].endedAt, 'selected slot returned');
     assert.equal(existsSync(accountStartFailurePath(master)), false);
+    assert.equal(observations.mock.callCount(), 0, 'no account is marked failed or held');
     assert.deepEqual(state.failureRuns, {}, 'host fault is not a runtime failure');
     for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, deps);
     assert.equal(launches, 1, 'blocked item is not dispatched again');
