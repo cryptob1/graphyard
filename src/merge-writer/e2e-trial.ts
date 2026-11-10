@@ -152,7 +152,7 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
         // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
         // GY-2997: command and agent steps run under the same confinement as the serve and static build.
         select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
-        processRunner: steps.run,
+        processRunner: steps.run, versionPath: target.kind === 'command' ? undefined : target.versionPath,
         report: value => { report = value; },
       });
       try { await suite.run(served.origin, null); } finally { await steps.close().catch(() => {}); }

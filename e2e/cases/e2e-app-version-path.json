@@ -1,0 +1,16 @@
+{
+  "id": "e2e-app-version-path",
+  "title": "A preview's e2e run reports the commit the application answers at its declared version path",
+  "description": "The delivery fixture's node application declares versionPath /api/meta/version and answers {\"version\": GRAPHYARD_PREVIEW_SHA} there, while its /healthz names no commit. A real preview of it runs its bound case and reports serving that commit, in the preview's detail, the run's report line and the recorded run; the same application without versionPath reports an unreported commit.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a real preview of the fixture's node application reports the commit its versionPath answers",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:e2e-app-version-path tests/e2e-app-version-path.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

@@ -20,7 +20,7 @@ import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '..
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { reworkReasonMax } from './rework.js';
@@ -91,7 +91,9 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
   const gitAs = async (args: string[], env?: Record<string, string>) => String(await run('git', ['-C', root, ...args], env ? { env: { ...(options.environment ?? process.env), ...env } } : undefined));
   const settings = mergeWriterSettings(config.run, installIdFor(config.repository));
   // GY-2997: the trial's children run the merge's code, so they never read the deploy key the push uses, nor any coordinator credential.
-  const hidden = trialHiddenPaths(settings.deployKeyFile, options.environment);
+  const hidden = trialHiddenPaths(settings.tokenFile ?? settings.deployKeyFile, options.environment);
+  // GY-3220: with a token the merge writer alone fetches and pushes over the repository's https URL; origin stays SSH.
+  const remote = mergeWriterRemote(config.repository, settings.tokenFile, options.environment);
   const base = config.baseBranch, ref = `refs/remotes/origin/${base}`;
   const tip = async () => {
     const sha = (await git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`)).trim().toLowerCase();
@@ -101,7 +103,11 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
   return {
     baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
     git: (args, env) => gitAs(args, env),
-    fetch: async () => { await git('fetch', '--no-tags', 'origin', base); return tip(); },
+    fetch: async () => {
+      if (settings.tokenFile) await gitAs(['fetch', '--no-tags', remote, `+refs/heads/${base}:${ref}`], pushEnvironment(settings, options.environment));
+      else await git('fetch', '--no-tags', 'origin', base);
+      return tip();
+    },
     // The head itself when its first-parent chain holds the tip (main fast-forwards), else the merge commit `Merge GY-N: <title>`.
     merge: async (head, baseTip, item) => {
       const merged = await trialMerge(gitAs, { head, baseTip, ...(item ? { subject: mergeSubject(item) } : {}) });
@@ -121,12 +127,12 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       delivery: () => loadProjectDelivery(options.environment ?? process.env, root), baseTip: tip, record: (item, preview, site) => options.record(item, previewRecordEvent(preview, site)), ...options.itemPreviews },
     // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came, with git's stderr in the message (GY-2940).
     push: async (mergeSha, baseTip) => {
-      try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
+      try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha, remote)], { env: pushEnvironment(settings, options.environment) }); return 'pushed'; }
       catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw pushFailureWithStderr(error); }
     },
     // GY-3199: the batch gate's own publication — the verified commit at refs/graphyard/verified, pushed with the deploy key alone like every other push.
     pushVerified: async commit => {
-      await run('git', ['-C', root, 'push', 'origin', `${commit}:${graphyardVerifiedRef}`], { env: pushEnvironment(settings.deployKeyFile, options.environment) });
+      await run('git', ['-C', root, 'push', remote, `${commit}:${graphyardVerifiedRef}`], { env: pushEnvironment(settings, options.environment) });
     },
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),

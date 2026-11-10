@@ -17,12 +17,14 @@ export function projectCaseSuite(root: string, token: string, options: { fetcher
   /** The checkout's release contract: an outcome still pending (GY-1802) runs its failing cases as pending, never blocking. */
   contract?: ReleaseContract | null;
   /** GY-2997: how command and agent steps spawn; the merge trial hands a confined runner. */
-  processRunner?: ProcessRunner } = {}) {
+  processRunner?: ProcessRunner;
+  /** The served application's declared `versionPath`: where the run reads the commit it serves, before /healthz. */
+  versionPath?: string } = {}) {
   return {
     name: 'e2e',
     run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
       const suite = e2eSuite(options.cases ? [...options.cases] : await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
-        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, contract: options.contract, processRunner: options.processRunner });
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, contract: options.contract, processRunner: options.processRunner, versionPath: options.versionPath });
       return suite.run(url, candidate);
     },
   };

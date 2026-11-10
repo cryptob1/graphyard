@@ -2,7 +2,7 @@ import { writeFailure } from '../disk-space.js';
 // Concern: removing ended attempts' worktrees, managed checkouts and shared installs, and preparing assignment worktrees: the dispatch cycle's one shared base fetch.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
+import { statfs, readdir, lstat, chmod, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
@@ -33,7 +33,9 @@ export async function freeBytes(path: string): Promise<number | null> {
  * tree with uncommitted changes; `force` (a done item's, a day after it ended) discards them. The
  * branch it had checked out survives either way. A shared install linked
  * into the tree is unlinked first, since it is no work of the attempt's, and whatever still runs
- * under it is stopped first: the attempt is over even when Git keeps the tree. Whether a tree was removed:
+ * under it is stopped first: the attempt is over even when Git keeps the tree. A directory the attempt
+ * left read-only (an npm install's 0555 trees) is made user-writable first, so Git can unlink its
+ * entries; symlinks are never followed out of the tree. Whether a tree was removed:
  * one already gone, or a path that is not directly inside `worktreesDirectory`, is nothing to do.
  */
 export async function removeAttemptWorktree(root: string, path: string, run: ChildRun, force = false): Promise<boolean> {
@@ -41,8 +43,16 @@ export async function removeAttemptWorktree(root: string, path: string, run: Chi
   if (dirname(target) !== worktreesDirectory(root) || !existsSync(target)) return false;
   await stopProcessesUnder(target);
   for (const name of dependencyDirectories) if ((await lstat(resolve(target, name)).catch(() => null))?.isSymbolicLink()) await unlink(resolve(target, name));
+  await writableDirectories(target);
   await Promise.resolve(run('git', ['-C', root, 'worktree', 'remove', ...(force ? ['--force'] : []), target]));
   return true;
+}
+
+/** Give the owner write access to `directory` and every directory below it; a symlink is never followed. */
+async function writableDirectories(directory: string): Promise<void> {
+  const { mode } = await lstat(directory);
+  if ((mode & 0o700) !== 0o700) await chmod(directory, mode | 0o700);
+  for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await writableDirectories(resolve(directory, entry.name));
 }
 
 /**

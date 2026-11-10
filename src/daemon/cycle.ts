@@ -1,3 +1,4 @@
+import { WorkerSandboxError } from '../worker-sandbox.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import { sessionAgents } from '../session-inventory.js';
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
@@ -282,7 +283,9 @@ async function closeStep(cycle: Cycle) {
     const endedAt = Date.parse((item as Work & CoordinationRounds).attemptEnd?.endedAt ?? item.updatedAt);
     const force = item.stage === 'done' && clock - endedAt > finishedWorktreeKeepMs;
     const key = `worktree:${item.id}:${space.epoch}${force ? ':forced' : ''}`;
-    if (state.actions[key]) continue;
+    // GY-3226: a failed removal is tried again on the next cycles, up to three attempts per key.
+    const prior = state.actions[key];
+    if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
     try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
   }
@@ -744,6 +747,10 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
     const full = capacityRefusal(error);
     if (full) {
       sink.push(await entry('waiting', `Dispatch of ${item.key} waits for a worker slot, retried on the first cycle one frees: ${full}`));
+      return;
+    }
+    if (error instanceof WorkerSandboxError) {
+      sink.push(await entry('done', `Blocked ${item.key} until its sandbox is repaired: ${message(error)}`));
       return;
     }
     recordLaunchFailure(state, runtime, item, message(error), now());
