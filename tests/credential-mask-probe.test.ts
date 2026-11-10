@@ -77,9 +77,11 @@ test('unit:tests/credential-mask-probe.test.ts — a sandbox that can still read
     const masterToken = f.secret(join(f.home, '.config', 'graphyard', 'install', 'tokens', 'master.token'));
     const otherInstall = join(f.home, '.config', 'graphyard', 'other-install');
     f.secret(join(otherInstall, 'tokens', 'other.token'));
-    const master = masterCredentialMask({ credentialFile: masterToken, environments: [{ home: ownAccount }, { home: otherAccount }] }, [ownAccount], join(f.home, '.config', 'graphyard'));
+    const sharedCli = join(otherInstall, 'deploy', 'build', 'bin', 'graphyard.mjs');
+    const master = masterCredentialMask({ credentialFile: masterToken, cliPath: sharedCli, environments: [{ home: ownAccount }, { home: otherAccount }] }, [ownAccount], join(f.home, '.config', 'graphyard'));
     assert.ok(master.hostPaths!.includes(otherInstall) && master.hostPaths!.includes(otherAccount) && master.hostPaths!.includes(join(f.home, '.ssh')), 'another install, another account and the personal credentials are masked');
     assert.ok(!master.hostPaths!.includes(dirname(dirname(masterToken))) && !master.hostPaths!.includes(ownAccount), 'its own install directory and account are kept');
+    assert.deepEqual(master.cli, [join(otherInstall, 'deploy', 'build')], 'a CLI run from another install keeps only its checkout');
   } finally {
     if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
     rmSync(base, { recursive: true, force: true });

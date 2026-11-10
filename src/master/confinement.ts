@@ -176,19 +176,20 @@ export function credentialMaskFor(
 ): CredentialMask {
   const recorded = (path: string | undefined) => !!path && isAbsolute(path) ? [path] : [];
   const operatorHome = configHome(home);
-  const launcher = recorded(config.cliPath)[0];
   return {
     configHome: operatorHome,
     extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.run?.mergeWriter?.tokenFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
-    // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
-    // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
-    // checkout root). Releases live beneath it, so new sessions keep that same stable
-    // mount across later publications. Only code and dependencies live there.
-    cli: launcher !== undefined && withinCheckout(launcher, operatorHome) ? [cliMountRoot(dirname(dirname(launcher)))] : [],
+    cli: keptCli(config, operatorHome),
     hostPaths: hostPathsFor(config, own.runtimeHomes),
   };
 }
+// GY-2995: a self-deployed install runs its CLI from a checkout under the config home
+// (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
+// checkout root). Releases live beneath it, so new sessions keep that same stable
+// mount across later publications. Only code and dependencies live there.
+const keptCli = (config: MaskConfig, operatorHome: string): string[] =>
+  config.cliPath && isAbsolute(config.cliPath) && withinCheckout(config.cliPath, operatorHome) ? [cliMountRoot(dirname(dirname(config.cliPath)))] : [];
 
 /** Every absolute path a configuration names, at any depth. */
 const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (isAbsolute(value) ? [value] : [])
@@ -196,13 +197,14 @@ const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (is
 /**
  * The master session's mask (GY-3228): the same host locations as every other session, and every
  * directory of the operator config home except its own install's — those holding a path its
- * configuration names (its token, its CLI). Its own install directory and token stay readable.
+ * configuration names (its token). Its own install directory and token stay readable; a CLI that
+ * runs from another install's directory keeps only its checkout, read-only.
  */
 export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
-  const operatorHome = configHome(home), named = namedPaths(config);
+  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined });
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
-  return { configHome: '', extraPaths: [], own: [], cli: [],
+  return { configHome: '', extraPaths: [], own: [], cli: keptCli(config, operatorHome),
     hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
 }
 
