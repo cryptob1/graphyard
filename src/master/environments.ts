@@ -442,7 +442,7 @@ export function roleCapacity(role: CapacityRole, profiles: { name: string }[], h
  * against the control plane for its role before a profile uses it. One reviewer profile is
  * generated per logged-in account. Without apply nothing is written; the report is the plan.
  */
-export async function setupAgentEnvironments(root: string, input: { directory?: string; create?: EnvironmentKind[]; apply?: boolean; probe?: EnvironmentProbe; verify: (token: string) => Promise<any> }) {
+export async function setupAgentEnvironments(root: string, input: { directory?: string; create?: EnvironmentKind[]; apply?: boolean; probe?: EnvironmentProbe; verify: (token: string) => Promise<any>; registry?: () => Promise<{ accounts: { name: string }[] }> }) {
   const config = await loadStoredMasterConfig(root);
   const directory = agentEnvironmentRoot(input.directory);
   const discovered = await discoverAgentEnvironments(directory);
@@ -456,6 +456,11 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
   const probe = { ...input.probe, ceilingPercent: input.probe?.ceilingPercent ?? config.run.quotaCeilingPercent };
   const health = await Promise.all(discovered.map(environment => checkAgentEnvironment(environment, probe)));
   const loggedIn = discovered.filter((_, index) => health[index].loggedIn);
+  // GY-3242: once the control plane's registry holds accounts, a profile names only those; an
+  // account removed from it (master registry account remove) leaves every profile below.
+  const registered = new Set(input.registry ? (await input.registry()).accounts.map(account => account.name) : []);
+  const known = (name: string) => !registered.size || registered.has(name);
+  const usable = loggedIn.filter(entry => known(entry.name));
 
   const next: MasterConfig = JSON.parse(JSON.stringify(config));
   next.environments = [...(config.environments ?? []).filter(existing => !discovered.some(found => found.name === existing.name)), ...discovered].sort((a, b) => a.name.localeCompare(b.name));
@@ -463,10 +468,10 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
   // consecutive profiles start on different accounts; the profile's current home, if it is one, leads.
   const accountsFor = (kind: string | undefined, index: number, home?: string) => {
     const rotate = (list: AgentEnvironment[]) => { if (!list.length) return list; const first = home ? list.findIndex(entry => entry.home === home) : -1; const start = first >= 0 ? first : index % list.length; return [...list.slice(start), ...list.slice(0, start)]; };
-    return [...rotate(loggedIn.filter(entry => entry.kind === kind)), ...rotate(loggedIn.filter(entry => entry.kind !== kind))].map(entry => entry.name);
+    return [...rotate(usable.filter(entry => entry.kind === kind)), ...rotate(usable.filter(entry => entry.kind !== kind))].map(entry => entry.name);
   };
   const same = (a?: string[], b?: string[]) => JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
-  const changes: { role: LaunchRole; profile: string; action: 'added' | 'accounts'; accounts: string[]; principal?: string }[] = [];
+  const changes: { role: LaunchRole; profile: string; action: 'added' | 'accounts' | 'removed'; accounts: string[]; dropped?: string[]; principal?: string }[] = [];
   const skipped: { file: string; reason: string }[] = [];
   const agentNames = () => new Set([...next.workers, ...next.reviewers, ...next.producers].map(profile => profile.agentName));
   // A profile whose runtime has no environment support keeps launching exactly as configured.
@@ -483,7 +488,19 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
     profile.accounts = accounts; changes.push({ role, profile: profile.name, action: 'accounts', accounts });
   };
 
-  if (loggedIn.length) {
+  // A profile loses the accounts the registry no longer holds; one left with none is deleted.
+  const prune = <P extends { name: string; accounts?: string[] }>(role: LaunchRole, profiles: P[]) => profiles.filter(profile => {
+    const dropped = (profile.accounts ?? []).filter(name => !known(name));
+    if (!dropped.length) return true;
+    const accounts = profile.accounts!.filter(known);
+    changes.push({ role, profile: profile.name, action: accounts.length ? 'accounts' : 'removed', accounts, dropped });
+    if (accounts.length) profile.accounts = accounts;
+    return accounts.length > 0;
+  });
+  next.workers = prune('worker', next.workers); next.reviewers = prune('reviewer', next.reviewers); next.producers = prune('producer', next.producers);
+  if (next.run.reviewerProfile && !next.reviewers.some(profile => profile.name === next.run.reviewerProfile)) delete next.run.reviewerProfile;
+
+  if (usable.length) {
     next.workers.filter(profile => profile.mode === 'launch').forEach((profile, index) => migrate('worker', profile, index));
     next.producers.forEach((profile, index) => migrate('producer', profile, index));
     next.reviewers.forEach((profile, index) => migrate('reviewer', profile, index));
@@ -533,7 +550,7 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       next.producers.push(producerProfileSchema.parse({ name, principal, agentName: agentNameOf(name), kind, credentialFile: file, accounts: accountsFor(kind, index) }));
       changes.push({ role: 'producer', profile: name, action: 'added', accounts: accountsFor(kind, index), principal });
     }
-    for (const environment of loggedIn) {
+    for (const environment of usable) {
       const name = profileNameOf(`review-${environment.name}`);
       if (next.reviewers.some(profile => profile.name === name) || agentNames().has(agentNameOf(name))) continue;
       const accounts = [environment.name, ...accountsFor(environment.kind, 0).filter(entry => entry !== environment.name)];
