@@ -39,10 +39,8 @@ export async function deliveryFixture(directory) {
   await writeFile(join(root, 'public/index.html'), '<!doctype html><title>Fixture static site</title>\n<h1>Fixture static site</h1>\n');
   await writeFile(join(root, 'build.mjs'), 'import { appendFileSync } from "node:fs";\nconst title = process.env.GRAPHYARD_PREVIEW_TITLE;\nif (title) appendFileSync("public/index.html", `<p>${title.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)}</p>\\n`);\n');
   await cp('fixtures/preview-compose', join(root, 'compose'), { recursive: true });
-  // GY-3201: a node application in its own directory, started on the PORT Graphyard gives it. Its page
-  // shows the change's title; a change titled "broken" breaks it, so its bound case fails.
-  await mkdir(join(root, 'web'));
-  await writeFile(join(root, 'web/server.mjs'), 'import { createServer } from "node:http";\nconst title = (process.env.GRAPHYARD_PREVIEW_TITLE ?? "").replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);\nconst page = /broken/i.test(title) ? "<h1>Out of order</h1>" : `<h1>Fixture node app</h1>\\n<p>${title}</p>`;\ncreateServer((request, response) => {\n  // GY-3223: the app answers the commit it serves at its declared versionPath; its /healthz names none.\n  if (request.url === "/api/meta/version") { response.setHeader("Content-Type", "application/json"); return response.end(JSON.stringify({ version: process.env.GRAPHYARD_PREVIEW_SHA })); }\n  response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<!doctype html><title>Node fixture</title>\\n${page}\\n`);\n}).listen(Number(process.env.PORT), "127.0.0.1");\n');
+  // GY-3201: the repository's fixture node application, in its own directory.
+  await cp('fixtures/node-app', join(root, 'web'), { recursive: true });
   await writeFile(join(root, 'graphyard.json'), JSON.stringify({ e2e: { serve: {
     command: 'node serve.mjs', url: `http://127.0.0.1:${port}`, readySeconds: 10,
   } }, delivery: { mode: 'local', previews: 'local',

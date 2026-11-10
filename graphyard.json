@@ -141,11 +141,19 @@
         "file": "fixtures/compose-app/compose.yml",
         "service": "web",
         "port": 8080
+      },
+      {
+        "id": "fixture-node",
+        "kind": "node",
+        "directory": "fixtures/node-app",
+        "start": "node server.mjs",
+        "versionPath": "/api/meta/version"
       }
     ],
     "cases": {
       "fixture-static-home": "fixture-site",
-      "fixture-compose-app": "fixture-app"
+      "fixture-compose-app": "fixture-app",
+      "fixture-node-home": "fixture-node"
     }
   }
 }
