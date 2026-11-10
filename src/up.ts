@@ -18,6 +18,7 @@ import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onb
 import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './redaction.js';
+import { checkoutTrustLine, checkoutTrustRefusals, type CheckoutTrustRefusal } from './harness.js';
 import { landlockRefusal, readLandlockAbi } from './landlock.js';
 import { recordSupervision } from './master/config.js';
 import { installIdFor } from './install/types.js';
@@ -205,6 +206,12 @@ export interface UpDependencies {
   installDirectory?(): string;
   /** GY-1552: ensure the install's deploy key on REPOSITORY; defaults to ensureDeployKey. */
   ensureDeployKey?(installDir: string, repository: string): Promise<string>;
+  /**
+   * GY-3225: which registered Claude account launches in ROOT this host's checkout would be
+   * refused by the folder-trust step — the checkout carries repository Claude configuration and
+   * the account's config does not trust it. Absent or failed, the harness step judges nothing.
+   */
+  checkoutTrust?(root: string): Promise<CheckoutTrustRefusal[]>;
   /**
    * GY-1851: the HTTP status the control plane gave each credential this install recorded (the
    * coordinator and operator-agent) at a status read; one that drew no answer is left out.
@@ -926,7 +933,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await awaitAccounts();
     });
 
-    await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });
+    await step('harness', async () => {
+      const applied = await run('harness', ['master', 'harness', request.master, '--apply']);
+      // GY-3225: the checkout's own Claude configuration, untrusted in a registered Claude
+      // account's config, refuses every launch of that account and the loop holds them, so setup
+      // stops here once — naming each account home and both remedies — rather than starting a loop
+      // that cannot launch. Graphyard never records that trust itself.
+      const refusals = await deps.checkoutTrust?.(deps.root).catch(() => []) ?? [];
+      if (refusals.length) throw new UpStop(`harness: ${checkoutTrustLine(refusals)}. Fix that, then rerun ${rerun()}`, upExitCodes.prerequisite);
+      return applied;
+    });
 
     // GY-1859: a recorded master-loop step says an earlier run finished setup, not that the loop
     // still runs this CLI's code — the install this check exists for is one whose earlier run
@@ -1353,6 +1369,14 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     credentialAnswers: async admin => {
       const url = await serverUrl();
       return url ? recordedCredentialAnswers(root, url, fetch, admin) : [];
+    },
+    // GY-3225: the registry's Claude accounts against this checkout's folder trust, as the harness
+    // step stops on it; a plane that does not answer judges nothing and the loop's standing check
+    // takes the launch instead.
+    checkoutTrust: async checkout => {
+      const url = await serverUrl(), token = await masterToken(), config = await loadStoredMasterConfig(root).catch(() => null);
+      if (!url || !token || !config?.hostId) return [];
+      return await planeRequest(url, token)('agent-registry/document').then(document => checkoutTrustRefusals(checkout, document, config.hostId), () => []);
     },
     status: async () => {
       const url = await serverUrl(), token = await masterToken();

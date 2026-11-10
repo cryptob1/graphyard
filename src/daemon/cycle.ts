@@ -12,6 +12,7 @@ import { assertDispatchable } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { firstRunStuck } from '../master/runtimes.js';
+import { checkoutTrustLine } from '../harness.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
@@ -114,6 +115,12 @@ export interface Cycle {
   herdr: { agents: RuntimeSession[]; available: boolean };
   credentials: Awaited<ReturnType<DaemonEffects['credentials']>>;
   performed: DaemonAction[]; launcher: Launcher; reservedProfiles: Set<string>;
+  /**
+   * GY-3225: the roles whose launches this cycle's checkout-trust check refuses (the roles named by
+   * `untrustedCheckoutRoles`), so neither a worker dispatch nor the master session launch opens a
+   * pane for them; absent when it refused none.
+   */
+  checkoutTrustRefused?: ReadonlySet<string>;
   /** The loop's journal line writer: steps that settle beside the cycle log through it (GY-3141). */
   log: (line: string) => void;
 }
@@ -519,6 +526,30 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
   } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not answer ${session.id}'s runtime prompt: ${message(error)}`, session.principal); }
 }
 
+/** The cursor key of the standing checkout-trust attention line (GY-3225). */
+export const checkoutTrustKey = 'checkout-trust';
+/**
+ * GY-3225: the roles whose every launch in this host's checkout the folder-trust step would
+ * refuse — the checkout carries repository Claude configuration and the named accounts' configs do
+ * not trust it, so the launch would stop at Claude Code's folder-trust dialog and the trust step
+ * refuses it first (harness.ts trustClaudeFolder). One standing attention line names the accounts
+ * and both remedies, and the roles' launches are held for the cycle — no relaunch, so no pane
+ * opened per retry — until the check answers empty: the operator's trust record or the role's
+ * arguments changed, and the launches go ahead again on their own.
+ */
+async function untrustedCheckoutRoles(cycle: Cycle): Promise<ReadonlySet<string>> {
+  const { state, effects, clock } = cycle;
+  const refusals = await Promise.resolve(effects.checkoutTrust?.()).catch(() => []);
+  cycle.checkoutTrustRefused = new Set((refusals ?? []).map(entry => entry.role));
+  if (!cycle.checkoutTrustRefused.size) {
+    if (state.actions[checkoutTrustKey]) { delete state.actions[checkoutTrustKey]; await effects.persist(state); }
+    return cycle.checkoutTrustRefused;
+  }
+  if (state.actions[checkoutTrustKey]?.state === 'failed') touchStanding(state, checkoutTrustKey, new Date(clock).toISOString());
+  else await record(state, checkoutTrustKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail: checkoutTrustLine(refusals!), attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist);
+  return cycle.checkoutTrustRefused;
+}
+
 /**
  * Dispatch: fill the pipeline from backlog (GY-2991), then each claimable item to a free worker
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
@@ -543,8 +574,11 @@ async function dispatchStep(cycle: Cycle) {
   const waiting = claimable.filter(item => state.actions[dispatchKey(item)]?.state === 'waiting').map(item => item.priority);
   const slotHeldAbove = waiting.length ? Math.min(...waiting) : Infinity;
   const ahead: { key: string; priority: number; done: Promise<void> }[] = [];
+  // GY-3225: an untrusted checkout carrying repository Claude configuration holds the roles it
+  // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
+  const refusedRoles = await untrustedCheckoutRoles(cycle);
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom) for (const item of claimable) {
+  if (!state.diskHeadroom && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -890,6 +924,9 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
   const { config, state, effects, launcher } = cycle;
   const sessions = effects.masterSession!;
   const launchKey = config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey;
+  // GY-3225: a checkout the folder-trust check refuses holds the master session's launch — one
+  // standing attention line (untrustedCheckoutRoles) instead of a pane per refused retry.
+  if (cycle.checkoutTrustRefused?.has('master')) return;
   if (launcher.busy(launchKey)) return;
   launcher.submit(launchKey, [], async sink => {
     try {

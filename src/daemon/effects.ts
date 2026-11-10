@@ -8,6 +8,7 @@ import type { RegistrySlot } from '../master/registry-slot.js';
 import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
+import type { CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -115,6 +116,13 @@ export interface DaemonEffects {
   dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
   /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
   registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
+  /**
+   * GY-3225: which registered Claude account launches in this host's checkout the folder-trust step
+   * would refuse — the checkout carries repository Claude configuration, and the account's config
+   * records neither it nor an ancestor trusted. The dispatch step holds the roles it names with one
+   * standing attention line and launches nothing until it answers empty; absent, nothing is held.
+   */
+  checkoutTrust?: () => Promise<CheckoutTrustRefusal[]>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
   setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */

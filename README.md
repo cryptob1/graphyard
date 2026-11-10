@@ -12,12 +12,13 @@
 
 ## Quick start
 
-1. On a Linux host with Node 24+, Git, the GitHub CLI and Docker, clone Graphyard, run `npm ci`, put `bin/` on your PATH and run `gh auth login --scopes repo`.
-2. In your repository's checkout, run `graphyard up --repo OWNER/NAME --provider compose --master claude` (or `--master codex`; `--provider local` skips Docker).
-   Installs share your main Herdr, each in a `graphyard-OWNER-NAME` workspace.
-3. Open the printed Setup link and connect accounts for the worker and reviewer roles.
-4. File a goal in **New work item** with acceptance criteria and required proof names; watch it with `graphyard master status`.
-5. Update with `graphyard upgrade --plan`, then `graphyard upgrade`.
+In your repository's checkout, on a Linux host with Node 24+, Git, Docker and the GitHub CLI signed in (`gh auth login --scopes repo`):
+
+```sh
+npx graphyard up --repo OWNER/NAME
+```
+
+It installs Graphyard and prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). Then file a goal in **New work item** with acceptance criteria and required proof names, and watch it with `npx graphyard master status`. Graphyard updates itself daily; `npx graphyard upgrade --plan`, then `npx graphyard upgrade`, updates it now. Installs share your main Herdr.
 
 ## Learn more
 

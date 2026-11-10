@@ -24,6 +24,14 @@ export const imageRepository = 'ghcr.io/cryptob1/graphyard';
 export const graphyardUpstreamUrl = 'https://github.com/cryptob1/graphyard';
 /** GY-3199: the ref Graphyard's own batch gate moves to its latest verified commit, which every install's watch reads. */
 export const graphyardVerifiedRef = 'refs/graphyard/verified';
+/**
+ * GY-3214: the images Graphyard's batch gate publishes for each commit it verifies, which an
+ * install pulls instead of building. GRAPHYARD_IMAGE_REGISTRY names another registry (a mirror).
+ */
+export const publishedImages = (commit: string, env: NodeJS.ProcessEnv = process.env) => {
+  const registry = env.GRAPHYARD_IMAGE_REGISTRY?.trim() || imageRepository.slice(0, imageRepository.lastIndexOf('/'));
+  return { server: `${registry}/graphyard:${commit}`, trial: `${registry}/graphyard-trial:${commit}` };
+};
 
 /**
  * The version a promotion on `date` (its UTC calendar day) takes, given the tags that exist:

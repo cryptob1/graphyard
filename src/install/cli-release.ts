@@ -1,14 +1,12 @@
 // Deployment artifacts stay at their original paths for processes that already loaded them.
 // Only current moves; neither the source tree nor node_modules of a published CLI is rebuilt.
 import { existsSync, realpathSync } from 'node:fs';
-import { copyFile, mkdir, rename, symlink, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rename, symlink, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import type { ChildRun } from '../child-runner.js';
 
-// Keep publication inside the checkout already mounted in legacy masked sessions.
-const releaseStore = (directory: string) => join(directory, 'deploy', 'build', '.graphyard');
-export const cliReleasePath = (directory: string, commit: string) => join(releaseStore(directory), 'cli-releases', commit);
-export const currentCliPath = (directory: string) => join(releaseStore(directory), 'cli-published');
+// GY-3214: the paths and the create-once step live in plain JavaScript, which the published npm package runs before any dependency is installed.
+import { cliReleasePath, currentCliPath, prepareCliRelease } from '../../bin/cli-release.mjs';
+export { cliReleasePath, currentCliPath, prepareCliRelease };
 
 /** Release launchers need the same stable, credential-free mount as the legacy launcher. */
 export function cliMountRoot(root: string): string {
@@ -18,19 +16,6 @@ export function cliMountRoot(root: string): string {
 
 export function activeCliRoot(root: string): string {
   try { return realpathSync(join(root, '.graphyard', 'cli-current')); } catch { return root; }
-}
-
-/** Create once, install once. A failed install can be retried without touching any published tree. */
-export async function prepareCliRelease(directory: string, source: string, commit: string, run: ChildRun) {
-  const target = cliReleasePath(directory, commit);
-  await mkdir(resolve(target, '..'), { recursive: true });
-  if (!existsSync(join(target, '.git'))) await run('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', target, commit]);
-  if (!existsSync(join(target, '.graphyard', 'cli-ready'))) {
-    await run('npm', ['ci', '--prefix', target], { cwd: target, timeoutMs: 1_800_000 });
-    await mkdir(join(target, '.graphyard'), { recursive: true });
-    await writeFile(join(target, '.graphyard', 'cli-ready'), commit);
-  }
-  return target;
 }
 
 /** Publish after health. The legacy build path remains loadable, including on the first handover. */

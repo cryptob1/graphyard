@@ -26,7 +26,6 @@ test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough medi
   assert.ok(readme.split(/\s+/).length < 600, `README is short: ${readme.split(/\s+/).length} words`);
   assert.ok(readme.includes(`](${gif})](${video})`), 'README embeds the walkthrough GIF linking to the MP4');
   const setup = readme.split('\n## Quick start\n')[1]?.split('\n## ')[0] ?? '';
-  assert.deepEqual([...setup.matchAll(/^(\d)\. /gm)].map(match => match[1]), ['1', '2', '3', '4', '5']);
   assert.match(setup, /graphyard up --repo OWNER\/NAME/);
   for (const help of ['graphyard guide TOPIC', 'graphyard master guide']) assert.ok(readme.includes(help), `README points at ${help}`);
   assert.deepEqual([...readme.matchAll(/\]\((docs\/[^)]*\.md)/g)].map(match => match[1]), ['docs/walkthrough.md'], 'README links only the walkthrough re-render page');
