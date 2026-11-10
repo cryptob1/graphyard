@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Work } from '../src/model.js';
 import { loadMasterConfig, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
