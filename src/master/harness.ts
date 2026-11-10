@@ -11,7 +11,8 @@ import { type HarnessPlan, type HarnessRule, repositoryClaudeConfig, writeHarnes
 import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
-import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
+import { coordinatorCheckoutRoot, promotionCommand, runtimeLoginHomes, workerConfinementRefusal } from './profiles.js';
+import { masterCredentialMask } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { accountLaunch } from './environments.js';
@@ -264,7 +265,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master is confined like every other launched session (GY-1658): its configuration,
     // administration and browser-flow commands run from the coordinator root with the checkout
     // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
-    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile) } }));
+    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)) } }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

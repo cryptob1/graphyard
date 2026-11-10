@@ -404,8 +404,11 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   // GY-1856: credential locations beside the operator config home that every confined session of
-  // this install must not read — a collector's token file, say. Each is masked at the nearest
-  // directory that exists; the session's own credential stays readable.
+  // this install must not read — a collector's token file, say. Each is masked where it exists,
+  // and at the nearest directory that holds it; the session's own credential stays readable.
+  // GY-3228: the host user's personal credentials (~/.ssh, ~/.config/gh, ~/.netrc, ...), other
+  // installs and other agent accounts are masked by default; a repository adds its own extras as
+  // `confinement.maskPaths` in graphyard.json (absolute or ~/ paths).
   confinement: z.object({
     maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
   }).strict().optional(),

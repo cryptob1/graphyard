@@ -1,5 +1,6 @@
 // Concern: OS-level host filesystem and coordinator confinement for every launched role.
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { slotsDirectoryVariable } from './verification-slots.js';
@@ -7,6 +8,8 @@ import { herdrTarget } from './herdr.js';
 import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
 import { socketConfinementWords } from './socket-confinement.js';
+import { underTestRunner } from '../runtime-environment.js';
+import { WorkerSandboxError } from '../worker-sandbox.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
 // Every runtime carries the same outer namespace, including runtimes with their own sandbox:
@@ -47,6 +50,8 @@ export interface ConfinementInput {
   secretsBus?: null;
   /** The install's credential locations the session must not read (GY-1856), with its own kept. Absent, nothing is masked — the master session keeps its coordinator credential. */
   credentialMask?: CredentialMask;
+  /** Overrides the credential-mask read probe (tests); null runs none. */
+  maskProbe?: MaskProbe | null;
 }
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
@@ -142,7 +147,21 @@ export interface CredentialMask {
   own: readonly string[];
   /** The checkout the install's own CLI launcher runs from, when the launcher sits under the config home (a self-deployed install, GY-2995): re-exposed read-only after the masks, so a confined session can execute the CLI its prompt names and post its verdict. */
   cli: readonly string[];
+  /** GY-3228: locations masked exactly where they exist — a directory by an empty unreadable one, a file by an unreadable empty file: the host user's personal credentials, other agent accounts' homes, other installs' directories, declared extras. */
+  hostPaths?: readonly string[];
 }
+
+/** GY-3228: where a host user's personal credentials live by default. Each is masked only where it exists. */
+export const hostCredentialPaths = (home = homedir()): string[] =>
+  ['.ssh', '.config/gh', '.git-credentials', '.netrc', '.docker/config.json', '.aws', '.config/gcloud', '.azure', '.kube', '.railway', '.config/railway'].map(path => join(home, path));
+type MaskConfig = { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; environments?: readonly { home: string }[]; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } };
+/** The personal credentials, the install's declared extras, and every configured agent account home that is not the session's own. */
+const hostPathsFor = (config: MaskConfig, runtimeHomes: readonly string[] = []) => {
+  const own = runtimeHomes.map(home => canonicalPath(home));
+  return [...hostCredentialPaths(), ...(config.confinement?.maskPaths ?? []),
+    ...(config.environments ?? []).map(environment => environment.home).filter(home => !own.some(kept => kept === canonicalPath(home) || withinCheckout(canonicalPath(home), kept))),
+  ].filter(isAbsolute);
+};
 
 /**
  * The credential mask a session of this install carries (GY-1856): everything this config records
@@ -151,29 +170,51 @@ export interface CredentialMask {
  * on the runtime's home variable) readable; `home` overrides the operator config home (tests).
  */
 export function credentialMaskFor(
-  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
+  config: MaskConfig,
   own: { credentialFile?: string | null; runtimeHomes?: readonly string[] },
   home?: string,
 ): CredentialMask {
   const recorded = (path: string | undefined) => !!path && isAbsolute(path) ? [path] : [];
   const operatorHome = configHome(home);
-  const launcher = recorded(config.cliPath)[0];
   return {
     configHome: operatorHome,
     extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.run?.mergeWriter?.tokenFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
-    // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
-    // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
-    // checkout root). Releases live beneath it, so new sessions keep that same stable
-    // mount across later publications. Only code and dependencies live there.
-    cli: launcher !== undefined && withinCheckout(launcher, operatorHome) ? [cliMountRoot(dirname(dirname(launcher)))] : [],
+    cli: keptCli(config, operatorHome),
+    hostPaths: hostPathsFor(config, own.runtimeHomes),
   };
+}
+// GY-2995: a self-deployed install runs its CLI from a checkout under the config home
+// (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
+// checkout root). Releases live beneath it, so new sessions keep that same stable
+// mount across later publications. Only code and dependencies live there.
+const keptCli = (config: MaskConfig, operatorHome: string): string[] =>
+  config.cliPath && isAbsolute(config.cliPath) && withinCheckout(config.cliPath, operatorHome) ? [cliMountRoot(dirname(dirname(config.cliPath)))] : [];
+
+/** Every absolute path a configuration names, at any depth. */
+const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (isAbsolute(value) ? [value] : [])
+  : value && typeof value === 'object' ? Object.values(value).flatMap(namedPaths) : [];
+/**
+ * The master session's mask (GY-3228): the same host locations as every other session, and every
+ * directory of the operator config home except its own install's — those holding a path its
+ * configuration names (its token). Its own install directory and token stay readable; a CLI that
+ * runs from another install's directory keeps only its checkout, read-only.
+ */
+export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
+  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined });
+  let installs: string[] = [];
+  try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
+  return { configHome: '', extraPaths: [], own: [], cli: keptCli(config, operatorHome),
+    hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
 }
 
 /**
  * The bubblewrap words that hide the install's credential locations from the session (GY-1856):
  * each masked directory becomes an empty tmpfs, so every credential under it is unreadable —
- * `test -r` fails, and no content is reachable to print. The session's own paths are not hidden
+ * `test -r` fails, and no content is reachable to print. A `hostPaths` entry (GY-3228) is masked
+ * exactly where it exists: a directory by an empty tmpfs that can be traversed but not read (mode
+ * 0111, so a kept path under it still resolves), a file by binding the unreadable empty file
+ * `blank` over it. The session's own paths are not hidden
  * here; they are re-exposed after the masks (`readOnlyMountWrapper`). Only a location that exists
  * is masked — the config home when it is a directory, a recorded path at the nearest directory
  * that holds it — so a stale recorded path never masks a broad ancestor that holds unrelated
@@ -182,18 +223,67 @@ export function credentialMaskFor(
  * real path, as the process-launch masks are (bwrap builds mount points only where every
  * component resolves inside the namespace).
  */
-export const credentialMaskWords = (mask: CredentialMask | undefined, protect: readonly string[]): readonly string[] => {
-  if (!mask) return [];
-  const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
+export const credentialMaskWords = (mask: CredentialMask | undefined, protect: readonly string[], blank?: string): readonly string[] => {
+  const { directories, files, unreadable } = credentialMasks(mask, protect);
+  return [...directories.flatMap(path => [...(unreadable.includes(path) ? ['--perms', '0111'] : []), '--tmpfs', path]), ...(blank ? files.flatMap(path => ['--ro-bind', blank, path]) : [])];
+};
+/** What the mask hides here, canonical: the directories replaced by an empty one (`unreadable` names those of them a `hostPaths` entry makes unreadable too) and the files replaced by an unreadable empty one. */
+const credentialMasks = (mask: CredentialMask | undefined, protect: readonly string[]): { directories: string[]; files: string[]; unreadable: string[] } => {
+  if (!mask) return { directories: [], files: [], unreadable: [] };
+  const home = canonicalPath(homedir());
+  // The checkout, the session's directory and the user's home itself are never hidden.
+  const hides = (path: string) => path !== '/' && ![...protect, home].some(p => p === path || withinCheckout(p, path));
+  const exact = [...new Set((mask.hostPaths ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))].filter(hides);
   const candidates = [isDirectoryPath(mask.configHome) ? mask.configHome : null, ...mask.extraPaths.filter(path => isAbsolute(path) && existsSync(path))];
-  const unhidden = [...new Set(candidates.filter((path): path is string => !!path)
+  const unhidden = [...new Set([...candidates.filter((path): path is string => !!path)
     .map(path => nearestExistingDirectory(path))
     .filter((path): path is string => !!path && path !== '/')
     .map(canonicalPath)
-    .filter(path => path !== '/' && isDirectoryPath(path) && hides(path)))];
+    .filter(path => isDirectoryPath(path) && !protect.some(p => p === path || withinCheckout(p, path)) && path !== '/'), ...exact.filter(isDirectoryPath)])];
   // A path already covered by a wider candidate is not masked again: the config home's tmpfs hides everything under it.
   const directories = unhidden.filter(path => !unhidden.some(other => other !== path && withinCheckout(path, other)));
-  return directories.flatMap(path => ['--tmpfs', path]);
+  return { directories, unreadable: exact, files: exact.filter(path => !isDirectoryPath(path) && !directories.some(directory => withinCheckout(path, directory))) };
+};
+
+/** Runs the credential-mask read probe: the sandbox's own words running `test -r` on each masked path, answering `readable<TAB>path` for each it can read. */
+export type MaskProbe = (command: string, args: string[]) => Promise<string> | string;
+const hostMaskProbe: MaskProbe = (command, args) => defaultChildRun(command, args, { timeoutMs: 20_000 });
+/** GY-3228: a launch whose sandbox can still read a masked credential location. A sandbox fault, never the account's: the item is blocked naming the path. */
+export class CredentialMaskError extends WorkerSandboxError {
+  constructor(path: string) {
+    super('session', path, 'readable');
+    this.name = 'CredentialMaskError';
+    this.message = `Host, not the item: the session's sandbox can still read ${path}, a credential location its mask must hide, so the launch was refused. Something re-exposes it — a writable grant over it, or a mask path inside the checkout; remove that, then unblock and relaunch.`;
+  }
+}
+/** Refuses the launch when the sandbox `wrapper` builds can read a masked location that exists (GY-3228). Under the test runner nothing is probed unless a test supplies the probe. */
+export async function assertCredentialsMasked(wrapper: readonly string[], input: { coordinatorRoot: string; sessionDirectory: string; credentialMask?: CredentialMask; maskProbe?: MaskProbe | null }): Promise<void> {
+  const run = input.maskProbe === undefined ? (underTestRunner() ? null : hostMaskProbe) : input.maskProbe;
+  const root = canonicalPath(resolve(input.coordinatorRoot)), mask = sessionMask(root, input.credentialMask);
+  if (!mask || !run) return;
+  const { directories, files, unreadable } = credentialMasks(mask, [root, canonicalPath(resolve(input.sessionDirectory))]);
+  const kept = [...keptCredentialPaths(mask), ...mask.cli];
+  // A directory masked only as the holder of recorded credentials stays a readable, empty one: what it held is what is probed.
+  const masked = (path: string) => [...directories, ...files].some(target => path === target || withinCheckout(path, target)) && !kept.some(own => path === own || withinCheckout(path, own))
+    && !(directories.includes(path) && !unreadable.includes(path));
+  const paths = [...new Set([mask.configHome, ...mask.extraPaths, ...(mask.hostPaths ?? [])].filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))].filter(masked);
+  if (!paths.length) return;
+  let output = '';
+  // A sandbox that cannot start reads nothing; the launch reports that failure itself.
+  try { output = await run(wrapper[0], [...wrapper.slice(1), '/bin/sh', '-c', 'for p do if test -r "$p"; then printf "readable\\t%s\\n" "$p"; fi; done', 'sh', ...paths]); } catch { return; }
+  const readable = /^readable\t(.+)$/m.exec(output);
+  if (readable) throw new CredentialMaskError(readable[1]);
+}
+/** The session's mask with the repository's own declared extras (GY-3228). */
+const sessionMask = (root: string, mask: CredentialMask | undefined): CredentialMask | undefined =>
+  mask && { ...mask, hostPaths: [...(mask.hostPaths ?? []), ...repositoryMaskPaths(root)] };
+/** GY-3228: the absolute or `~/` mask paths the repository's own graphyard.json declares (`confinement.maskPaths`); an unreadable declaration adds none. */
+const repositoryMaskPaths = (root: string): string[] => {
+  try {
+    const declared = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.confinement?.maskPaths;
+    return (Array.isArray(declared) ? declared : []).filter((path): path is string => typeof path === 'string')
+      .map(path => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path).filter(isAbsolute);
+  } catch { return []; }
 };
 /** The session's own credential paths that exist here, canonical: what the wrapper re-exposes after the masks. */
 const keptCredentialPaths = (mask: CredentialMask | undefined): string[] =>
@@ -294,11 +384,16 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // GY-1856: the install's credential locations are hidden from the session, and its own — its
   // token file read-only, its runtime login homes writable — are re-exposed last, so a later bind
   // shadows the mask that covered them.
-  const kept = keptCredentialPaths(input.credentialMask);
+  // GY-3228: the repository's own declared extras join the mask.
+  const mask = sessionMask(root, input.credentialMask);
+  const kept = keptCredentialPaths(mask);
   // GY-2995: the install's own CLI checkout is re-exposed read-only after the masks, so a
   // confined session runs the launcher its prompt names but can change none of its code.
   const cli = (input.credentialMask?.cli ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath);
-  const masks = credentialMaskWords(input.credentialMask, [root, directory]);
+  // A masked file is replaced by this unreadable empty one.
+  const blank = join(directory, '.graphyard', 'masked');
+  if (mask && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
+  const masks = credentialMaskWords(mask, [root, directory], blank);
   const environment = { ...process.env, ...input.environment };
   const channels = processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
@@ -385,6 +480,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
   const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  await assertCredentialsMasked(wrapper, { coordinatorRoot: root, sessionDirectory: directory, credentialMask: input.credentialMask, maskProbe: input.maskProbe });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };
