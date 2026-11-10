@@ -11,7 +11,8 @@ export async function open(c: Omit<Ctx, 'work'> & { work?: Work }): Promise<Work
   let work: Work | undefined;
   if (actor.role === 'operator-agent') {
     authorizeOperatorCommand(actor, command, data, undefined, engine.repository);
-  } else admin(actor);
+  // GY-3215: an invited maintainer files work as themselves; a viewer does not.
+  } else if (actor.team !== 'maintainer') admin(actor);
   demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
   demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
   const criteria = declareBootstrap(engine, actor, data, [], 1, now);
@@ -27,7 +28,7 @@ export async function open(c: Omit<Ctx, 'work'> & { work?: Work }): Promise<Work
     const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, engine.repository);
     if (scenario) scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
   }
-  assertHumanOwner(engine, data.owner);
+  await assertHumanOwner(engine, db, data.owner);
   const created = now.toISOString();
   const { reason: _reason, ...intent } = data;
   work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,

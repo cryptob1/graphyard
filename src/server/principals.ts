@@ -29,3 +29,13 @@ export const laneOnlyProducer = (p: Pick<Principal, 'role' | 'grants' | 'proofs'
 export const principalSchema = z.array(z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'slice-lead', 'worker', 'producer', 'reader']), token: z.string().min(32), proofs: z.array(z.string()).optional(), grants: z.array(z.enum(principalGrants)).max(20).optional(), deploymentProviders: z.array(z.string().trim().min(1).max(40)).max(20).optional(), displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), runtime: z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]+$/).optional(), slice: z.enum(['product', 'infrastructure', 'docs-experience']).optional(), sessionKind: z.enum(['human', 'ai']).optional() }).strict()
   .refine(p => !p.grants?.includes(observeShaGrant) || p.grants.length === 1, { message: `${observeShaGrant} is held by a dedicated principal, beside no other grant`, path: ['grants'] })).min(1);
 export type Credential = Principal & { token: string };
+
+/**
+ * GY-3215: the roles of a teammate the operator invites (`graphyard invite NAME --role ROLE`). Both are
+ * database-backed human principals of role reader, so a viewer reads everything and acts on nothing; a
+ * maintainer may also file work. Neither is admin, so neither answers a human-only decision.
+ */
+export const teamRoles = ['viewer', 'maintainer'] as const;
+export type TeamRole = (typeof teamRoles)[number];
+/** Who types into the Master page (GY-3211): the operator's human session and invited maintainers; never a viewer. */
+export const canTypeIntoMasterPane = (principal: Principal) => (principal.role === 'admin' && principal.sessionKind === 'human') || principal.team === 'maintainer';

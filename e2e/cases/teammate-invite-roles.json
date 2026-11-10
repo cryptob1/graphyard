@@ -1,0 +1,16 @@
+{
+  "id": "teammate-invite-roles",
+  "title": "Invited teammates sign in as their own human principals with viewer or maintainer roles",
+  "description": "Against a real control plane and a temporary Postgres, the operator invites a viewer and a maintainer with graphyard invite; each redeems its own link into a 90-day session; the maintainer files work attributed to them while the viewer is refused; neither answers a human-only decision; revoking the maintainer ends its session; only the operator invites.",
+  "tags": ["dashboard", "authentication"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Invite, redeem, act and revoke as teammates",
+      "run": "node --import tsx --test tests/teammate-invite-roles.test.ts",
+      "timeoutSeconds": 120
+    }
+  ]
+}
