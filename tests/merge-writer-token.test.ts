@@ -18,7 +18,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const TOKEN = 'github_pat_fixture_token_value';
 
-test('unit:merge-writer-token — the token file is 0600, its askpass answers git, and the environment carries only the file path', async () => {
+test('unit:tests/merge-writer-token.test.ts — the token file is 0600, its askpass answers git, and the environment carries only the file path', async () => {
   const directory = await temporaryDirectory('merge-writer-token');
   const file = await writeMergeToken(directory, TOKEN);
   assert.equal(file, join(directory, 'merge-writer.token'));
@@ -43,7 +43,7 @@ test('unit:merge-writer-token — the token file is 0600, its askpass answers gi
   assert.equal(pushArgs('main', 'a', 'b')[1], 'origin');
 });
 
-test('unit:merge-writer-token — exactly one of deployKeyFile and tokenFile is set', async () => {
+test('unit:tests/merge-writer-token.test.ts — exactly one of deployKeyFile and tokenFile is set', async () => {
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKeyFile: '/k', tokenFile: '/t' }), /not both/);
   assert.deepEqual(mergeWriterSettings({ mergeWriter: { tokenFile: '~/t' } }, 'owner-project', '/home/loop'), { tokenFile: '/home/loop/t', parallel: 3 });
   assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '/k' } }, 'owner-project', '/home/loop'), { deployKeyFile: '/k', parallel: 3 });
@@ -55,13 +55,13 @@ test('unit:merge-writer-token — exactly one of deployKeyFile and tokenFile is 
   assert.deepEqual(mergeWriterSettings({}, 'owner-project', home), { tokenFile, parallel: 3 }, 'the install\'s stored token is the credential');
 });
 
-test('unit:merge-writer-token — the token file is hidden from trials and masked from confined sessions', () => {
+test('unit:tests/merge-writer-token.test.ts — the token file is hidden from trials and masked from confined sessions', () => {
   const environment = { GRAPHYARD_CONFIG_HOME: '/cfg' };
   assert.ok(trialHiddenPaths('/keys/merge-writer.token', environment, 1000).includes('/keys/merge-writer.token'));
   assert.ok(credentialMaskFor({ run: { mergeWriter: { tokenFile: '/keys/merge-writer.token' } } }, {}, '/home/x').extraPaths.includes('/keys/merge-writer.token'));
 });
 
-test('unit:merge-writer-token — a token install plans github.merge-token, stores the file, and never records the value', async () => {
+test('unit:tests/merge-writer-token.test.ts — a token install plans github.merge-token, stores the file, and never records the value', async () => {
   const fixture = await harness({ provider: 'compose', serverUrl: 'http://127.0.0.1:4310' });
   try {
     const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--merge-token-stdin', '--apply']);
