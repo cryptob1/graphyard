@@ -70,8 +70,8 @@ export const installRecordSchema = z.object({
    * record that predates it: that installation keeps the delivery model it had.
    */
   merger: z.enum(['control-plane', 'github']).nullable().default(null),
-  /** Legacy full-install marker: a workerless private-server install was not observation-only. */
-  herdrInstance: z.boolean().default(false),
+  /** Legacy full-install marker: a workerless private-server install was not observation-only. The Herdr migration drops it. */
+  herdrInstance: z.boolean().optional(),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
   /** Retired (GY-3204): the schema-only deployment adapter a record before it stored; still read, then dropped. */

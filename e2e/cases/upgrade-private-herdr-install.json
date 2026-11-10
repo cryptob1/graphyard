@@ -1,0 +1,9 @@
+{
+  "id": "upgrade-private-herdr-install",
+  "title": "A private-Herdr install upgrades across GY-3212 and migrates to the main Herdr",
+  "description": "Records written by a pre-GY-3212 release for an install on its own Herdr server: the predecessor watch's restart arguments (with --herdr-instance) are accepted, the install moves its launches to the main Herdr workspace, the drained private server is removed, every record drops herdrInstance and the next redeploy passes no --herdr-instance.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Upgrade and migrate a private-Herdr install", "run": "node --import tsx tests/helpers/run-tests.ts tests/upgrade-private-herdr-install.test.ts", "timeoutSeconds": 120 }]
+}

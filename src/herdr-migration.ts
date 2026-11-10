@@ -5,6 +5,7 @@ import { herdrCall, type HerdrInstance } from './master/herdr.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { atomicPrivateWrite } from './private-file.js';
 import { installIdFor } from './install/types.js';
+import { installDirectory } from './install/secrets.js';
 
 /** Up/upgrade switches launches immediately. The loop revisits only the remaining drain record. */
 export async function migrateHerdr(root: string, run: ChildRun = defaultChildRun, home = homedir()) {
@@ -37,6 +38,14 @@ export async function migrateHerdr(root: string, run: ChildRun = defaultChildRun
   await rm(join(home, '.config/herdr/sessions', instance.session), { force: true });
   await rm(instance.configHome, { recursive: true, force: true });
   await run('systemctl', ['--user', 'daemon-reload']);
+  // GY-3232: the install and up records forget the private server too, so nothing passes it again.
+  for (const record of [join(installDirectory(installId), 'install.json'), join(root, '.graphyard/up.json')]) {
+    let recorded: any;
+    try { recorded = JSON.parse(await readFile(record, 'utf8')); } catch (error: any) { if (error.code === 'ENOENT') continue; throw error; }
+    if (!('herdrInstance' in recorded)) continue;
+    delete recorded.herdrInstance;
+    await atomicPrivateWrite(record, recorded);
+  }
   delete config.herdrInstance;
   await atomicPrivateWrite(file, config);
 }

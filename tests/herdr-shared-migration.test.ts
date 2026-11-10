@@ -52,9 +52,9 @@ test('unit:tests/herdr-shared-migration.test.ts — private panes drain while ne
   assert.equal(calls.length, count);
 });
 
-test('unit:tests/herdr-shared-migration.test.ts — retired private-instance and rebind options are unknown, and redeploy stops emitting them', () => {
+test('unit:tests/herdr-shared-migration.test.ts — retired private-instance and rebind options are ignored by install, unknown elsewhere, and redeploy stops emitting them', () => {
   for (const flag of ['--herdr-instance', '--herdr-rebind']) {
-    assert.throws(() => installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/app', flag]), /Unknown option/);
+    assert.deepEqual(installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/app', flag]).request, installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/app']).request);
   }
   const rejected = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), 'init', '--herdr-rebind'], { encoding: 'utf8' });
   assert.notEqual(rejected.status, 0);

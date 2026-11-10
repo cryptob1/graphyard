@@ -102,6 +102,9 @@ export function installRequestFromArgs(args: string[]) {
     local: { type: 'boolean' },
     'no-herdr': { type: 'boolean' },
     'observe-only': { type: 'boolean' }, 'merge-token-stdin': { type: 'boolean' },
+    // GY-3232: retired by GY-3212 and ignored. A pre-GY-3212 deploy watch still passes them when it
+    // restarts onto this release; the restarted watch then migrates the install to the main Herdr.
+    'herdr-instance': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' },
   }, allowPositionals: false });
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
   const provider = values.provider;
