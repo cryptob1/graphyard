@@ -36,11 +36,11 @@ test('managed instructions refresh one section and preserve all surrounding oper
 });
 
 test('Herdr setup validates identity, privately saves configuration, updates instructions, and enables last', async () => {
-  const root = await repo(); const config = join(root, 'herdr-private'); const calls: string[][] = [];
+  const root = await repo(); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root }); const config = join(root, 'herdr-private'); const calls: string[][] = [];
   const runHerdr = (args: string[]) => { calls.push(args); return args[1] === 'config-dir' ? config : ''; };
   try {
     await writeFile(join(root, 'AGENTS.md'), '# Original instructions\n', { mode: 0o600 });
-    const result = await setupRepository(root, connection, { herdr: true, fetcher, runHerdr });
+    const result = await setupRepository(root, connection, { herdr: true, workspace: 'wA', pluginHome: join(root, 'plugin'), fetcher, runHerdr });
     const text = await readFile(join(root, 'AGENTS.md'), 'utf8');
     assert.ok(text.startsWith('# Original instructions\n')); assert.doesNotMatch(text, new RegExp(secret));
     assert.equal(JSON.stringify(result).includes(secret), false); assert.equal(result.pluginConfigured, true);
@@ -49,7 +49,7 @@ test('Herdr setup validates identity, privately saves configuration, updates ins
     assert.equal((await stat(join(config, 'config.json'))).mode & 0o777, 0o600);
     assert.deepEqual(calls.at(-1), ['plugin', 'enable', 'graphyard']);
     assert.equal((await loadConnection(root))?.principal, 'worker-a');
-    await setupRepository(root, connection, { herdr: true, fetcher, runHerdr });
+    await setupRepository(root, connection, { herdr: true, workspace: 'wA', pluginHome: join(root, 'plugin'), fetcher, runHerdr });
     assert.equal(await readFile(join(root, 'AGENTS.md'), 'utf8'), text);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -114,12 +114,12 @@ test('init accepts a token over stdin, and a server override never forwards a sa
 });
 
  test('padded host IDs normalize before saving and match registered workspace handoffs', async () => {
-  const root = await repo(); const config = join(root, 'herdr-private');
+  const root = await repo(); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root }); const config = join(root, 'herdr-private');
   try {
-    await setupRepository(root, { ...connection, hostId: '  machine-a  ' }, { herdr: true, fetcher, runHerdr: args => args[1] === 'config-dir' ? config : '' });
+    await setupRepository(root, { ...connection, hostId: '  machine-a  ' }, { herdr: true, workspace: 'wA', pluginHome: join(root, 'plugin'), fetcher, runHerdr: args => args[1] === 'config-dir' ? config : '' });
     const saved = (await loadConnection(root))!;
     assert.equal(saved.hostId, 'machine-a');
-    assert.equal(JSON.parse(await readFile(join(config, 'config.json'), 'utf8')).hostId, 'machine-a');
+    assert.equal(Object.values<any>(JSON.parse(await readFile(join(config, 'config.json'), 'utf8')).installs)[0].hostId, 'machine-a');
     const work = { key: 'GY-5', lease: { owner: 'worker-a', epoch: 2, expiresAt: '2030-01-01T00:02:00Z' }, workspaces: [{ epoch: 2, host: 'machine-a', path: root }] };
     assert.ok(handoff(work, { actor: { id: 'worker-a', role: 'worker' }, now: '2030-01-01T00:00:00Z' }, saved.hostId, launcher).commands.length);
     await assert.rejects(setupRepository(root, { ...connection, hostId: '   ' }, { fetcher }));

@@ -22,9 +22,9 @@ import { applicationProblems, caseIdsOf, projectDeliveryVariable } from '../proj
 import { projectDeliveryAssignment } from '../model-boundary/project-applications.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
+import { herdrPluginBinding } from '../repository-setup.js';
 import { sshOrigin } from '../merger-mode.js';
-import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
+import { herdrViaEnv } from '../master/herdr.js';
 import { localTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
@@ -71,21 +71,12 @@ export interface InstallDependencies {
 export interface ProfileRequest {
   root: string; url: string; cliPath: string; hostId: string; installDirectory: string;
   coordinatorToken: string; workerTokens: { principal: string; token: string }[];
-  runtimes: DetectedRuntime[]; herdr: HerdrState; herdrRebind?: boolean;
-  /** GY-1511: this install's own Herdr instance, where the plugin is linked instead of the host's default one. */
-  herdrInstance?: HerdrInstance | null;
+  runtimes: DetectedRuntime[]; herdr: HerdrState;
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
   runHerdr?: (args: string[]) => string;
 }
 
-/**
- * What the install does with Herdr's `graphyard` plugin when it is already bound to another server
- * (GY-1413): `rebind` repoints it (`--herdr-rebind`), `skip` leaves Herdr untouched (`--no-herdr`),
- * and `instance` (`--herdr-instance`, GY-1511) links it in this install's own Herdr instance, never
- * touching the default one. Without any, a plugin bound elsewhere fails preflight instead of being
- * silently repointed; `graphyard up` answers that with `--herdr-instance`.
- */
-export interface HerdrChoice { herdr?: 'rebind' | 'skip' | 'instance' }
+export interface HerdrChoice { herdr?: 'skip' }
 /**
  * GY-1846: observation-only install of an existing repository (`--observe-only`). The control
  * plane may be deployed, but nothing the managed repository or its product owns is changed — no
@@ -109,10 +100,9 @@ export function installRequestFromArgs(args: string[]) {
     'source-root': { type: 'string' },
     port: { type: 'string' },
     local: { type: 'boolean' },
-    'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' },
+    'no-herdr': { type: 'boolean' },
     'observe-only': { type: 'boolean' }, 'merge-token-stdin': { type: 'boolean' },
   }, allowPositionals: false });
-  if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
   const provider = values.provider;
   if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
@@ -129,7 +119,7 @@ export function installRequestFromArgs(args: string[]) {
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
   const request: InstallRequest & ObserveOnlyChoice = { repository: values.repo,
-    ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
+    ...(values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
     ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
     ...(values.port ? { port: count('port', values.port) } : {}),
@@ -159,7 +149,7 @@ export function redeployArguments(record: InstallRecord, image: string, sourceRo
   const workers = installer.filter(principal => principal.role === 'worker' && principal.id.startsWith(`${record.installId}-worker-`)).length;
   const proofs = installer.find(principal => principal.role === 'producer' && principal.id === `${record.installId}-ci`)?.proofs ?? [];
   // GY-2941: a workerless installation on its own Herdr instance was a full --workers 0 install, not an observation-only one.
-  const mode = !workers && !record.herdrInstance ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof]), ...(record.herdrInstance ? ['--herdr-instance'] : [])];
+  const mode = !workers && !record.herdrInstance ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof])];
   return ['--repo', record.repository, '--provider', record.provider,
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(record.deployment?.port ? ['--port', String(record.deployment.port)] : []), '--review-policy', 'agent', ...mode, '--image', image,
@@ -168,7 +158,7 @@ export function redeployArguments(record: InstallRecord, image: string, sourceRo
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
-  return [...['workers', 'producer-proof', 'herdr-rebind', 'herdr-instance'].filter(given).map(name => `--${name}`),
+  return [...['workers', 'producer-proof'].filter(given).map(name => `--${name}`),
     // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
     ...(provider === 'local' ? ['--provider local'] : [])];
 }
@@ -617,12 +607,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
   // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
   if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile}, then rerun` });
-  // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
-  // another server is repointed only with --herdr-rebind (GY-1413).
   const herdr = await observeHerdr(session);
-  const herdrTarget = record?.url ?? null;
-  const herdrRelink = session.inputs.herdr !== 'skip' && herdrBoundElsewhere(herdr?.binding ?? null, herdrTarget) ? herdr!.binding!.bound : null;
-  if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-instance to give this installation its own Herdr instance, --herdr-rebind to repoint the plugin at it, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   // The deployed roster is reconciled, not replaced (GY-1879): an existing installation's workers
@@ -672,8 +657,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
       title: 'Run the master loop under graphyard-master.service (master run) and the continuous deploy under graphyard-deploy.service (upgrade --watch: each new base tip built, restarted, health-checked, rolled back on failure); master init installs both',
       values: [{ name: 'graphyard-master.service', value: units.master, secret: false }, { name: 'graphyard-deploy.service', value: deployUnitOf(units), secret: false }] });
     }
-    actions.push(herdrAction(session, herdr, herdrRelink, herdrTarget));
-    if (herdrRelink) drift.push({ action: 'local.herdr', field: 'Herdr graphyard plugin url', expected: herdrTarget ?? 'this installation', observed: herdrRelink });
+    actions.push(herdrAction(session, herdr));
   }
 
   if (record && record.provider !== context.provider) drift.push({ action: 'local.credentials', field: 'provider', expected: context.provider, observed: record.provider });
@@ -713,27 +697,20 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
 
 
 
-/** This install's own Herdr instance under --herdr-instance (GY-1511), else null: the host's default instance. */
-export function ownHerdrInstance(session: Pick<InstallSession, 'installId' | 'inputs'>) {
-  return session.inputs.herdr === 'instance' ? installHerdrInstance(session.installId) : null;
-}
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
 async function observeHerdr(session: InstallSession) {
   const { deps, context } = session;
   const state = await (deps.detectHerdr ?? detectHerdr)(context.transport);
   if (!state.available || session.inputs.herdr === 'skip') return { state, binding: null };
-  const run = deps.runHerdr ?? (async (args: string[]) => { const call = herdrViaEnv(args, ownHerdrInstance(session)); const result = await context.transport.exec(call.command, call.args, { allowFailure: true, timeout: 30_000 }); return result.code === 0 ? result.stdout : ''; });
-  return { state, binding: await herdrPluginBinding(run) };
+  const run = deps.runHerdr ?? (async (args: string[]) => { const call = herdrViaEnv(args, null); const result = await context.transport.exec(call.command, call.args, { allowFailure: true, timeout: 30_000 }); return result.code === 0 ? result.stdout : ''; });
+  return { state, binding: await herdrPluginBinding(run, undefined, session.installId) };
 }
 
 /** The plan line for Herdr: link, keep, relink (named, with the server it is bound to now), or leave alone. */
-function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof observeHerdr>> | null, relink: string | null, target: string | null): PlanAction {
-  const steps = 'herdr plugin link, write the plugin config.json {url, worker token}, herdr plugin enable';
+function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof observeHerdr>> | null): PlanAction {
+  const steps = 'herdr plugin link, write the plugin config.json installs entry, herdr plugin enable';
   if (session.inputs.herdr === 'skip') return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Leave Herdr untouched (--no-herdr): the graphyard plugin is neither linked nor reconfigured' };
-  const own = ownHerdrInstance(session);
-  if (own && herdr?.state.available && !herdr.binding) return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin in this installation's own Herdr instance (XDG_CONFIG_HOME ${own.configHome}, session ${own.session}); the default instance is not touched (${steps})` };
   if (!herdr?.state.available) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Herdr is not installed on this machine; nothing to link, and workers start from the CLI' };
-  if (relink) return { id: 'local.herdr', target: 'local', state: 'update', title: `Relink Herdr's graphyard plugin, now bound to ${relink}, to ${target ?? 'this installation'} (${steps})${session.inputs.herdr === 'rebind' ? '; --herdr-rebind allows it' : '; refused without --herdr-rebind'}` };
   if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.bound}; it keeps that server` };
   return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin for this repository (${steps})` };
 }
@@ -900,7 +877,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect the ${context.provider} provider logs.`);
 
   let record = session.record ?? emptyRecord(session, url);
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, herdrInstance: session.inputs.herdr && session.inputs.herdr !== 'skip' ? session.inputs.herdr === 'instance' : record.herdrInstance, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   const observeOnly = !!session.inputs.observeOnly;
@@ -967,7 +944,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     producerProofs: values('producer-proof', inputs.producerProofs),
     reviewPolicy: value('review-policy', inputs.reviewPolicy),
     image: value('image', inputs.image), serverName: value('server-name', inputs.serverName),
-    herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
+    herdr: inputs.herdr === 'skip' ? ['--no-herdr'] : [],
   };
   return ['graphyard', 'install', ...Object.values(flags).flat(), ...flag('observe-only', inputs.observeOnly), '--apply'].join(' ');
 }
@@ -1093,7 +1070,6 @@ async function registerProfiles(session: InstallSession, url: string): Promise<P
     coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
     workerTokens: workerIds.map(principal => ({ principal, token: session.tokens.get(principal)! })),
     runtimes, herdr, workers, reviewers: [], masterKind: master?.kind ?? null,
-    herdrRebind: session.inputs.herdr === 'rebind', herdrInstance: ownHerdrInstance(session),
     ...(deps.runHerdr ? { runHerdr: deps.runHerdr } : {}),
   };
   return deps.registerProfiles ? deps.registerProfiles(request) : (await import('./profiles.js')).registerLocalProfiles(request);

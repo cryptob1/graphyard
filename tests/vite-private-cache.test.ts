@@ -11,7 +11,7 @@ test('integration:vite-private-cache — actual project config starts cold and w
   const root = join(import.meta.dirname, '..');
   const allocation = await temporaryDirectory('vite-trial', root);
   const checkout = await temporaryDirectory('checkout', allocation);
-  for (const file of ['vite.config.ts', 'package.json', 'package-lock.json', 'web', 'src']) {
+  for (const file of ['vite.config.ts', 'package.json', 'package-lock.json', 'web', 'src', 'README.md', 'docs']) {
     await cp(join(root, file), join(checkout, file), { recursive: true });
   }
   await symlink(join(root, 'node_modules'), join(checkout, 'node_modules'));

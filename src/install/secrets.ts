@@ -70,7 +70,7 @@ export const installRecordSchema = z.object({
    * record that predates it: that installation keeps the delivery model it had.
    */
   merger: z.enum(['control-plane', 'github']).nullable().default(null),
-  /** GY-2941: this installation runs its own Herdr instance (`--herdr-instance`), so every redeploy composed from the record passes it again. */
+  /** Legacy full-install marker: a workerless private-server install was not observation-only. */
   herdrInstance: z.boolean().default(false),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
