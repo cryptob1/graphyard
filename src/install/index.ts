@@ -11,6 +11,7 @@ import { parseRepositoryConfig } from '../model-boundary/documentation.js';
 import { repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { adapterFor, carriesCredential, publishedPort, readRemote, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter } from './adapters.js';
+import { orgDeployKeysPreflight } from './org-deploy-keys.js';
 import { githubCli, type GitHubCli } from './github.js';
 import { DEPLOY_KEY_FILE, ensureDeployKey } from './deploy-key.js';
 import { detectHerdr, detectRuntimes, masterRuntime, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
@@ -596,6 +597,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // gh registers the deploy key; observe-only still refuses a signed-out caller (GY-1862). It needs
   // only the `repo` scope.
   preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository));
+  if (!observeOnly) { const orgKeys = await orgDeployKeysPreflight(gh, session.inputs.repository); if (orgKeys) preflight.push(orgKeys); }
   // GY-2940: the control-plane merge writer pushes this checkout with the deploy key over SSH alone, so an https origin is refused before anything is installed.
   if (session.delivery.merger === 'control-plane' && !observeOnly) preflight.push(repositoryOriginPreflight(session.root, session.inputs.repository));
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so

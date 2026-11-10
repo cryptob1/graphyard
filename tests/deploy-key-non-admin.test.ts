@@ -37,7 +37,7 @@ test('unit:tests/deploy-key-non-admin.test.ts — a deploy-key list answered 404
     const lines = fixture.commandLines();
     assert.deepEqual(lines.filter(line => line.includes(PROBE)), [`ssh -i ${join(directory, 'deploy-key')} -o IdentitiesOnly=yes -o BatchMode=yes git@github.com ${PROBE}`], 'the key alone is probed, read-write, and nothing is pushed');
     assert.deepEqual(lines.filter(line => line.startsWith('gh repo deploy-key add ')), [], 'a login that cannot list keys cannot add one');
-    assert.ok(!lines.some(line => line.includes('gh api ')), 'the install itself runs no admin command');
+    assert.ok(!lines.some(line => line.includes('gh api ') && line !== 'gh api orgs/owner'), 'the install itself runs no admin command (GY-3219 reads the org setting)');
   } finally { await fixture.cleanup(); }
 });
 

@@ -1,0 +1,13 @@
+{
+  "id": "up-deploy-keys-disabled",
+  "title": "Up refuses an organization that disables deploy keys",
+  "description": "With gh reporting deploy_keys_enabled_for_repositories=false for the org, the install plan's preflight (which up runs) refuses before provisioning, naming the setting and the fix; true, absent or unreadable proceeds.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "up deploy keys disabled preflight",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/up-deploy-keys-disabled.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
