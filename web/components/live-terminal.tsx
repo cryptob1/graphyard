@@ -2,6 +2,25 @@ import { useEffect, useRef, useState } from 'react';
 
 const columns = 120, rows = 36;
 
+// xterm.js loads from the CDN at a pinned exact version, checked by its hash, only on a page that
+// shows a terminal: never an npm dependency of the dashboard bundle.
+const xterm = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0';
+/** The part of xterm.js's Terminal this page uses. */
+type TerminalClass = new (options: Record<string, unknown>) => {
+  open(host: HTMLElement): void; focus(): void; write(data: Uint8Array): void; dispose(): void;
+  onData(listener: (data: string) => void): { dispose(): void };
+};
+let loading: Promise<TerminalClass> | undefined;
+const loadTerminal = () => loading ??= new Promise((done, fail) => {
+  const style = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: `${xterm}/css/xterm.css`,
+    integrity: 'sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD', crossOrigin: 'anonymous' });
+  const script = Object.assign(document.createElement('script'), { src: `${xterm}/lib/xterm.js`,
+    integrity: 'sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4', crossOrigin: 'anonymous',
+    onload: () => done((globalThis as unknown as { Terminal: TerminalClass }).Terminal),
+    onerror: () => { loading = undefined; fail(new Error('xterm.js did not load')); } });
+  document.head.append(style, script);
+});
+
 /**
  * A Herdr pane's live terminal (GY-3211), over the control plane's /api/terminal WebSocket: the
  * master's pane when PANE is absent, else that agent session's. The server decides who may type —
@@ -13,9 +32,8 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
   const [state, setState] = useState<'connecting' | 'control' | 'observe' | 'closed' | 'refused'>('connecting');
   useEffect(() => {
     if (!token) { setState('refused'); return; }
-    // xterm.js loads with the page that shows a terminal, never with the rest of the dashboard.
     let live = true, stop = () => {};
-    void import('@xterm/xterm').then(({ Terminal }) => {
+    loadTerminal().then(Terminal => {
       if (!live) return;
       const terminal = new Terminal({ cols: columns, rows, convertEol: false, cursorBlink: true, fontSize: 13 });
       terminal.open(host.current!);
@@ -31,7 +49,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       socket.onclose = () => setState(opened ? 'closed' : 'refused');
       const typing = terminal.onData(data => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
       stop = () => { typing.dispose(); socket.close(); terminal.dispose(); };
-    });
+    }, () => { if (live) setState('refused'); });
     return () => { live = false; stop(); };
   }, [token, pane]);
   const notes = {

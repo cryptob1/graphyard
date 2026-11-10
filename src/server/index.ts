@@ -47,8 +47,8 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
   const http = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    // style-src admits inline styles because xterm.js (the Master page's terminal, GY-3211) sizes and colours its grid with <style> elements; scripts stay 'self'.
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    // The Master page's terminal (GY-3211) loads pinned xterm.js from jsdelivr and sizes and colours its grid with <style> elements.
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data:; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('Cache-Control', 'no-store');
     const send = (status: number, data: unknown): typeof Sent => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); return Sent; };
     try {

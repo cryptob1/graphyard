@@ -1,4 +1,3 @@
-@import '@xterm/xterm/css/xterm.css';
 /* GY-161: one design system. These tokens and the two IBM Plex families are the only colour and
    font definitions in the dashboard; every rule below reads them through var(), and a tint is a
    color-mix of a token, never a new colour. tests/ui-dashboard.test.ts keeps it that way. */
