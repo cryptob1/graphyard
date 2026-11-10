@@ -172,7 +172,7 @@ const minutesBetween = (from: string | null | undefined, to: string | null | und
 
 /**
  * The scratch install a hand run creates: one compose-provider install of `repository` with its
- * own port and Herdr instance, filed items go to over the control-plane API, and everything it
+ * own port and Herdr workspace, filed items go to over the control-plane API, and everything it
  * owns — containers, volumes, credentials — is taken down by `dispose` whatever the outcome.
  */
 export class ComposeScratchInstall implements GoldenInstall {
@@ -188,7 +188,7 @@ export class ComposeScratchInstall implements GoldenInstall {
   async up(): Promise<this> {
     const cli = this.input.cliPath ?? resolve(dirname(fileURLToPath(import.meta.url)), '../bin/graphyard.mjs');
     await new Promise<void>((pass, fail) => {
-      const child = spawn(process.execPath, [cli, 'install', '--provider', 'compose', '--repo', this.input.repository, '--herdr-instance',
+      const child = spawn(process.execPath, [cli, 'install', '--provider', 'compose', '--repo', this.input.repository,
         '--port', String(this.input.port), '--apply', '--source-root', this.input.sourceRoot], { stdio: 'inherit' });
       child.on('error', fail);
       child.on('exit', code => code === 0 ? pass() : fail(new Error(`graphyard install --apply exited ${code}`)));

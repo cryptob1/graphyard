@@ -12,7 +12,7 @@ import { herdrInstanceEnv, herdrInvocation, herdrTarget, type HerdrInstance } fr
 /** The synchronous form, for the few callers that run herdr with execFileSync. */
 export function herdrSync(args: string[], options: ExecFileSyncOptions & { encoding: BufferEncoding }, instance: HerdrInstance | null = herdrTarget()): string {
   const call = herdrInvocation(args, instance);
-  return String(execFileSync(call.command, call.args, call.env ? { ...options, env: { ...call.env, ...options.env, XDG_CONFIG_HOME: instance!.configHome } } : options));
+  return String(execFileSync(call.command, call.args, call.env ? { ...options, env: { ...call.env, ...options.env, XDG_CONFIG_HOME: call.env.XDG_CONFIG_HOME } } : options));
 }
 
 /** What host setup runs and touches; `hostHerdrSetup` is the process's own, a test hands in a table. */
@@ -130,24 +130,8 @@ export async function ensureLinger(deps: Pick<HerdrHostDeps, 'exec' | 'user'>) {
   throw new HerdrSetupFailure('server', `lingering is off for ${deps.user} and loginctl enable-linger ${deps.user} ${result.code === 0 ? 'left it off' : `exited ${result.code}: ${outputTail(result)}`}, so the Herdr server would not start after a reboot until ${deps.user} logs in; have an administrator run sudo loginctl enable-linger ${deps.user}, then rerun`);
 }
 
-/**
- * What an install's own instance needs beside its server: the configuration other tools read from
- * XDG_CONFIG_HOME (gh, git), linked in, since the panes inherit the instance's; and its session in
- * the default config's session list, so plain `herdr --session NAME` (and `herdr --remote HOST
- * --session NAME`) reaches its socket. Nothing in the default instance's own configuration changes.
- */
-export async function prepareHerdrInstance(deps: HerdrHostDeps, instance: HerdrInstance) {
-  await deps.mkdir(join(instance.configHome, 'herdr', 'sessions', instance.session));
-  for (const shared of ['gh', 'git']) {
-    const source = join(deps.home, '.config', shared), target = join(instance.configHome, shared);
-    if (deps.exists(source) && !deps.exists(target)) await deps.symlink(source, target).catch(() => undefined);
-  }
-  const sessions = join(deps.home, '.config', 'herdr', 'sessions'), alias = join(sessions, instance.session);
-  if (!deps.exists(alias)) { await deps.mkdir(sessions); await deps.symlink(join(instance.configHome, 'herdr', 'sessions', instance.session), alias).catch(() => undefined); }
-}
-
 /** The instance's workspace for this repository: the one labelled LABEL, else one created there. */
-export async function ensureHerdrWorkspace(deps: HerdrHostDeps, binary: string, instance: HerdrInstance, root: string, label: string): Promise<string> {
+export async function ensureHerdrWorkspace(deps: HerdrHostDeps, binary: string, instance: HerdrInstance | null, root: string, label: string): Promise<string> {
   const workspaceIn = (text: string) => {
     try {
       const parsed = JSON.parse(text), result = parsed?.result ?? parsed;
@@ -159,7 +143,7 @@ export async function ensureHerdrWorkspace(deps: HerdrHostDeps, binary: string, 
   if (listed) return listed;
   const created = await herdrAt(deps, binary, ['workspace', 'create', '--cwd', root, '--label', label, '--no-focus'], instance);
   const workspace = workspaceIn(created.stdout);
-  if (!workspace) throw new HerdrSetupFailure('workspace', `herdr workspace create in session ${instance.session} answered no workspace: ${outputTail(created)}`);
+  if (!workspace) throw new HerdrSetupFailure('workspace', `herdr workspace create in session ${instance?.session ?? 'main'} answered no workspace: ${outputTail(created)}`);
   return workspace;
 }
 

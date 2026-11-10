@@ -108,7 +108,7 @@ export const installCommands = defineCommands([
       '          [--plan|--apply] [--domain HOST] [--workers N]',
       '          [--producer-proof PROOF] [--port N] [--image REF]',
       '          [--source-root DIR] [--merge-token-stdin]',
-      '          [--create-environments] [--herdr-rebind | --no-herdr]',
+      '          [--create-environments] [--no-herdr]',
       '                                Install or reconcile a complete control plane on this machine:',
       '                                compose runs it as containers, local on embedded Postgres.',
       '                                No GitHub App, webhook or branch protection is set up: the',
@@ -119,7 +119,6 @@ export const installCommands = defineCommands([
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
-      '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind.',
     ],
     // The installer creates the connection file; it must never read a stale one.
     readsConnection: () => false,
@@ -142,7 +141,7 @@ export const installCommands = defineCommands([
   {
     name: 'init',
     help: [
-      '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
+      '  init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]',
       '       [--delivery local] [--candidate-cron CRON|off]',
       '                                Print the proposed delivery workflow, writing nothing (--scan), or apply it (--scan --apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
@@ -151,7 +150,7 @@ export const installCommands = defineCommands([
     async run(context) {
       const { base, connection, print } = context;
       const root = context.repositoryRoot();
-      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
+      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
         delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
       if (values.delivery !== undefined && values.delivery !== 'local') throw new Error('Use --delivery local');
       if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan && !values.apply) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
@@ -197,8 +196,7 @@ export const installCommands = defineCommands([
       const selectedUrl = values.url ?? base;
       // Never silently send a saved credential to a newly selected server.
       if (values.url && connection && new URL(values.url).origin !== connection.url && !process.env.GRAPHYARD_TOKEN && !values['token-stdin']) workerToken = undefined;
-      if (values['herdr-rebind'] && !values.herdr) throw new Error('--herdr-rebind repoints the Herdr plugin; pass it with --herdr');
-      return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr, herdrRebind: values['herdr-rebind'] }));
+      return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
     },
   },
   {
