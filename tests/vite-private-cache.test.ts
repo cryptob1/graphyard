@@ -15,10 +15,12 @@ test('integration:vite-private-cache — actual project config starts cold and w
     await cp(join(root, file), join(checkout, file), { recursive: true });
   }
   await symlink(join(root, 'node_modules'), join(checkout, 'node_modules'));
-  // Exercise the previous config itself, without depending on a new helper that
-  // would be missing on the baseline. Everything except cacheDir stays identical.
+  // The previous config kept Vite's cache in node_modules. A shared install may already hold a
+  // fresh node_modules/.vite that Vite reads without writing, so give it one no run has filled:
+  // Vite must create it, as on a fresh install. Everything except cacheDir stays identical.
   const config = await readFile(join(checkout, 'vite.config.ts'), 'utf8');
-  await writeFile(join(checkout, 'vite.previous.config.ts'), config.replace(/^.*cacheDir:.*\n/m, ''));
+  await writeFile(join(checkout, 'vite.previous.config.ts'),
+    config.replace(/^(\s*)cacheDir:.*$/m, "$1cacheDir: '../node_modules/.vite-prior-config',"));
   const script = join(checkout, 'startup.mjs');
   await writeFile(script, `
     import assert from 'node:assert/strict';
@@ -40,9 +42,8 @@ test('integration:vite-private-cache — actual project config starts cold and w
       console.log('prior config EROFS; cold and warm Vite served client and entry');
       process.exit(0);
     }
-    // Vite throws EROFS only when it must remove a stale node_modules/.vite/deps; with a fresh
-    // install it logs the failed cache write and serves 504s, or leaves the optimizer's rejection
-    // unhandled, so an EROFS it logs or drops counts too.
+    // Vite logs the failed cache write and serves 504s, throws, or leaves the optimizer's
+    // rejection unhandled, so an EROFS it throws, logs or drops counts.
     let readOnly, server, failure;
     process.on('unhandledRejection', thrown => { if (thrown?.code !== 'EROFS') throw thrown; readOnly ??= thrown; });
     const logger = createLogger(), error = logger.error;
