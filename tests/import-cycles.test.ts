@@ -19,6 +19,8 @@ async function importGraph() {
     const edges = new Set<string>();
     const add = (specifier: ts.Expression | undefined) => {
       if (!specifier || !ts.isStringLiteralLike(specifier) || !specifier.text.startsWith('.')) return;
+      // A plain-JavaScript module outside src (bin/cli-release.mjs, which the npm launcher shares) imports nothing from src, so it closes no cycle.
+      if (specifier.text.endsWith('.mjs')) return;
       const target = resolve(dirname(file), specifier.text).replace(/\.js$/, '.ts');
       const found = [target, target.replace(/\.ts$/, '.tsx'), resolve(target, 'index.ts')].find(path => known.has(path));
       assert.ok(found, `Unresolved source import ${specifier.text} in ${file}`);
