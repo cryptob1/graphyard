@@ -1,0 +1,16 @@
+{
+  "id": "environments-drop-removed-account",
+  "title": "master environments --apply drops a removed registry account from launch profiles",
+  "description": "On a fixture install with reviewer profiles naming accounts [a, b] and [a], master registry account remove a then master environments --apply leaves the first profile naming only b, deletes the second, and reports both changes.",
+  "tags": ["registry"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "environments --apply drops the removed account",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/environments-drop-removed-account.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
