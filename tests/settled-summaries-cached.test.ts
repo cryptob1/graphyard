@@ -48,7 +48,7 @@ test('unit:tests/settled-summaries-cached.test.ts — an unchanged poll reads no
   assert.ok(readsSettledDocuments(one.seen), 'the first read builds the settled summary');
   const two = await queriesDuring(store.pool, () => boundedSnapshot(store.pool));
   assert.equal(readsSettledDocuments(two.seen), false, `the second read reads no settled document: ${two.seen.join('\n')}`);
-  const strip = (snapshot: any) => ({ ...snapshot, now: undefined, jobs: undefined });
+  const strip = (snapshot: any) => ({ ...snapshot, now: undefined, jobs: undefined, cursor: undefined });
   assert.deepEqual(strip(two.result), strip(one.result), 'the second response equals the first');
   const summary = (one.result as any).work.find((work: any) => work.id === first.id);
   assert.equal(summary.summary, true);
