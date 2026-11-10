@@ -56,7 +56,7 @@ async function imageRegistry() {
   return { host, tags, pulls };
 }
 
-/** docker, gh and npm as a trial can have them: docker talks to the image registry and keeps its images in a file; `npm ci` links this checkout's installed dependencies. */
+/** docker, gh, npm, ssh, herdr and systemctl as a trial can have them: docker talks to the image registry and keeps its images in a file; `npm ci` links this checkout's installed dependencies. */
 async function standIns(directory: string, origin: string, tree: string, database: string) {
   const loader = pathToFileURL(createRequire(join(source, 'package.json')).resolve('tsx')).href;
   const modules = dirname(dirname(createRequire(join(source, 'package.json')).resolve('tsx/package.json')));
@@ -130,8 +130,11 @@ if (args[0] === 'ci') {
 `);
   // GitHub over SSH: the scratch repository's bare origin, whatever key is presented.
   await writeFile(join(directory, 'ssh'), `#!/bin/sh\nfor last; do :; done\nexec \${last%% *} ${JSON.stringify(origin)}\n`);
-  for (const name of ['docker', 'gh', 'npm', 'ssh']) chmodSync(join(directory, name), 0o755);
-  return { path: `${directory}:${tools}:/usr/local/bin:/usr/bin:/bin`, log: (name: string) => existsSync(join(directory, `${name}.log`)) ? readFileSync(join(directory, `${name}.log`), 'utf8').split('\n').filter(Boolean) : [],
+  // A trial has no systemd user manager, so Herdr's server cannot be kept running: setup leaves Herdr out and says so.
+  await writeFile(join(directory, 'herdr'), '#!/bin/sh\n[ "$1" = --version ] && echo herdr 0.0.0 && exit 0\necho "no Herdr server on this host" >&2; exit 1\n');
+  await writeFile(join(directory, 'systemctl'), '#!/bin/sh\necho "no systemd user manager on this host" >&2; exit 1\n');
+  for (const name of ['docker', 'gh', 'npm', 'ssh', 'herdr', 'systemctl']) chmodSync(join(directory, name), 0o755);
+  return { path: `${directory}:${tools}:/usr/bin:/bin`, log: (name: string) => existsSync(join(directory, `${name}.log`)) ? readFileSync(join(directory, `${name}.log`), 'utf8').split('\n').filter(Boolean) : [],
     images: () => JSON.parse(readFileSync(join(directory, 'docker-images.json'), 'utf8')) as Record<string, string> };
 }
 
@@ -154,8 +157,8 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
   const upstream = join(base, 'upstream'), home = join(base, 'home'), stubs = join(base, 'bin'), repository = join(base, 'scratch'), origin = join(base, 'origin.git');
   for (const directory of [upstream, home, stubs, repository]) await mkdir(directory);
 
-  // Graphyard's upstream: this checkout's files as one commit, which is the commit the gate verified.
-  for (const file of execFileSync('git', ['-C', source, 'ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean)) {
+  // Graphyard's upstream: this checkout's tracked files as one commit, which is the commit the gate verified.
+  for (const file of execFileSync('git', ['-C', source, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\0').filter(Boolean)) {
     if (existsSync(join(source, file))) await cp(join(source, file), join(upstream, file), { recursive: true, verbatimSymlinks: true });
   }
   git(upstream, 'init', '-q', '-b', 'main'); git(upstream, 'add', '-A'); git(upstream, 'commit', '-q', '-m', 'verified');

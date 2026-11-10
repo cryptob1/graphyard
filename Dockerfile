@@ -1,9 +1,9 @@
 # The Graphyard control-plane image.
 #
-# Built and published per release as REGISTRY/graphyard:VERSION by .github/workflows/release.yml,
-# with the same bytes also addressable by immutable digest. The version and the Git revision
-# are stamped into the image so a running deployment reports which release it serves at
-# /healthz; the same values are OCI labels on the image itself.
+# Graphyard's batch gate publishes it for each commit it verifies as ghcr.io/cryptob1/graphyard:<sha>
+# (src/publish-verified.ts), which an install pulls; an install of an unpublished commit builds it
+# itself. The version and the Git revision are stamped into the image so a running deployment
+# reports which release it serves at /healthz; the same values are OCI labels on the image itself.
 #
 #   docker build --build-arg GRAPHYARD_VERSION=0.1.0 --build-arg GRAPHYARD_BUILD_REVISION=$(git rev-parse HEAD) -t graphyard:0.1.0 .
 ARG GRAPHYARD_VERSION=0.0.0-dev

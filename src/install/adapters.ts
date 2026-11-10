@@ -290,13 +290,15 @@ export function imageBuildArgs(sourceRoot: string, dirty = sourceTreeDirty) {
 
 /**
  * GY-3214: the images Graphyard published for the source checkout's commit, which an install pulls
- * instead of building — the commit a deploy vouches (GY-2167), else a clean checkout's HEAD. Null
- * for a checkout with changes HEAD does not hold: no published image has its bytes.
+ * instead of building — the release a deploy vouches (GY-2167), else a clean checkout's HEAD. Null
+ * for a checkout with changes HEAD does not hold, whose bytes no published image has, and for a
+ * commit released under a date version: the published image is stamped `unreleased <sha>`, and the
+ * server must report the release it is deployed as.
  */
 export function publishedSourceImages(sourceRoot: string, dirty = sourceTreeDirty) {
-  const named = process.env.GRAPHYARD_VERSION?.trim() && process.env.GRAPHYARD_BUILD_REVISION?.trim();
-  const commit = named || (dirty(sourceRoot) ? null : checkoutRelease(sourceRoot).revision);
-  return commit && /^[0-9a-f]{40}$/.test(commit) ? publishedImages(commit) : null;
+  const version = process.env.GRAPHYARD_VERSION?.trim(), revision = process.env.GRAPHYARD_BUILD_REVISION?.trim();
+  const release = version && revision ? { version, revision } : dirty(sourceRoot) ? null : checkoutRelease(sourceRoot);
+  return release && /^[0-9a-f]{40}$/.test(release.revision) && release.version === `unreleased ${release.revision.slice(0, 12)}` ? publishedImages(release.revision) : null;
 }
 
 export const composeAdapter: ProviderAdapter = {
