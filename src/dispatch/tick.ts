@@ -9,11 +9,12 @@ import { sessionAgentName, withReviewerDefaults, type MasterConfig, type Produce
 import { withLaunchedRuntime } from '../master/launch.js';
 import { boundedLaunch, launchBoundMs } from '../master/launch-bound.js';
 import { capacityRefusal } from '../fleet.js';
+import { WorkerSandboxError } from '../worker-sandbox.js';
 import { answeredByPendingReview, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict } from '../reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, postMergeRefusalProbeMs } from '../model/post-merge-review.js';
 import { answeredByPendingSession, independentProducerProfiles, sessionRetry } from '../producer.js';
 import { unexercisedFindings } from '../model/mechanical-proofs.js';
-import { cursorTextLimit, bounded, closeFailureReasons, type DispatchLaunch, type DispatchWait, dispatchAttemptCeiling, type DispatchFailure, type DispatchCursor, dispatchRetryMinMs, dispatchRetryMaxMs, capacityRecheckMs, sessionMissLimit, dispatchReadTimeoutMs, attributePersistFailure, tickWaits, capacityReasonLimit, dispatchFailureReasonLimit, closureFailureReasonLimit, dispatchFailureLimit, verdictIngestGraceMs } from './cursor.js';
+import { cursorTextLimit, bounded, closeFailureReasons, type DispatchLaunch, type DispatchWait, dispatchAttemptCeiling, type DispatchFailure, type DispatchCursor, dispatchRetryMinMs, dispatchRetryMaxMs, capacityRecheckMs, sessionMissLimit, dispatchReadTimeoutMs, attributePersistFailure, tickWaits, capacityReasonLimit, dispatchFailureReasonLimit, closureFailureReasonLimit, dispatchFailureLimit, verdictIngestGraceMs, backedOffProfiles, probeBackoffFailures, probeBackoffMs } from './cursor.js';
 import { describeAttempts, unactedProducerSession, requestSpentAt, preferFreshProfiles, requestSessions, limitNoticeExit, type DispatchedSession } from './attempts.js';
 import { selectReviewerProfile, launchWithFailover, type InstantExit } from './launch-failover.js';
 import { launchedSessionHandle, type SessionClosure, sessionHandleKey, reconcileSessionLiveness, reportClosure, sweepRegistrySessions } from './session-sweep.js';
@@ -174,6 +175,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     settlementWakes.set(item.id, { key: item.key, wake: Promise.resolve().then(() => effects.wakeObservation!(item)).then(() => null, (error: unknown) => message(error)) });
   };
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
+    if ((error as { probeBackoff?: boolean })?.probeBackoff) { delete cursor.failures[request.id]; wait(kind, item, request, bounded(message(error), dispatchFailureReasonLimit)); return; }
     const previous = cursor.failures[request.id];
     // Bounded at the cursor schema's ceiling: a request probed hourly past its attempt limit (GY-2075)
     // keeps counting its refusals, and the count must stay one the cursor can persist.
@@ -316,12 +318,29 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   };
   // Launch over `profiles` in order, each in its own name's turn. Room is read again once the name
   // is this launch's. The registry chooses and reserves the slot inside the launcher.
-  const launchInTurns = async <P extends ReviewerProfile | ProducerProfile>(request: DispatchRequest, profiles: P[], launch: (profile: P) => Promise<unknown>, exhausted?: (profile: P, exit: InstantExit) => Promise<string>) =>
-    launchWithFailover(profiles, profile => reserveName(profile.agentName, async () => {
-      const result = await launch(profile);
+  // GY-3235: a profile whose launch failed the same sandbox probe twice in a row is skipped for its
+  // role until its backoff ends, in favour of the next; the probe failure is the profile's, never
+  // a refusal counted against the request.
+  const launchInTurns = async <P extends ReviewerProfile | ProducerProfile>(request: DispatchRequest, profiles: P[], launch: (profile: P) => Promise<unknown>, exhausted?: (profile: P, exit: InstantExit) => Promise<string>) => {
+    const role = request.kind === 'producer' ? 'producer' : 'reviewer', key = (profile: P) => `${role}:${profile.name}`;
+    const skipped = backedOffProfiles(cursor, now()).filter(entry => entry.role === role);
+    const usable = profiles.filter(profile => !skipped.some(entry => entry.profile === profile.name));
+    if (profiles.length && !usable.length) throw Object.assign(new Error(`every ${role} profile is backed off after failing its launch probe: ${skipped.map(entry => `${entry.profile} until ${entry.until} (${entry.cause})`).join('; ')}`), { probeBackoff: true });
+    return launchWithFailover(usable, profile => reserveName(profile.agentName, async () => {
+      let result: unknown;
+      try { result = await launch(profile); }
+      catch (error) {
+        if (!(error instanceof WorkerSandboxError)) throw error;
+        const previous = cursor.profileBackoff[key(profile)], failures = previous?.path === error.path ? Math.min(previous.failures, dispatchAttemptCeiling - 1) + 1 : 1;
+        cursor.profileBackoff[key(profile)] = { role, profile: profile.name, path: bounded(error.path, cursorTextLimit), cause: bounded(message(error), cursorTextLimit), failures, at: new Date(now()).toISOString(),
+          until: failures >= probeBackoffFailures ? new Date(now() + probeBackoffMs).toISOString() : null };
+        throw Object.assign(error, { probeBackoff: true });
+      }
+      delete cursor.profileBackoff[key(profile)];
       started.push({ name: launchedName(profile, request, result) });
       return result;
     }), exhausted);
+  };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
     // A product review (GY-2989) launches like a review on the same reviewer lanes — one session per
     // head, reviewer concurrency and capacity.

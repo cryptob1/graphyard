@@ -21,7 +21,7 @@ import { loadMasterConfig, readCredentialFile } from './master/config.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { sessionAgentName } from './master/profiles.js';
 import { selectReviewerProfile } from './dispatch/launch-failover.js';
-import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, reviewerCredentialDirectory, sessionCoordinatorRoot, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
@@ -103,6 +103,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   /** How a headless check's one child runs (headless-session.ts); the host's by default. */
   headless?: HeadlessExec | null;
 } = {}): Promise<SpecCheckLaunchResult> {
+  dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A spec-check launch requires a valid Graphyard snapshot clock');

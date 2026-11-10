@@ -23,7 +23,7 @@ import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, worktreeRoot, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { anchorSessionCheckout, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { anchorSessionCheckout, sessionCoordinatorRoot, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
@@ -367,6 +367,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   runner?: Runner;
   fetcher?: typeof fetch;
 } = {}) {
+  dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const now = dependencies.now ?? (() => new Date());
   const config = await loadMasterConfig(root);
   let binding = assertProducerCandidate(work, request, observedAt);
