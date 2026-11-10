@@ -30,6 +30,7 @@ const loadTerminal = () => loading ??= new Promise((done, fail) => {
 export default function LiveTerminal({ token, pane, label }: { token: string; pane?: string; label: string }) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<'connecting' | 'control' | 'observe' | 'closed' | 'refused'>('connecting');
+  const [reason, setReason] = useState('');
   useEffect(() => {
     if (!token) { setState('refused'); return; }
     let live = true, stop = () => {};
@@ -43,10 +44,10 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       let opened = false;
       socket.onopen = () => { opened = true; };
       socket.onmessage = event => {
-        if (typeof event.data === 'string') { const hello = JSON.parse(event.data); setState(hello.mode); if (hello.mode === 'control') terminal.focus(); return; }
+        if (typeof event.data === 'string') { const hello = JSON.parse(event.data); if (hello.refused) { setReason(hello.refused); setState('refused'); return; } setState(hello.mode); if (hello.mode === 'control') terminal.focus(); return; }
         terminal.write(new Uint8Array(event.data));
       };
-      socket.onclose = () => setState(opened ? 'closed' : 'refused');
+      socket.onclose = () => setState(current => current === 'refused' ? current : opened ? 'closed' : 'refused');
       const typing = terminal.onData(data => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
       stop = () => { typing.dispose(); socket.close(); terminal.dispose(); };
     }, () => { if (live) setState('refused'); });
@@ -60,7 +61,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
     refused: 'Not available: sign in, and check the session still has a pane.',
   };
   return <section className="live-terminal" aria-label={label} data-terminal={state}>
-    <p className={state === 'refused' ? 'notice danger' : 'muted'} role="status">{notes[state]}</p>
+    <p className={state === 'refused' ? 'notice danger' : 'muted'} role="status">{state === 'refused' && reason ? `refused: ${reason}` : notes[state]}</p>
     <div ref={host} className="terminal-host"/>
   </section>;
 }
