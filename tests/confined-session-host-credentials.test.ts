@@ -4,9 +4,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { coordinatorConfinement, credentialMaskFor, masterCredentialMask, sessionMountNamespaceWorks } from '../src/master/confinement.js';
+import { coordinatorConfinement, credentialMaskFor, masterCredentialMask, sessionMountNamespaceWorks, type MaskProbe } from '../src/master/confinement.js';
 import { masterSessionConfinement, prepareConfinedGitPaths } from '../src/master/launch.js';
-import type { SandboxExec } from '../src/worker-sandbox.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3228: a confined session ran with the whole host readable apart from the install's own
@@ -18,7 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const secret = 'host-credential-secret-'.padEnd(48, 'x');
 const ownToken = 'worker-own-token-'.padEnd(40, 'x');
-const hostProbe: SandboxExec = (command, args, options) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const hostProbe: MaskProbe = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 function fixture(home: string) {
   const root = join(home, 'code', 'project');

@@ -18,7 +18,7 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
-import { credentialMaskFor, CredentialMaskError } from './confinement.js';
+import { credentialMaskFor, CredentialMaskError, type MaskProbe } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
@@ -56,6 +56,8 @@ type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
  */
 export interface DispatchOptions {
   probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
+  /** Overrides the credential-mask read probe (GY-3228); tests supply one. */
+  maskProbe?: MaskProbe;
   /** The prompt section a run of repeated equal failures asks for (GY-3104, daemon/repeated-failure.ts). */
   diagnosis?: string;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
@@ -265,7 +267,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous, options.diagnosis));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous, options.diagnosis, options.maskProbe));
               claimedEpoch = epoch;
               // History supports session resume and status; it never grants or reserves a slot.
               const at = new Date().toISOString();
@@ -388,7 +390,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null, diagnosis = '') {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null, diagnosis = '', maskProbe?: MaskProbe) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -436,9 +438,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // fails at its first sync; the claimed item is blocked below with the probe cause.
       // The probe runs behind the same coordinator confinement the session will (GY-1321): a sandbox
       // that cannot start inside that read-only mount fails the launch naming the path it refused on.
-      if (sandboxProbe) {
-        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(sandboxProbe === 'host' ? {} : { maskProbe: sandboxProbe }) }, coordinatorRoot);
-        sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
+      // The same confinement is asked whether it still reads a masked credential location (GY-3228).
+      if (sandboxProbe || maskProbe) {
+        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(maskProbe ? { maskProbe } : {}) }, coordinatorRoot);
+        if (sandboxProbe) sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
       }
 
       // GY-2971: the previous attempt's runtime session is resumed when this launch runs on the same

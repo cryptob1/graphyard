@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { CredentialMaskError, credentialMaskFor, masterCredentialMask, readOnlyMountWrapper } from '../src/master/confinement.js';
+import { assertCredentialsMasked, CredentialMaskError, credentialMaskFor, masterCredentialMask, readOnlyMountWrapper, type MaskProbe } from '../src/master/confinement.js';
 import { prepareConfinedGitPaths } from '../src/master/launch.js';
 import { dispatchWork, setupMaster, loadMasterConfig } from '../src/master.js';
 import { readAccountStartFailures } from '../src/master/dispatch.js';
 import { cycleBaseTip } from '../src/master/worktrees.js';
-import { WorkerSandboxError, type SandboxExec } from '../src/worker-sandbox.js';
+import { WorkerSandboxError } from '../src/worker-sandbox.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -33,12 +33,11 @@ function fixture(base: string) {
   return { root, home, worktree, git, secret };
 }
 /** A probe that answers as the sandbox would if it could still read `leaked`, recording what it was asked. */
-const probeReading = (leaked: string[], asked: string[][] = []): SandboxExec & { asked: string[][] } => Object.assign(((_command, args) => {
-  if (!args.some(word => word.includes('test -r'))) return 'writable\n';
-  const paths = args.slice(args.indexOf('sh') + 1);
+const probeReading = (leaked: string[], asked: string[][] = []): MaskProbe & { asked: string[][] } => Object.assign(((_command, args) => {
+  const paths = args.slice(args.lastIndexOf('sh') + 1);
   asked.push(paths);
   return paths.filter(path => leaked.includes(path)).map(path => `readable\t${path}\n`).join('');
-}) as SandboxExec, { asked });
+}) as MaskProbe, { asked });
 
 test('unit:tests/credential-mask-probe.test.ts — a sandbox that can still read a masked path that exists refuses the launch naming it; one that reads none launches', async () => {
   const base = await temporaryDirectory('credential mask probe');
@@ -53,10 +52,10 @@ test('unit:tests/credential-mask-probe.test.ts — a sandbox that can still read
     f.secret(join(otherAccount, '.credentials.json')); f.secret(join(ownAccount, '.credentials.json'));
     const extra = f.secret(join(base, 'extra', 'secrets.env'));
     const mask = credentialMaskFor({ confinement: { maskPaths: [extra] }, environments: [{ home: ownAccount }, { home: otherAccount }] }, { credentialFile: own, runtimeHomes: [ownAccount] }, join(f.home, '.config', 'graphyard'));
-    const build = (maskProbe: SandboxExec | null) => readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, bwrap: 'bwrap', credentialMask: mask, secretsBus: null, maskProbe });
+    const session = { coordinatorRoot: f.root, sessionDirectory: f.worktree, credentialMask: mask };
 
     // The words: a masked directory becomes an empty unreadable one, a masked file an unreadable empty file.
-    const words = build(null), blank = join(f.worktree, '.graphyard', 'masked');
+    const words = readOnlyMountWrapper({ ...session, bwrap: 'bwrap', secretsBus: null }), blank = join(f.worktree, '.graphyard', 'masked');
     const after = (flag: string, path: string) => words.some((word, index) => word === path && words[index - 1] === flag);
     assert.ok(words.some((word, index) => word === join(f.home, '.ssh') && words[index - 1] === '--tmpfs' && words[index - 2] === '0111' && words[index - 3] === '--perms'), 'the SSH directory is an unreadable empty directory');
     assert.ok(after('--tmpfs', otherAccount) && !after('--tmpfs', ownAccount), 'another account\'s home is masked, the session\'s own is not');
@@ -66,13 +65,13 @@ test('unit:tests/credential-mask-probe.test.ts — a sandbox that can still read
 
     // A sandbox that reads none of them launches; the probe is asked about every masked path that exists, and never the session's own.
     const clean = probeReading([]);
-    assert.doesNotThrow(() => build(clean));
+    await assertCredentialsMasked(words, { ...session, maskProbe: clean });
     assert.equal(clean.asked.length, 1, 'one probe per launch');
     for (const path of [join(f.home, '.ssh'), netrc, otherAccount, extra]) assert.ok(clean.asked[0].includes(path), `${path} is probed`);
     for (const path of [own, ownAccount, join(f.home, '.aws')]) assert.ok(!clean.asked[0].includes(path), `${path} is not probed`);
 
     // One that still reads a masked path is refused, naming it.
-    assert.throws(() => build(probeReading([netrc])), (error: unknown) => error instanceof CredentialMaskError && error instanceof WorkerSandboxError && error.path === netrc && error.message.includes(netrc) && /Host, not the item/.test(error.message));
+    await assert.rejects(assertCredentialsMasked(words, { ...session, maskProbe: probeReading([netrc]) }), (error: unknown) => error instanceof CredentialMaskError && error instanceof WorkerSandboxError && error.path === netrc && error.message.includes(netrc) && /Host, not the item/.test(error.message));
 
     // The master's mask keeps its own install directory and hides another install's.
     const masterToken = f.secret(join(f.home, '.config', 'graphyard', 'install', 'tokens', 'master.token'));
@@ -117,7 +116,7 @@ test('unit:tests/credential-mask-probe.test.ts — a worker dispatch whose sandb
     await assert.rejects(dispatchWork(f.root, item, profile, [], async () => { throw new Error('No runtime should start'); }, [item],
       async () => ({ epoch: 1, path: f.worktree, base: f.git('rev-parse', 'HEAD'), branch: 'graphyard/gy-1-1' }),
       async (_root, _key, _epoch, _profile, blocker) => { released.push(blocker); }, 1, now,
-      { probe: registry.probe, sandbox: probeReading([leaked]), coordinatorRoot: f.root }),
+      { probe: registry.probe, maskProbe: probeReading([leaked]), coordinatorRoot: f.root }),
     (error: unknown) => error instanceof CredentialMaskError && error.path === leaked);
     assert.equal(released.length, 1, 'the claim is released once');
     assert.ok(released[0]?.includes(leaked) && released[0].startsWith('Host, not the item:'), `one blocker names the path: ${released[0]}`);

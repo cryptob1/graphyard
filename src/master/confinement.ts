@@ -1,5 +1,4 @@
 // Concern: OS-level host filesystem and coordinator confinement for every launched role.
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -10,7 +9,7 @@ import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
 import { socketConfinementWords } from './socket-confinement.js';
 import { underTestRunner } from '../runtime-environment.js';
-import { WorkerSandboxError, type SandboxExec } from '../worker-sandbox.js';
+import { WorkerSandboxError } from '../worker-sandbox.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
 // Every runtime carries the same outer namespace, including runtimes with their own sandbox:
@@ -244,9 +243,9 @@ const credentialMasks = (mask: CredentialMask | undefined, protect: readonly str
   return { directories, unreadable: exact, files: exact.filter(path => !isDirectoryPath(path) && !directories.some(directory => withinCheckout(path, directory))) };
 };
 
-/** Runs the credential-mask read probe: the sandbox's own words running `test -r` on each masked path, printing `readable<TAB>path` for each it can read. */
-export type MaskProbe = SandboxExec;
-const hostMaskProbe: MaskProbe = (command, args, options) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000, killSignal: 'SIGKILL' });
+/** Runs the credential-mask read probe: the sandbox's own words running `test -r` on each masked path, answering `readable<TAB>path` for each it can read. */
+export type MaskProbe = (command: string, args: string[]) => Promise<string> | string;
+const hostMaskProbe: MaskProbe = (command, args) => defaultChildRun(command, args, { timeoutMs: 20_000 });
 /** GY-3228: a launch whose sandbox can still read a masked credential location. A sandbox fault, never the account's: the item is blocked naming the path. */
 export class CredentialMaskError extends WorkerSandboxError {
   constructor(path: string) {
@@ -256,10 +255,12 @@ export class CredentialMaskError extends WorkerSandboxError {
   }
 }
 /** Refuses the launch when the sandbox `wrapper` builds can read a masked location that exists (GY-3228). Under the test runner nothing is probed unless a test supplies the probe. */
-function assertCredentialsMasked(wrapper: readonly string[], mask: CredentialMask | undefined, protect: readonly string[], kept: readonly string[], probe: MaskProbe | null | undefined) {
-  const run = probe === undefined ? (underTestRunner() ? null : hostMaskProbe) : probe;
+export async function assertCredentialsMasked(wrapper: readonly string[], input: { coordinatorRoot: string; sessionDirectory: string; credentialMask?: CredentialMask; maskProbe?: MaskProbe | null }): Promise<void> {
+  const run = input.maskProbe === undefined ? (underTestRunner() ? null : hostMaskProbe) : input.maskProbe;
+  const root = canonicalPath(resolve(input.coordinatorRoot)), mask = sessionMask(root, input.credentialMask);
   if (!mask || !run) return;
-  const { directories, files, unreadable } = credentialMasks(mask, protect);
+  const { directories, files, unreadable } = credentialMasks(mask, [root, canonicalPath(resolve(input.sessionDirectory))]);
+  const kept = [...keptCredentialPaths(mask), ...mask.cli];
   // A directory masked only as the holder of recorded credentials stays a readable, empty one: what it held is what is probed.
   const masked = (path: string) => [...directories, ...files].some(target => path === target || withinCheckout(path, target)) && !kept.some(own => path === own || withinCheckout(path, own))
     && !(directories.includes(path) && !unreadable.includes(path));
@@ -267,10 +268,13 @@ function assertCredentialsMasked(wrapper: readonly string[], mask: CredentialMas
   if (!paths.length) return;
   let output = '';
   // A sandbox that cannot start reads nothing; the launch reports that failure itself.
-  try { output = run(wrapper[0], [...wrapper.slice(1), '/bin/sh', '-c', 'for p do if test -r "$p"; then printf "readable\\t%s\\n" "$p"; fi; done', 'sh', ...paths], { cwd: protect[0], env: process.env }); } catch { return; }
+  try { output = await run(wrapper[0], [...wrapper.slice(1), '/bin/sh', '-c', 'for p do if test -r "$p"; then printf "readable\\t%s\\n" "$p"; fi; done', 'sh', ...paths]); } catch { return; }
   const readable = /^readable\t(.+)$/m.exec(output);
   if (readable) throw new CredentialMaskError(readable[1]);
 }
+/** The session's mask with the repository's own declared extras (GY-3228). */
+const sessionMask = (root: string, mask: CredentialMask | undefined): CredentialMask | undefined =>
+  mask && { ...mask, hostPaths: [...(mask.hostPaths ?? []), ...repositoryMaskPaths(root)] };
 /** GY-3228: the absolute or `~/` mask paths the repository's own graphyard.json declares (`confinement.maskPaths`); an unreadable declaration adds none. */
 const repositoryMaskPaths = (root: string): string[] => {
   try {
@@ -360,7 +364,7 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; maskProbe?: MaskProbe | null; environment?: NodeJS.ProcessEnv }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv }): readonly string[] {
   const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
   const gitDir = canonicalPath(checkoutGitDirectory(root));
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -379,7 +383,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // token file read-only, its runtime login homes writable — are re-exposed last, so a later bind
   // shadows the mask that covered them.
   // GY-3228: the repository's own declared extras join the mask.
-  const mask = input.credentialMask && { ...input.credentialMask, hostPaths: [...(input.credentialMask.hostPaths ?? []), ...repositoryMaskPaths(root)] };
+  const mask = sessionMask(root, input.credentialMask);
   const kept = keptCredentialPaths(mask);
   // GY-2995: the install's own CLI checkout is re-exposed read-only after the masks, so a
   // confined session runs the launcher its prompt names but can change none of its code.
@@ -409,7 +413,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  const wrapper = [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks,
+  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
@@ -421,8 +425,6 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
     ...cli.flatMap(path => ['--ro-bind', path, path]), ...channels, '--',
     ...socketConfinementWords([...own, ...writable, ...kept.filter(isDirectoryPath), ...commonGitDir, ...sharedDirectories],
       channels.flatMap((word, index) => word === '--ro-bind' && channels[index + 1] !== '/dev/null' ? [channels[index + 2]] : []))];
-  assertCredentialsMasked(wrapper, mask, [root, directory], [...kept, ...cli], input.maskProbe);
-  return wrapper;
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
@@ -475,7 +477,8 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}), ...(input.maskProbe !== undefined ? { maskProbe: input.maskProbe } : {}) });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  await assertCredentialsMasked(wrapper, { coordinatorRoot: root, sessionDirectory: directory, credentialMask: input.credentialMask, maskProbe: input.maskProbe });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };

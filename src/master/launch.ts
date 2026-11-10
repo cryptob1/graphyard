@@ -14,7 +14,7 @@ import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
 import { assertIsolatableHostControlEndpoints } from './confinement.js';
-import { bwrapOnPath, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput, type CredentialMask, type MaskProbe } from './confinement.js';
+import { bwrapOnPath, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, assertCredentialsMasked, type CoordinatorConfinement, type ConfinementInput, type CredentialMask, type MaskProbe } from './confinement.js';
 import { runtimeLoginHomes, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, coordinatorCheckoutRoot } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
@@ -192,6 +192,7 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   // Mount options precede the socket-confinement command inside bubblewrap.
   const command = words.indexOf('--');
   const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words.slice(0, command), '--ro-bind', records, records, ...words.slice(command)];
+  await assertCredentialsMasked(wrapper, { coordinatorRoot: root, sessionDirectory: root, credentialMask });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
