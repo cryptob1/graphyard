@@ -149,7 +149,7 @@ export interface CredentialMask {
  * on the runtime's home variable) readable; `home` overrides the operator config home (tests).
  */
 export function credentialMaskFor(
-  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
+  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
   own: { credentialFile?: string | null; runtimeHomes?: readonly string[] },
   home?: string,
 ): CredentialMask {
@@ -158,7 +158,7 @@ export function credentialMaskFor(
   const launcher = recorded(config.cliPath)[0];
   return {
     configHome: operatorHome,
-    extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
+    extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.run?.mergeWriter?.tokenFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
     // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
     // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its

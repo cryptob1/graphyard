@@ -67,7 +67,7 @@ export const installCommands = defineCommands([
     help: [
       '  up --repo OWNER/NAME [--base-branch NAME] [--provider compose|local]',
       '     [--local] [--master claude|codex] [--agent] [--wait MINUTES]',
-      '     [--share-tailnet] [--url URL] [--json]',
+      '     [--share-tailnet] [--url URL] [--merge-token-stdin] [--json]',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
       '                                Herdr, the merge writer\'s deploy key, master autonomy, onboarding, agent',
       '                                accounts, harness and master loop, resumable (.graphyard/up.json;',
@@ -83,6 +83,8 @@ export const installCommands = defineCommands([
       '                                registered: up creates the repository when missing and registers the merge writer\'s deploy',
       '                                key with the gh login. --url URL names the control plane\'s address before master init',
       '                                records one (HTTPS, or HTTP on loopback); --json prints the result as JSON.',
+      '                                --merge-token-stdin pipes a fine-grained token (Contents read/write on the repository) to',
+      '                                the install instead of a deploy key, where the organization disables deploy keys.',
       '                                --base-branch NAME builds on that branch (default: the repository\'s default branch);',
       '                                a rerun without the flag keeps the branch the install recorded.',
       '                                --wait MINUTES bounds a wait (agent: 20). Exit codes: 0 green, 1 a step failed, 2 a',
@@ -103,13 +105,15 @@ export const installCommands = defineCommands([
       '  install --provider compose|local --repo OWNER/NAME',
       '          [--plan|--apply] [--domain HOST] [--workers N]',
       '          [--producer-proof PROOF] [--port N] [--image REF]',
-      '          [--source-root DIR]',
+      '          [--source-root DIR] [--merge-token-stdin]',
       '          [--create-environments] [--herdr-rebind | --no-herdr]',
       '                                Install or reconcile a complete control plane on this machine:',
       '                                compose runs it as containers, local on embedded Postgres.',
       '                                No GitHub App, webhook or branch protection is set up: the',
       '                                merge writer\'s deploy key is registered read-write with the',
-      '                                gh login, and it alone pushes.',
+      '                                gh login, and it alone pushes. Where deploy keys are disabled,',
+      '                                pipe a fine-grained token (Contents read/write on the one',
+      '                                repository) to --merge-token-stdin instead.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
@@ -119,7 +123,10 @@ export const installCommands = defineCommands([
     readsConnection: () => false,
     async run(context) {
       const { values, request: inputs } = installRequestFromArgs(context.rest);
+      const mergeToken = values['merge-token-stdin'] ? await readSecretFromStdin(10000) : undefined;
+      if (values['merge-token-stdin'] && !mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
       const session = await prepareInstall(process.cwd(), inputs, {
+        ...(mergeToken ? { mergeToken } : {}),
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
         // GY-2168: a redeploy names the checkout the deployed commit's tree stands in; without the
         // flag the session builds from the checkout this command's own code was loaded from.

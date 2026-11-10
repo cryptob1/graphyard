@@ -13,6 +13,7 @@ import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/deliver
 import { adapterFor, carriesCredential, publishedPort, readRemote, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter } from './adapters.js';
 import { githubCli, type GitHubCli } from './github.js';
 import { DEPLOY_KEY_FILE, ensureDeployKey } from './deploy-key.js';
+import { MERGE_TOKEN_FILE, writeMergeToken } from './merge-token.js';
 import { detectHerdr, detectRuntimes, masterRuntime, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model-boundary/repository-policy.js';
@@ -55,6 +56,8 @@ export interface InstallDependencies {
   detectRuntimes?: (transport: Transport) => Promise<DetectedRuntime[]>;
   detectHerdr?: (transport: Transport) => Promise<HerdrState>;
   /** Generates (when absent) and registers the merge writer's deploy key; ensureDeployKey through the transport's gh by default. */
+  /** The merge writer's token read from stdin (`--merge-token-stdin`, GY-3220); stored instead of generating a deploy key. */
+  mergeToken?: string;
   ensureDeployKey?: (installDir: string, repository: string, gh: GitHubCli) => Promise<string>;
   registerProfiles?: (request: ProfileRequest) => Promise<ProfileRegistration>;
   runHerdr?: (args: string[]) => string;
@@ -106,7 +109,7 @@ export function installRequestFromArgs(args: string[]) {
     port: { type: 'string' },
     local: { type: 'boolean' },
     'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' },
-    'observe-only': { type: 'boolean' },
+    'observe-only': { type: 'boolean' }, 'merge-token-stdin': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
@@ -133,6 +136,7 @@ export function installRequestFromArgs(args: string[]) {
     ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
     ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'agent' } : {}),
     ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
+    ...(values['merge-token-stdin'] ? { mergeToken: true } : {}),
     ...(values['observe-only'] ? { observeOnly: true, herdr: 'skip' as const } : {}) };
   return { values, request };
 }
@@ -582,6 +586,8 @@ export function repositoryOriginPreflight(root: string, repository: string): Pre
  */
 function deployKeyAction(session: InstallSession): PlanAction {
   const { inputs } = session;
+  if (inputs.mergeToken) return inputs.observeOnly ? held({ id: 'github.merge-token', target: 'github', title: 'Store the merge writer\'s token' }, 'no token is stored, so the merge writer cannot push')
+    : { id: 'github.merge-token', target: 'github', state: existsSync(resolve(session.directory, MERGE_TOKEN_FILE)) ? 'update' : 'create', title: `Store the merge writer's fine-grained token piped to stdin (${resolve(session.directory, MERGE_TOKEN_FILE)}, mode 0600; Contents read/write on ${inputs.repository} only); the merge writer fetches and pushes ${inputs.baseBranch} over https with it, and no deploy key, GitHub App, webhook or branch protection is set up` };
   const title = 'Generate the merge writer\'s deploy key';
   if (inputs.observeOnly) return held({ id: 'github.deploy-key', target: 'github', title: `${title} and register it on ${inputs.repository}` }, 'no deploy key is generated or registered, so the merge writer cannot push');
   const file = resolve(session.directory, DEPLOY_KEY_FILE);
@@ -741,6 +747,8 @@ export interface InstallSummary {
   principals: { id: string; role: string; fingerprint: string; tokenFile: string }[];
   /** The merge writer's deploy key (GY-2010): its private key file; null for --observe-only. */
   deployKey: string | null;
+  /** Which credential the merge writer pushes with (GY-3220); the token's value is never recorded. */
+  mergeCredential: 'deploy-key' | 'token' | null;
   health: boolean; status: { actor: string; role: string; repository: string };
   profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
   release: { mode: 'local' | 'release-candidate' | 'per-pr' };
@@ -897,7 +905,10 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const gh = githubCli(context.transport);
   // The merge writer's deploy key (GY-2010): the only credential Graphyard holds on GitHub.
   const ensure = deps.ensureDeployKey ?? ((installDir: string, repository: string, cli: GitHubCli) => ensureDeployKey(installDir, repository, cli));
-  const deployKey = observeOnly ? null : await ensure(session.directory, session.inputs.repository, gh);
+  const token = !observeOnly && session.inputs.mergeToken;
+  if (token && !deps.mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
+  if (token) { await writeMergeToken(session.directory, deps.mergeToken!); log(`Merge writer token stored at ${resolve(session.directory, MERGE_TOKEN_FILE)}`); }
+  const deployKey = observeOnly || token ? null : await ensure(session.directory, session.inputs.repository, gh);
   if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
 
   const release: InstallSummary['release'] = { mode: session.delivery.policy.mode };
@@ -920,7 +931,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
     url,
     principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: tokenFile(session.directory, principal.id) })),
-    deployKey,
+    deployKey, mergeCredential: observeOnly ? null : token ? 'token' : 'deploy-key',
     health, status, profiles, drift: plan.drift,
     nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : nextSteps(session, url, profiles),
     release,

@@ -1,3 +1,4 @@
+import { readSecretFromStdin } from './cli/context.js';
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
 import { supervisingUnit } from './master/loop-restart.js';
@@ -84,6 +85,8 @@ export interface UpRequest {
    * pointed at the recorded address (this, else master.json, else the install record), never a default port.
    */
   url?: string | null;
+  /** GY-3220: the merge writer's fine-grained token read from stdin (`--merge-token-stdin`), forwarded to every install child; the deploy-key step is skipped. */
+  mergeToken?: string;
 }
 /** Agent mode's default wait on a person: 20 minutes (GY-1457). */
 export const upAgentWaitMs = 1_200_000;
@@ -573,7 +576,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return result.stdout;
   };
   // install registers no GitHub App (GY-2010): it registers the merge writer's deploy key instead.
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : [])];
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []), ...(request.mergeToken ? ['--merge-token-stdin'] : [])];
+  const installInput = request.mergeToken ? { stdin: request.mergeToken } : {};
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch '${request.baseBranch}'` : ''}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
@@ -645,7 +649,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
       await ensureRepository();
       for (let attempt = 0; attempt < 2; attempt++) {
-        const planned = await run('preflight', installArgs('--plan'));
+        const planned = await run('preflight', installArgs('--plan'), installInput);
         const plan = parseJson(planned);
         await rememberSignIn(deps.root, state, planned);
         const failed: { name: string; detail?: string; fix?: string }[] = (plan?.preflight ?? []).filter((check: any) => check && check.ok === false);
@@ -677,7 +681,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     const controlPlane = () => step('control-plane', async () => {
       // The control plane is the merge writer (GY-1552): the install registers no App, no App page
       // is served or driven, and the merge writer's deploy key is its only GitHub access.
-      const result = await deps.cli(installArgs('--apply'));
+      const result = await deps.cli(installArgs('--apply'), installInput);
       claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
       if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
       return 'control plane installed without a GitHub App';
@@ -769,7 +773,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (result.code !== 0 && !options?.allowFailure) throw new Error(`gh ${args.join(' ')} exited ${result.code}${result.stderr ? `: ${result.stderr.split('\n')[0].slice(0, 200)}` : ''}`);
         return { stdout: result.stdout, stderr: result.stderr ?? '', code: result.code };
       } : null;
-      await step('deploy-key', async () => {
+      if (request.mergeToken) deps.emit({ kind: 'step', step: 'deploy-key', state: 'skipped', detail: 'the merge writer uses the fine-grained token the install stored' });
+      else await step('deploy-key', async () => {
         const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
           if (!gh) throw new UpStop('deploy-key: the merge writer needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
           return ensureDeployKey(installDir, repository, gh);
@@ -806,7 +811,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // so the install runs again once, this run, before the item that carries it is filed.
       const firstCase: string[] = typeof applied?.delivery?.firstCase === 'string' ? [applied.delivery.firstCase] : [];
       if (applied?.delivery?.serve === true || firstCase.length) {
-        const result = await deps.cli(installArgs('--apply'));
+        const result = await deps.cli(installArgs('--apply'), installInput);
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
       }
@@ -1046,6 +1051,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
  */
 export async function upCommand(root: string, cliPath: () => Promise<string>, args: string[]): Promise<UpResult> {
   const request = upRequestFromArgs(args, recordedUp(root));
+  if (request.mergeToken !== undefined) {
+    request.mergeToken = await readSecretFromStdin(10000);
+    if (!request.mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
+  }
   const refusal = await upUrlRefusal(root, request.url);
   if (refusal) throw new Error(refusal);
   const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
@@ -1083,7 +1092,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses (GY-1510). */
-export const upOptions = { 'base-branch': { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
+export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'base-branch': { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -1105,7 +1114,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, master: values.master ?? 'claude',
-    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
+    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}), ...(values['merge-token-stdin'] ? { mergeToken: '' } : {}) };
 }
 
 /** A one-time dashboard sign-in address minted with the operator's admin credential, TOKEN or the one in FILE (as `graphyard login` mints it). */
