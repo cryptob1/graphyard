@@ -87,7 +87,7 @@ else if (args[0] === 'build' || words.startsWith('buildx build')) {
 else if (args[0] === 'push') await push(args[1]);
 else if (args[0] === 'pull') { const found = await fetch(manifest(args[1])); if (!found.ok) fail('manifest unknown: ' + args[1]); images[args[1]] = await found.text(); save(); }
 else if (args[0] === 'tag') { images[args[2]] = images[args[1]] ?? fail('no such image ' + args[1]); save(); }
-else if (args[0] === 'rm') { delete images[args[1]]; save(); }
+else if (args[0] === 'rm') { for (const image of args.slice(1)) delete images[image]; save(); }
 else if (args[0] === 'compose') {
   // The server container: the image's own command, run from the tree its commit was built from, on the published port.
   const project = args[args.indexOf('--project-directory') + 1], pid = join(project, 'server.pid');

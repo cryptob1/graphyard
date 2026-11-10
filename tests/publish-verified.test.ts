@@ -61,7 +61,7 @@ test('unit:tests/publish-verified.test.ts — a verified commit is pushed as bot
   }
   assert.match(trial, /--target trial .*--push /);
   assert.deepEqual(calls.filter(call => call.startsWith('docker image push ')), [`docker image push ghcr.io/cryptob1/graphyard:${commit}`, 'docker image push ghcr.io/cryptob1/graphyard:verified']);
-  assert.ok(calls.includes(`docker image rm ghcr.io/cryptob1/graphyard:${commit}`), 'the pushed commit tag does not pile up on the publishing host');
+  assert.ok(calls.includes(`docker image rm ghcr.io/cryptob1/graphyard:${commit} ghcr.io/cryptob1/graphyard:verified`), 'the pushed image does not pile up on the publishing host');
   assert.match(calls.find(call => call.startsWith('npm '))!, /^npm publish --tag latest /, 'latest moves to the published version');
   assert.equal(published.length, 1);
   const { manifest, npmrc } = published[0]!;
