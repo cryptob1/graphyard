@@ -1,0 +1,13 @@
+{
+  "id": "untrusted-checkout-once",
+  "title": "An untrusted checkout with its own Claude configuration is raised once at up and the loop stops relaunching",
+  "description": "A checkout carrying .mcp.json and .claude/settings.json, untrusted in two registered Claude accounts: up stops at the harness step naming both account homes and both remedies (operator trust once per account, or the role's --setting-sources user); the Setup checklist shows the loop's standing line as one item; and the loop holds the named roles' launches behind one attention line, opening no pane per retry, until the account configs record trust or the role gains --setting-sources user.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "untrusted checkout raised once",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/untrusted-checkout-once.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -17,6 +17,7 @@ import { type MasterConfig } from '../master/profiles.js';
 import { agentToken } from '../master/autonomy.js';
 import { listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson } from '../master/herdr.js';
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
+import { checkoutTrustRefusals } from '../harness.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
 import { removeAttemptWorktree, worktreesDirectory } from '../master/worktrees.js';
@@ -193,6 +194,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     dispatch: (work, profile, agents, snapshot, launch) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot, ...launch }),
     registry: () => fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'),
+    // GY-3225: the checkout's folder-trust refusals (an untrusted checkout carrying repository
+    // Claude configuration), read from the registry document and this host's account configs.
+    checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),
     setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
     launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
