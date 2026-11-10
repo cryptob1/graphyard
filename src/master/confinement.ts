@@ -189,18 +189,20 @@ export function credentialMaskFor(
   };
 }
 
+/** Every absolute path a configuration names, at any depth. */
+const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (isAbsolute(value) ? [value] : [])
+  : value && typeof value === 'object' ? Object.values(value).flatMap(namedPaths) : [];
 /**
  * The master session's mask (GY-3228): the same host locations as every other session, and every
- * directory of the operator config home except its own install's — the one holding its token or
- * its CLI. Its own install directory and token stay readable.
+ * directory of the operator config home except its own install's — those holding a path its
+ * configuration names (its token, its CLI). Its own install directory and token stay readable.
  */
 export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
-  const operatorHome = configHome(home);
-  const own = [config.credentialFile, config.cliPath].filter((path): path is string => !!path && isAbsolute(path));
+  const operatorHome = configHome(home), named = namedPaths(config);
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
-  return { configHome: '', extraPaths: [], own: [], cli: [],
-    hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !own.some(kept => kept === path || withinCheckout(kept, path)))] };
+  return { configHome: '', extraPaths: [], own: runtimeHomes.filter(isAbsolute), cli: [],
+    hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
 }
 
 /**
