@@ -17,6 +17,7 @@ import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { staticRoutes } from './static.js';
+import { terminalUpgrade } from './terminal.js';
 export { principalSchema, type Credential } from './principals.js';
 export type { ServerOptions } from './auth.js';
 export { assembleServices } from './auth.js';
@@ -43,10 +44,11 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
   const services = assembleServices(engine, credentials, options);
   const unauthenticated: Principal = { id: '', role: 'reader' };
   // The services ride on the server so the entry announces decisions without reassembling.
-  return Object.assign(createServer(async (req, res) => {
+  const http = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    // The Master page's terminal (GY-3211) loads pinned xterm.js from jsdelivr and sizes and colours its grid with <style> elements.
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data:; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader('Cache-Control', 'no-store');
     const send = (status: number, data: unknown): typeof Sent => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); return Sent; };
     try {
@@ -85,5 +87,8 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
       console.error(requestFailure(req.method, req.url, error));
       send(500, { error: 'Internal error; consult server logs' });
     }
-  }), { services });
+  });
+  // The Master page's live terminal (GY-3211) is the one WebSocket.
+  http.on('upgrade', (req, socket) => { terminalUpgrade(services, req, socket).catch(error => { console.error(requestFailure(req.method, req.url, error)); socket.destroy(); }); });
+  return Object.assign(http, { services });
 }

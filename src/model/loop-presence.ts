@@ -137,7 +137,7 @@ export function loopPanes(header: string | string[] | undefined): PaneServer | n
     const parsed = JSON.parse(decodeURIComponent(value));
     const text = (field: unknown) => typeof field === 'string' && field.trim() && field.length <= 500 ? field.trim() : null;
     const configHome = text(parsed?.configHome), session = text(parsed?.session);
-    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null };
+    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null, master: text(parsed?.master) };
   } catch { return null; }
 }
 /** The pane server the loop last named, kept per engine like the loop's presence; a read naming none keeps the last. */

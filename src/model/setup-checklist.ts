@@ -41,12 +41,13 @@ export function setupAddress(server: string, signIn?: string | null) {
 /**
  * The page an address opens and the fragment the sign-in page reads (GY-1419): `#setup` alone, or a
  * sign-in or claim fragment followed by `&setup`, opens the Setup page; the `&setup` marker is taken
- * off so the sign-in page sees the exact fragment it redeems. Any other fragment opens no page.
+ * off so the sign-in page sees the exact fragment it redeems. `#master` (or `&master`) opens the Master
+ * page the same way (GY-3211). Any other fragment opens no page.
  */
-export function requestedView(hash: string): { view: 'setup' | null; hash: string } {
-  if (hash === '#setup') return { view: 'setup', hash };
-  const signIn = /^(#(?:sign-in|claim)=[A-Za-z0-9_-]{16,200})&setup$/.exec(hash);
-  return signIn ? { view: 'setup', hash: signIn[1] } : { view: null, hash };
+export function requestedView(hash: string): { view: 'setup' | 'master' | null; hash: string } {
+  if (hash === '#setup' || hash === '#master') return { view: hash.slice(1) as 'setup' | 'master', hash };
+  const signIn = /^(#(?:sign-in|claim)=[A-Za-z0-9_-]{16,200})&(setup|master)$/.exec(hash);
+  return signIn ? { view: signIn[2] as 'setup' | 'master', hash: signIn[1] } : { view: null, hash };
 }
 
 const roleTitle: Record<RequiredSetupRole, string> = { worker: 'An agent account that writes code', reviewer: 'An agent account that reviews code' };
@@ -106,7 +107,8 @@ function accountItems(status: any | null): SetupItem[] {
  * install, else the default (both null); the host the loop runs on, when recorded; and whether the
  * loop last reached that server (null while unknown). A sibling module outside the model turns it into commands.
  */
-export interface PaneServer { configHome: string | null; session: string | null; host: string | null; running: boolean | null }
+/** `master` is the pane the master session holds (GY-3211), which the Master page attaches to. */
+export interface PaneServer { configHome: string | null; session: string | null; host: string | null; running: boolean | null; master?: string | null }
 /** The value `status.setup.panes` carries, or the default instance on an unknown host when it carries none. */
 export function paneServer(status: any | null): PaneServer {
   const reported = status?.setup?.panes;
