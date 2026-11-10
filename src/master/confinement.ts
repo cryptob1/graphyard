@@ -151,9 +151,10 @@ export interface CredentialMask {
   hostPaths?: readonly string[];
 }
 
-/** GY-3228: where a host user's personal credentials live by default. Each is masked only where it exists. */
+/** GY-3228: where a host user's personal credentials live by default, with package-manager publish tokens (GY-3248). Each is masked only where it exists. */
 export const hostCredentialPaths = (home = homedir()): string[] =>
-  ['.ssh', '.config/gh', '.git-credentials', '.netrc', '.docker/config.json', '.aws', '.config/gcloud', '.azure', '.kube', '.railway', '.config/railway'].map(path => join(home, path));
+  ['.ssh', '.config/gh', '.git-credentials', '.netrc', '.docker/config.json', '.aws', '.config/gcloud', '.azure', '.kube', '.railway', '.config/railway',
+    '.npmrc', '.yarnrc', '.yarnrc.yml', '.pypirc', '.gem/credentials', '.cargo/credentials', '.cargo/credentials.toml'].map(path => join(home, path));
 type MaskConfig = { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; environments?: readonly { home: string }[]; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } };
 /** The personal credentials, the install's declared extras, and every configured agent account home that is not the session's own. */
 const hostPathsFor = (config: MaskConfig, runtimeHomes: readonly string[] = []) => {

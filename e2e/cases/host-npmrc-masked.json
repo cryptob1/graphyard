@@ -1,0 +1,13 @@
+{
+  "id": "host-npmrc-masked",
+  "title": "Confined sessions cannot read the host user's package-manager credentials",
+  "description": "With a fixture HOME holding ~/.npmrc with an auth token and its siblings (.yarnrc.yml, .pypirc, .gem/credentials, .cargo/credentials.toml), a confined worker under real bubblewrap reads none of them, and npm install of a public package in its worktree still succeeds.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "host package-manager credentials masked from a confined worker",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/host-npmrc-masked.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
