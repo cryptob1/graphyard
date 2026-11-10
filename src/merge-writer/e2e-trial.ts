@@ -153,6 +153,9 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
         // GY-2997: command and agent steps run under the same confinement as the serve and static build.
         select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
         processRunner: steps.run, versionPath: target.kind === 'command' ? undefined : target.versionPath,
+        // GY-3246: the budget above bounds the run; a release run's shared wait budget would leave a case late in a
+        // whole catalog (the batch gate's diagnostics) seconds to wait for what it waits a minute for alone.
+        waitUntil: Infinity,
         report: value => { report = value; },
       });
       try { await suite.run(served.origin, null); } finally { await steps.close().catch(() => {}); }

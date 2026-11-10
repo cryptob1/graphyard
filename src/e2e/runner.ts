@@ -632,6 +632,12 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   processRunner?: ProcessRunner;
   /** The served application's declared `versionPath`, when the run is against one application. */
   versionPath?: string;
+  /**
+   * The deadline the run's waits share out among its cases (GY-2603): a release run's
+   * (`releaseWaitUntil`) by default. A merge trial passes Infinity (GY-3246): its own signal bounds
+   * the run, so each case waits as its steps declare, as it would alone, however many cases precede it.
+   */
+  waitUntil?: number;
   /** The run's clock and pause between asks; tests substitute a fake clock (GY-1938). */
   now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) => ({
   name: 'e2e',
@@ -645,7 +651,7 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const suspendedPreviews = applicationSuspendedCases(selected, probed.previewsServed);
     const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended, ...suspendedPreviews], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy, processRunner: options.processRunner, versionPath: options.versionPath });
+      root: options.root, retries: releaseRetries, waitUntil: options.waitUntil ?? releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy, processRunner: options.processRunner, versionPath: options.versionPath });
     if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
     if (suspendedPreviews.length) report.suspendedPreviews = { cases: suspendedPreviews };
     if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';
