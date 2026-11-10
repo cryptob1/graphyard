@@ -118,7 +118,7 @@ test('unit:credential-mask-words — a location that exists is masked at the dir
     mkdirSync(dirname(outside)); writeFileSync(outside, 'x'.repeat(40));
     const mask = { configHome, extraPaths: [token, beside, outside, join(base, 'gone', 'x.token')], own: [], cli: [] };
     assert.deepEqual(credentialMaskWords(mask, [join(base, 'coordinator')]),
-      ['--tmpfs', configHome, '--tmpfs', join(base, 'collector')], 'the config home and each recorded path\'s directory are masked once; two files in one directory mask it once; a stale recorded path hides nothing');
+      ['--perms', '0111', '--tmpfs', configHome, '--perms', '0111', '--tmpfs', join(base, 'collector')], 'the config home and each recorded path\'s directory are masked once; two files in one directory mask it once; a stale recorded path hides nothing');
     // A candidate that would hide the checkout or the session directory is dropped wholesale.
     assert.deepEqual(credentialMaskWords({ configHome: base, extraPaths: [], own: [], cli: [] }, [join(base, 'coordinator')]), [], 'a mask that would hide the checkout is dropped');
     assert.deepEqual(credentialMaskWords({ configHome, extraPaths: [join(configHome, 'x')], own: [], cli: [] }, [configHome]), [], 'a session directory under the config home keeps it unmasked');

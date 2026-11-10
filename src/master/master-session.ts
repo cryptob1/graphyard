@@ -15,6 +15,8 @@ import { type HerdrAgent, observeHerdrAgents } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
+import { runtimeLoginHomes } from './profiles.js';
+import { masterCredentialMask } from './confinement.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -94,7 +96,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
-    ({ delivery } = await launchSession({ name, kind, args: [...plan.args, ...conversationArgs(kind, nativeId, resume)], text: request, workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...(config.forPerson ? { GRAPHYARD_FOR_PERSON: config.forPerson } : {}), GRAPHYARD_URL: config.url, GRAPHYARD_HOST_ID: config.hostId, ...plan.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile) } }));
+    ({ delivery } = await launchSession({ name, kind, args: [...plan.args, ...conversationArgs(kind, nativeId, resume)], text: request, workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...(config.forPerson ? { GRAPHYARD_FOR_PERSON: config.forPerson } : {}), GRAPHYARD_URL: config.url, GRAPHYARD_HOST_ID: config.hostId, ...plan.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile), credentialMask: masterCredentialMask(config, runtimeLoginHomes(plan.environment, plan.contract?.homeVariable)) } }));
     const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config), request);
     const conversation = { launch, runtime: kind, account: selected.account.name, ...discovered,
       record: resume ? current!.record : join(masterRecords(root), `${launch}.jsonl`), origins,

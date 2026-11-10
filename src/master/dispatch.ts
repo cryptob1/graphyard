@@ -18,7 +18,7 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
-import { credentialMaskFor } from './confinement.js';
+import { credentialMaskFor, CredentialMaskError } from './confinement.js';
 import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
@@ -437,7 +437,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // The probe runs behind the same coordinator confinement the session will (GY-1321): a sandbox
       // that cannot start inside that read-only mount fails the launch naming the path it refused on.
       if (sandboxProbe) {
-        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask }, coordinatorRoot);
+        const confinement = await sessionConfinement(launch.kind!, [...args, ...sessionHarness.args], { directory: prepared.path, cwd: prepared.path, environment: withVerificationPath(sessionHarness.environment, launch.environment), ...confinementCredential, credentialMask, ...(sandboxProbe === 'host' ? {} : { maskProbe: sandboxProbe }) }, coordinatorRoot);
         sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
       }
 
@@ -492,7 +492,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         withLaunchClose(error, `${note} before epoch ${prepared.epoch} was released`);
       }
       await keepAlive?.stop();
-      try { await release(root, work.key, prepared.epoch, profile.name, error instanceof WorkerSandboxError ? environmentBlocker('sandbox write probe', error.runtime, error) : undefined); }
+      try { await release(root, work.key, prepared.epoch, profile.name, error instanceof CredentialMaskError ? error.message : error instanceof WorkerSandboxError ? environmentBlocker('sandbox write probe', error.runtime, error) : undefined); }
       catch (releaseError) {
         // A lease that is already gone has handed its epoch back: nothing is stranded, so the
         // launch's own failure is reported as it is, as the worktree path does (GY-860, GY-1287).
