@@ -649,7 +649,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const failed: { name: string; detail?: string; fix?: string }[] = (plan?.preflight ?? []).filter((check: any) => check && check.ok === false);
       if (failed.length) throw new UpStop(`Preflight needs a person on this machine: ${failed.map(check => `${check.name}: ${check.detail ?? 'failed'}${check.fix ? ` (fix: ${check.fix})` : ''}`).join('; ')}. Fix it, then rerun graphyard up.`, upExitCodes.prerequisite);
       return `${(plan?.preflight ?? []).length} checks passed`;
-
     });
 
     // The server is started before the install links the plugin into it, and checked on every run.
