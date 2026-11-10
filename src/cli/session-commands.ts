@@ -224,13 +224,15 @@ async function signInLink({ api, base, repositoryRoot }: Parameters<CliCommand['
   const reachable = remote ? recorded?.reachableUrl ?? servedTailnetUrl(base) : null;
   return { url: `${(reachable ?? base).replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt };
 }
-/** The https address `tailscale serve` maps to `base`, or null when tailscale is missing, fails or maps nothing to it. */
+/** The address `tailscale serve` maps to `base` — http for a plain-HTTP serve (the kind `up` sets up), else https — or null when tailscale is missing, fails or maps nothing to it. */
 function servedTailnetUrl(base: string): string | null {
   const same = (url: string) => url.replace(/\/+$/, '').replace('//localhost', '//127.0.0.1') === base.replace(/\/+$/, '').replace('//localhost', '//127.0.0.1');
   try {
     const config = JSON.parse(execFileSync('tailscale', ['serve', 'status', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }));
     const host = Object.keys(config?.Web ?? {}).find(key => Object.values<any>(config.Web[key]?.Handlers ?? {}).some(handler => typeof handler?.Proxy === 'string' && same(handler.Proxy)));
-    return host ? `https://${host.replace(/:443$/, '')}` : null;
+    if (!host) return null;
+    // Web looks the same for both serve kinds: only the sibling TCP map says a port speaks plain HTTP.
+    return config.TCP?.[host.slice(host.lastIndexOf(':') + 1)]?.HTTP === true ? `http://${host.replace(/:80$/, '')}` : `https://${host.replace(/:443$/, '')}`;
   } catch { return null; }
 }
 /** A wait as a person reads it: minutes under an hour, then hours, then days. */

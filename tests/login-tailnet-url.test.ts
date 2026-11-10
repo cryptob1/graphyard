@@ -39,9 +39,13 @@ async function login(upJson: object | undefined, stub: ((port: number) => string
 }
 const serving = (port: number) => `echo '${JSON.stringify({ Web: { 'vishrog.tail3739e3.ts.net:8443': { Handlers: { '/': { Proxy: `http://127.0.0.1:${port}` } } } } })}'`;
 const code = '/#sign-in=one-time-code-0123456789';
+// What `tailscale serve --bg --http=<port>` (the serve `up` sets up) and an https serve report: Web is alike, TCP tells them apart.
+const servingOver = (kind: 'HTTP' | 'HTTPS') => (port: number) => `echo '${JSON.stringify({ TCP: { 4310: { [kind]: true } }, Web: { 'vishrog.tail3739e3.ts.net:4310': { Handlers: { '/': { Proxy: `http://127.0.0.1:${port}` } } } } })}'`;
 
 test('unit:login-tailnet-url login prints the served tailnet address, a recorded one wins, and no mapping falls back to loopback', async () => {
   assert.equal(await login(undefined, serving), `https://vishrog.tail3739e3.ts.net:8443${code}`);
+  assert.equal(await login(undefined, servingOver('HTTP')), `http://vishrog.tail3739e3.ts.net:4310${code}`);
+  assert.equal(await login(undefined, servingOver('HTTPS')), `https://vishrog.tail3739e3.ts.net:4310${code}`);
   assert.equal(await login({ version: 1, repository: 'acme/widget', provider: 'local', completed: [], noHerdr: true, goal: null, tailnetUrl: 'http://host.tailnet.ts.net:4310' }, serving), `http://host.tailnet.ts.net:4310${code}`);
   assert.match(await login(undefined, port => serving(port + 1)), /^http:\/\/localhost:\d+\/#sign-in=/);
   assert.match(await login(undefined, () => 'exit 1'), /^http:\/\/localhost:\d+\/#sign-in=/);
