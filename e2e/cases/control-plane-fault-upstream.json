@@ -1,0 +1,14 @@
+{
+  "id": "control-plane-fault-upstream",
+  "title": "A Graphyard fault on another repository's install is reported upstream, never filed as work in that repository",
+  "description": "Run the real loop cycle for a fixture install of a non-Graphyard repository with a stuck control-plane upgrade on record and a dispatch step that never returns: with upstream configured, a loopback upstream install receives each fault once over HTTP with the upstream credential, however many cycles see it; without it, each fault raises one attention line and nothing is filed again. Nothing is filed into the managed repository, and the master prompt and guide master state the rule.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Report a stuck upgrade and a stalled loop step upstream or as an attention line",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/control-plane-fault-upstream.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

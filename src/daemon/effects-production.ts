@@ -39,6 +39,7 @@ import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { upstreamFiler } from './control-plane.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
@@ -243,6 +244,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    // GY-3233: control-plane faults go to the upstream install while the live configuration names one.
+    get fileUpstream() { const upstream = current().upstream; return upstream ? upstreamFiler(upstream, fetcher) : undefined; },
     // GY-3101: one plain-text line POSTed to the operator's alert webhook (run.alertUrl) — any receiver that takes a body, such as an ntfy topic.
     alertWebhook: async text => {
       const response = await fetcher(current().run.alertUrl!, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text, signal: AbortSignal.timeout(10_000) });
