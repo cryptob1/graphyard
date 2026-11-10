@@ -229,4 +229,4 @@ export const serveBaselineCheckoutPath = (root: string) => join(root, '.graphyar
  * GY-3229: turbo's cache is the install's own, beside the serve checkouts, never the served repository's root.
  */
 export const serveEnvironment = async (checkout: string, run: (command: string, args: string[]) => Promise<string>, host: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> =>
-  ({ TURBO_CACHE_DIR: join(dirname(checkout), 'turbo-cache'), ...host, PATH: await pinnedNodePath(checkout, host.PATH, run) });
+  ({ ...host, TURBO_CACHE_DIR: join(dirname(checkout), 'turbo-cache'), PATH: await pinnedNodePath(checkout, host.PATH, run) });

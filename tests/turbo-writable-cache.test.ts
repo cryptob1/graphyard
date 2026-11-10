@@ -137,6 +137,18 @@ test('integration:turbo-writable-cache — a turbo workspace whose checkout root
   } finally { await chmod(root, 0o755); }
 });
 
+test('integration:turbo-writable-cache — a read-only failure writing past the trial\'s granted directories is the containment refusing the candidate, a failed build like any other, never a host blocker', async () => {
+  const root = await temporaryDirectory('turbo-read-only-escape', tmpdir());
+  // GY-1565: the parent of the trial's temporary directory is read-only on purpose, so a step writing
+  // past its granted directories fails with EROFS naming that parent — the head's own failure, and it
+  // keeps its verdict instead of parking the item behind a host blocker.
+  const { base, head } = await repository(root, { 'apps/one/build.mjs': `import { dirname } from 'node:path';\nconsole.error("Error: EROFS: read-only file system, open '" + dirname(process.env.TMPDIR!) + "/package.json'");\nprocess.exit(1);\n` });
+  const verdict = await trialOf(root, base, head);
+  assert.equal(verdict.build, 'fail', verdict.logTail);
+  assert.deepEqual(verdict.tests, { passed: 0, failed: [], files: 0 }, 'no test runs after a failed build');
+  assert.match(verdict.logTail, /read-only file system/);
+});
+
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker', role: 'worker' };
 const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
@@ -145,8 +157,8 @@ test('integration:turbo-writable-cache — a build step failing with \'Read-only
   // Turbo's own report wraps the path across lines; the blocker names it whole.
   assert.equal(readOnlyPath('  x IO error: failed to create directory `/home/vish/code/huck-\n  | graphyard/.turbo/cache`\n  `-> Read-only file system (os error 30)\n'), '/home/vish/code/huck-graphyard/.turbo/cache');
   const root = await temporaryDirectory('turbo-read-only', tmpdir());
-  const path = '/srv/checkout/.turbo/cache';
-  const { base, head } = await repository(root, { 'apps/one/build.mjs': `console.error("Error: EROFS: read-only file system, mkdir '${path}'");\nprocess.exit(1);\n` });
+  // The failing step names a path in its own checkout, as turbo naming `<checkout>/.turbo/cache` does.
+  const { base, head } = await repository(root, { 'apps/one/build.mjs': `console.error("Error: EROFS: read-only file system, mkdir '" + process.cwd() + "/.turbo/cache'");\nprocess.exit(1);\n` });
   let store: Store | undefined, http: ReturnType<typeof server> | undefined;
   try {
     store = await withDatabase('turbo-writable-cache'); await store.init();
@@ -180,11 +192,11 @@ test('integration:turbo-writable-cache — a build step failing with \'Read-only
     };
     const failed = await mergeOne(ports, work).then(() => null, (error: unknown) => error);
     assert.ok(failed instanceof TrialReadOnlyError, String(failed));
-    assert.equal(failed.path, path);
+    assert.ok(failed.path.endsWith('/.turbo/cache'), failed.path);
     assert.equal(trials, 1);
     let current: Work = (await store.workDocument(work.id))!;
     assert.ok(current.blocker?.startsWith(readOnlyTrialBlocker), String(current.blocker));
-    assert.ok(current.blocker!.includes(path), current.blocker!);
+    assert.ok(current.blocker!.includes('/.turbo/cache'), current.blocker!);
     assert.equal(current.reworkRequested, false, 'no new head is asked for');
     assert.equal(awaitsMerge(current, { [current.key]: current.mergeLedger! }, Date.now()), false, 'the queue holds the head while the blocker stands');
     // A repeated record keeps the one blocker.

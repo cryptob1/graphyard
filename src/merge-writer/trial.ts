@@ -499,12 +499,15 @@ export class TrialReadOnlyError extends Error {
     this.name = 'TrialReadOnlyError';
   }
 }
-/** The path a 'Read-only file system' failure names in `out` (Node's EROFS or turbo's wrapped report), or null when it names none. */
+/** The path a 'Read-only file system' failure names in `out` — the quoted absolute path nearest the failure, for Node's EROFS names it after the phrase and turbo's wrapped report before it — or null when it names none. */
 export function readOnlyPath(out: string): string | null {
   const flat = out.replace(ansiEscape, '').replace(/\n[ \t]*[|`]?(?:->)?[ \t]*/g, '');
   const at = flat.search(/read-only file system/i);
   if (at < 0) return null;
-  return /[`'"](\/[^`'"\s]+)[`'"]/.exec(flat.slice(Math.max(0, at - 600), at + 300))?.[1] ?? 'an unnamed path';
+  const from = Math.max(0, at - 600), phraseFrom = at - from, phraseTo = phraseFrom + 'read-only file system'.length;
+  return [...flat.slice(from, at + 300).matchAll(/[`'"](\/[^`'"\s]+)[`'"]/g)]
+    .map(match => ({ path: match[1]!, distance: match.index! + match[0].length <= phraseFrom ? phraseFrom - (match.index! + match[0].length) : match.index! - phraseTo }))
+    .sort((a, b) => a.distance - b.distance)[0]?.path ?? null;
 }
 /**
  * A trial directory could not be removed afterwards, so it is left behind: the session directory
@@ -918,7 +921,17 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const diagnostic = ended.out.replace(ansiEscape, '');
     return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
-  const readOnly = (phase: string, ended: Ended) => { const path = ended.ok ? null : readOnlyPath(ended.out); if (path) throw new TrialReadOnlyError(phase, path); };
+  // GY-3229: a read-only failure is the host's fault only when it blocks a directory the trial itself
+  // grants writable — the checkout (with its worktree and git dir), its short place, its temporary
+  // directory and its home, exactly what the boundary mounts writable. A write past them is the trial's
+  // own containment refusing the candidate (GY-1565 keeps the parent of the temporary directory
+  // read-only on purpose), a failed build like any other, so the head still gets its verdict.
+  const readOnly = (phase: string, ended: Ended) => {
+    if (ended.ok) return;
+    const path = readOnlyPath(ended.out);
+    const granted = [checkout.directory, place, temporary, home].filter((directory): directory is string => !!directory);
+    if (path && granted.some(directory => path === directory || path.startsWith(`${directory}/`))) throw new TrialReadOnlyError(phase, path);
+  };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
