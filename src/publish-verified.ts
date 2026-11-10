@@ -24,6 +24,9 @@ export function publishedPackage(source: Record<string, unknown>, commit: string
     repository: { type: 'git', url: 'git+https://github.com/cryptob1/graphyard.git' } };
 }
 
+/** An image reference without its tag (a registry host may carry a port). */
+const repositoryOf = (image: string) => image.slice(0, image.lastIndexOf(':'));
+
 export type PublishOutcome = { version: string; images: string[] } | { blocker: string };
 
 /**
@@ -34,7 +37,7 @@ export type PublishOutcome = { version: string; images: string[] } | { blocker: 
 export async function publishVerified(commit: string, ports: { root: string; directory: string; run: ChildRun; env?: NodeJS.ProcessEnv }): Promise<PublishOutcome> {
   const files = publishTokenFiles(ports.directory), env = ports.env ?? process.env;
   const missing = [...(existsSync(files.npm) ? [] : [`an npm token that may publish the package graphyard, in ${files.npm}`]),
-    ...(existsSync(files.ghcr) ? [] : [`a GitHub token with write:packages for ${publishedImages(commit, env).server.split(':')[0]}, in ${files.ghcr}`])];
+    ...(existsSync(files.ghcr) ? [] : [`a GitHub token with write:packages for ${repositoryOf(publishedImages(commit, env).server)}, in ${files.ghcr}`])];
   if (missing.length) return { blocker: `Publishing Graphyard for npx graphyard up needs ${missing.join(' and ')} (mode 0600); nothing is published until the operator stores ${missing.length > 1 ? 'them' : 'it'}.` };
   const run = (command: string, args: string[], cwd?: string) => Promise.resolve(ports.run(command, args, { timeoutMs: 1_800_000, env, ...(cwd ? { cwd } : {}) })).then(String);
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-publish-'));
@@ -45,7 +48,7 @@ export async function publishVerified(commit: string, ports: { root: string; dir
     await run('tar', ['-xmf', join(scratch, 'tree.tar'), '-C', tree]);
     const version = publishedVersion(commit, new Date(Number((await run('git', ['-C', ports.root, 'show', '-s', '--format=%ct', commit])).trim()) * 1000));
 
-    const images = publishedImages(commit, env), tags = (image: string) => [image, `${image.split(':')[0]}:verified`];
+    const images = publishedImages(commit, env), tags = (image: string) => [image, `${repositoryOf(image)}:verified`];
     const registry = images.server.split('/')[0]!, owner = images.server.split('/')[1]!;
     // The token reaches docker on stdin, from its file: never an argument another process can read.
     await run('sh', ['-c', 'docker login "$0" --username "$1" --password-stdin < "$2"', registry, owner, files.ghcr]);
