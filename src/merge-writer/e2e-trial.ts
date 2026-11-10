@@ -43,9 +43,9 @@ export function declaredServe(worktree: string): { serve: CommandApplication | n
   return { serve, applications: [], bindings: {} };
 }
 
-/** Whether the head's case `name` needs a Compose item preview: its `compose` tag (GY-3193). A case that does not parse runs, and its run names why. */
-async function needsComposePreview(worktree: string, name: string) {
-  try { return parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8')).tags.includes('compose'); } catch { return false; }
+/** The head's case `name`'s tags; none for a case that does not parse, which runs and names why. */
+async function caseTags(worktree: string, name: string): Promise<string[]> {
+  try { return parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8')).tags; } catch { return []; }
 }
 
 /**
@@ -93,8 +93,17 @@ export async function runTrialE2eCases(input: {
     // GY-3128: an unbound case needing a Compose item preview cannot pass on e2e.serve: the trial
     // withholds Docker from the head's code (GY-2997). It is left out, named in the log, and the
     // daily run proves it on the host (GY-3193, merge-writer/served-previews.ts).
-    if (id === 'serve' && await needsComposePreview(input.worktree, name)) {
+    const tags = id === 'serve' ? await caseTags(input.worktree, name) : [];
+    if (tags.includes('compose')) {
       input.log(`left out ${proof}: it needs a Compose item preview, which the daily served run proves`);
+      continue;
+    }
+    // GY-3245: a `fixture` case targets the fixture project's own application. A repository that
+    // binds it to none of its applications serves it only e2e.serve, whose page is never the
+    // fixture's: the case citing it runs it in the fixture project (fixture-node-home under
+    // node-application-preview), so it is left out here, named in the log.
+    if (tags.includes('fixture')) {
+      input.log(`left out ${proof}: it targets the fixture project's application, which this repository binds it to none of`);
       continue;
     }
     // GY-3208: onboarding's placeholder serve runs none of the application, so only onboarding's own
