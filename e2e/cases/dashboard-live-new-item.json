@@ -1,0 +1,11 @@
+{
+  "id": "dashboard-live-new-item",
+  "title": "The open dashboard shows a newly filed item, and a stage change, within seconds without a reload",
+  "description": "A real browser holds the dashboard open against a real control plane and temporary Postgres with a ledger of settled deliveries, over a 2 Mbit/s link. An item filed through the CLI appears on the Work and Now pages within 10 seconds, and releasing it moves it out of Backlog within 10 seconds, with no page reload: each poll carries the open items and only the settled summaries that changed.",
+  "tags": ["dashboard", "polling"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "file and release an item while the dashboard is open", "run": "npm run test:browser -- browser-tests/dashboard-live-new-item.spec.ts", "timeoutSeconds": 240 }
+  ]
+}
