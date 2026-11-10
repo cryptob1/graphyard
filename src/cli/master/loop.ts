@@ -14,6 +14,7 @@ import { processConnectAccounts } from '../../master/connect-accounts.js';
 import { recordRunningPin } from '../../master/known-good.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';
+import { bridgeTerminals } from '../../master/terminal-bridge.js';
 import { alertMinutesOf } from '../../daemon/yard-alerts.js';
 
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, whether it last answered, and the master's pane (GY-3211). */
@@ -63,6 +64,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     }, 15_000);
     connects?.unref?.();
     stopping.signal.addEventListener('abort', () => clearInterval(connects));
+    // GY-3241: and streams the Master page's terminal for a server (a compose container) that has no Herdr of its own.
+    if (!values.once && current().url) bridgeTerminals(current().url!, masterToken, stopping.signal);
     const result = await daemonRun;
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
     if (result.stopped) exit.stopped();
