@@ -262,9 +262,9 @@ const appliedStateSchema = z.object({
 }).strict();
 export type AppliedSetup = z.infer<typeof appliedStateSchema>;
 
+/** Reads the applied record without creating .graphyard/ or touching .gitignore, so a scan writes nothing. */
 export async function loadAppliedSetup(root: string): Promise<AppliedSetup | null> {
-  const directory = await localDirectory(root);
-  const file = resolve(directory, appliedFileName);
+  const file = resolve(root, '.graphyard', appliedFileName);
   try {
     if (!(await lstat(file)).isFile()) throw new Error('The applied setup record must be a regular file');
     return appliedStateSchema.parse(JSON.parse(await readFile(file, 'utf8')));
@@ -302,12 +302,6 @@ export async function readSetupStatus(root: string) {
     // Read where the units run, as doctor's setup line reads them: a self-contained host's on that host.
     loopCode: await readInstallLoopCode(root).catch(() => null),
   };
-}
-
-/** Repository-derived drift between a fresh scan and the stored proposal, ignoring machine-specific profile and server choices. */
-export function repositoryScanDifference(fresh: SetupProposal, stored: SetupProposal): string[] {
-  const repositoryPart = (proposal: SetupProposal) => canonicalJson({ ...proposal, server: null, profiles: { ...proposal.profiles, workers: [] } });
-  return repositoryPart(fresh) === repositoryPart(stored) ? [] : ['The repository scan no longer matches the stored proposal'];
 }
 
 export interface ApplyDependencies {

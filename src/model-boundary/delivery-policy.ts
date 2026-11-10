@@ -13,6 +13,12 @@ export const gateCheckSchema = z.object({
     pattern: z.string().min(1),
     durations: z.string().min(1).optional(),
   }).strict().optional(),
+  /** GY-3209: Compose services the trial starts beside the check, one project, reached at GRAPHYARD_SERVICE_<SERVICE>_HOST and _PORT. */
+  services: z.array(z.object({
+    file: z.string().trim().min(1).max(300),
+    service: z.string().trim().min(1).max(100),
+    port: z.number().int().min(1).max(65535),
+  }).strict()).min(1).max(8).refine(services => new Set(services.map(entry => entry.file)).size === 1, 'every service of a check comes from one Compose file').optional(),
   reason: z.string().max(300),
 }).strict();
 

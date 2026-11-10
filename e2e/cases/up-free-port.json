@@ -1,0 +1,13 @@
+{
+  "id": "up-free-port",
+  "title": "Up picks a free port and accepts --port",
+  "description": "With 4310 held, a local install plan picks the next free loopback port; up --port forwards the port to install; a rerun keeps the port the install recorded.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "up free port regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/up-free-port.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

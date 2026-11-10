@@ -7,7 +7,7 @@ import { checkoutGitDirectory } from '../master/checkout-git.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
-import { composeBounds, composeProjectName, composeStack, defaultDocker, dockerEnvironment } from '../compose-preview.js';
+import { composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -180,10 +180,7 @@ export async function containerTrialE2e(input: {
           project, environment, variables: {}, bounds: composeBounds(), isolatedTrial: true,
           scratch: await mkdtemp(join(input.scratch, 'compose-')) });
         await stack.start(AbortSignal.timeout(left()), left());
-        const id = (await defaultDocker(['ps', '--quiet', '--filter', 'label=com.docker.compose.project=' + project,
-          '--filter', 'label=com.docker.compose.service=' + target.service], { env: environment, timeoutMs: left() })).trim();
-        if (!/^[a-f0-9]{12,64}$/.test(id)) throw new Error('the Compose HTTP service has no unique running container');
-        wrapper = input.networkWrapper('container:' + id);
+        wrapper = input.networkWrapper('container:' + await composeServiceContainer(project, target.service, { env: environment, timeoutMs: left() }));
         origin = 'http://127.0.0.1:' + target.port;
       }
       const directory = await mkdtemp(join(input.scratch, 'e2e-'));

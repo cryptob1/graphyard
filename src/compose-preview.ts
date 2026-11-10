@@ -1,5 +1,6 @@
 // Concern: the Compose adapter of an item's local preview (GY-1903) — one isolated, bounded Compose project per preview, its pages published, and every container, volume and network removed after it.
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -129,7 +130,7 @@ export function composeMountProblems(config: Json, checkout: string, service: st
  * ephemeral loopback port, each service one container (no `scale` or replicas) bounded (`bounds`), unable to gain privileges, not
  * restarted, given the preview's `variables`, and each container and network labelled with `owner`.
  */
-export function composePreviewConfig(config: Json, options: { project: string; service: string; port: number; bounds: ComposeBounds; variables: Record<string, string>; owner: TempOwner }): Json {
+export function composePreviewConfig(config: Json, options: { project: string; service: string; port: number; bounds: ComposeBounds; variables: Record<string, string>; owner: TempOwner; publish?: boolean }): Json {
   const labels = { [composeOwnerLabel]: JSON.stringify(options.owner) };
   const services = Object.fromEntries(Object.entries<Json>(config.services ?? {}).map(([name, entry]) => {
     const { container_name: _name, ports: _ports, cpus: _cpus, mem_limit: _memory, memswap_limit: _swap, pids_limit: _pids, restart: _restart, scale: _scale, deploy, ...rest } = entry;
@@ -143,7 +144,7 @@ export function composePreviewConfig(config: Json, options: { project: string; s
       security_opt: [...new Set([...(entry.security_opt ?? []), 'no-new-privileges:true'])],
       environment: { ...keyed(entry.environment), ...options.variables },
       labels: { ...keyed(entry.labels), ...labels },
-      ...(name === options.service ? { ports: [{ target: options.port, host_ip: '127.0.0.1', protocol: 'tcp' }] } : {}),
+      ...(name === options.service && options.publish !== false ? { ports: [{ target: options.port, host_ip: '127.0.0.1', protocol: 'tcp' }] } : {}),
     }];
   }));
   const networks = Object.fromEntries(Object.entries<Json>(config.networks ?? { default: {} }).map(([name, entry]) => [name, { ...entry, name: `${options.project}_${name}`, labels: { ...(entry?.labels ?? {}), ...labels } }]));
@@ -186,6 +187,8 @@ export interface ComposeStackOptions {
   docker?: Docker; fetcher?: typeof fetch;
   /** Trial services receive copied checkout content, never host bind mounts. */
   isolatedTrial?: boolean;
+  /** GY-3209: a pre-merge check's services by name, each of which must be declared: none is published or asked for HTTP, and `start` answers '' once Compose has them up, for the check reaches them on the project's own network (`tcpAcceptProbe`). */
+  checkServices?: readonly string[];
 }
 export function composeStack(options: ComposeStackOptions): ComposeStack {
   const docker = options.docker ?? defaultDocker, env = options.environment;
@@ -210,6 +213,7 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       if (envFiles.length) throw new Error(`the Compose application cannot be previewed in isolation: ${envFiles.join('; ')}`);
       const resolved = await config();
       const problems = composeMountProblems(resolved, options.checkout, options.service);
+      for (const name of options.checkServices ?? []) if (name !== options.service && !resolved.services?.[name]) problems.push(`the Compose file declares no service "${name}"`);
       if (options.isolatedTrial) {
         for (const [name, entry] of Object.entries<Json>(resolved.services ?? {})) {
           for (const key of ['runtime', 'storage_opt', 'credential_spec', 'provider']) if (entry[key]) problems.push(`service ${name} sets ${key}`);
@@ -231,7 +235,7 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       if (declaredServices > options.bounds.services) problems.push(`the Compose file declares ${declaredServices} services, more than the ${options.bounds.services} a preview runs`);
       if (problems.length) throw new Error(`the Compose application cannot be previewed in isolation: ${problems.join('; ')}`);
       const generated = join(options.scratch, 'compose.preview.json');
-      const config_ = composePreviewConfig(resolved, { ...options, owner: currentOwner() });
+      const config_ = composePreviewConfig(resolved, { ...options, owner: currentOwner(), publish: !options.checkServices });
       const copies: { service: string; source: string; target: string }[] = [];
       if (options.isolatedTrial) for (const [name, entry] of Object.entries<Json>(config_.services)) {
         // Compose implements file secrets/configs as host binds too. Materialize
@@ -276,6 +280,7 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
         }
       }
       await docker([...compose(generated), '--project-directory', options.checkout, 'up', '--detach', options.isolatedTrial ? '--no-build' : '--build', '--wait', '--wait-timeout', String(Math.ceil(left() / 1000))], { env, cwd: options.checkout, signal, timeoutMs: left() });
+      if (options.checkServices) return '';
       const published = (await docker([...compose(generated), 'port', options.service, String(options.port)], { env, signal, timeoutMs: left() })).trim().split('\n')[0] ?? '';
       const port = /^127\.0\.0\.1:(\d{1,5})$/.exec(published)?.[1];
       if (!port) throw new Error(`service ${options.service} published no loopback port for ${options.port} (${published || 'none'})`);
@@ -297,6 +302,56 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
   };
   return stack;
 }
+
+/** The one running container of `service` in `project`, by id. */
+export async function composeServiceContainer(project: string, service: string, options: { docker?: Docker; env: Record<string, string>; timeoutMs: number }): Promise<string> {
+  const id = (await (options.docker ?? defaultDocker)(['ps', '--quiet', '--filter', 'label=com.docker.compose.project=' + project,
+    '--filter', 'label=com.docker.compose.service=' + service], { env: options.env, timeoutMs: options.timeoutMs })).trim();
+  if (!/^[a-f0-9]{12,64}$/.test(id)) throw new Error(`the Compose service ${service} has no unique running container`);
+  return id;
+}
+
+/** A pre-merge check's declared Compose service (GY-3209), reached at `service`:`port` on its project's network. */
+export interface CheckService { file: string; service: string; port: number }
+/** What a check with services runs beside: the network its children join, and the stack's removal. */
+export interface CheckServices { network: string; close(): Promise<void> }
+
+/** The variables a check with services receives: GRAPHYARD_SERVICE_<SERVICE>_HOST (the service name) and _PORT (its declared port), uppercased with non-alphanumerics as _. */
+export const checkServiceVariables = (services: readonly CheckService[]): Record<string, string> => Object.fromEntries(services.flatMap(({ service, port }) => {
+  const name = `GRAPHYARD_SERVICE_${service.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  return [[`${name}_HOST`, service], [`${name}_PORT`, String(port)]];
+}));
+
+/**
+ * A check's services as one bounded, mount-checked Compose project of the trial (GY-3209), in the
+ * isolated-trial mode compose E2E groups use; its children join the network of the first service's
+ * container, as a Compose E2E group's do. A start that fails removes what it started.
+ */
+export async function startCheckServices(input: { checkout: string; services: readonly CheckService[]; scratch: string; env: Record<string, string>; key: string; timeoutMs: number }): Promise<CheckServices> {
+  const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }), first = input.services[0]!;
+  const project = composeProjectName('trial-services-' + input.key, randomUUID());
+  const stack = composeStack({ checkout: input.checkout, file: first.file, service: first.service, port: first.port, project, environment, variables: {},
+    bounds: composeBounds(), isolatedTrial: true, scratch: await mkdtemp(join(input.scratch, 'services-')), checkServices: input.services.map(entry => entry.service) });
+  try {
+    await stack.start(AbortSignal.timeout(input.timeoutMs), input.timeoutMs);
+    return { network: 'container:' + await composeServiceContainer(project, first.service, { env: environment, timeoutMs: input.timeoutMs }), close: () => stack.close() };
+  } catch (error) { await stack.close().catch(() => {}); throw error; }
+}
+
+/**
+ * The TCP-accept readiness wait for a check's services (GY-3209): a node command that connects to
+ * each `host:port` until it accepts, or exits non-zero naming the first that did not within
+ * `timeoutMs`. Postgres answers no HTTP. It runs where the check does, on the project's network:
+ * a loopback port the engine's proxy publishes accepts before the service listens.
+ */
+export const tcpAcceptProbe = (targets: readonly { host: string; port: number }[], timeoutMs: number): string[] => ['node', '-e', `const net = require('node:net'), end = Date.now() + ${Math.max(1, Math.round(timeoutMs))};
+const accepts = (host, port) => new Promise(done => { const socket = net.connect({ host, port, timeout: 2000 }); const finish = value => { socket.destroy(); done(value); };
+  socket.once('connect', () => finish(true)); socket.once('error', () => finish(false)); socket.once('timeout', () => finish(false)); });
+(async () => { for (const target of process.argv.slice(1)) { const at = target.lastIndexOf(':');
+  while (!await accepts(target.slice(0, at), Number(target.slice(at + 1)))) {
+    if (Date.now() > end) { console.error(target + ' accepted no TCP connection in time'); process.exit(1); }
+    await new Promise(next => setTimeout(next, 250)); }
+  console.log(target + ' accepts TCP connections'); } })();`, ...targets.map(target => `${target.host}:${target.port}`)];
 
 /**
  * Removes `project`: its containers, its volumes and networks, and the images it built; then anything

@@ -1,0 +1,16 @@
+{
+  "id": "unauthenticated-account-held",
+  "title": "An account whose agent is not logged in is held and the launch moves on",
+  "description": "A stub agent binary exits 1 printing a not-logged-in message on one reviewer account. A spec check and a review that start on it record the account ineligible with that message as the reason, run again on the next eligible account under the same launch and post their answer, and no later launch selects the held account until an operator clears it.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "logged-out account hold and same-launch move",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/unauthenticated-account-held.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

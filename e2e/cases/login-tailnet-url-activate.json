@@ -1,0 +1,14 @@
+{
+  "id": "login-tailnet-url-activate",
+  "title": "Login prints the tailnet URL that tailscale serve maps to the install",
+  "description": "With a stub tailscale reporting a serve mapping for the install's loopback URL, `graphyard login` prints the tailnet address with the code, http for a plain-HTTP serve and https otherwise; a recorded tailnetUrl wins; no mapping or no tailscale prints the loopback URL.",
+  "tags": ["cli", "authentication"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run the login tailnet URL test",
+    "run": "node --import tsx --test tests/login-tailnet-url.test.ts tests/login-no-options.test.ts",
+    "timeoutSeconds": 120
+  }]
+}
