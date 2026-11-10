@@ -34,6 +34,8 @@ import { findingLocation } from './review-cap.js';
 import { postReview, verdictStateOf, writeReviewBinding } from './review-post.js';
 import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { liveRun } from './runner/registry.js';
+import { lostRunReason } from './producer.js';
+import { liveSessions, type AgentRegistry } from './model/registry.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -1320,6 +1322,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   retry?: (record: ReviewRecord, message: string) => void | Promise<void>;
   /** How the pass takes the review ledger lock; the managed data root and node:fs/promises by default. */
   ledgerLock?: ReviewLedgerLockOptions;
+  /** The agent registry document the tick read (GY-3234); null or absent when it could not be read. */
+  registry?: Pick<AgentRegistry, 'sessions'> | null;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!ledger.reviews.length) return { reviews: ledger.reviews, changed: 0, released: [] as { pane: string; agentName: string }[] };
@@ -1386,7 +1390,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
       const screen = () => readSessionScreen(record.agentName, dependencies.run);
       const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
       if (judged.changed) changed++;
-      if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
+      // GY-3234: a session gone from Herdr whose registry session is ended too is dead, not idle:
+      // no reminder can reach it, so it settles on this pass and its request relaunches on the
+      // same tick as a lost run, rather than waiting out the idle grace or the token.
+      if (!agent && record.session && dependencies.registry && !liveSessions(dependencies.registry).some(session => session.id === record.session))
+        failed = `${lostRunReason}: the reviewer ${record.pane ? `pane ${record.pane}` : 'headless run'} (${record.agentName}) exited and its registry session ${record.session} is ended, without a verdict on ${record.sha.slice(0, 12)}; it is relaunched at once`;
+      else if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
         if (!record.idleSince) {
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());

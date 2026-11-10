@@ -86,7 +86,7 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
     snapshot: async () => ({ work: items(), now: new Date().toISOString() }),
     agents: () => [...agents],
     credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
-    reconcileReviews: (work, herdr) => reconcileReviews(root, config(), { run, work, agents: herdr, observe }),
+    reconcileReviews: (work, herdr, registry) => reconcileReviews(root, config(), { run, work, agents: herdr, observe, registry }),
     reconcileProducers: async () => ({ producers: [] }),
     launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, registerLaunch, requestId: request.id }),
     launchProducer: async () => { throw new Error('no producer is launched here'); },
