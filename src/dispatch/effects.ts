@@ -26,7 +26,7 @@ export interface DispatchEffects {
   agents: () => RuntimeSession[] | null | Promise<RuntimeSession[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
-  reconcileReviews: (work: Work[], agents: RuntimeSession[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
+  reconcileReviews: (work: Work[], agents: RuntimeSession[] | null, registry?: AgentRegistry | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: RuntimeSession[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: RuntimeSession[], observedAt: string) => Promise<unknown>;
   /** GY-2989: the product review of a user-facing feature, launched like a review on the same reviewer lanes. A dispatcher wired without it waits the request instead. */
@@ -109,7 +109,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
-    reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
+    reconcileReviews: (work, agents, registry) => reconcileReviews(root, current(), { run, work, agents, registry }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
     wakeObservation: async work => {
       const at = (deps.now ?? Date.now)(), previous = observationWakes.get(work.id);

@@ -1,6 +1,7 @@
 // Concern: `graphyard master status` — one page: the managed repository's served commit against its base tip (only what a deployment provider records; unconfigured when none does), each open item, the merge writer, live sessions and free worker profiles.
 import { latestReleaseNote, releaseNotesPath } from '../release-notes.js';
-import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
+import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from '../master.js';
+import { readSessionScreenOrError } from '../master/prompt-delivery.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
@@ -25,6 +26,7 @@ import { applicationAttention } from '../master/attention.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
+import { backedOffProfiles, readDispatchCursor } from '../dispatch/cursor.js';
 
 /** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
 export async function itemLedger(masterApi: (path: string) => Promise<any>, id: string): Promise<SpeedEvent[] | null> {
@@ -91,7 +93,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
-  const masterScreen = session?.agentName ? await readSessionScreen(masterAgent?.pane_id ?? session.agentName, run) : undefined;
+  const { screen: masterScreen, error: screenError } = session?.agentName ? await readSessionScreenOrError(masterAgent?.pane_id ?? session.agentName, run) : { screen: undefined, error: null };
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null,
@@ -113,10 +115,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
   let placeholder = false;
   try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
+  // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
+  const backedOff = backedOffProfiles(await readDispatchCursor(root, master, () => {}).catch(() => ({ profileBackoff: {} })), now)
+    .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...stopped, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...stopped, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -135,7 +140,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     leftovers: state?.leftovers.report ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
-    masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen),
+    masterSession: { ...masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen), screenError },
     delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
       : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     deliverySpeed: deliverySpeed(merged, open, now),

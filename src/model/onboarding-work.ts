@@ -11,8 +11,6 @@
 export const onboardingBranch = 'graphyard/onboarding';
 /** The work item's title: what the Setup page and `up` find it by, with its branch. */
 export const onboardingWorkTitle = 'Add Graphyard onboarding';
-/** The proof the item's one criterion names, answered as a closed question about the changed files. */
-export const onboardingProof = 'unit:onboarding-files';
 /**
  * GY-3037: every item owes an e2e proof, so onboarding leaves every repository able to carry one:
  * the first case `init --scan --apply` writes when the repository has none (e2e.serve it writes
@@ -50,8 +48,7 @@ export function onboardingWorkRequest(commit: string, checks: string[] | null, c
   return {
     title: onboardingWorkTitle, type: 'chore' as const, priority: 0,
     description: `${commit.slice(0, 12)} on ${onboardingBranch}\n\nThe commit graphyard up published with the files it wrote while onboarding this repository: coordination instructions (AGENTS.md), configuration (graphyard.json) and, when the repository had no E2E case, the first one (${onboardingCasePath}). It changes nothing else. Filed by graphyard up so the loop reviews and merges it under the normal gates (GY-1478).`,
-    criteria: [{ id: 'AC-1', text: `The change adds only Graphyard's onboarding files (AGENTS.md, .gitignore, graphyard.json and, when written, ${onboardingCasePath}); no .github/workflows file is written.`, proofs: [onboardingProof, ...(caseId ? [`e2e:${caseId}`] : [])] }],
-    closedQuestions: [{ criterion: 'AC-1', proof: onboardingProof, question: `Does this change touch only AGENTS.md, .gitignore, graphyard.json and, when it adds one, ${onboardingCasePath}?`, criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'changed-files' as const }] }],
+    criteria: [{ id: 'AC-1', text: `The change adds only Graphyard's onboarding files (AGENTS.md, .gitignore, graphyard.json and, when written, ${onboardingCasePath}); no .github/workflows file is written.`, proofs: caseId ? [`e2e:${caseId}`] : [] }],
     policy: { checks: checks?.length ? checks : ['test', 'typecheck'], review: true },
   };
 }

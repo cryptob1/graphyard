@@ -1,0 +1,14 @@
+{
+  "id": "onboarding-item-proofs-producible",
+  "title": "The onboarding item binds only proofs the loop can produce without adding files",
+  "description": "The item `graphyard up` files for a repository with no tests names the repository's first e2e case and an independent review, with no unit proof or closed question that would need a file beyond the onboarding files, so the merge trial and the reviewer can pass it and it merges without hand requirements or attest.",
+  "tags": ["onboarding", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Build the onboarding work request and check its proofs",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/onboarding-item-proofs-producible.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

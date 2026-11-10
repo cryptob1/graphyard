@@ -65,6 +65,8 @@ export interface Evidence {
   exercise?: ProofExercise;
   /** Set by the control plane, never the producer: why this pass does not exercise its criterion. */
   unexercised?: string;
+  /** GY-3238: the master's words attesting a manual: proof, recorded beside the judgement it justifies. */
+  reason?: string;
 }
 
 /**

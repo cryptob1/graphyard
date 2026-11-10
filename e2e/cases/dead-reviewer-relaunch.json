@@ -1,0 +1,16 @@
+{
+  "id": "dead-reviewer-relaunch",
+  "title": "A dead reviewer is relaunched on the next cycle",
+  "description": "A pending review whose Herdr pane exited and whose registry session is ended is failed with its cause, its credential withdrawn, and the next attempt launched on the same dispatch tick, without waiting for the launch token to expire.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "dead reviewer relaunch regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/dead-reviewer-relaunch.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

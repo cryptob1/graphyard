@@ -23,7 +23,7 @@ import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
-import { sessionConfinement } from './master/launch.js';
+import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
@@ -34,6 +34,8 @@ import { findingLocation } from './review-cap.js';
 import { postReview, verdictStateOf, writeReviewBinding } from './review-post.js';
 import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { liveRun } from './runner/registry.js';
+import { lostRunReason } from './producer.js';
+import { liveSessions, type AgentRegistry } from './model/registry.js';
 import type { FleetProbe } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -524,6 +526,14 @@ export async function anchorSessionCheckout(root: string, directory: string, run
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
   return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
 }
+/**
+ * GY-3235: the checkout a reviewer's, spec checker's or producer's session is confined against is
+ * the repository it serves, as GY-3224 made worker launches — never the launcher's own CLI release
+ * checkout, which on Huck's install is another repository whose confinement left the served `.git`
+ * read-only to the sandbox probe. Only under the test runner, with no sandbox probe, is nothing confined.
+ */
+export const sessionCoordinatorRoot = (root: string, dependencies: { coordinatorRoot?: string; sandbox?: SessionSandboxProbe }) =>
+  dependencies.coordinatorRoot ?? (dependencies.sandbox || launcherCoordinatorRoot() ? root : undefined);
 /** Where a reviewer's or producer's sandbox probe runs: on the host by default, never under the test runner unless a test substitutes one. */
 export type SessionSandboxProbe = SandboxExec | 'host' | null;
 /**
@@ -883,6 +893,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   /** How a headless review's one child runs (headless-session.ts); the host's by default, and a runtime with no one-shot form keeps its pane session. */
   headless?: HeadlessExec | null;
 } = {}) {
+  dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const now = dependencies.now ?? (() => new Date());
   // GY-3237: inside the master session's confinement a headless child would need a bubblewrap of
   // its own, which Landlock forbids there; the review runs in a Herdr pane the host starts instead.
@@ -1322,6 +1333,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   retry?: (record: ReviewRecord, message: string) => void | Promise<void>;
   /** How the pass takes the review ledger lock; the managed data root and node:fs/promises by default. */
   ledgerLock?: ReviewLedgerLockOptions;
+  /** The agent registry document the tick read (GY-3234); null or absent when it could not be read. */
+  registry?: Pick<AgentRegistry, 'sessions'> | null;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!ledger.reviews.length) return { reviews: ledger.reviews, changed: 0, released: [] as { pane: string; agentName: string }[] };
@@ -1388,7 +1401,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
       const screen = () => readSessionScreen(record.agentName, dependencies.run);
       const judged = await acknowledgeLaunch(record, agent, { now: now.getTime(), ackMs, result: false, screen });
       if (judged.changed) changed++;
-      if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
+      // GY-3234: a session gone from Herdr whose registry session is ended too is dead, not idle:
+      // no reminder can reach it, so it settles on this pass and its request relaunches on the
+      // same tick as a lost run, rather than waiting out the idle grace or the token.
+      if (!agent && record.session && dependencies.registry && !liveSessions(dependencies.registry).some(session => session.id === record.session))
+        failed = `${lostRunReason}: the reviewer ${record.pane ? `pane ${record.pane}` : 'headless run'} (${record.agentName}) exited and its registry session ${record.session} is ended, without a verdict on ${record.sha.slice(0, 12)}; it is relaunched at once`;
+      else if (!agent || ['done', 'idle', 'blocked'].includes(agent.agent_status ?? '')) {
         if (!record.idleSince) {
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());

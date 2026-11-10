@@ -159,7 +159,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const value = (flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
     const create = (value('--create') ?? '').split(',').filter(Boolean) as EnvironmentKind[];
     if (create.some(kind => !environmentKinds.includes(kind))) throw new Error(`master environments --create takes ${environmentKinds.join(', ')}`);
-    return setupAgentEnvironments(root, { directory: value('--directory'), create, apply: args.includes('--apply'), verify: token => call(token, 'status') });
+    return setupAgentEnvironments(root, { directory: value('--directory'), create, apply: args.includes('--apply'), verify: token => call(token, 'status'), registry: () => deps.coordinator('agent-registry/document') });
   }
   if (id === 'autonomy') {
     const apply = args.includes('--apply'), harness = args[args.indexOf('--harness') + 1];
@@ -192,7 +192,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'attest') {
     // A manual: proof no producer may run, attested by the master on the exact current head.
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master attest GY-N PROOF REASON');
-    return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1] }));
+    return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1], reason: reason(args.slice(2)) }));
   }
   return restartMasterLoop(root, config, await deps.daemonLock());
 }

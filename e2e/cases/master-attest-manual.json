@@ -1,0 +1,15 @@
+{
+  "id": "master-attest-manual",
+  "title": "master attest records a manual: proof with the master's operator-agent identity",
+  "description": "A fixture control plane with an autonomous master: the worker's submitted head is attested by `graphyard master attest GY-N manual:NAME REASON`, recorded as trusted evidence from the operator-agent identity on the exact current head so the item's proof requirement is met, while a worker identity is still refused for manual: proofs.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master attest records the manual proof",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-attest-manual.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

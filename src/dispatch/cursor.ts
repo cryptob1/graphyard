@@ -47,6 +47,13 @@ export const abandonedRequestSchema = z.object({
   group: z.string().min(1).max(40).optional(), proofs: z.array(z.string().min(1).max(200)).max(50).optional(),
 }).strict();
 const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
+export const profileBackoffSchema = z.object({ role: z.enum(['reviewer', 'producer']), profile: z.string().min(1).max(200), path: z.string().max(cursorTextLimit), cause: z.string().max(cursorTextLimit),
+  failures: z.number().int().min(1).max(dispatchAttemptCeiling), at: z.string(), until: z.string().nullable() }).strict();
+/** GY-3235: how many launches in a row must fail the same sandbox probe before a profile is skipped, and for how long. */
+export const probeBackoffFailures = 2, probeBackoffMs = 30 * 60_000;
+/** The profiles skipped at `now`, as master status names them. */
+export const backedOffProfiles = (cursor: Pick<DispatchCursor, 'profileBackoff'>, now: number) =>
+  Object.values(cursor.profileBackoff).filter(entry => entry.until && Date.parse(entry.until) > now).map(({ role, profile, cause, until }) => ({ role, profile, cause, until: until! }));
 /**
  * A tick that failed, and — when it composed state it could not persist — the field that failed
  * and the request and item it was composed for, so `master status` attributes the failure to a
@@ -88,6 +95,12 @@ export const dispatchCursorSchema = z.object({
    * request that waited out a week-long reset launches the moment an account returns.
    */
   capacity: z.object({ review: capacityHoldSchema.optional(), producer: capacityHoldSchema.optional() }).strict().default({}),
+  /**
+   * GY-3235: a profile whose launch failed its sandbox probe, by `role:profile`, with the cause and
+   * how many launches in a row failed on the same path. Twice in a row skips it for that role until
+   * `until`, in favour of the next profile; a launch that starts clears it.
+   */
+  profileBackoff: z.record(z.string(), profileBackoffSchema).default({}),
   /**
    * The session handles the runtime had stopped reporting when the last tick swept, each carrying
    * when it was first missed (GY-113). Absence is only evidence that a session is gone once it

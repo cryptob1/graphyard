@@ -4,6 +4,7 @@ import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, s
 import { runtimeEndedStates } from '../harness.js';
 import { type DispatchRequest } from '../model/dispatch.js';
 import { orphanedRegistrySessions } from '../master/registry-slot.js';
+import type { AgentRegistry } from '../model/registry.js';
 import { bounded, closureFailureReasonLimit, type DispatchCursor } from './cursor.js';
 import type { DispatchEffects } from './effects.js';
 import type { DispatchTick } from './tick.js';
@@ -163,28 +164,25 @@ export const herdrSessionListing = (agents: RuntimeSession[]): RuntimeSession[] 
  * review ledger record needs only the first miss after launch grace. An unread
  * registry or an unread Herdr is a gap: nothing is judged and the misses stand as they were.
  */
-export async function sweepRegistrySessions(hostId: string, cursor: DispatchCursor, effects: Pick<DispatchEffects, 'registry' | 'endRegistrySession'>, herdr: RuntimeSession[], records: Parameters<typeof orphanedRegistrySessions>[3], clock: number, work: Work[], tick: Pick<DispatchTick, 'registryClosed' | 'closeFailures'>) {
-  if (!effects.registry || !effects.endRegistrySession) return;
-  const document = await effects.registry();
-  if (document) {
-    const misses: Record<string, string> = {};
-    tick.registryClosed = [];
-    for (const orphan of orphanedRegistrySessions(document, hostId, herdr, records, clock, work)) {
-      const first = Date.parse(cursor.registryMisses[orphan.id] ?? '');
-      const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
-      misses[orphan.id] = new Date(firstMissedAt).toISOString();
-      // The second consecutive miss is the end; an entry survives a failed end, so the next
-      // tick retries it rather than starting the grace again.
-      // A completed verdict already settled the ledger. Its item may be
-      // absent from this snapshot, so the handle-based close step cannot release its slot.
-      // Once its pane is gone it needs no second miss, including after a loop restart.
-      // GY-3116: a closed review no watched pane backs has nothing to miss; it ends at once.
-      if (!orphan.completedReview && !orphan.completedImplementation && !orphan.closedReview && !Number.isFinite(first)) continue;
-      const reason = orphan.closedReview ? `its review record is ${orphan.closedReview} and no watched pane backs it (${orphan.agentName ?? 'no agent name recorded'}), so the review is over`
-        : `${orphan.completedImplementation ? 'the submitted implementation is finished and ' : orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
-      try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
-      catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(error instanceof Error ? error.message : String(error), closureFailureReasonLimit) }); }
-    }
-    cursor.registryMisses = misses;
+export async function sweepRegistrySessions(hostId: string, cursor: DispatchCursor, effects: Pick<DispatchEffects, 'endRegistrySession'>, document: AgentRegistry, herdr: RuntimeSession[], records: Parameters<typeof orphanedRegistrySessions>[3], clock: number, work: Work[], tick: Pick<DispatchTick, 'registryClosed' | 'closeFailures'>) {
+  if (!effects.endRegistrySession) return;
+  const misses: Record<string, string> = {};
+  tick.registryClosed = [];
+  for (const orphan of orphanedRegistrySessions(document, hostId, herdr, records, clock, work)) {
+    const first = Date.parse(cursor.registryMisses[orphan.id] ?? '');
+    const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
+    misses[orphan.id] = new Date(firstMissedAt).toISOString();
+    // The second consecutive miss is the end; an entry survives a failed end, so the next
+    // tick retries it rather than starting the grace again.
+    // A completed verdict already settled the ledger. Its item may be
+    // absent from this snapshot, so the handle-based close step cannot release its slot.
+    // Once its pane is gone it needs no second miss, including after a loop restart.
+    // GY-3116: a closed review no watched pane backs has nothing to miss; it ends at once.
+    if (!orphan.completedReview && !orphan.completedImplementation && !orphan.closedReview && !Number.isFinite(first)) continue;
+    const reason = orphan.closedReview ? `its review record is ${orphan.closedReview} and no watched pane backs it (${orphan.agentName ?? 'no agent name recorded'}), so the review is over`
+      : `${orphan.completedImplementation ? 'the submitted implementation is finished and ' : orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+    try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
+    catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(error instanceof Error ? error.message : String(error), closureFailureReasonLimit) }); }
   }
+  cursor.registryMisses = misses;
 }
