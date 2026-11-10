@@ -20,6 +20,7 @@
     "test:browser": "node --import tsx tests/helpers/run-tests.ts --browser"
   },
   "dependencies": {
+    "@xterm/xterm": "6.0.0",
     "embedded-postgres": "^18.4.0-beta.17",
     "pg": "8.22.0",
     "react": "19.2.7",

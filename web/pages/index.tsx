@@ -9,6 +9,7 @@ import AutomationPage from './automation';
 import FleetPage from './fleet';
 import SetupPage from './setup';
 import WorkersPage from './workers';
+import MasterPage from './master';
 import ScenarioLibrary from '../scenarios';
 import ReleasesView from '../releases';
 import TestsPage from './tests';
@@ -57,6 +58,8 @@ export const views: readonly View[] = [
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
+  // The master agent's live terminal (GY-3211), beside the sessions it runs.
+  { id: 'master', icon: '▶', label: 'Master', section: 'workers', render: dashboard => <MasterPage token={dashboard.token}/> },
   // What waits on a release, beside what shipped.
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'shipped', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   // Every test case with its latest trusted result and history (GY-162). It is shown even before the

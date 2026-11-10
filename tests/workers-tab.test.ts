@@ -98,7 +98,7 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
   assert.equal(views.find(view => view.id === 'workers')?.section, 'workers');
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(visibleViews({ ...dashboard([]), status: { actor: { role } } }).some(view => view.id === 'workers'), role);
   const tabs = [...renderToStaticMarkup(createElement(TopBar, { ...dashboard([]), view: 'workers' })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs, [], 'a section with one page draws no tab row');
+  assert.deepEqual(tabs, ['Workers', 'Master'], 'the Master page (GY-3211) sits beside Workers as its section\'s second tab');
   assert.match(await read('web/pages/index.tsx'), /id: 'workers'.*label: 'Workers'/);
 
   const work = fixture();
