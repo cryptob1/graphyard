@@ -67,11 +67,13 @@ test('integration:deploy-watch-runs-deployed-code — a watch that deploys a com
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const port = (server.address() as { port: number }).port, url = `http://127.0.0.1:${port}`;
 
-  // The only Docker and gh this fixture has: every provider command succeeds, `compose ps` reports
-  // the deployment running, and an image build records its per-commit tag as the served commit.
+  // The only Docker and gh this fixture has: every provider command succeeds but a pull (GY-3214:
+  // these commits are published nowhere, so the install builds them), `compose ps` reports the
+  // deployment running, and an image build records its per-commit tag as the served commit.
   await mkdir(shim, { recursive: true });
   await writeFile(join(shim, 'docker'), `#!/bin/sh
 echo "docker \$*" >> ${JSON.stringify(join(state, 'docker.log'))}
+[ "\$1 \$2" = "image pull" ] && exit 1
 for arg in "$@"; do
   if [ "$prev" = "--tag" ]; then
     tag=\$(echo "\$arg" | sed 's|.*:||')

@@ -8,8 +8,10 @@ const start = readme.split('## Quick start\n')[1]?.split('\n## ')[0] ?? '';
 const cli = new URL('../src/cli.ts', import.meta.url);
 const help = (...args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', cli.pathname, ...args], { encoding: 'utf8' });
 
-test('unit:readme-onboarding-commands — ordered onboarding uses commands and flags advertised by this CLI', () => {
-  assert.deepEqual([...start.matchAll(/^(\d)\. /gm)].map(match => match[1]), ['1', '2', '3', '4', '5']);
+test('unit:readme-onboarding-commands — the Quick start is one command, and it uses commands and flags advertised by this CLI', () => {
+  // GY-3214: setup is the one command a fresh host runs; nothing is cloned, installed or put on PATH first.
+  assert.deepEqual([...start.matchAll(/```sh\n([^`]+)```/g)].map(match => match[1]!.trim()), ['npx graphyard up --repo OWNER/NAME']);
+  assert.doesNotMatch(start, /npm ci|clone Graphyard|on your PATH/);
   const up = help('up', '--help');
   const all = help('--help');
   const command = start.match(/graphyard up ([^\n`]+)/)?.[1];
