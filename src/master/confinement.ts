@@ -157,10 +157,12 @@ export const hostCredentialPaths = (home = homedir()): string[] =>
   ['.ssh', '.config/gh', '.git-credentials', '.netrc', '.docker/config.json', '.aws', '.config/gcloud', '.azure', '.kube', '.railway', '.config/railway'].map(path => join(home, path));
 type MaskConfig = { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; environments?: readonly { home: string }[]; run?: { mergeWriter?: { deployKeyFile?: string; tokenFile?: string } }; upstream?: { url?: string; credentialFile?: string } };
 /** The personal credentials, the install's declared extras, and every configured agent account home that is not the session's own. */
-const hostPathsFor = (config: MaskConfig, runtimeHomes: readonly string[] = []) => [
-  ...hostCredentialPaths(), ...(config.confinement?.maskPaths ?? []),
-  ...(config.environments ?? []).map(environment => environment.home).filter(home => !runtimeHomes.some(own => own === home || withinCheckout(home, own))),
-].filter(isAbsolute);
+const hostPathsFor = (config: MaskConfig, runtimeHomes: readonly string[] = []) => {
+  const own = runtimeHomes.map(home => canonicalPath(home));
+  return [...hostCredentialPaths(), ...(config.confinement?.maskPaths ?? []),
+    ...(config.environments ?? []).map(environment => environment.home).filter(home => !own.some(kept => kept === canonicalPath(home) || withinCheckout(canonicalPath(home), kept))),
+  ].filter(isAbsolute);
+};
 
 /**
  * The credential mask a session of this install carries (GY-1856): everything this config records
@@ -201,7 +203,7 @@ export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly 
   const operatorHome = configHome(home), named = namedPaths(config);
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
-  return { configHome: '', extraPaths: [], own: runtimeHomes.filter(isAbsolute), cli: [],
+  return { configHome: '', extraPaths: [], own: [], cli: [],
     hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
 }
 
