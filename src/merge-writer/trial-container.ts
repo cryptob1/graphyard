@@ -119,6 +119,8 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
   for (const directory of dependencies) { add(directory, true); if (existsSync(directory) && realpathSync(directory) !== directory) add(directory, true, realpathSync(directory)); }
   // Only trusted source and dependencies, never the install's home or credentials.
   add(join(sourceRoot, 'src'), true, join(trialHarness, 'src'));
+  // src/install/cli-release.ts imports bin/cli-release.mjs, which the npm launcher shares.
+  add(join(sourceRoot, 'bin'), true, join(trialHarness, 'bin'));
   add(harnessModules, true, join(trialHarness, 'node_modules'));
   add(join(sourceRoot, 'package.json'), true, join(trialHarness, 'package.json'));
   if (existsSync('/etc/graphyard-trial')) {
