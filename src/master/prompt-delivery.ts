@@ -120,9 +120,9 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
   throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle${pane ? `; the pane last showed: "${pane}"` : ''}`);
 }
 
-/** The session's terminal, as text; null when Herdr cannot read it. */
-export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<string | null> {
-  try { return String(await herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch { return null; }
+/** The session's terminal, as text; null when Herdr cannot read it, with the failure available to status readers. */
+export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80, onError?: (error: unknown) => void): Promise<string | null> {
+  try { return String(await herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])); } catch (error) { onError?.(error); return null; }
 }
 const screenDecoration = /^[\s─━═╌┄┈│┃╭╮╰╯┌┐└┘├┤=_*·•-]*$|^[❯⏵✻✶✳✢·]|bypass permissions on|shift\+tab to cycle|for shortcuts|esc to interrupt|\? for help/;
 /** The session's own last words: the tail of its screen without the runtime's frame, bounded for a ledger record. */
