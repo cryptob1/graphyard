@@ -192,7 +192,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'attest') {
     // A manual: proof no producer may run, attested by the master on the exact current head.
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master attest GY-N PROOF REASON');
-    return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1] }));
+    return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1], reason: reason(args.slice(2)) }));
   }
   return restartMasterLoop(root, config, await deps.daemonLock());
 }

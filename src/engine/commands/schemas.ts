@@ -72,7 +72,9 @@ export const commands = {
   window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; a base refresh carries a proof across its own authored merge only inside it.
-  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
+  evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(),
+    // GY-3238: why the master attests a manual: proof, recorded on the evidence and the ledger.
+    reason: z.string().trim().min(1).max(2000).optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
     scopeFiles: z.array(z.string().min(1).max(500)).min(1).max(100).optional(), provenance: z.object({
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
