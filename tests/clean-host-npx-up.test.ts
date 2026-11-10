@@ -12,7 +12,7 @@ import { publishTokenFiles, publishVerified } from '../src/publish-verified.js';
 import { databaseUrl } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-3214: a host that holds no Graphyard checkout goes from `npx graphyard up` to a working
+// GY-3214: a host that holds no Graphyard checkout goes from `npx @cryptob1/graphyard up` to a working
 // install. The npm registry and the image registry are local ones standing in for npm and GHCR,
 // Graphyard's upstream is a local repository Git is pointed at, and docker, gh and the dependency
 // install are stand-ins on PATH (a trial has no Docker daemon, GitHub or network); everything
@@ -153,7 +153,7 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
   });
 }
 
-test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a published commit and gets a served control plane from a Git release tree and pulled images', { timeout: 900_000 }, async () => {
+test('e2e:clean-host-npx-up — a fresh account runs npx @cryptob1/graphyard up against a published commit and gets a served control plane from a Git release tree and pulled images', { timeout: 900_000 }, async () => {
   // Beside the checkout, not under the temporary directory: setup refuses a repository checked out where a reboot removes it.
   const base = realpathSync(await temporaryDirectory('.npx-up', source));
   const upstream = join(base, 'upstream'), home = join(base, 'home'), stubs = join(base, 'bin'), repository = join(base, 'scratch'), origin = join(base, 'origin.git');
@@ -178,7 +178,7 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
   const outcome = await publishVerified(commit, { root: upstream, directory: publisher, run: defaultChildRun, env: { ...process.env, ...published, PATH: tools.path } });
   assert.ok('version' in outcome, JSON.stringify(outcome));
   assert.deepEqual([...images.tags.keys()].sort(), [`cryptob1/graphyard-trial:${commit}`, 'cryptob1/graphyard-trial:verified', `cryptob1/graphyard:${commit}`, 'cryptob1/graphyard:verified']);
-  assert.equal(npm.packages.get('graphyard')['dist-tags'].latest, outcome.version);
+  assert.equal(npm.packages.get('@cryptob1/graphyard')['dist-tags'].latest, outcome.version);
 
   // A fresh account: an empty home, Git pointed at the local upstream, and a scratch repository.
   await writeFile(join(home, '.gitconfig'), `[url "${upstream}"]\n\tinsteadOf = https://github.com/cryptob1/graphyard\n[user]\n\tname = Fresh\n\temail = fresh@example.com\n`);
@@ -188,7 +188,7 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
   git(repository, 'add', '.'); git(repository, 'commit', '-q', '-m', 'first'); git(repository, 'push', '-q', origin, 'main'); git(repository, 'remote', 'add', 'origin', 'git@github.com:owner/scratch.git');
   const env = { HOME: home, PATH: tools.path, LANG: 'C.UTF-8', TMPDIR: process.env.TMPDIR ?? '/tmp', ...published };
 
-  const graphyard = (...args: string[]) => run('npx', ['--yes', 'graphyard', ...args], { cwd: repository, env });
+  const graphyard = (...args: string[]) => run('npx', ['--yes', '@cryptob1/graphyard', ...args], { cwd: repository, env });
   after(() => { for (const pid of [join(home, '.config', 'graphyard', 'owner-scratch', 'compose', 'server.pid')]) { try { process.kill(Number(readFileSync(pid, 'utf8'))); } catch { /* never started */ } } });
 
   // The README's one command, with the agent flags a session without a terminal passes.
@@ -222,7 +222,7 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
   assert.equal(dashboard.status, 200);
   assert.match(await dashboard.text(), /<title>[^<]*Graphyard/i);
 
-  // Setup filed the onboarding change as the install's first work item, and a later `npx graphyard` runs the installed release.
+  // Setup filed the onboarding change as the install's first work item, and a later `npx @cryptob1/graphyard` runs the installed release.
   const onboarding = events.find(event => event.step === 'onboarding' && event.state === 'done');
   assert.match(onboarding.detail, /filed as GY-1 for the loop to review and merge/);
   const status = await graphyard('status', 'GY-1');
