@@ -7,7 +7,7 @@ import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/
 import { dirname, join } from 'node:path';
 import { availableRuntimes, buildProposal, collectScanInput, detectDeploy, detectStack, environmentTopology, hasNoCi, hasSharedDatabase, workflowCheckNames } from '../src/onboarding.js';
 import * as onboarding from '../src/onboarding.js';
-import { applyProposal, loadAppliedSetup, loadProposal, proposalDigest, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift } from '../src/repository-setup.js';
+import { applyProposal, loadAppliedSetup, loadProposal, proposalDigest, readSetupStatus, saveProposal, scanProposal, setupDrift } from '../src/repository-setup.js';
 import { workerProfileSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -197,9 +197,7 @@ test('applying a reviewed proposal writes onboarding files without a roster and 
 
     await addFile(root, '.github/workflows/audit.yml', 'on:\n  pull_request:\njobs:\n  audit:\n    runs-on: ubuntu-latest\n');
     const rescan = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
-    assert.deepEqual(repositoryScanDifference(rescan, proposal), ['The repository scan no longer matches the stored proposal']);
     assert.equal(setupDrift(applied, rescan).length, 1);
-    assert.deepEqual(repositoryScanDifference(await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex', 'claude'] }), rescan), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -341,30 +339,20 @@ function runCli(cwd: string, args: string[], env: NodeJS.ProcessEnv) {
     .then(result => result.stdout, error => { throw new Error(String((error as any).stderr || error.message)); });
 }
 
-test('CLI init --scan applies nothing without approval and --apply enforces the reviewed proposal', async () => {
+test('CLI init --scan applies nothing without --apply, and --scan --apply applies the fresh scan', async () => {
   const root = await fixtureRepo(nodeRailway);
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('GRAPHYARD_')) delete env[key];
   env.GRAPHYARD_URL = await unreachableUrl();
   try {
-    await assert.rejects(runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env), /No stored setup proposal/);
     const scanned = JSON.parse(await runCli(root, ['init', '--scan'], env));
-    assert.equal(scanned.appliedNothingElse, true);
+    assert.equal(scanned.wroteNothing, true);
     assert.equal(scanned.proposal.stack.name, 'node');
     assert.deepEqual(scanned.proposal.profiles.workers.map((worker: any) => worker.kind), availableRuntimes(process.env.PATH).slice(0, 2));
     await assert.rejects(stat(join(root, 'AGENTS.md')));
-    await assert.rejects(stat(join(root, '.graphyard/principals.json')));
-    await assert.rejects(stat(join(root, '.graphyard/repository-setup.json')));
-    const stored = await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8');
+    await assert.rejects(stat(join(root, '.graphyard')));
 
-    await addFile(root, '.github/workflows/notify.yml', 'on:\n  pull_request:\njobs:\n  notify:\n    runs-on: ubuntu-latest\n');
-    await assert.rejects(runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env), /no longer matches/);
-    assert.equal(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'), stored);
-
-    await runCli(root, ['init', '--scan'], env);
-    const refreshed = JSON.parse(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'));
-    assert.ok(refreshed.ci.jobs.includes('notify'));
-
+    await mkdir(join(root, '.graphyard'), { mode: 0o700 });
     // A pull-request-era saved App registration is neither read nor revived (GY-2010).
     await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ appId: 99, slug: 'graphyard-owner-repo', repository: 'owner/repo', privateKey: 'test-only', webhookSecret: 'test-only', installationId: 7 }), { mode: 0o600 });
     const applied = JSON.parse(await runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env));
@@ -379,13 +367,14 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     assert.match(afterChange.drift[0], /changed after setup was applied/);
     const status = JSON.parse(await runCli(root, ['doctor'], env));
     assert.equal(status.setup.githubApp, null);
-    assert.equal(status.setup.drift.length, 1);
+    // The scan wrote no proposal, so doctor reads the applied one; init --scan above reports the drift.
+    assert.deepEqual(status.setup.drift, []);
     // The readiness checklist is part of doctor: with no server it cannot be ready, every
-    // item states what was observed and the direct recovery, and drift is a missing item.
+    // item states what was observed and the direct recovery.
     assert.equal(status.readiness.profile, 'through-merge'); assert.equal(status.readiness.ready, false);
     const byId = Object.fromEntries(status.readiness.items.map((item: any) => [item.id, item]));
     assert.equal(byId.server.status, 'missing'); assert.match(byId.server.recovery, /GRAPHYARD_TOKEN/);
-    assert.equal(byId['setup-proposal'].status, 'missing'); assert.match(byId['setup-proposal'].detail, /drift/);
+    assert.equal(byId['setup-proposal'].status, 'ready');
     assert.equal(byId['test-formats'].status, 'ready'); assert.match(byId['test-formats'].detail, /vitest → junit-xml-v1/);
     assert.equal(byId['github-app'], undefined, 'doctor asks for no GitHub App: the deploy key is the install\'s only remote credential (GY-2010)');
     assert.ok(status.readiness.items.every((item: any) => item.status === 'ready' || typeof item.recovery === 'string'));

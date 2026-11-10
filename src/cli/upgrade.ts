@@ -18,7 +18,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
+import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
@@ -325,15 +325,17 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
   // The install runs once at the repository root, where a workspace's lockfile is (GY-3200's package manager); a repository with no package.json builds without one.
+  // GY-3207: install, build and serve run under the Node major the checkout declares.
+  const environment = (at: string) => serveEnvironment(at, async (command, args) => String(await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs })));
   const installIn = async (at: string) => {
     const [command, ...args] = installCommand(at) ?? [];
-    if (command) await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
+    if (command) await input.run(command, args, { cwd: at, timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
   };
   const buildIn = (at: string) => async (application: ServeDeclaration) => {
-    if (application.build) await input.run('sh', ['-c', application.build], { cwd: join(at, application.directory), timeoutMs: serveInstallTimeoutMs });
+    if (application.build) await input.run('sh', ['-c', application.build], { cwd: join(at, application.directory), timeoutMs: serveInstallTimeoutMs, env: await environment(at) });
   };
-  const start = (at: string, application: ServeDeclaration, port: number) => {
-    const child = spawn('sh', ['-c', application.start], { cwd: join(at, application.directory), env: { ...process.env, PORT: String(port) }, detached: true, stdio: 'ignore' });
+  const start = async (at: string, application: ServeDeclaration, port: number) => {
+    const child = spawn('sh', ['-c', application.start], { cwd: join(at, application.directory), env: { ...await environment(at), PORT: String(port) }, detached: true, stdio: 'ignore' });
     // A start that cannot spawn must not crash the watch; the pass records it as a serve that never answered.
     child.on('error', () => {});
     child.unref();

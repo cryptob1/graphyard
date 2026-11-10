@@ -25,6 +25,7 @@ import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, Launche
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
+import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { z } from 'zod';
 import { postSpecCheck, writeSpecCheckBinding } from './spec-check-post.js';
 import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
@@ -154,17 +155,25 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const vendor = await readVendorPrompts();
       if (runHeadless) {
+        // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
+        const on = { current: selected };
+        const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
+          const moved = accountLaunch(profile, next.account, { writable });
+          const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, checkout: checkout.worktree });
+          return { kind: moved.kind!, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
+            credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
+        });
         // What posting a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
         const context: HeadlessSpecCheckContext = { cliPath: config.cliPath, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless,
-          holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
+          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
+          holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
           answer: output => postHeadlessSpecCheck(context, output), root, route: 'spec-check', context });
         // The binding and the registry slot go with the run, whatever it answered.
         const ended = settled.then(() => null, (failure: unknown) => failure instanceof Error ? failure.message : String(failure)).then(async failure => {
           await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});
-          await selected.release?.(`the headless spec check of ${work.key} ended${failure ? `: ${failure}` : ''}`.slice(0, 400)).catch(() => false);
+          await on.current.release?.(`the headless spec check of ${work.key} ended${failure ? `: ${failure}` : ''}`.slice(0, 400)).catch(() => false);
           return failure;
         });
         return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane: null, checkout: checkout.directory, tokenExpiresAt: expiresAt, settled: ended };

@@ -40,6 +40,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:c15146d251fe89e369361909267ff9ec32bbdb7d5d78ec2c935047711038d410',
   // GY-3111: ledger compaction's saved cursor and the per-item delivery event index.
   'sha256:9a5c9509616909d7861dda1419ec1f51914c392097d5313bd06ae565c53fd248',
+  // GY-3215: teammates the operator invited (team_members).
+  'sha256:0161aa6cf3d5e2729cfe74ed8bb00596640b6185d0e51dc72ff4b3c77a22d6d0',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

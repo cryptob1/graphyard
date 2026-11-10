@@ -16,6 +16,7 @@ import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
 import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
+import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
 import { endRun, liveRun, registerRun, type AdoptedRun } from './runner/registry.js';
@@ -147,7 +148,17 @@ export interface HeadlessSession<T> {
   exec: HeadlessExec;
   /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (dispatch/effects.ts `holdAccount`), so the request's next launch takes the next account. */
   holdAccount?: (notice: ExhaustionSignal) => Promise<unknown>;
+  /**
+   * The run's agent exited saying its account is not logged in (GY-3218): holds that account under
+   * the agent's message and answers with the launch on the role's next eligible account, where the
+   * request runs again at once. A throw (no account left) ends the session with that reason.
+   */
+  moveAccount?: (reason: string) => Promise<HeadlessAccountLaunch>;
 }
+/** What the account a headless run is on decides of its launch. */
+export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'args' | 'environment' | 'contract' | 'credentialMask' | 'role'>;
+/** How many logged-out accounts one session moves off before it ends as any failed run does. */
+const accountMoveLimit = 4;
 
 /**
  * Start a headless session: refused before anything runs when the runtime has no launch contract,
@@ -156,40 +167,47 @@ export interface HeadlessSession<T> {
  * session; `settled` is its posted answer, or the reason no answer was accepted.
  */
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
-  assertLaunchable(input.kind, input.contract);
-  const trust = await launchRecipe(input.kind)?.trust?.(input.directory, input.environment, input.args);
-  const confinement = await sessionConfinement(input.kind, input.args, { directory: input.directory, cwd: input.directory, environment: input.environment, ownGitHubCredential: true, credentialMask: input.credentialMask }, input.coordinatorRoot);
-  if (trust) await launchRecipe(input.kind)?.verify?.(trust);
-  const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(input.kind, input.args) : input.args;
+  const prepare = async (on: HeadlessAccountLaunch) => {
+    assertLaunchable(on.kind, on.contract);
+    const trust = await launchRecipe(on.kind)?.trust?.(input.directory, on.environment, on.args);
+    const confinement = await sessionConfinement(on.kind, on.args, { directory: input.directory, cwd: input.directory, environment: on.environment, ownGitHubCredential: true, credentialMask: on.credentialMask }, input.coordinatorRoot);
+    if (trust) await launchRecipe(on.kind)?.verify?.(trust);
+    const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(on.kind, on.args) : on.args;
+    // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
+    const carried = withAutonomyContract(false, { request: input.prompt, role: on.role });
+    return { kind: on.kind, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
+  };
+  let launch = await prepare(input);
   const controller = new AbortController(), detached = new AbortController(), startedAt = new Date().toISOString();
   const runDirectory = resolve(headlessRunsDirectory(input.root), randomUUID());
   mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
   writeFileSync(join(runDirectory, sessionFile), JSON.stringify({ name: input.name, work: input.work, subject: input.subject, kind: input.kind, route: input.route, context: input.context, startedAt } satisfies HeadlessSessionRecord), { mode: 0o600 });
-  // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
-  const carried = withAutonomyContract(false, { request: input.prompt, role: input.role });
-  const request = carried.role ? `${carried.role} ${carried.request}` : carried.request;
   let settled!: Promise<T>;
   registerRun({ name: input.name, role: 'reviewer', work: input.work, subject: input.subject, agent: input.kind, run: {
     id: randomUUID(), directory: runDirectory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
     result: () => settled.then(payload => ({ ok: true as const, tool: 'answer', payload, payloads: [payload] }), error => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: String(error?.message ?? error) }, payloads: [] })),
   } }, true);
   settled = (async () => {
-    let refused = '';
+    let refused = '', moves = 0;
     for (let attempt = 1; ; attempt++) {
-      const prompt = attempt === 1 ? request : `${request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
-      const argv = [...wrapper, headlessForms[input.kind]?.program ?? launchProgram(input.kind), ...headlessArgs(input.kind, args, prompt)];
+      const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
+      const argv = [...launch.wrapper, headlessForms[launch.kind]?.program ?? launchProgram(launch.kind), ...headlessArgs(launch.kind, launch.args, prompt)];
       let output: string | null = null;
       try {
-        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, input.environment), timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
+        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, launch.environment), timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
         return await input.answer(output);
       } catch (error) {
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
-        const notice = detectRuntimeExhaustion(output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), input.kind, Date.now());
+        const printed = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error);
+        const notice = detectRuntimeExhaustion(printed, launch.kind, Date.now());
         if (notice) {
           await input.holdAccount?.(notice);
           throw new Error(`the headless run stopped on its provider's limit notice: ${notice.reason}; its account is held until ${notice.resetsAt ?? 'its reset'}`);
         }
+        // A failed run whose agent said it is not logged in (GY-3218): its account is held and the request runs on the next.
+        const loggedOut = output === null && input.moveAccount && moves < accountMoveLimit && !controller.signal.aborted ? detectLoggedOut(printed) : null;
+        if (loggedOut) { moves++; launch = await prepare(await input.moveAccount!(loggedOut)); attempt = 0; continue; }
         if (controller.signal.aborted || attempt >= headlessAttempts) throw new Error(`no answer accepted after ${attempt} run${attempt === 1 ? '' : 's'}: ${refused}`);
       }
     }

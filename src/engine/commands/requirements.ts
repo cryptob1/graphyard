@@ -48,7 +48,7 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
     if (scenario) pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
   }
   work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
-  if (data.owner !== undefined) { assertHumanOwner(engine, data.owner); work.owner = data.owner; }
+  if (data.owner !== undefined) { await assertHumanOwner(engine, db, data.owner); work.owner = data.owner; }
   work.criteria = revised;
   if (data.plannedFiles !== undefined) work.plannedFiles = data.plannedFiles;
   work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;

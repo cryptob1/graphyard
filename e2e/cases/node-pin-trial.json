@@ -1,0 +1,15 @@
+{
+  "id": "node-pin-trial",
+  "title": "A repository's merge trial installs and builds under the Node major it declares",
+  "description": "The merge trial reads the Node major a repository declares (.nvmrc, .node-version, mise.toml, .tool-versions, then package.json engines.node) and, when the running node is another major, fetches that node through npm exec and runs install, build and tests under it. The fixture is a pnpm workspace linked only with workspace:*, with engine-strict=true and engines.node pinned to 22 (24 when the running node is 22): its frozen install refuses any other node, and its build prints process.version, which must be the pinned major. Fetches pnpm and that node from the registry on the first run.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "an engine-strict pnpm workspace's trial installs and builds under the pinned Node major",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/node-pin-trial.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

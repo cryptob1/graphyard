@@ -54,6 +54,8 @@ export interface Principal {
   deploymentProviders?: string[];
   slice?: SliceId; sessionKind?: 'human' | 'ai'; grants?: string[]; // GY-1879: lane grants (server/principals.ts), never proof authority
   capabilities?: OperatorCapability[];
+  /** GY-3215: an invited teammate's role (server/principals.ts `teamRoles`); set only by an invite, on a reader human. */
+  team?: 'viewer' | 'maintainer';
   scope?: { repositories: string[]; workItems: string[] };
   [operatorCredentialHash]?: string;
 }
