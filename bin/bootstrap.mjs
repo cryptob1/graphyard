@@ -1,4 +1,4 @@
-// GY-3214: `npx graphyard …` on a host with no Graphyard checkout. The published package is this
+// GY-3214: `npx @cryptob1/graphyard …` on a host with no Graphyard checkout. The published package is this
 // launcher alone; the code it runs is a Git checkout of Graphyard's upstream at the commit the
 // package was published from, under the install's own directory, so the loop, `graphyard upgrade`
 // and the deploy watch move it with Git like any other install.
@@ -16,7 +16,7 @@ export async function releaseRoot(packageRoot, args) {
     try { repository = /[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(execFileSync('git', ['config', '--get', 'remote.origin.url'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim())?.[1] ?? ''; } catch { /* not a checkout */ }
   }
   const match = /^([\w.-]+)\/([\w.-]+)$/.exec(repository);
-  if (!match) { console.error('Run this in your repository\'s checkout: npx graphyard up --repo OWNER/NAME'); process.exit(1); }
+  if (!match) { console.error('Run this in your repository\'s checkout: npx @cryptob1/graphyard up --repo OWNER/NAME'); process.exit(1); }
   const directory = join(process.env.GRAPHYARD_CONFIG_HOME ?? join(homedir(), '.config', 'graphyard'), `${match[1]}-${match[2]}`.toLowerCase().replace(/[^a-z0-9._-]/g, '-'));
   // An installed host runs the release it serves, which the deploy watch moves.
   const current = currentCliPath(directory);

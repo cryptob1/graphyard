@@ -1,6 +1,6 @@
 // GY-3214: what Graphyard's own install publishes for each commit its batch gate verifies, so
-// `npx graphyard up` works on a host that holds no checkout: the control-plane and trial images,
-// by commit, and the npm package `graphyard` — the launcher alone, naming the commit it fetches.
+// `npx @cryptob1/graphyard up` works on a host that holds no checkout: the control-plane and trial images,
+// by commit, and the npm package `@cryptob1/graphyard` — the launcher alone, naming the commit it fetches.
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -36,9 +36,9 @@ export type PublishOutcome = { version: string; images: string[] } | { blocker: 
  */
 export async function publishVerified(commit: string, ports: { root: string; directory: string; run: ChildRun; env?: NodeJS.ProcessEnv }): Promise<PublishOutcome> {
   const files = publishTokenFiles(ports.directory), env = ports.env ?? process.env;
-  const missing = [...(existsSync(files.npm) ? [] : [`an npm token that may publish the package graphyard, in ${files.npm}`]),
+  const missing = [...(existsSync(files.npm) ? [] : [`an npm token that may publish the package @cryptob1/graphyard, in ${files.npm}`]),
     ...(existsSync(files.ghcr) ? [] : [`a GitHub token with write:packages for ${repositoryOf(publishedImages(commit, env).server)}, in ${files.ghcr}`])];
-  if (missing.length) return { blocker: `Publishing Graphyard for npx graphyard up needs ${missing.join(' and ')} (mode 0600); nothing is published until the operator stores ${missing.length > 1 ? 'them' : 'it'}.` };
+  if (missing.length) return { blocker: `Publishing Graphyard for npx @cryptob1/graphyard up needs ${missing.join(' and ')} (mode 0600); nothing is published until the operator stores ${missing.length > 1 ? 'them' : 'it'}.` };
   const run = (command: string, args: string[], cwd?: string) => Promise.resolve(ports.run(command, args, { timeoutMs: 1_800_000, env, ...(cwd ? { cwd } : {}) })).then(String);
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-publish-'));
   try {

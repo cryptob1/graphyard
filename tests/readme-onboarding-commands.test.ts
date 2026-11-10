@@ -10,7 +10,7 @@ const help = (...args: string[]) => execFileSync(process.execPath, ['--import', 
 
 test('unit:readme-onboarding-commands — the Quick start is one command, and it uses commands and flags advertised by this CLI', () => {
   // GY-3214: setup is the one command a fresh host runs; nothing is cloned, installed or put on PATH first.
-  assert.deepEqual([...start.matchAll(/```sh\n([^`]+)```/g)].map(match => match[1]!.trim()), ['npx graphyard up --repo OWNER/NAME']);
+  assert.deepEqual([...start.matchAll(/```sh\n([^`]+)```/g)].map(match => match[1]!.trim()), ['npx @cryptob1/graphyard up --repo OWNER/NAME']);
   assert.doesNotMatch(start, /npm ci|clone Graphyard|on your PATH/);
   const up = help('up', '--help');
   const all = help('--help');

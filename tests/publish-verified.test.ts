@@ -15,7 +15,7 @@ import { graphyardRepository } from '../src/scenarios.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3214: each commit Graphyard's batch gate verifies is published as two images and the npm
-// package `graphyard`, from the operator's tokens; publishing never touches the verification.
+// package `@cryptob1/graphyard`, from the operator's tokens; publishing never touches the verification.
 
 const identity = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } as NodeJS.ProcessEnv;
 const git = (cwd: string, args: string[], env: NodeJS.ProcessEnv = identity) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim();
@@ -26,7 +26,7 @@ async function checkout() {
   git(root, ['init', '-q', '-b', 'main']);
   await mkdir(join(root, 'bin'));
   await writeFile(join(root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
-  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'graphyard', version: '0.1.0', private: true, type: 'module', description: 'd', license: 'Apache-2.0', bin: { graphyard: './bin/graphyard.mjs' }, dependencies: { zod: '4.4.3' } }));
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@cryptob1/graphyard', version: '0.1.0', private: true, type: 'module', description: 'd', license: 'Apache-2.0', bin: { graphyard: './bin/graphyard.mjs' }, dependencies: { zod: '4.4.3' } }));
   git(root, ['add', '.']);
   git(root, ['commit', '-q', '-m', 'base'], { ...identity, GIT_COMMITTER_DATE: '2026-11-09T23:30:00-05:00' });
   const files = publishTokenFiles(directory);
@@ -66,7 +66,7 @@ test('unit:tests/publish-verified.test.ts — a verified commit is pushed as bot
   assert.equal(published.length, 1);
   const { manifest, npmrc } = published[0]!;
   assert.deepEqual({ name: manifest.name, version: manifest.version, graphyardCommit: manifest.graphyardCommit, graphyardUpstream: manifest.graphyardUpstream, private: manifest.private, dependencies: manifest.dependencies, bin: manifest.bin },
-    { name: 'graphyard', version, graphyardCommit: commit, graphyardUpstream: 'https://github.com/cryptob1/graphyard', private: undefined, dependencies: undefined, bin: { graphyard: './bin/graphyard.mjs' } }, 'the package names the commit it fetches and installs nothing itself');
+    { name: '@cryptob1/graphyard', version, graphyardCommit: commit, graphyardUpstream: 'https://github.com/cryptob1/graphyard', private: undefined, dependencies: undefined, bin: { graphyard: './bin/graphyard.mjs' } }, 'the package names the commit it fetches and installs nothing itself');
   assert.match(npmrc, /^\/\/registry\.npmjs\.org\/:_authToken=npm-secret$/m);
   assert.ok(!calls.some(call => /npm-secret|ghcr-secret/.test(call)), 'no token is a command argument');
   assert.match(calls[0]!, /^sh -c docker login "\$0" .*--password-stdin < "\$2" ghcr\.io cryptob1 .*ghcr-token$/, 'docker logs in from the token file before anything is built');
@@ -86,7 +86,7 @@ test('unit:tests/publish-verified.test.ts — a missing token publishes nothing 
   const one = stubs(), outcome = await publishVerified(commit, { root, directory, run: one.run, env: {} });
   assert.ok('blocker' in outcome);
   assert.ok(outcome.blocker.includes(files.npm) && !outcome.blocker.includes(files.ghcr), outcome.blocker);
-  assert.match(outcome.blocker, /an npm token that may publish the package graphyard/);
+  assert.match(outcome.blocker, /an npm token that may publish the package @cryptob1\/graphyard/);
   assert.deepEqual(one.calls, [], 'nothing is built, pushed or published');
   await rm(files.ghcr);
   const both = await publishVerified(commit, { root, directory, run: stubs().run, env: {} }) as { blocker: string };
@@ -145,7 +145,7 @@ async function gateFixture(publish: (commit: string) => Promise<PublishOutcome>,
 
 test('unit:tests/publish-verified.test.ts — the gate publishes each commit it verifies; a failure leaves the commit verified and the next one publishes; a missing token is recorded once', async () => {
   const asked: string[] = [];
-  let answer: (commit: string) => PublishOutcome = () => ({ blocker: 'Publishing Graphyard for npx graphyard up needs an npm token' });
+  let answer: (commit: string) => PublishOutcome = () => ({ blocker: 'Publishing Graphyard for npx @cryptob1/graphyard up needs an npm token' });
   const { coordinator, merge, gate, state, lines } = await gateFixture(async commit => { asked.push(commit); return answer(commit); });
   await gate(); // rollout: the served commit is the first verified one, and nothing new was verified
   assert.deepEqual(asked, []);
@@ -155,7 +155,7 @@ test('unit:tests/publish-verified.test.ts — the gate publishes each commit it 
   const second = await merge(); await gate();
   assert.deepEqual(asked, [first, second]);
   assert.equal(readGateRecord(gateRecordPath(coordinator))!.verified, second);
-  assert.deepEqual(Object.values(state.actions).filter(action => action.kind === 'blocker').map(action => [action.state, action.detail]), [['failed', 'Publishing Graphyard for npx graphyard up needs an npm token']]);
+  assert.deepEqual(Object.values(state.actions).filter(action => action.kind === 'blocker').map(action => [action.state, action.detail]), [['failed', 'Publishing Graphyard for npx @cryptob1/graphyard up needs an npm token']]);
   assert.equal(lines.filter(line => line.includes('needs an npm token')).length, 1, 'the missing token is recorded once, not per verified commit');
 
   // A failing publish never blocks or reverts the verification, and is logged.
