@@ -68,7 +68,7 @@ test('unit:tests/credential-mask-probe.test.ts — a sandbox that can still read
     const clean = probeReading([]);
     assert.doesNotThrow(() => build(clean));
     assert.equal(clean.asked.length, 1, 'one probe per launch');
-    for (const path of [join(f.home, '.ssh'), netrc, otherAccount, extra, join(f.home, '.config', 'graphyard')]) assert.ok(clean.asked[0].includes(path), `${path} is probed`);
+    for (const path of [join(f.home, '.ssh'), netrc, otherAccount, extra]) assert.ok(clean.asked[0].includes(path), `${path} is probed`);
     for (const path of [own, ownAccount, join(f.home, '.aws')]) assert.ok(!clean.asked[0].includes(path), `${path} is not probed`);
 
     // One that still reads a masked path is refused, naming it.

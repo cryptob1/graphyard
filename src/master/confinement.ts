@@ -207,11 +207,11 @@ export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly 
 
 /**
  * The bubblewrap words that hide the install's credential locations from the session (GY-1856):
- * each masked directory becomes an empty tmpfs that can be traversed but not read (mode 0111, so
- * a kept path under it still resolves), so the directory and every credential under it is
- * unreadable — `test -r` fails, and no content is reachable to print. A `hostPaths` entry
- * (GY-3228) is masked exactly where it exists: a directory the same way, a file by binding the
- * unreadable empty file `blank` over it. The session's own paths are not hidden
+ * each masked directory becomes an empty tmpfs, so every credential under it is unreadable —
+ * `test -r` fails, and no content is reachable to print. A `hostPaths` entry (GY-3228) is masked
+ * exactly where it exists: a directory by an empty tmpfs that can be traversed but not read (mode
+ * 0111, so a kept path under it still resolves), a file by binding the unreadable empty file
+ * `blank` over it. The session's own paths are not hidden
  * here; they are re-exposed after the masks (`readOnlyMountWrapper`). Only a location that exists
  * is masked — the config home when it is a directory, a recorded path at the nearest directory
  * that holds it — so a stale recorded path never masks a broad ancestor that holds unrelated
@@ -221,12 +221,12 @@ export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly 
  * component resolves inside the namespace).
  */
 export const credentialMaskWords = (mask: CredentialMask | undefined, protect: readonly string[], blank?: string): readonly string[] => {
-  const { directories, files } = credentialMasks(mask, protect);
-  return [...directories.flatMap(path => ['--perms', '0111', '--tmpfs', path]), ...(blank ? files.flatMap(path => ['--ro-bind', blank, path]) : [])];
+  const { directories, files, unreadable } = credentialMasks(mask, protect);
+  return [...directories.flatMap(path => [...(unreadable.includes(path) ? ['--perms', '0111'] : []), '--tmpfs', path]), ...(blank ? files.flatMap(path => ['--ro-bind', blank, path]) : [])];
 };
-/** What the mask hides here, canonical: the directories replaced by an empty unreadable one and the files replaced by an unreadable empty one. */
-const credentialMasks = (mask: CredentialMask | undefined, protect: readonly string[]): { directories: string[]; files: string[] } => {
-  if (!mask) return { directories: [], files: [] };
+/** What the mask hides here, canonical: the directories replaced by an empty one (`unreadable` names those of them a `hostPaths` entry makes unreadable too) and the files replaced by an unreadable empty one. */
+const credentialMasks = (mask: CredentialMask | undefined, protect: readonly string[]): { directories: string[]; files: string[]; unreadable: string[] } => {
+  if (!mask) return { directories: [], files: [], unreadable: [] };
   const home = canonicalPath(homedir());
   // The checkout, the session's directory and the user's home itself are never hidden.
   const hides = (path: string) => path !== '/' && ![...protect, home].some(p => p === path || withinCheckout(p, path));
@@ -239,7 +239,7 @@ const credentialMasks = (mask: CredentialMask | undefined, protect: readonly str
     .filter(path => isDirectoryPath(path) && !protect.some(p => p === path || withinCheckout(p, path)) && path !== '/'), ...exact.filter(isDirectoryPath)])];
   // A path already covered by a wider candidate is not masked again: the config home's tmpfs hides everything under it.
   const directories = unhidden.filter(path => !unhidden.some(other => other !== path && withinCheckout(path, other)));
-  return { directories, files: exact.filter(path => !isDirectoryPath(path) && !directories.some(directory => withinCheckout(path, directory))) };
+  return { directories, unreadable: exact, files: exact.filter(path => !isDirectoryPath(path) && !directories.some(directory => withinCheckout(path, directory))) };
 };
 
 /** Runs the credential-mask read probe: the sandbox's own words running `test -r` on each masked path, printing `readable<TAB>path` for each it can read. */
@@ -257,8 +257,10 @@ export class CredentialMaskError extends WorkerSandboxError {
 function assertCredentialsMasked(wrapper: readonly string[], mask: CredentialMask | undefined, protect: readonly string[], kept: readonly string[], probe: MaskProbe | null | undefined) {
   const run = probe === undefined ? (underTestRunner() ? null : hostMaskProbe) : probe;
   if (!mask || !run) return;
-  const { directories, files } = credentialMasks(mask, protect);
-  const masked = (path: string) => [...directories, ...files].some(target => path === target || withinCheckout(path, target)) && !kept.some(own => path === own || withinCheckout(path, own));
+  const { directories, files, unreadable } = credentialMasks(mask, protect);
+  // A directory masked only as the holder of recorded credentials stays a readable, empty one: what it held is what is probed.
+  const masked = (path: string) => [...directories, ...files].some(target => path === target || withinCheckout(path, target)) && !kept.some(own => path === own || withinCheckout(path, own))
+    && !(directories.includes(path) && !unreadable.includes(path));
   const paths = [...new Set([mask.configHome, ...mask.extraPaths, ...(mask.hostPaths ?? [])].filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))].filter(masked);
   if (!paths.length) return;
   let output = '';
