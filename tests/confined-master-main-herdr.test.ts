@@ -18,7 +18,7 @@ import { proposedRuntimes } from '../src/model/registry.js';
 import { worktreeRoot } from '../src/install/worktree-root.js';
 import type { Principal } from '../src/model.js';
 import { withDatabase } from './helpers/postgres.js';
-import { startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand } from './helpers/launch-shell.js';
 import { workFixture } from './helpers/work-fixture.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -33,6 +33,23 @@ const checkout = dirname(dirname(fileURLToPath(import.meta.url)));
 const cli = join(checkout, 'bin', 'graphyard.mjs');
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const HEAD = sha40('candidate'), BASE = sha40('base');
+
+// The pane surface the stubs report: each pane's runtime kind, recorded from its typed launch
+// line the way Herdr classifies one (expandTypedCommand), so the master session's node stand-in
+// runtime is observed ready as itself (a global 'claude' default would name another runtime and
+// the launch would wait on it until its bound).
+const paneKinds = new Map<string, string>();
+const recordTypedRuntime = (args: string[]) => { paneKinds.set(args[2], expandTypedCommand(args[3]).kind); };
+const shellAnswers = (args: string[]): string | null => {
+  const pane = args[1] === 'process-info' ? args[3] : args[2];
+  const kind = paneKinds.get(pane) ?? 'claude';
+  const json = (result: unknown) => JSON.stringify({ result });
+  if (args[0] === 'pane' && args[1] === 'read') return `${kind} ready\n`;
+  if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: kind, agent_status: 'idle', pane_id: pane } });
+  if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [kind] }] } });
+  if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, agent_status: 'idle', name: args[3] } });
+  return null;
+};
 
 test(`e2e:confined-master-main-herdr — a fixture install migrated from its private Herdr to the main one launches a confined master session that runs herdr agent list and master review GY-N against the main server's socket`, { timeout: 600_000 }, async () => {
   assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this host');
@@ -130,23 +147,29 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       '',
     ].join('\n'));
     chmodSync(join(localBin, 'herdr'), 0o755);
+    // The reviewer `master review` launches runs headless, as the CLI does outside a test runner.
     writeFileSync(join(localBin, 'claude'), '#!/usr/bin/env node\nconsole.log(\'Claude Code ready\');\n');
     chmodSync(join(localBin, 'claude'), 0o755);
 
     // What the confined master session runs: the two recovery steps the migration left it owing.
-    writeFileSync(join(root, '.graphyard', 'master-session-fixture.mjs'), [
+    const sessionScript = join(root, '.graphyard', 'master-session-fixture.mjs');
+    writeFileSync(sessionScript, [
       "import { execFileSync } from 'node:child_process';",
       'const run = (command, args, options = {}) => execFileSync(command, args, { encoding: "utf8", timeout: 240_000, ...options });',
       "const list = run('herdr', ['agent', 'list']);",
       'if (!Array.isArray(JSON.parse(list).result?.agents)) throw new Error(`herdr agent list did not answer an inventory: ${list}`);',
       "console.log('MASTER-AGENT-LIST-OK');",
       "const review = run(process.execPath, [process.env.GRAPHYARD_CLI, 'master', 'review', 'GY-1'], { cwd: process.env.GRAPHYARD_REPOSITORY_ROOT });",
-      "console.log('MASTER-REVIEW-OK ' + review.split('\\n')[0].slice(0, 120));",
+      "const record = JSON.parse(review);",
+      "if (record.work !== 'GY-1' || record.mode !== 'control-plane' || !record.launch) throw new Error(`master review did not launch the control-plane review: ${review.slice(0, 400)}`);",
+      "console.log('MASTER-REVIEW-OK ' + record.agentName);",
       '',
     ].join('\n'));
 
-    // The main server's answers: the pane surface a real Herdr serves, every reply through the socket.
-    let connections = 0, agentLists = 0, reviewTabs = 0;
+    // The main server's answers: every reply through the socket. The reviewer `master review`
+    // launches runs headless the way the CLI does outside a test runner, so the session asks the
+    // server for the inventories its launch reads, never for a pane.
+    let connections = 0, agentLists = 0;
     const herdrNet = herdrServer = createServer(connection => {
       connections++;
       let buffer = '';
@@ -159,23 +182,8 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
         const json = (result: unknown) => JSON.stringify({ result });
         let answer = '';
         if (args[0] === 'agent' && args[1] === 'list') { agentLists++; answer = json({ agents: [] }); }
-        else if (args[0] === 'tab' && args[1] === 'create') {
-          reviewTabs++;
-          answer = json({ root_pane: { pane_id: 'wMain:review', tab_id: 'wMain:review-tab' } });
-        }
-        else if (args[0] === 'pane' && args[1] === 'run') {
-          // Async, never spawnSync: the server itself must stay answering while the pane runs.
-          execFile('/bin/bash', ['-ec', args[3]], { encoding: 'utf8', timeout: 120_000, cwd: process.cwd(),
-            env: { PATH: `${localBin}:${process.env.PATH}`, HOME: home } }, (error, stdout, stderr) => {
-            connection.end(error ? `${JSON.stringify({ error: { code: 'pane_run_failed', message: `${stdout ?? ''}${stderr ?? ''}${error.message}`.slice(0, 800) } })}\n` : '\n');
-          });
-          return;
-        }
-        else {
-          const canned = startedAtOnce(args, 'idle');
-          if (canned !== null) answer = canned;
-          else if (args[0] === 'pane' && args[1] === 'list') answer = json({ panes: [] });
-        }
+        else if (args[0] === 'pane' && args[1] === 'list') answer = json({ panes: [] });
+        else answer = shellAnswers(args) ?? '';
         connection.end(`${answer}\n`);
       });
     });
@@ -183,7 +191,9 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
 
     // The launch the loop makes: the pane environment names the main Herdr's socket, exactly as a
     // pane the main server created inherits it, and the confinement grants what the install
-    // records now — the main Herdr — beside the master's own state.
+    // records now — the main Herdr — beside the master's own state. The stand-in node runtime is
+    // registered the way an operator registers one without a built-in recipe (launchMasterSession
+    // passes the registry account's contract the same way), so its launch is non-interactive.
     const paneEnvironment: Record<string, string> = {
       PATH: `${localBin}:${dirname(process.execPath)}:${process.env.PATH}`,
       HERDR_SOCKET_PATH: socket,
@@ -196,6 +206,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
     const run = async (_command: string, args: string[]) => {
       if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'wMain:master', tab_id: 'wMain:master-tab' } } });
       if (args[0] === 'pane' && args[1] === 'run') {
+        recordTypedRuntime(args);
         // The typed line carries the whole confinement: running it is running the session. Async,
         // never spawnSync — the socket server below must keep answering while the session runs.
         masterOutput = await new Promise<string>((resolve, reject) =>
@@ -203,23 +214,25 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
             (error, stdout, stderr) => error ? reject(new Error(`the confined master session exited: ${`${stdout ?? ''}\n${stderr ?? ''}`.slice(-1200)}`)) : resolve(`${stdout ?? ''}\n${stderr ?? ''}`)));
         return '';
       }
-      return startedAtOnce(args, 'idle') ?? JSON.stringify({ result: {} });
+      return shellAnswers(args) ?? JSON.stringify({ result: {} });
     };
-    const launched = await launchSession({ name: config.masterAgentName, kind: process.execPath, args: [join(root, '.graphyard', 'master-session-fixture.mjs'), '{request}'],
+    const launched = await launchSession({ name: config.masterAgentName, kind: process.execPath, args: [sessionScript, '{request}'],
       text: 'Run the recovery steps the migration left this install owing.', workspace: migrated.herdrWorkspace, label: 'Graphyard master · owner/project',
       environment: { GRAPHYARD_MASTER: '1', ...paneEnvironment }, run,
       onPane: () => undefined,
       start: { directory: root, cwd: root, coordinatorRoot: root, environment: paneEnvironment, confinement: 'master', timeoutMs: 240_000,
+        contract: { args: [sessionScript, '{request}'] },
         masterStateDirectory: dirname(config.credentialFile),
         stateDirectories: [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, migrated)],
         credentialMask: masterCredentialMask(config, []), herdrPaths: herdrSessionPaths(migrated) } });
     assert.equal(launched.started.state, 'started', launched.started.detail);
 
-    // Both recovery steps ran inside the confinement and reached the main server through its socket.
+    // Both recovery steps ran inside the confinement and reached the main server through its socket:
+    // the fixture's own `herdr agent list`, and `master review GY-1`'s launch, which registers the
+    // control-plane review and reads the session inventory the same way.
     assert.ok(masterOutput.includes('MASTER-AGENT-LIST-OK'), `herdr agent list ran inside the confinement: ${masterOutput.slice(-800)}`);
     assert.ok(masterOutput.includes('MASTER-REVIEW-OK'), `master review GY-1 ran inside the confinement: ${masterOutput.slice(-800)}`);
-    assert.ok(agentLists >= 1, 'the main Herdr served the agent inventory');
-    assert.ok(reviewTabs >= 1, 'the main Herdr served the reviewer launch of master review');
+    assert.ok(agentLists >= 2, 'the main Herdr served both inventory reads, the session\'s and the review launch\'s');
     assert.ok(connections >= 2, 'every answer came through the main server\'s own socket');
   } finally {
     if (herdrServer) await new Promise<void>(resolve => (herdrServer as NonNullable<typeof herdrServer>).close(() => resolve()));
