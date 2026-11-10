@@ -78,6 +78,8 @@ export interface InstallInputs {
   serverName?: string;
   /** Create the cost-bearing UAT and production resources the plan marks as human decisions (GY-1102). */
   createEnvironments?: boolean;
+  /** The merge writer's credential is a fine-grained token piped in (`--merge-token-stdin`, GY-3220), not a deploy key. */
+  mergeToken?: boolean;
 }
 
 export function installIdFor(repository: string) {

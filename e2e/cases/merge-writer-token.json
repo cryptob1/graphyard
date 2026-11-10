@@ -1,0 +1,13 @@
+{
+  "id": "merge-writer-token",
+  "title": "The merge writer fetches and pushes with a fine-grained token over HTTPS",
+  "description": "A scratch bare repository is served over token-authenticated git smart HTTP on loopback (git http-backend behind a Basic-auth server): an install configured with the token fetches and pushes a merge through it, a wrong token is refused, the token appears in no log line, and an install with a deploy key still uses origin.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "merge writer token over smart HTTP",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-writer-token-http.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
