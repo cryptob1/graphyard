@@ -1,0 +1,14 @@
+{
+  "id": "clean-host-npx-up",
+  "title": "A fresh account gets a working install from npx graphyard up",
+  "description": "The publisher pushes a verified commit's two images to a local image registry and publishes the npm package to a local npm registry, as it does to GHCR and npm. A fresh home with a scratch repository and no Graphyard checkout then runs `npx graphyard up --repo OWNER/NAME`: the real npx, launcher and setup run as subprocesses, clone the upstream at the published commit into the install's release directory, pull both images by that commit instead of building them, serve the dashboard from the pulled image's commit and file the onboarding change as the first work item, stopping where a person signs in the AI coding accounts. No Graphyard path is typed. Docker, gh, the SSH origin and the dependency install are stand-ins on PATH, since a trial has no Docker daemon, GitHub or network; signing in agent accounts, the master session and the merge of the filed item need real accounts and are the post-deploy check's.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Publish a verified commit locally and run npx graphyard up in a fresh home",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/clean-host-npx-up.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

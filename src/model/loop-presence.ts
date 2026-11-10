@@ -25,7 +25,7 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -36,8 +36,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -77,6 +77,25 @@ export function loopAlerts(header: string | string[] | undefined): number | fals
   if (value === 'off') return false;
   const minutes = Number(value);
   return value && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+}
+
+/**
+ * The header on the loop's coordination reads naming the standing checkout-trust refusal (GY-3225):
+ * the one attention line the loop raised — the checkout carries repository Claude configuration no
+ * registered Claude account trusts — URI-encoded, or `off` while none stands. The control plane
+ * keeps the latest beside the loop's presence for /api/status, so the Setup checklist shows it as
+ * one item while it stands.
+ */
+export const loopCheckoutTrustHeader = 'X-Graphyard-Loop-Checkout-Trust';
+export const encodeLoopCheckoutTrust = (text: string) => encodeURIComponent(text);
+/** The standing checkout-trust refusal a loop read names, or null when it names none, `off`, or one that does not parse. */
+export function loopCheckoutTrust(header: string | string[] | undefined): string | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value === 'off' || value.length > 4_000) return null;
+  try {
+    const text = decodeURIComponent(value);
+    return text.trim() && !/[\r\n]/.test(text) ? text.slice(0, 2_000) : null;
+  } catch { return null; }
 }
 
 /**
