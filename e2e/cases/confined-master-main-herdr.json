@@ -1,0 +1,14 @@
+{
+  "id": "confined-master-main-herdr",
+  "title": "The confined master session reaches the main Herdr after a migration",
+  "description": "Migrates a fixture install from its private Herdr to the host's main one, then launches the master session the way the loop does: under its real confinement it runs herdr agent list and master review GY-N against the main server's own socket, and the loop closes the master pane a migration left in the moved-away workspace and relaunches the master.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Confined master session on the main Herdr",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/confined-master-main-herdr.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

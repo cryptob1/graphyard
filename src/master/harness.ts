@@ -17,7 +17,7 @@ import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, launchSession } from './launch.js';
-import { type HerdrAgent, stopCreatedHerdrTab } from './herdr.js';
+import { type HerdrAgent, herdrSessionPaths, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { graphyardRepository } from '../scenarios.js';
@@ -261,6 +261,10 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
       ? { CODEX_HOME: resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex')) }
       : kind === 'claude' ? { CLAUDE_CONFIG_DIR: resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude')) } : {};
     const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment }, null, { writable: [dirname(config.credentialFile)] });
+    // GY-3237: the install state the master session's own recovery commands write — reviewer
+    // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
+    // the managed worktree root its launches allocate checkouts under — granted writable.
+    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
 
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
@@ -268,7 +272,7 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master is confined like every other launched session (GY-1658): its configuration,
     // administration and browser-flow commands run from the coordinator root with the checkout
     // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
-    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)) } }));
+    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)), herdrPaths: herdrSessionPaths(config) } }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

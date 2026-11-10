@@ -10,6 +10,16 @@ import { herdrConnectCommands } from '../herdr-connect.js';
 /** A legacy private server retained only while its existing panes drain. */
 export interface HerdrInstance { configHome: string; session: string }
 export const herdrSocketPath = (instance: HerdrInstance) => join(instance.configHome, 'herdr/sessions', instance.session, 'herdr-client.sock');
+/**
+ * GY-3237: the Herdr socket and config directories the install's master session reaches — the
+ * host's main Herdr (its socket and config live under `~/.config/herdr`), and a recorded private
+ * instance's own tree while its panes drain. After a GY-3212 migration the master session's
+ * commands (`herdr agent list`, `master review GY-N`) speak to the main server, so its
+ * confinement grants exactly these; anything that does not exist yet is simply absent.
+ */
+export function herdrSessionPaths(config: Pick<MasterConfig, 'herdrInstance'>, home: string = homedir()): string[] {
+  return [...new Set([join(home, '.config', 'herdr'), ...(config.herdrInstance ? [join(config.herdrInstance.configHome, 'herdr')] : [])])];
+}
 /** The environment that names the instance to a process the install starts (a pane's supervisor inherits it from the instance's server). */
 export const herdrInstanceEnv = { configHome: 'GRAPHYARD_HERDR_CONFIG_HOME', session: 'GRAPHYARD_HERDR_SESSION' } as const;
 let processInstance: HerdrInstance | null = null;

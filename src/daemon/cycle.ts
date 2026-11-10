@@ -23,6 +23,7 @@ import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
 import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
+import { herdrWorkspaceOf } from '../master/herdr.js';
 import { launchGraceMs } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
@@ -873,6 +874,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
     }
   }
   if (!handle) {
+    await closeMigratedMasterPane(cycle);
     submitMasterLaunch(cycle, open, recoveryError);
     return;
   }
@@ -895,6 +897,35 @@ async function masterSession(cycle: Cycle, open: Work[]) {
       sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'done', detail: prompt, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) { sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'failed', detail: `Could not wake the master: ${message(error)}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist)); }
   });
+}
+
+/**
+ * GY-3237: a master pane the Herdr migration left behind. While an install still records a private
+ * instance, the pane the loop last launched may sit in the workspace that instance served — moved
+ * away from, invisible to the current inventory, and unable to reach the main Herdr its
+ * confinement never granted. It is closed through that instance once, so the private server
+ * drains, its records are dropped, and the launch this cycle relaunches the master into the main
+ * workspace with a confinement that reaches it. A pane in the current workspace, or one no
+ * recorded instance can answer for, is left to the ordinary absent-pane path.
+ */
+async function closeMigratedMasterPane(cycle: Cycle) {
+  const { config, state, effects } = cycle;
+  const sessions = effects.masterSession;
+  const pane = state.master.pane;
+  const workspace = pane ? herdrWorkspaceOf(pane) : null;
+  if (!sessions?.closeMigratedPane || !config.herdrInstance || !pane || !workspace || workspace === config.herdrWorkspace) return;
+  const key = config.forPerson ? `master:migrate-pane:${config.forPerson}:${pane}` : `master:migrate-pane:${pane}`;
+  if (cycle.state.actions[key]?.state === 'done') return;
+  try {
+    await sessions.closeMigratedPane(pane, config.herdrInstance);
+  } catch (error) {
+    if (!paneAlreadyGone(error)) {
+      await note(cycle, key, 'failover', null, 'failed', `Could not close the master pane ${pane} the Herdr migration left in workspace ${workspace}: ${message(error)}`);
+      return;
+    }
+  }
+  state.master = { ...state.master, pane: null };
+  await note(cycle, key, 'failover', null, 'done', `Closed the master pane ${pane} the Herdr migration left in workspace ${workspace}; the private server can drain and the master relaunches into workspace ${config.herdrWorkspace} with a confinement that reaches it`);
 }
 
 /**

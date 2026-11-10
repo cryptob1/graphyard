@@ -366,7 +366,9 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv;
+  /** GY-3237: Herdr socket and config directories the session reaches read-only (the master session's own grant): bound after the masks, kept from the process-launch masks, and allowed socket resolution under Landlock. */
+  herdrPaths?: readonly string[] }): readonly string[] {
   const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
   const gitDir = canonicalPath(checkoutGitDirectory(root));
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -390,12 +392,23 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // GY-2995: the install's own CLI checkout is re-exposed read-only after the masks, so a
   // confined session runs the launcher its prompt names but can change none of its code.
   const cli = (input.credentialMask?.cli ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath);
+  // GY-3237: the Herdr socket and config the master session reaches, granted read-only: bound
+  // after every mask so the later bind shadows the process-launch mask over the same tree, kept
+  // from that mask's own words (a pane-inherited HERDR_SOCKET_PATH is otherwise replaced by the
+  // keyring proxy), and allowed socket resolution under Landlock below. Every other session —
+  // worker, reviewer, producer — grants nothing here: Herdr launches host commands, and only the
+  // master may ask it to.
+  const herdr = [...new Set((input.herdrPaths ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path)).map(canonicalPath))];
   // A masked file is replaced by this unreadable empty one.
   const blank = join(directory, '.graphyard', 'masked');
   if (mask && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
   const masks = credentialMaskWords(mask, [root, directory], blank);
   const environment = { ...process.env, ...input.environment };
-  const channels = processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
+  // The Herdr grant covers the sockets under it (GY-3237): a pane-inherited HERDR_SOCKET_PATH
+  // would otherwise carry the keyring proxy over the very socket the session must reach.
+  const launchTargets = hostProcessLaunchTargets(undefined, environment);
+  const busSockets = launchTargets.busSockets.filter(socket => !herdr.some(directory => socket === directory || withinCheckout(socket, directory)));
+  const channels = processLaunchMaskWords({ ...launchTargets, busSockets, ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory, ...herdr]);
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
   // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
   // packed a ref (git gc, git pack-refs), and rewrites packed-refs under that lock, so keeping the
@@ -424,8 +437,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]),
     ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]),
-    ...cli.flatMap(path => ['--ro-bind', path, path]), ...channels, '--',
-    ...socketConfinementWords([...own, ...writable, ...kept.filter(isDirectoryPath), ...commonGitDir, ...sharedDirectories],
+    ...cli.flatMap(path => ['--ro-bind', path, path]),
+    ...herdr.flatMap(path => ['--ro-bind', path, path]), ...channels, '--',
+    ...socketConfinementWords([...own, ...writable, ...herdr, ...kept.filter(isDirectoryPath), ...commonGitDir, ...sharedDirectories],
       channels.flatMap((word, index) => word === '--ro-bind' && channels[index + 1] !== '/dev/null' ? [channels[index + 2]] : []))];
 }
 

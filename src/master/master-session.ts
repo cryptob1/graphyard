@@ -3,15 +3,15 @@ import { gateRecordPath, readGateRecord } from '../batch-gate.js';
 import { dispatchCauses, deploymentCauses, batchGateCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
 import { readDispatchCursor } from '../dispatch/cursor.js';
 import { servingReport } from '../deploy-watch.js';
-import { dirname } from 'node:path';
-import { type ChildRun } from '../child-runner.js';
+import { dirname, join, resolve } from 'node:path';
+import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { masterHarness, masterPrompt } from './harness.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type FleetProbe, httpFleetClient, selectFleetSession } from '../fleet.js';
 import { accountLaunch, readEnvironmentLog } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, launchSession, withLaunchClose } from './launch.js';
-import { type HerdrAgent, observeHerdrAgents } from './herdr.js';
+import { type HerdrAgent, herdrCall, herdrSessionPaths, observeHerdrAgents, type HerdrInstance } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
@@ -20,9 +20,9 @@ import { masterCredentialMask } from './confinement.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { adoptConversation, assertConversationRuntime, awaitConversation, captureConversation, continuationContext, conversationArgs, graphyardInput, masterInputs, masterRecords, type Continuity } from './conversation.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { worktreeRoot } from '../install/worktree-root.js';
 import type { MasterSessionState } from '../daemon/state.js';
 
 /** The registry role and profile name the master session launches under. */
@@ -70,6 +70,10 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   // state the master's own commands write beside its credential, and nothing beyond it.
   try { assertConversationRuntime(kind); plan = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, selected.account, { writable: [dirname(config.credentialFile)] }); }
   catch (error) { await selected.release(`master session launch failed: ${failureText(error).slice(0, 300)}`); throw error; }
+  // GY-3237: the install state the master session's own recovery commands write — reviewer
+  // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
+  // the managed worktree root its launches allocate checkouts under — granted writable.
+  const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   const current = previous?.current ?? null;
   const resume = !!current && current.runtime === kind && current.account === selected.account.name;
@@ -96,7 +100,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
-    ({ delivery } = await launchSession({ name, kind, args: [...plan.args, ...conversationArgs(kind, nativeId, resume)], text: request, workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...(config.forPerson ? { GRAPHYARD_FOR_PERSON: config.forPerson } : {}), GRAPHYARD_URL: config.url, GRAPHYARD_HOST_ID: config.hostId, ...plan.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile), credentialMask: masterCredentialMask(config, runtimeLoginHomes(plan.environment, plan.contract?.homeVariable)) } }));
+    ({ delivery } = await launchSession({ name, kind, args: [...plan.args, ...conversationArgs(kind, nativeId, resume)], text: request, workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...(config.forPerson ? { GRAPHYARD_FOR_PERSON: config.forPerson } : {}), GRAPHYARD_URL: config.url, GRAPHYARD_HOST_ID: config.hostId, ...plan.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(plan.environment, plan.contract?.homeVariable)), herdrPaths: herdrSessionPaths(config) } }));
     const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config), request);
     const conversation = { launch, runtime: kind, account: selected.account.name, ...discovered,
       record: resume ? current!.record : join(masterRecords(root), `${launch}.jsonl`), origins,
@@ -121,6 +125,12 @@ export interface MasterSessionEffects {
   end?: (session: string, reason: string) => Promise<unknown>;
   /** The live master-role registry sessions of this host and person, each ended before a launch whether or not the loop's state names it (GY-3091). */
   live?: () => Promise<{ id: string; selectedAt: string }[]>;
+  /**
+   * GY-3237: closes the master pane a Herdr migration left in the workspace it moved away from,
+   * through the private instance the install still records, so that server drains and the
+   * relaunch replaces the session with one whose confinement reaches the main Herdr.
+   */
+  closeMigratedPane?: (pane: string, instance: HerdrInstance) => Promise<unknown>;
 }
 export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
   initialize: async (master, handle, prompts = []) => {
@@ -155,6 +165,7 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
   wake: (target, text, continuity) => deliverPrompt(target, text, run, {
     beforeSubmit: (text, attempt) => graphyardInput(continuity?.current.origins ?? masterInputs(root, config().masterAgentName), attempt === 1 ? 'wake' : 'retry', text),
   }),
+  closeMigratedPane: async (pane, instance) => { await herdrCall(run ?? defaultChildRun, ['pane', 'close', pane], undefined, instance); },
   launch: async (handover, previous) => {
     const { delivery: _, ...launched } = await launchMasterSession(root, config(), await observeHerdrAgents(run), handover, run, {}, previous);
     return launched;
