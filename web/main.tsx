@@ -87,7 +87,7 @@ function App() {
           if (!response.ok) throw new Error(`Unable to load dashboard (${response.status}). Retrying automatically.`);
           return response.json();
         };
-        const [items, system, served] = await Promise.all([read(`work-snapshot?since=${encodeURIComponent(snapshotCursor.current)}`), read('status'), read('board').catch(() => null)]);
+        const [items, system, served] = await Promise.all([read(snapshotCursor.current ? `work-snapshot?since=${encodeURIComponent(snapshotCursor.current)}` : 'work-snapshot'), read('status'), read('board').catch(() => null)]);
         if (active && epoch === sessionEpoch.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
         if (!active || epoch !== sessionEpoch.current) return;
