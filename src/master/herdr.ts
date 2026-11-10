@@ -1,7 +1,7 @@
 // Concern: the Herdr runtime adapter — the instance every herdr call targets, workspace health, agent inventory, panes and tabs.
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, type ChildRunOptions, defaultChildTimeoutMs, type BoundChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import type { MasterConfig } from './profiles.js';
@@ -39,10 +39,14 @@ export const herdrSubcommand = (args: string[]) => args[0] === '--session' ? arg
  * XDG_CONFIG_HOME and `--session` (which outranks a pane's HERDR_SOCKET_PATH); for the default
  * instance, the arguments unchanged. Every herdr spawn in src/ goes through here or herdrCall.
  */
+/** Whether `socket` is the host's main Herdr server socket (`~/.config/herdr/herdr.sock`), not a private instance's or an old pane's. */
+const mainHerdrSocket = (socket: string) => basename(socket) === 'herdr.sock' && basename(dirname(socket)) === 'herdr';
 export function herdrInvocation(args: string[], instance: HerdrInstance | null = processInstance, command: string = herdrBinary()): { command: string; args: string[]; env?: NodeJS.ProcessEnv } {
   if (!instance) {
     // A caller inside an old pane can retain its socket after the install has moved to the main server.
-    if (!process.env.GRAPHYARD_HERDR_CONFIG_HOME && !process.env.HERDR_SOCKET_PATH) return { command, args };
+    // The main server's own socket is kept (GY-3237): the confined master session's HOME is a scratch
+    // home, so a herdr client without it would look for the main server where none listens.
+    if (!process.env.GRAPHYARD_HERDR_CONFIG_HOME && (!process.env.HERDR_SOCKET_PATH || mainHerdrSocket(process.env.HERDR_SOCKET_PATH))) return { command, args };
     const { HERDR_SOCKET_PATH: _socket, GRAPHYARD_HERDR_CONFIG_HOME: _home, GRAPHYARD_HERDR_SESSION: _session, ...env } = process.env;
     return { command, args, env: { ...env, ...(process.env.GRAPHYARD_HERDR_CONFIG_HOME ? { XDG_CONFIG_HOME: join(homedir(), '.config') } : {}) } };
   }
