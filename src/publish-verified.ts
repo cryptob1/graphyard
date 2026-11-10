@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildRun } from './child-runner.js';
 import { trialBuilder } from './install/trial-image.js';
-import { publishedImages } from './release.js';
+import { graphyardUpstreamUrl, publishedImages } from './release.js';
 
 /** The operator's publishing credentials, each a 0600 file under the install directory. */
 export const publishTokenFiles = (directory: string) => ({ npm: join(directory, 'npm-token'), ghcr: join(directory, 'ghcr-token') });
@@ -17,11 +17,11 @@ export function publishedVersion(commit: string, committedAt: Date) {
   return `${committedAt.getUTCFullYear()}.${committedAt.getUTCMonth() + 1}.${committedAt.getUTCDate()}-${commit.slice(0, 12)}`;
 }
 
-/** The published package.json: the launcher and no dependency, since everything else is fetched by commit. */
+/** The published package.json: the launcher and no dependency, since everything else is fetched from the upstream it names, at the commit it names. */
 export function publishedPackage(source: Record<string, unknown>, commit: string, version: string) {
   return { name: source.name, version, description: source.description, license: source.license, type: source.type, bin: source.bin,
-    graphyardCommit: commit, files: ['bin/graphyard.mjs', 'bin/bootstrap.mjs', 'bin/cli-release.mjs'], engines: { node: '>=24' },
-    repository: { type: 'git', url: 'git+https://github.com/cryptob1/graphyard.git' } };
+    graphyardCommit: commit, graphyardUpstream: graphyardUpstreamUrl, files: ['bin/graphyard.mjs', 'bin/bootstrap.mjs', 'bin/cli-release.mjs'], engines: { node: '>=24' },
+    repository: { type: 'git', url: `git+${graphyardUpstreamUrl}.git` } };
 }
 
 /** An image reference without its tag (a registry host may carry a port). */
@@ -55,6 +55,8 @@ export async function publishVerified(commit: string, ports: { root: string; dir
     const stamp = ['--build-arg', `GRAPHYARD_VERSION=unreleased ${commit.slice(0, 12)}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${commit}`, '--build-arg', `GRAPHYARD_BUILD_SHA=${commit}`];
     await run('docker', ['build', ...stamp, ...tags(images.server).flatMap(tag => ['--tag', tag]), tree]);
     for (const tag of tags(images.server)) await run('docker', ['push', tag]);
+    // Only `verified` stays named on this host, so a commit's image goes when the next one replaces it.
+    await run('docker', ['image', 'rm', images.server]);
     // The trial image is pushed straight from Graphyard's own builder, whose cache the loop prunes (GY-3188).
     await run('docker', ['buildx', 'build', '--builder', trialBuilder, '--target', 'trial', ...stamp, ...tags(images.trial).flatMap(tag => ['--tag', tag]), '--push', tree]);
 

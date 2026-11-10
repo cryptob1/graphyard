@@ -225,4 +225,10 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
   const item = JSON.parse(status.stdout);
   assert.deepEqual([item.key, item.stage !== 'done', !!item.submission], ['GY-1', true, true], 'the onboarding change is submitted and waits for review');
   assert.ok(!status.stderr.includes('Fetching Graphyard'), 'the release is fetched once');
+  // The README's next commands work the same way, and upgrading stays a Git move of that tree.
+  const master = await graphyard('master', 'status');
+  assert.equal(JSON.parse(master.stdout).controlPlane.reachable, true, master.stderr);
+  const plan = await graphyard('upgrade', '--plan');
+  assert.equal(plan.code, 0, plan.stderr);
+  assert.ok(plan.stdout.includes(`git -C "${release}/" checkout --detach`), plan.stdout);
 });

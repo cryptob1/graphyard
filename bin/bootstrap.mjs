@@ -8,8 +8,6 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { currentCliPath, prepareCliRelease } from './cli-release.mjs';
 
-const upstream = 'https://github.com/cryptob1/graphyard';
-
 /** The release tree this host runs for the repository `args` or the working directory names, cloned and installed on first use. */
 export async function releaseRoot(packageRoot, args) {
   const flag = args.findIndex(arg => arg === '--repo' || arg.startsWith('--repo='));
@@ -23,7 +21,7 @@ export async function releaseRoot(packageRoot, args) {
   // An installed host runs the release it serves, which the deploy watch moves.
   const current = currentCliPath(directory);
   if (existsSync(join(current, 'bin', 'graphyard.mjs'))) return realpathSync(current);
-  const commit = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).graphyardCommit;
+  const { graphyardCommit: commit, graphyardUpstream: upstream } = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
   console.error(`[graphyard] Fetching Graphyard ${commit.slice(0, 12)} into ${directory} (a few minutes, once)`);
   const run = (command, words, options = {}) => {
     // The children's output goes to stderr: stdout is the command's own (up --json).

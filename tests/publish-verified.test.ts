@@ -61,11 +61,12 @@ test('unit:tests/publish-verified.test.ts — a verified commit is pushed as bot
   }
   assert.match(trial, /--target trial .*--push /);
   assert.deepEqual(calls.filter(call => call.startsWith('docker push ')), [`docker push ghcr.io/cryptob1/graphyard:${commit}`, 'docker push ghcr.io/cryptob1/graphyard:verified']);
+  assert.ok(calls.includes(`docker image rm ghcr.io/cryptob1/graphyard:${commit}`), 'the pushed commit tag does not pile up on the publishing host');
   assert.match(calls.find(call => call.startsWith('npm '))!, /^npm publish --tag latest /, 'latest moves to the published version');
   assert.equal(published.length, 1);
   const { manifest, npmrc } = published[0]!;
-  assert.deepEqual({ name: manifest.name, version: manifest.version, graphyardCommit: manifest.graphyardCommit, private: manifest.private, dependencies: manifest.dependencies, bin: manifest.bin },
-    { name: 'graphyard', version, graphyardCommit: commit, private: undefined, dependencies: undefined, bin: { graphyard: './bin/graphyard.mjs' } }, 'the package names the commit it fetches and installs nothing itself');
+  assert.deepEqual({ name: manifest.name, version: manifest.version, graphyardCommit: manifest.graphyardCommit, graphyardUpstream: manifest.graphyardUpstream, private: manifest.private, dependencies: manifest.dependencies, bin: manifest.bin },
+    { name: 'graphyard', version, graphyardCommit: commit, graphyardUpstream: 'https://github.com/cryptob1/graphyard', private: undefined, dependencies: undefined, bin: { graphyard: './bin/graphyard.mjs' } }, 'the package names the commit it fetches and installs nothing itself');
   assert.match(npmrc, /^\/\/registry\.npmjs\.org\/:_authToken=npm-secret$/m);
   assert.ok(!calls.some(call => /npm-secret|ghcr-secret/.test(call)), 'no token is a command argument');
   assert.match(calls[0]!, /^sh -c docker login "\$0" .*--password-stdin < "\$2" ghcr\.io cryptob1 .*ghcr-token$/, 'docker logs in from the token file before anything is built');
