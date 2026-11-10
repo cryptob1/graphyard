@@ -1,0 +1,13 @@
+{
+  "id": "init-scan-read-only",
+  "title": "init --scan without --apply writes nothing into the checkout",
+  "description": "graphyard init --scan on a fixture repository prints the proposal and leaves the working tree and .gitignore byte-identical, with no .graphyard/ created; init --scan --apply writes the setup as before.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "init scan read-only regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/init-scan-read-only.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

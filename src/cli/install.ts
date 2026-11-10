@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
 import { type DeliveryMode } from '../model/delivery-policy.js';
-import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
+import { applyProposal, loadAppliedSetup, loadProposal, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installIdFor, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { defineCommands } from './registry.js';
@@ -135,7 +135,7 @@ export const installCommands = defineCommands([
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
       '       [--delivery local] [--candidate-cron CRON|off]',
-      '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
+      '                                Print the proposed delivery workflow, writing nothing (--scan), or apply it (--scan --apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
       '                                after graphyard install, --apply reuses the install\'s identities and writes no principals file',
     ],
@@ -145,7 +145,7 @@ export const installCommands = defineCommands([
       const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
         delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
       if (values.delivery !== undefined && values.delivery !== 'local') throw new Error('Use --delivery local');
-      if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
+      if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan && !values.apply) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
       const cron = values['candidate-cron'];
       const choices = { ...(values.delivery ? { mode: values.delivery as DeliveryMode } : {}), ...(cron !== undefined ? { candidateSchedule: cron === 'off' ? null : cron } : {}) };
       if (values.scan || values.apply) {
@@ -157,29 +157,27 @@ export const installCommands = defineCommands([
         // GY-1901: the control plane is the merge writer, which chooses the default model.
         const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: 'control-plane' } });
         if (values.apply) {
-          if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
+          // Applying saves the scan it applies; a scan without --apply writes nothing (GY-3222).
+          const { file } = await saveProposal(root, fresh);
           // An install that owns this repository supplies the identities (GY-1413), only for the
           // server it installed, so the selected server must be that one.
-          const selected = values.url ?? stored.proposal.server ?? null;
-          const installed = await installedOnboarding(root, stored.proposal.repository, selected);
-          const differences = repositoryScanDifference(fresh, stored.proposal);
-          if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
+          const selected = values.url ?? stored?.proposal.server ?? null;
+          const installed = await installedOnboarding(root, fresh.repository, selected);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
           if (installed) {
-            const result = await applyProposal(root, stored.proposal, { url, installed });
-            return print({ proposal: stored.file, ...result, installed: installed.directory });
+            const result = await applyProposal(root, fresh, { url, installed });
+            return print({ proposal: file, ...result, installed: installed.directory });
           }
-          return print({ proposal: stored.file, ...await applyProposal(root, stored.proposal, { url }) });
+          return print({ proposal: file, ...await applyProposal(root, fresh, { url }) });
         }
-        await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);
-        return print({ proposalFile: '.graphyard/setup-proposal.json', proposal: fresh,
+        return print({ proposal: fresh,
           mergeGate: fresh.delivery ? describeMergeGate(fresh.delivery) : [],
           applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
           drift: setupDrift(applied, fresh),
-          appliedNothingElse: true,
-          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or edit the proposed checks), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+          wroteNothing: true,
+          next: 'Review the proposal and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning), then rerun init --scan --apply --url SERVER_URL to apply it' });
       }
       let workerToken = await context.individualToken();
       if (values['token-stdin']) {
