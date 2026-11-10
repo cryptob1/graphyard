@@ -44,7 +44,12 @@ export async function removeAttemptWorktree(root: string, path: string, run: Chi
   await stopProcessesUnder(target);
   for (const name of dependencyDirectories) if ((await lstat(resolve(target, name)).catch(() => null))?.isSymbolicLink()) await unlink(resolve(target, name));
   await writableDirectories(target);
-  await Promise.resolve(run('git', ['-C', root, 'worktree', 'remove', ...(force ? ['--force'] : []), target]));
+  try { await Promise.resolve(run('git', ['-C', root, 'worktree', 'remove', ...(force ? ['--force'] : []), target])); }
+  catch (error) {
+    // Git no longer registers the directory (an earlier partial removal or prune): nothing else will remove it.
+    if (!/is not a working tree/.test(String((error as { stderr?: unknown }).stderr ?? '') + String((error as Error).message))) throw error;
+    await rm(target, { recursive: true, force: true });
+  }
   return true;
 }
 
