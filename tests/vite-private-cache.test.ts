@@ -23,12 +23,16 @@ test('integration:vite-private-cache — actual project config starts cold and w
   await writeFile(script, `
     import assert from 'node:assert/strict';
     import { writeFile, readdir } from 'node:fs/promises';
-    import { createServer } from 'vite';
+    import { createServer, createLogger } from 'vite';
     await assert.rejects(writeFile('node_modules/graphyard-forbidden', 'bad'), { code: 'EROFS' });
     async function start(configFile) {
-      let server;
+      let server, readOnly;
+      // Vite throws EROFS only when it must remove a stale node_modules/.vite/deps; with a fresh
+      // install it logs the failed cache write and serves 504s, so a logged EROFS counts too.
+      const logger = createLogger(), error = logger.error;
+      logger.error = (message, options) => { if (/EROFS/.test(message)) readOnly ??= Object.assign(new Error(message), { code: 'EROFS' }); error(message, options); };
       try {
-        server = await createServer({ configFile, configLoader: 'runner',
+        server = await createServer({ configFile, configLoader: 'runner', customLogger: logger,
           server: { host: '127.0.0.1', port: 0 } });
         await server.listen();
         const origin = server.resolvedUrls.local[0];
@@ -47,12 +51,15 @@ test('integration:vite-private-cache — actual project config starts cold and w
             }
           }
         }
+      } catch (failure) {
+        throw readOnly ?? failure;
       } finally {
         // Pending import transforms can add watched files after watcher.close(),
         // reopening filesystem handles. Drain Vite's crawl before closing it.
         await server?.waitForRequestsIdle();
         await server?.close();
       }
+      if (readOnly) throw readOnly;
     }
     await assert.rejects(start('vite.previous.config.ts'), { code: 'EROFS' });
     await start('vite.config.ts');
