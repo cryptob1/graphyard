@@ -327,7 +327,7 @@ export const composeAdapter: ProviderAdapter = {
     return [
       trialImagePlan(ctx, published?.trial ?? null),
       published
-        ? { id: 'provider.image', target: 'provider', title: `Pull the Graphyard image ${published.server} as ${ctx.image}, or build it from ${ctx.sourceRoot} when it is not published`, state: 'update', command: `docker pull ${published.server} && docker tag ${published.server} ${ctx.image} || ${build}` }
+        ? { id: 'provider.image', target: 'provider', title: `Pull the Graphyard image ${published.server} as ${ctx.image}, or build it from ${ctx.sourceRoot} when it is not published`, state: 'update', command: `docker image pull ${published.server} && docker tag ${published.server} ${ctx.image} || ${build}` }
         : { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: build },
       ...composeActions(ctx, observation),
     ];
@@ -335,7 +335,7 @@ export const composeAdapter: ProviderAdapter = {
   async provision(ctx) {
     const published = publishedSourceImages(ctx.sourceRoot);
     await provisionTrialImage(ctx, published?.trial ?? null);
-    if (published && (await ctx.transport.exec('docker', ['pull', published.server], { allowFailure: true, timeout: 1_800_000 })).code === 0) {
+    if (published && (await ctx.transport.exec('docker', ['image', 'pull', published.server], { allowFailure: true, timeout: 1_800_000 })).code === 0) {
       // The install keeps naming, pruning and rolling back its own tag; the registry's name is dropped, the layers stay.
       await ctx.transport.exec('docker', ['tag', published.server, ctx.image]);
       await ctx.transport.exec('docker', ['image', 'rm', published.server], { allowFailure: true });

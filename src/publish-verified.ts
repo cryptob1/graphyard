@@ -54,7 +54,7 @@ export async function publishVerified(commit: string, ports: { root: string; dir
     await run('sh', ['-c', 'docker login "$0" --username "$1" --password-stdin < "$2"', registry, owner, files.ghcr]);
     const stamp = ['--build-arg', `GRAPHYARD_VERSION=unreleased ${commit.slice(0, 12)}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${commit}`, '--build-arg', `GRAPHYARD_BUILD_SHA=${commit}`];
     await run('docker', ['build', ...stamp, ...tags(images.server).flatMap(tag => ['--tag', tag]), tree]);
-    for (const tag of tags(images.server)) await run('docker', ['push', tag]);
+    for (const tag of tags(images.server)) await run('docker', ['image', 'push', tag]);
     // Only `verified` stays named on this host, so a commit's image goes when the next one replaces it.
     await run('docker', ['image', 'rm', images.server]);
     // The trial image is pushed straight from Graphyard's own builder, whose cache the loop prunes (GY-3188).

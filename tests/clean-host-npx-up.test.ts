@@ -65,8 +65,10 @@ async function standIns(directory: string, origin: string, tree: string, databas
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const args = process.argv.slice(2), state = ${JSON.stringify(join(directory, 'docker-images.json'))}, words = args.join(' ');
+const state = ${JSON.stringify(join(directory, 'docker-images.json'))}, words = process.argv.slice(2).join(' ');
 appendFileSync(${JSON.stringify(join(directory, 'docker.log'))}, words + '\\n');
+// docker image pull|push|rm REF is docker pull|push|rmi REF.
+const args = process.argv[2] === 'image' ? process.argv.slice(3) : process.argv.slice(2);
 // Each image is the commit it was built from: the stamp a real image carries.
 const images = existsSync(state) ? JSON.parse(readFileSync(state, 'utf8')) : {};
 const save = () => writeFileSync(state, JSON.stringify(images));
@@ -85,7 +87,7 @@ else if (args[0] === 'build' || words.startsWith('buildx build')) {
 else if (args[0] === 'push') await push(args[1]);
 else if (args[0] === 'pull') { const found = await fetch(manifest(args[1])); if (!found.ok) fail('manifest unknown: ' + args[1]); images[args[1]] = await found.text(); save(); }
 else if (args[0] === 'tag') { images[args[2]] = images[args[1]] ?? fail('no such image ' + args[1]); save(); }
-else if (words.startsWith('image rm')) { delete images[args[2]]; save(); }
+else if (args[0] === 'rm') { delete images[args[1]]; save(); }
 else if (args[0] === 'compose') {
   // The server container: the image's own command, run from the tree its commit was built from, on the published port.
   const project = args[args.indexOf('--project-directory') + 1], pid = join(project, 'server.pid');
@@ -207,7 +209,7 @@ test('e2e:clean-host-npx-up — a fresh account runs npx graphyard up against a 
 
   // Both images were pulled by that commit from the registry; nothing was built on this host.
   assert.ok(images.pulls.includes(`cryptob1/graphyard:${commit}`) && images.pulls.includes(`cryptob1/graphyard-trial:${commit}`), images.pulls.join(', '));
-  const installing = tools.log('docker').slice(tools.log('docker').findIndex(line => line.startsWith('pull ')));
+  const installing = tools.log('docker').slice(tools.log('docker').findIndex(line => line.startsWith('image pull ')));
   assert.deepEqual(installing.filter(line => /^(build|buildx) /.test(line)), [], 'the install builds no image');
   assert.equal(tools.images()['graphyard-local:owner-scratch'], commit, 'the control plane runs the pulled image');
   assert.equal(readFileSync(join(release, '.graphyard', 'trial-image'), 'utf8').trim(), `${images.host}/cryptob1/graphyard-trial:${commit}`, 'merge trials run the pulled trial image');

@@ -60,7 +60,7 @@ test('unit:tests/publish-verified.test.ts — a verified commit is pushed as bot
     assert.match(call, new RegExp(`--tag ghcr\\.io/cryptob1/${image}:${commit} --tag ghcr\\.io/cryptob1/${image}:verified `));
   }
   assert.match(trial, /--target trial .*--push /);
-  assert.deepEqual(calls.filter(call => call.startsWith('docker push ')), [`docker push ghcr.io/cryptob1/graphyard:${commit}`, 'docker push ghcr.io/cryptob1/graphyard:verified']);
+  assert.deepEqual(calls.filter(call => call.startsWith('docker image push ')), [`docker image push ghcr.io/cryptob1/graphyard:${commit}`, 'docker image push ghcr.io/cryptob1/graphyard:verified']);
   assert.ok(calls.includes(`docker image rm ghcr.io/cryptob1/graphyard:${commit}`), 'the pushed commit tag does not pile up on the publishing host');
   assert.match(calls.find(call => call.startsWith('npm '))!, /^npm publish --tag latest /, 'latest moves to the published version');
   assert.equal(published.length, 1);
@@ -96,7 +96,7 @@ test('unit:tests/publish-verified.test.ts — a missing token publishes nothing 
 
 test('unit:tests/publish-verified.test.ts — a failed push or publish rejects, so the gate logs it and the next verified commit publishes again', async () => {
   const { root, directory, commit } = await checkout();
-  for (const step of ['docker push', 'npm publish']) await assert.rejects(publishVerified(commit, { root, directory, run: stubs(step).run, env: {} }), new RegExp(`${step} failed`));
+  for (const step of ['docker image push', 'npm publish']) await assert.rejects(publishVerified(commit, { root, directory, run: stubs(step).run, env: {} }), new RegExp(`${step} failed`));
 });
 
 /** Graphyard's own coordinator checkout over a scratch origin, a trial that always passes, and `merge()` to land one more item on main. */

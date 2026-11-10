@@ -27,7 +27,7 @@ test('unit:tests/install-pulls-published-images.test.ts — a published commit i
   const server = `ghcr.io/cryptob1/graphyard:${commit}`, trial = `ghcr.io/cryptob1/graphyard-trial:${commit}`;
   await composeAdapter.provision(context(root, transport), {} as never);
   assert.deepEqual(transport.commands.map((_, index) => transport.line(index)),
-    [`docker pull ${trial}`, `docker pull ${server}`, `docker tag ${server} graphyard-local:owner-project`, `docker image rm ${server}`]);
+    [`docker image pull ${trial}`, `docker image pull ${server}`, `docker tag ${server} graphyard-local:owner-project`, `docker image rm ${server}`]);
   assert.equal(transport.files.get(pulledTrialImageFile(root))?.content, `${trial}\n`);
   const actions = composeAdapter.plan(context(root, transport), { database: false, app: false } as never);
   assert.match(actions.find(action => action.id === 'provider.image')!.title, new RegExp(`^Pull the Graphyard image ${server.replace(/\./g, '\\.')} as graphyard-local:owner-project`));
@@ -42,10 +42,10 @@ test('unit:tests/install-pulls-published-images.test.ts — a published commit i
 
 test('unit:tests/install-pulls-published-images.test.ts — a commit that is not published, or a checkout with changes, builds both images here as before', async () => {
   const { root } = await sourceCheckout();
-  const unpublished = fakeTransport({ responses: [{ match: 'docker pull', result: { stdout: '', stderr: 'manifest unknown', code: 1 } }] });
+  const unpublished = fakeTransport({ responses: [{ match: 'docker image pull', result: { stdout: '', stderr: 'manifest unknown', code: 1 } }] });
   await composeAdapter.provision(context(root, unpublished), {} as never);
   const lines = unpublished.commands.map((_, index) => unpublished.line(index));
-  assert.equal(lines.filter(line => line.startsWith('docker pull ')).length, 2);
+  assert.equal(lines.filter(line => line.startsWith('docker image pull ')).length, 2);
   assert.ok(lines.some(line => line.startsWith('docker buildx build ') && line.includes(`--tag ${trialContainerImage} `)), lines.join('\n'));
   assert.ok(lines.some(line => line.startsWith('docker build ') && line.includes('--tag graphyard-local:owner-project ')), lines.join('\n'));
   assert.equal(unpublished.files.size, 0, 'no pulled trial image is named');
