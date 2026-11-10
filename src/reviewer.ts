@@ -545,7 +545,8 @@ export type SessionSandboxProbe = SandboxExec | 'host' | null;
  * not probed here.
  */
 export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false, credentialMask?: CredentialMask, coordinatorRoot?: string) {
-  const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
+  // Inside the master session's confinement no bubblewrap can run (GY-3237): the pane's own launch, started by Herdr on the host, carries the confinement.
+  const run = probe === undefined ? (underTestRunner() || insideMasterConfinement() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
   const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask }, coordinatorRoot);
