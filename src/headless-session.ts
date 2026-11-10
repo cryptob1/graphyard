@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
+import { realRuntimeBinary } from './runtime-binary.js';
 import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
 import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
@@ -191,10 +192,11 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
     let refused = '', moves = 0;
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
-      const argv = [...launch.wrapper, headlessForms[launch.kind]?.program ?? launchProgram(launch.kind), ...headlessArgs(launch.kind, launch.args, prompt)];
+      const env = runEnvironment(process.env, launch.environment);
+      const argv = [...launch.wrapper, realRuntimeBinary(headlessForms[launch.kind]?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, prompt)];
       let output: string | null = null;
       try {
-        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, launch.environment), timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
+        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
         return await input.answer(output);
       } catch (error) {
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
