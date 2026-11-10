@@ -1,3 +1,4 @@
+import { WorkerSandboxError } from '../worker-sandbox.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import { sessionAgents } from '../session-inventory.js';
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
@@ -746,6 +747,10 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
     const full = capacityRefusal(error);
     if (full) {
       sink.push(await entry('waiting', `Dispatch of ${item.key} waits for a worker slot, retried on the first cycle one frees: ${full}`));
+      return;
+    }
+    if (error instanceof WorkerSandboxError) {
+      sink.push(await entry('done', `Blocked ${item.key} until its sandbox is repaired: ${message(error)}`));
       return;
     }
     recordLaunchFailure(state, runtime, item, message(error), now());

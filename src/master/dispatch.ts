@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
-import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
+import { type SandboxExec, environmentBlocker, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
 import { supersededByObservation } from '../model/park-withdrawal.js';
@@ -151,9 +151,12 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   // two overlapping items lands second. A file an item declares is an exclusive resource, held above.
 }
 
-export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
+export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
+  // The served repository can differ from the CLI release checkout (Huck's install).
+  // Confine its Git store, not the launcher's code. Injected preparers retain the test boundary.
+  const coordinatorRoot = options.coordinatorRoot ?? (prepare === prepareWorkerLaunch ? root : undefined);
   // GY-1523: a worker is launched with no push credential and no keyring proxy: the control plane is the only merge writer.
   const mergeWriter: 'control-plane' = 'control-plane';
   let rework: AppliedRework | null;
@@ -262,7 +265,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous, options.diagnosis));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed, initialHead, runtimeStartedAt } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous, options.diagnosis));
               claimedEpoch = epoch;
               // History supports session resume and status; it never grants or reserves a slot.
               const at = new Date().toISOString();
@@ -289,8 +292,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
           // The chosen account's runtime never came up — refused at the bound as never started, or
           // still starting at the ceiling: its pane is closed and its claim released, so the
           // profile's next account takes the launch rather than the dispatch dying silently (GY-417).
-          // GY-1746: a Pi launch refused before its session started — the sandbox probe failing, or the host unable to confine it — likewise moves the same dispatch to the next account.
-          const piRefused = launch.kind === 'pi' && (error instanceof WorkerSandboxError || /never starts a session unconfined|cannot be launched/.test(failureText(error)));
+          // A write probe diagnoses the host/layout, never the selected account.
+          if (error instanceof WorkerSandboxError) throw error;
+          const piRefused = launch.kind === 'pi' && (/never starts a session unconfined|cannot be launched/.test(failureText(error)));
           if (!chosen.account || !(piRefused || error instanceof SessionStartError && ['never started', 'still starting', ...launch.kind === 'pi' ? ['exited'] : []].includes(error.startCase))) throw error;
           startError = error;
           const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
@@ -384,7 +388,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null, diagnosis = '') {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null, diagnosis = '') {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -429,7 +433,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
     try {
       // A sandbox that cannot write them is a launch failure naming the path, not a worker that
-      // fails at its first sync; the claim is released below like any other failed launch.
+      // fails at its first sync; the claimed item is blocked below with the probe cause.
       // The probe runs behind the same coordinator confinement the session will (GY-1321): a sandbox
       // that cannot start inside that read-only mount fails the launch naming the path it refused on.
       if (sandboxProbe) {
@@ -488,7 +492,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         withLaunchClose(error, `${note} before epoch ${prepared.epoch} was released`);
       }
       await keepAlive?.stop();
-      try { await release(root, work.key, prepared.epoch, profile.name); }
+      try { await release(root, work.key, prepared.epoch, profile.name, error instanceof WorkerSandboxError ? environmentBlocker('sandbox write probe', error.runtime, error) : undefined); }
       catch (releaseError) {
         // A lease that is already gone has handed its epoch back: nothing is stranded, so the
         // launch's own failure is reported as it is, as the worktree path does (GY-860, GY-1287).
@@ -634,11 +638,11 @@ export async function renewWorkerLaunch(root: string, key: string, epoch: number
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await run(process.execPath, [config.cliPath, 'heartbeat', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
-export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
+export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, blocker?: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
-  await run(process.execPath, [config.cliPath, 'unclaim', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
+  await run(process.execPath, [config.cliPath, ...(blocker ? ['blocked', key, String(epoch), blocker] : ['unclaim', key, String(epoch)])], { cwd: root, env: workerEnvironment(config, profile) });
 }
 
 /**
