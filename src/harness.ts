@@ -162,6 +162,90 @@ export async function verifyClaudeTrust(trust: FolderTrust) {
   if (!ancestors(trust.directory).some(path => projects[path]?.hasTrustDialogAccepted === true)) throw new LaunchRefusedError('claude', `Graphyard refuses to start the claude runtime in ${trust.directory}: the folder's hasTrustDialogAccepted record in its account config ${trust.file} was dropped by a concurrent rewrite of that config before the session started, so the session would stop at Claude Code's folder-trust dialog for a human; the launch is tried again.`);
 }
 
+/** One Claude launch the checkout's folder trust would refuse, as setup and the loop name it (GY-3225). */
+export interface CheckoutTrustRefusal {
+  /** The checkout whose folder the launch needs trusted. */
+  folder: string;
+  /** The repository-controlled Claude configuration the checkout carries and the launch would load. */
+  carried: string;
+  /** The registry role the session serves and the account it would run on. */
+  role: string;
+  account: string;
+  /** The account's home (its CLAUDE_CONFIG_DIR; null runs the default config) and the config file that records trust. */
+  home: string | null;
+  file: string;
+}
+
+/** The registry as the checkout-trust check reads it: the document's runtimes, accounts and roles. */
+export interface CheckoutTrustFleet {
+  runtimes: readonly { name: string; launch: { kind: string; args: readonly string[] } }[];
+  accounts: readonly { name: string; runtime: string; credential: { host: string; home: string | null } }[];
+  roles: readonly { name: string; accounts: readonly string[]; policy?: { args?: readonly string[] } }[];
+}
+
+/** The roles whose sessions load their role file instead of the repository's own settings (master/harness.ts prepareSessionHarness). */
+const sessionRoles = new Set(['worker', 'reviewer', 'producer']);
+/**
+ * Whether the checkout's worker, reviewer and producer sessions are started with
+ * `--setting-sources user`: they are wherever the checkout carries Claude settings of its own, the
+ * same judgement prepareSessionHarness makes at launch, so the check refuses only the launches the
+ * trust step really would.
+ */
+async function checkoutSessionSources(checkout: string) {
+  for (const name of ['.claude/settings.json', '.claude/settings.local.json']) if (existsSync(resolve(checkout, name))) return true;
+  return !!await repositoryClaudeConfig(checkout);
+}
+
+/**
+ * GY-3225: which registered Claude account launches in the checkout the folder-trust step
+ * (trustClaudeFolder) would refuse — the checkout carries repository Claude configuration the
+ * launch's own arguments load, and the account's config records neither the folder nor an ancestor
+ * trusted. Graphyard never records that trust itself, so every launch named here is refused until
+ * the operator records trust or the role's arguments stop loading project settings; the check is
+ * the loop's and `up`'s, so both stop once instead of launching into the refusal. Accounts on
+ * another host are not this host's to read and never name.
+ */
+export async function checkoutTrustRefusals(checkout: string, fleet: CheckoutTrustFleet | null | undefined, host: string | null): Promise<CheckoutTrustRefusal[]> {
+  const folder = canonicalPath(checkout);
+  const carried = await repositoryClaudeConfig(folder);
+  if (!carried || !fleet) return [];
+  const sessionSources = await checkoutSessionSources(folder);
+  const refused: CheckoutTrustRefusal[] = [];
+  for (const role of fleet.roles) {
+    for (const name of role.accounts) {
+      const account = fleet.accounts.find(entry => entry.name === name);
+      if (!account || account.credential.host !== host) continue;
+      const runtime = fleet.runtimes.find(entry => entry.name === account.runtime);
+      if (!runtime || runtime.launch.kind !== 'claude') continue;
+      const args = [...runtime.launch.args, ...(role.policy?.args ?? []), ...(sessionRoles.has(role.name) && sessionSources ? ['--setting-sources', 'user'] : [])];
+      if (!loadsRepositorySettings(args)) continue;
+      const home = account.credential.home, environment: Record<string, string> = home ? { CLAUDE_CONFIG_DIR: home } : {};
+      const file = claudeConfigFile(environment);
+      const projects: Record<string, any> = await readFile(file, 'utf8').then(text => {
+        const document = JSON.parse(text);
+        return document && typeof document === 'object' && !Array.isArray(document) && document.projects && typeof document.projects === 'object' && !Array.isArray(document.projects) ? document.projects as Record<string, any> : {};
+      }, () => ({}));
+      if (ancestors(folder).some(path => projects[path]?.hasTrustDialogAccepted === true)) continue;
+      refused.push({ folder, carried, role: role.name, account: name, home, file });
+    }
+  }
+  return refused;
+}
+
+/**
+ * GY-3225: the one line an untrusted checkout raises — `up`'s harness step, the loop's standing
+ * attention and the Setup checklist item — naming each untrusted account home and both remedies:
+ * the operator records trust once per account, or the roles launch without the repository's
+ * project settings. One line, no newlines: the loop also carries it in a header.
+ */
+export function checkoutTrustLine(refusals: readonly CheckoutTrustRefusal[]): string {
+  if (!refusals.length) return '';
+  const trust = [...new Set(refusals.map(entry => entry.home))].map(home => home ? `CLAUDE_CONFIG_DIR=${home} claude` : 'claude').join(' and ');
+  const sources = [...new Set(refusals.map(entry => entry.role))].map(role =>
+    `graphyard master registry role set ${role} ${[...new Set(refusals.filter(entry => entry.role === role).map(entry => entry.account))].join(',')} --arg=--setting-sources --arg=user --reason "launch without the repository's own Claude settings"`).join('; ');
+  return `${refusals[0].folder} carries its own Claude configuration (${refusals[0].carried}), which these registered Claude accounts do not trust: ${refusals.map(entry => `${entry.role}/${entry.account} (${entry.home ?? 'its default config'})`).join(', ')}. Graphyard never records that trust itself. Either trust the folder once as the operator — run ${trust} in the checkout and accept the prompt, once per account — or launch those roles without the repository's project settings: ${sources}`;
+}
+
 /**
  * Codex asks "Trust this folder?" the first time it starts in a folder its config does not list
  * as trusted, and neither `--ask-for-approval never` nor the sandbox flag skips it: a reviewer or

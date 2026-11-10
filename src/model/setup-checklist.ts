@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = `account:${RequiredSetupRole}` | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -86,6 +86,13 @@ function accountItems(status: any | null): SetupItem[] {
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',
       action: done ? null : { kind: 'connect', label: 'Connect an account', role } });
   }
+  // GY-3225: the standing checkout-trust refusal the live loop raised (`setup.checkoutTrust`, the
+  // loop's own attention line): the repository carries its own Claude configuration and no
+  // registered Claude account trusts its folder, so no launch goes ahead. One item while it
+  // stands — naming each account home and both remedies — gone once the recorded trust or the
+  // role's arguments change, which the loop re-checks each cycle and this page re-reads.
+  const trust = typeof status?.setup?.checkoutTrust === 'string' ? status.setup.checkoutTrust.trim() : '';
+  if (trust) items.push({ id: 'checkout-trust', title: 'Trust the repository folder for its agent accounts', done: false, human: true, line: trust, action: { kind: 'wait', label: 'Check again' } });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',
