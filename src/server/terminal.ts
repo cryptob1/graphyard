@@ -1,12 +1,12 @@
 // Concern: the live terminal the dashboard's Master page and Workers page show (GY-3211) — a WebSocket bridged to Herdr's terminal session stream.
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createInterface } from 'node:readline';
 import type { Principal } from '../model.js';
 import { loopPanesRegistry } from '../model/loop-presence.js';
-import { herdrInvocation, herdrTarget, herdrTerminalArgs } from '../master/herdr.js';
+import { herdrInvocation, herdrTarget } from '../master/herdr.js';
 import { authenticate } from './auth.js';
 import { canTypeIntoMasterPane } from './principals.js';
 import type { Services } from './routes.js';
@@ -19,79 +19,6 @@ const refuse = (socket: Duplex, status: number, text: string) => { socket.end(`H
 const frame = (opcode: number, payload: Buffer = Buffer.alloc(0)) => {
   const length = payload.length, head = length < 126 ? Buffer.from([0x80 | opcode, length]) : length < 65_536 ? Buffer.from([0x80 | opcode, 126, length >> 8, length & 255]) : Buffer.concat([Buffer.from([0x80 | opcode, 127]), (() => { const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(length)); return size; })()]);
   return Buffer.concat([head, payload]);
-};
-
-const text = (value: unknown) => frame(1, Buffer.from(JSON.stringify(value)));
-/** Completes the WebSocket handshake on SOCKET, echoing the subprotocol the client offered first. */
-const accept = (req: IncomingMessage, socket: Duplex, protocol: string) => socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade',
-  `Sec-WebSocket-Accept: ${createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}`,
-  ...(protocol ? [`Sec-WebSocket-Protocol: ${protocol}`] : []), '', ''].join('\r\n'));
-/** Calls ON for each client frame (masked, as a browser sends them) arriving on SOCKET. */
-const readFrames = (socket: Duplex, on: (opcode: number, payload: Buffer) => void) => {
-  let pending = Buffer.alloc(0);
-  socket.on('data', (chunk: Buffer) => {
-    pending = Buffer.concat([pending, chunk]);
-    for (;;) {
-      if (pending.length < 2) return;
-      const opcode = pending[0]! & 15; let length = pending[1]! & 127, offset = 2;
-      if (length === 126) { if (pending.length < 4) return; length = pending.readUInt16BE(2); offset = 4; }
-      else if (length === 127) { if (pending.length < 10) return; length = Number(pending.readBigUInt64BE(2)); offset = 10; }
-      if (pending.length < offset + 4 + length) return;
-      const mask = pending.subarray(offset, offset + 4), payload = Buffer.from(pending.subarray(offset + 4, offset + 4 + length)).map((byte, index) => byte ^ mask[index % 4]!);
-      pending = pending.subarray(offset + 4 + length);
-      on(opcode, Buffer.from(payload));
-    }
-  });
-};
-
-/** A herdr terminal stream, wherever it runs: a command goes in as a JSON line, lines come out through the handlers. */
-interface Stream { send(command: unknown): void; end(): void }
-interface Handlers { line(line: string): void; exit(reason: string): void }
-interface StreamRequest { control: boolean; pane: string; cols: string; rows: string }
-
-/**
- * On a compose install the server container has no herdr: the loop, running on the host beside
- * Herdr, connects to /api/terminal-host (GY-3241) and runs each stream for the server. One host at a time.
- */
-let host: { socket: Duplex; streams: Map<string, Handlers> } | null = null;
-const hostUpgrade = async (services: Services, req: IncomingMessage, socket: Duplex) => {
-  const [protocol, token = ''] = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(part => part.trim());
-  let actor: Principal;
-  try { actor = await authenticate(services, `Bearer ${token}`, services.repository); } catch { return refuse(socket, 401, 'Unauthorized'); }
-  if (actor.role !== 'coordinator') return refuse(socket, 403, 'Forbidden');
-  accept(req, socket, protocol);
-  const mine = { socket, streams: new Map<string, Handlers>() };
-  host?.socket.destroy(); host = mine;
-  const gone = () => { if (host === mine) host = null; for (const [id, handlers] of mine.streams) { mine.streams.delete(id); handlers.exit('the host supervisor disconnected'); } };
-  readFrames(socket, (opcode, payload) => {
-    if (opcode === 8) return void socket.end(frame(8));
-    if (opcode === 9) socket.write(frame(10, payload));
-    if (opcode !== 1) return;
-    let message: any; try { message = JSON.parse(payload.toString('utf8')); } catch { return; }
-    const handlers = mine.streams.get(String(message.id));
-    if (typeof message.line === 'string') handlers?.line(message.line);
-    if (typeof message.exit === 'string') { mine.streams.delete(String(message.id)); handlers?.exit(message.exit); }
-  });
-  socket.on('close', gone).on('error', gone);
-};
-
-const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest, handlers: Handlers): Stream => {
-  const id = randomUUID();
-  bridge.streams.set(id, handlers);
-  const send = (value: object) => { if (bridge.socket.writable) bridge.socket.write(text({ id, ...value })); };
-  send({ type: 'open', ...request });
-  return { send: command => send({ type: 'command', command }), end: () => { send({ type: 'close' }); bridge.streams.delete(id); } };
-};
-
-const localStream = (args: string[], instance: Parameters<typeof herdrInvocation>[1], handlers: Handlers): Stream => {
-  const call = herdrInvocation(args, instance);
-  const herdr = spawn(call.command, call.args, { env: call.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
-  let stderr = '';
-  herdr.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-300); });
-  herdr.on('error', error => handlers.exit((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'herdr is not installed where the server runs, and no host supervisor is connected to stream it' : error.message))
-    .on('exit', code => handlers.exit(stderr.trim() || `herdr exited with code ${code}`));
-  createInterface({ input: herdr.stdout }).on('line', handlers.line);
-  return { send: command => { if (herdr.stdin.writable) herdr.stdin.write(`${JSON.stringify(command)}\n`); }, end: () => { herdr.stdin.end(); setTimeout(() => herdr.kill(), 1_000).unref(); } };
 };
 
 /**
@@ -110,7 +37,6 @@ const localStream = (args: string[], instance: Parameters<typeof herdrInvocation
  */
 export async function terminalUpgrade(services: Services, req: IncomingMessage, socket: Duplex) {
   const url = new URL(req.url ?? '/', 'http://localhost');
-  if (url.pathname === '/api/terminal-host') return hostUpgrade(services, req, socket);
   if (url.pathname !== '/api/terminal') return refuse(socket, 404, 'Not Found');
   const [protocol, token = ''] = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(part => part.trim());
   let actor: Principal;
@@ -121,32 +47,30 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   if (pane !== master && !(await services.engine.store.pool.query('SELECT 1 FROM work_items WHERE document->\'sessions\' @> $1::jsonb LIMIT 1', [JSON.stringify([{ pane, state: 'running' }])])).rowCount) return refuse(socket, 404, 'Not Found');
   const control = pane === master && canTypeIntoMasterPane(actor);
   const size = (name: string, fallback: number) => String(Math.min(500, Math.max(10, Number(url.searchParams.get(name)) || fallback)));
-  accept(req, socket, protocol);
-  socket.write(text({ pane, mode: control ? 'control' : 'observe' }));
+  socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade',
+    `Sec-WebSocket-Accept: ${createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}`,
+    ...(protocol ? [`Sec-WebSocket-Protocol: ${protocol}`] : []), '', ''].join('\r\n'));
+  socket.write(frame(1, Buffer.from(JSON.stringify({ pane, mode: control ? 'control' : 'observe' }))));
 
-  // The loop's host stream when one is connected (a compose install), else herdr where the server runs.
   const instance = panes?.configHome && panes.session ? { configHome: panes.configHome, session: panes.session } : herdrTarget();
-  const [cols, rows] = [size('cols', 120), size('rows', 40)];
-  let closed = false, framed = false;
+  const call = herdrInvocation(['terminal', 'session', control ? 'control' : 'observe', pane, ...(control ? ['--takeover'] : []), '--cols', size('cols', 120), '--rows', size('rows', 40)], instance);
+  const herdr = spawn(call.command, call.args, { env: call.env ?? process.env, stdio: ['pipe', 'pipe', 'ignore'] });
+  const command = (value: unknown) => { if (herdr.stdin.writable) herdr.stdin.write(`${JSON.stringify(value)}\n`); };
+  let closed = false;
   const close = () => {
     if (closed) return; closed = true;
-    if (control) herdr.send({ type: 'terminal.release' });
-    herdr.end();
+    if (control) command({ type: 'terminal.release' });
+    herdr.stdin.end(); setTimeout(() => herdr.kill(), 1_000).unref();
     if (socket.writable) socket.end(frame(8));
   };
-  const handlers: Handlers = {
-    line: line => {
-      let record: any; try { record = JSON.parse(line); } catch { return; }
-      if (record.type === 'terminal.frame' && typeof record.bytes === 'string') { framed = true; socket.write(frame(2, Buffer.from(record.bytes, 'base64'))); }
-      if (record.type === 'terminal.closed') close();
-    },
-    // A stream that ends before showing anything is a refusal the page words with its cause, not a detach.
-    exit: reason => { if (!framed && socket.writable) socket.write(text({ refused: reason })); close(); },
-  };
-  const herdr = host ? bridgedStream(host, { control, pane, cols, rows }, handlers) : localStream(herdrTerminalArgs(control, pane, cols, rows), instance, handlers);
-  const command = herdr.send;
+  herdr.on('error', close).on('exit', close);
+  createInterface({ input: herdr.stdout }).on('line', line => {
+    let record: any; try { record = JSON.parse(line); } catch { return; }
+    if (record.type === 'terminal.frame' && typeof record.bytes === 'string') socket.write(frame(2, Buffer.from(record.bytes, 'base64')));
+    if (record.type === 'terminal.closed') close();
+  });
 
-  let typed = '';
+  let typed = '', pending = Buffer.alloc(0);
   const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
   const message = (text: string) => {
     let input: any; try { input = JSON.parse(text); } catch { return; }
@@ -160,10 +84,20 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
       else if (char >= ' ') typed += char;
     }
   };
-  readFrames(socket, (opcode, payload) => {
-    if (opcode === 8) return close();
-    if (opcode === 9) socket.write(frame(10, payload));
-    if (opcode === 1) message(payload.toString('utf8'));
+  socket.on('data', (chunk: Buffer) => {
+    pending = Buffer.concat([pending, chunk]);
+    for (;;) {
+      if (pending.length < 2) return;
+      const opcode = pending[0]! & 15; let length = pending[1]! & 127, offset = 2;
+      if (length === 126) { if (pending.length < 4) return; length = pending.readUInt16BE(2); offset = 4; }
+      else if (length === 127) { if (pending.length < 10) return; length = Number(pending.readBigUInt64BE(2)); offset = 10; }
+      if (pending.length < offset + 4 + length) return;
+      const mask = pending.subarray(offset, offset + 4), payload = Buffer.from(pending.subarray(offset + 4, offset + 4 + length)).map((byte, index) => byte ^ mask[index % 4]!);
+      pending = pending.subarray(offset + 4 + length);
+      if (opcode === 8) return close();
+      if (opcode === 9) socket.write(frame(10, Buffer.from(payload)));
+      if (opcode === 1) message(Buffer.from(payload).toString('utf8'));
+    }
   });
   socket.on('close', close).on('error', close);
 }

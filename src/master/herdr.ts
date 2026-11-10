@@ -202,5 +202,3 @@ export async function stopCreatedHerdrTab(pane: string | undefined, tab: string 
   }
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
-/** The herdr arguments of a pane's terminal stream: writable `control` (taking over) or read-only `observe`. */
-export const herdrTerminalArgs = (control: boolean, pane: string, cols: string, rows: string) => ['terminal', 'session', control ? 'control' : 'observe', pane, ...(control ? ['--takeover'] : []), '--cols', cols, '--rows', rows];
