@@ -340,7 +340,7 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.deepEqual(trialTemporaryRoots('/var/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp']);
   assert.deepEqual(trialTemporaryRoots('/tmp', '/home/me'), ['/tmp', '/home/me/.gy/tmp']);
   assert.deepEqual([...trialLookupEntries], ['node_modules', '.git', 'package.json']);
-  assert.deepEqual(trialTemporaryVariables('/var/tmp/gy-tx'), { TMPDIR: '/var/tmp/gy-tx', TMP: '/var/tmp/gy-tx', TEMP: '/var/tmp/gy-tx' });
+  assert.deepEqual(trialTemporaryVariables('/var/tmp/gy-tx'), { TMPDIR: '/var/tmp/gy-tx', TMP: '/var/tmp/gy-tx', TEMP: '/var/tmp/gy-tx', TURBO_CACHE_DIR: '/var/tmp/gy-tx/turbo' });
   // The filesystem root is inspected too: a container\'s /node_modules poisons /tmp and /var/tmp alike.
   for (const entry of trialLookupEntries) assert.equal(lookupPoisoned('/var/tmp', path => path === `/${entry}`), true, `a /${entry} poisons every candidate`);
   assert.equal(lookupPoisoned('/var/tmp', () => false), false);

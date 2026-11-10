@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { runTrial, trialMerge, trialTemporaryVariables, TrialReadOnlyError } from '../src/merge-writer/trial.js';
+import { runTrial, trialMerge, readOnlyPath, trialAttempts, trialTemporaryVariables, TrialReadOnlyError } from '../src/merge-writer/trial.js';
 import { mergeOne, type MergePorts } from '../src/merge-writer/executor.js';
 import { awaitsMerge, readOnlyTrialBlocker } from '../src/model/merge-queue.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -94,6 +94,7 @@ const turboWorkspace: Record<string, string> = {
   'apps/one/build.mjs': build,
   'packages/shared/package.json': JSON.stringify({ name: 'shared', version: '1.0.0', private: true, scripts: { build: 'node build.mjs' } }),
   'packages/shared/build.mjs': build,
+  'e2e/cases/fixture.json': JSON.stringify({ id: 'fixture', title: 'Fixture', target: 'any', required: false, steps: [{ kind: 'command', name: 'builds', run: 'node --eval 0' }] }),
 };
 const write = async (root: string, files: Record<string, string>) => {
   for (const [path, content] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), content); }
@@ -141,6 +142,8 @@ const worker: Principal = { id: 'worker', role: 'worker' };
 const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 
 test('integration:turbo-writable-cache — a build step failing with \'Read-only file system\' records one blocker naming the path and does not send the item back for a new head', { timeout: 600_000 }, async () => {
+  // Turbo's own report wraps the path across lines; the blocker names it whole.
+  assert.equal(readOnlyPath('  x IO error: failed to create directory `/home/vish/code/huck-\n  | graphyard/.turbo/cache`\n  `-> Read-only file system (os error 30)\n'), '/home/vish/code/huck-graphyard/.turbo/cache');
   const root = await temporaryDirectory('turbo-read-only', tmpdir());
   const path = '/srv/checkout/.turbo/cache';
   const { base, head } = await repository(root, { 'apps/one/build.mjs': `console.error("Error: EROFS: read-only file system, mkdir '${path}'");\nprocess.exit(1);\n` });
@@ -153,7 +156,7 @@ test('integration:turbo-writable-cache — a build step failing with \'Read-only
     http = server(engine, [{ ...coordinator, token }]);
     await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-    let work = await engine.execute(operator, 'create', null, { type: 'bug', title: 'turbo app', criteria: [{ id: 'AC-1', text: 'Builds', proofs: ['unit:builds'] }] }, randomUUID());
+    let work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'turbo app', criteria: [{ id: 'AC-1', text: 'Builds', proofs: ['unit:builds', 'e2e:fixture'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'fixture', path: root, branch: 'graphyard/gy-1-1' }, randomUUID());
@@ -186,7 +189,7 @@ test('integration:turbo-writable-cache — a build step failing with \'Read-only
     assert.equal(awaitsMerge(current, { [current.key]: current.mergeLedger! }, Date.now()), false, 'the queue holds the head while the blocker stands');
     // A repeated record keeps the one blocker.
     const blocker = current.blocker;
-    await ports.record(current, { kind: 'trial', head, baseTip: base, mergeSha: current.mergeLedger!.mergeSha!, outcome: 'host-failure', phase: 'build', reason: failed.message.slice(0, 900), phases: { install: 0, build: 0, selection: 0, tests: 0 }, attempts: [], durationMs: 0 });
+    await ports.record(current, { kind: 'trial', head, baseTip: base, mergeSha: current.mergeLedger!.mergeSha!, outcome: 'host-failure', phase: 'build', reason: failed.message.slice(0, 900), phases: { install: 0, build: 0, selection: 0, tests: 0 }, attempts: trialAttempts(failed), durationMs: 0 });
     current = (await store.workDocument(work.id))!;
     assert.equal(current.blocker, blocker);
     assert.equal(current.reworkRequested, false);
