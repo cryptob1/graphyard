@@ -282,7 +282,8 @@ async function closeStep(cycle: Cycle) {
     const endedAt = Date.parse((item as Work & CoordinationRounds).attemptEnd?.endedAt ?? item.updatedAt);
     const force = item.stage === 'done' && clock - endedAt > finishedWorktreeKeepMs;
     const key = `worktree:${item.id}:${space.epoch}${force ? ':forced' : ''}`;
-    if (state.actions[key]) continue;
+    // GY-3226: a failed removal is tried again on the next cycle.
+    if (state.actions[key]?.state === 'done') continue;
     try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
   }

@@ -1,0 +1,13 @@
+{
+  "id": "reclaim-readonly-worktree",
+  "title": "The loop removes an ended attempt's worktree that holds read-only directories, and retries a failed removal",
+  "description": "Runs the loop's real cycle against a real temporary Postgres over an ended attempt's worktree holding a nested 0555 npm tree and a symlink to a read-only directory outside it: an injected first removal failure is retried on the next cycle, which removes the tree without following or chmodding the symlink's target (GY-3226).",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Reclaim a read-only worktree",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/reclaim-readonly-worktree.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
