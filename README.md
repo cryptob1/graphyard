@@ -37,7 +37,7 @@ npx @cryptob1/graphyard up --repo OWNER/NAME
 
 It prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). File a goal in **New work item** with acceptance criteria and required proof names; watch with `npx @cryptob1/graphyard master status`. Graphyard updates daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates now. In Setup, the operator can invite viewers or maintainers with a one-time sign-in link and revoke invitations made there.
 
-`npx @cryptob1/graphyard doctor` checks credentials, agent logins, confinement, the kernel and services; failed checks print the fix.
+Run `npx @cryptob1/graphyard doctor` in the checkout to check credentials, agent logins, confinement, the kernel and services; failed checks print the fix.
 
 ## Learn more
 
