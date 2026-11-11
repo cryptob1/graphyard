@@ -25,7 +25,8 @@ import { chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, l
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
@@ -105,14 +106,12 @@ async function master(workers: { name: string; principal: string; kind: string; 
   await atomicPrivateWrite(join(root, '.graphyard/master.json'), config);
   return { root, credentialDirectory, config: await loadMasterConfig(root) };
 }
-const herdr = (calls: string[][], fail?: (args: string[]) => boolean) => (_command: string, args: string[]) => {
+/** Herdr for the reviewer launches below: the launch starts its runtime at once (GY-121). */
+const herdr = (calls: string[][]) => (_command: string, args: string[]) => {
   calls.push(args);
-  if (fail?.(args)) throw new Error('herdr refused the launch');
-  // The typed launch starts its runtime at once, and Herdr sees it ready under the pane (GY-121).
   return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' }, tab: { tab_id: 'tab-1' } }
     : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
-const tabEnvironment = (tab: string[]) => Object.fromEntries(tab.flatMap((value, index) => value === '--env' ? [tab[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
 let items = 0;
 const readyWork = (key = `GY-${++items + 900}`) => ({ id: `work-${key}`, key, title: 'Registry fixture', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true },
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], observation: null,
@@ -127,10 +126,12 @@ function reviewWork(key: string, sha: string): Work {
 }
 const registerReviewerSession = async () => ({ launch: 'fixture-launch' });
 
-/** One executor action: a worker dispatch through the same code path `master run` and `master dispatch` take. */
-async function dispatch(root: string, config: any, profile: string, probe: EnvironmentProbe, calls: string[][] = [], fail?: (args: string[]) => boolean) {
-  const item = readyWork();
-  return dispatchWork(root, item, config.workers.find((entry: any) => entry.name === profile), [], herdr(calls, fail), [item], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe, prompt: { attempts: 1, pauseMs: 0, acceptMs: 1_000 } });
+/** One executor action: a worker dispatch through the same code path `master run` and `master dispatch` take; its run stays live, holding its registry session. */
+async function dispatch(root: string, config: any, profile: string, probe: EnvironmentProbe, failure?: string) {
+  const item = readyWork(), worker = recordedRuns({ running: true, fail: () => failure ?? null });
+  const result = await dispatchWork(root, item, config.workers.find((entry: any) => entry.name === profile), { allWork: [item], prepare: async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: worker.exec, startupMs: worker.startupMs, probe })
+    .finally(() => worker.forget());
+  return Object.assign(result, { run: worker.runs[0] });
 }
 
 // ---------------------------------------------------------------------------
@@ -262,17 +263,15 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   // arguments, and names no account. The registry decides what actually runs.
   const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }, { name: 'worker-c', principal: 'implementer-c', kind: 'claude', agentArgs: ['--permission-mode', 'default'] }]);
   assert.equal(config.environments, undefined); assert.ok(config.workers.every(entry => !entry.accounts));
-  const calls: string[][] = [];
-  const dispatched = await dispatch(root, config, 'worker-a', probe, calls);
+  const dispatched = await dispatch(root, config, 'worker-a', probe);
   assert.equal(dispatched.account!.environment, 'claude-fresh'); assert.equal(dispatched.account!.kind, 'claude');
   assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['claude-off', 'claude-spent', 'claude-out', 'claude-remote']);
   const reasons = dispatched.account!.skipped.map(entry => entry.reason);
   assert.match(reasons[0], /claude-off is disabled/); assert.match(reasons[1], /claude-spent quota is exhausted until .*7d window at 100%/); assert.match(reasons[2], /claude-out is not logged in/); assert.match(reasons[3], /claude-remote is placed on build-host-2; this executor is build-host-1/);
-  const tab = tabEnvironment(calls[0]);
-  assert.equal(tab.CLAUDE_CONFIG_DIR, fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-  const typed = expandTypedCommand(calls[1][3]!);
-  assert.equal(typed.kind, 'claude'); assert.deepEqual(typed.args.slice(0, 4), ['--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5'], 'the registry runtime\'s contract and the account\'s model, not the profile\'s runtime');
-  assert.doesNotMatch(calls[1][3]!, /gpt-codex-only/);
+  const run = dispatched.run!;
+  assert.equal(run.env.CLAUDE_CONFIG_DIR, fresh); assert.equal(run.env.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(run.env.CODEX_HOME, undefined);
+  assert.equal(run.runtime, 'claude'); assert.deepEqual(run.args.slice(6, 10), ['--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5'], 'the registry runtime\'s contract and the account\'s model, not the profile\'s runtime');
+  assert.ok(!run.args.includes('gpt-codex-only'));
 
   // The choice and its reason are recorded in the control plane, with what the executor observed.
   const recorded: Registry = await ok('agent-registry/document', coordinator);
@@ -302,9 +301,9 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // A launch that fails gives its session back at once, so its account and the role's slot are free again.
   await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-fresh'], concurrency: 3 }, reason: 'room for one more' });
-  await assert.rejects(dispatch(root, config, 'worker-a', probe, [], args => args[0] === 'pane' && args[1] === 'run'), /herdr refused the launch/);
+  await assert.rejects(dispatch(root, config, 'worker-a', probe, 'the runtime could not be started'), /worker exited at once/);
   const released = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
-  assert.ok(released.endedAt); assert.match(released.endReason!, /worker launch for GY-\d+ failed: herdr refused the launch/);
+  assert.ok(released.endedAt); assert.match(released.endReason!, /worker launch for GY-\d+ failed: the claude worker exited at once/);
   // So does a launch refused for its effective arguments after the account was chosen: a role
   // policy restoring the approval prompt ends the session it reserved, not five minutes later
   // (GY-184). A registry role launches with its own policy, never the profile's arguments (GY-170).
@@ -380,7 +379,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   // One run: the executor's configuration is loaded once and never again, and its file is never written.
   const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
   const file = join(root, '.graphyard/master.json'), bytes = await readFile(file, 'utf8');
-  const next = async () => { const calls: string[][] = []; const result = await dispatch(root, config, 'worker-a', probe, calls); return { account: result.account!.environment, kind: result.account!.kind, skipped: result.account!.skipped, tab: tabEnvironment(calls.find(call => call[0] === 'tab')!) }; };
+  const next = async () => { const result = await dispatch(root, config, 'worker-a', probe); return { account: result.account!.environment, kind: result.account!.kind, skipped: result.account!.skipped, tab: result.run!.env }; };
   assert.equal((await next()).account, 'claude-a');
 
   // Add an account mid-run, ahead of the one in use: the very next action runs on it.
@@ -432,9 +431,8 @@ test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer,
   const spent = network({ 'claude-one-oauth-token': { five: 10, seven: 100 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
 
   // The worker launch runs on the second account; with what it observed folded in, the loop's gate reads every role launchable through the fleet.
-  const calls: string[][] = [];
-  const worker = await dispatch(root, config, 'worker-a', spent, calls);
-  assert.equal(worker.account!.environment, 'claude-two'); assert.equal(tabEnvironment(calls.find(call => call[0] === 'tab')!).CLAUDE_CONFIG_DIR, homeB);
+  const worker = await dispatch(root, config, 'worker-a', spent);
+  assert.equal(worker.account!.environment, 'claude-two'); assert.equal(worker.run!.env.CLAUDE_CONFIG_DIR, homeB);
   for (const role of fleetRoles) {
     const health = (await fleetRoleHealth(config, role, spent))!;
     assert.deepEqual([health.available, health.failover], [true, 'claude-two'], `${role}: the role is launchable through the fleet`);
@@ -551,9 +549,8 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.equal(applied.applied, true); assert.equal(applied.registry.configured, true);
   // A working fleet, with no profile account written by hand: the first dispatch runs on a discovered login.
   const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex' }]);
-  const calls: string[][] = [];
-  const first = await dispatch(root, config, 'worker-a', network({ 'claude-b-oauth-token': { five: 1, seven: 1 } }), calls);
-  assert.equal(first.account!.environment, 'claude-b'); assert.equal(tabEnvironment(calls[0]).CLAUDE_CONFIG_DIR, isolated);
+  const first = await dispatch(root, config, 'worker-a', network({ 'claude-b-oauth-token': { five: 1, seven: 1 } }));
+  assert.equal(first.account!.environment, 'claude-b'); assert.equal(first.run!.env.CLAUDE_CONFIG_DIR, isolated);
   // Running it again proposes only what is new, and never reorders what an operator arranged.
   await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['codex-a', 'claude-b'], concurrency: 7 }, reason: 'An operator\'s own order' });
   await writeFile(join(directory, 'claude-c', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-c-token', refreshToken: 'r', expiresAt: Date.now() + hour } }));
@@ -675,17 +672,17 @@ for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wa
   const probe = network({ 'capacity-worker-oauth-token': { five: 5, seven: 10 } });
   const occupied = [];
   for (const key of ['GY-8001', 'GY-8002']) occupied.push(await selectAccount(config, 'worker', config.workers[0], { ...probe, work: key }));
-  const item = readyWork('GY-8003'), state = emptyDaemonState(config), prompts: string[] = [], calls: string[][] = [];
+  const item = readyWork('GY-8003'), state = emptyDaemonState(config), prompts: string[] = [];
   let now = Date.now(), claims = 0, mode = 'normal';
   const effects: DaemonEffects = {
     snapshot: async () => ({ work: [item], now: new Date(now).toISOString() }),
     agents: () => [{ name: config.masterAgentName, pane_id: 'master-pane', agent_status: 'working' }],
     credentials: async () => ({ 'queued-worker': { available: true, reason: null } }),
     closeSession: () => {}, persist: async () => {},
-    dispatch: async (work, profile, _agents, snapshot) => dispatchWork(root, work, profile, [], herdr(calls, args => mode === 'launcher' && args[0] === 'pane' && args[1] === 'run'), [work], async () => {
+    dispatch: async (work, profile, _agents, snapshot) => { const worker = recordedRuns({ running: true, fail: () => mode === 'launcher' ? 'the launcher could not start the run' : null }); return dispatchWork(root, work, profile, { allWork: [work], prepare: async () => {
       claims++;
       return { epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) };
-    }, async () => {}, 5_000, snapshot.now, { probe: mode === 'unreadable' ? { ...probe, fetch: async () => { throw new Error('registry unreadable'); } } : probe, prompt: { attempts: 1, pauseMs: 0, acceptMs: 1_000 } }),
+    }, release: async () => {}, observedAt: snapshot.now, headless: worker.exec, startupMs: worker.startupMs, probe: mode === 'unreadable' ? { ...probe, fetch: async () => { throw new Error('registry unreadable'); } } : probe }).finally(() => worker.forget()); },
     masterSession: { launch: async () => { throw new Error('master already visible'); }, wake: async (_target, text) => { prompts.push(text); } },
   };
   const cycle = () => runCycle(config, state, effects, () => now);
@@ -695,7 +692,6 @@ for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wa
     assert.match(state.actions[dispatchKey(item)].detail, /worker slot.*role worker is at its concurrency limit/);
     assert.deepEqual(state.launchBackoff, {});
     assert.equal(claims, 0);
-    assert.equal(calls.length, 0);
     assert.deepEqual(prompts, []);
   }
   // Capacity waits do not suppress the bounded open-work heartbeat.
@@ -716,9 +712,9 @@ for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wa
     state.launchBackoff = {};
     await cycle();
     assert.equal(state.actions[dispatchKey(item)].state, 'failed');
-    assert.match(state.actions[dispatchKey(item)].detail, failure === 'launcher' ? /herdr refused the launch/ : /registry unreadable/);
+    assert.match(state.actions[dispatchKey(item)].detail, failure === 'launcher' ? /worker exited at once/ : /registry unreadable/);
     await cycle(); // asynchronous launch settles before the next wake decision
-    assert.match(prompts.at(-1)!, failure === 'launcher' ? /herdr refused the launch/ : /registry unreadable/);
+    assert.match(prompts.at(-1)!, failure === 'launcher' ? /worker exited at once/ : /registry unreadable/);
   }
   assert.equal(claims, 2, 'an unreadable registry claims no lease');
 });

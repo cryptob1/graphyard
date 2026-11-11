@@ -326,6 +326,8 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
   root: string; exec: HeadlessExec;
   /** The run's hard bound, the configured attempt ceiling; the loop's attempt bound stops a run without progress first. */
   timeoutMs: number;
+  /** How long the start is watched; `workerStartupMs` by default. */
+  startupMs?: number;
   /** Hears a run that outlived its startup observation end, with what it printed, once its process has ended. */
   settle?: (ended: { output: string; ok: boolean }) => Promise<unknown>;
 }
@@ -348,7 +350,7 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const argv = [...input.supervisor, ...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, launch.request, launch.contract)];
   const stop = new AbortController(), detached = new AbortController();
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
-  const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), workerStartupMs).unref())]);
+  const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), input.startupMs ?? workerStartupMs).unref())]);
   const printed = () => readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '';
   if (ended) return { id, ended: { ...ended, output: printed() } };
   void watchWorker(record, directory, running, stop, detached).then(async () => detached.signal.aborted ? undefined : input.settle?.({ output: printed(), ok: await running.then(() => true, () => false) })).catch(() => {});

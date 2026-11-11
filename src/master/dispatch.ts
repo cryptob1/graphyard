@@ -61,8 +61,8 @@ export interface DispatchOptions {
   allWork?: Work[]; observedAt?: string;
   /** Claims the item and builds its worktree, and hands a failed launch's claim back; prepareWorkerLaunch and releaseWorkerLaunch by default. */
   prepare?: WorkerPreparer; release?: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>;
-  /** Runs the worker's one headless child (GY-3259); spawnHeadless outside tests. */
-  headless?: HeadlessExec;
+  /** Runs the worker's one headless child (GY-3259); spawnHeadless outside tests. `startupMs` is how long its start is watched (workerStartupMs). */
+  headless?: HeadlessExec; startupMs?: number;
   /** Records a worker run that stopped at once on its provider's limit notice on the item, as the coordinator: its handoff and the account hold. Absent, the hold is the dispatch's own start failure. */
   capacity?: (event: Record<string, unknown>) => Promise<unknown>;
   /** Overrides the credential-mask read probe (GY-3228); tests supply one. */
@@ -224,7 +224,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       assertClaimDeadline(work.key, options.claimBy);
       result = await launchWorker(root, config, work, profile, launch, prepare, release, { settleReservation: async reason => chosen.release?.(reason), sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
         renew: options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), renewIntervalMs: options.renewIntervalMs, verificationMaps: options.verificationMaps ?? readVerificationMaps, rework, cycle: observedAt,
-        diagnosis: options.diagnosis ?? '', maskProbe: options.maskProbe, headless: options.headless ?? defaultHeadlessExec(), capacity: options.capacity });
+        diagnosis: options.diagnosis ?? '', maskProbe: options.maskProbe, headless: options.headless ?? defaultHeadlessExec(), startupMs: options.startupMs, capacity: options.capacity });
     } catch (error) {
       // The registry session chosen for this launch never ran on; its account is free again at once.
       await chosen.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
@@ -321,8 +321,8 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
 }
 
 
-interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; capacity?: DispatchOptions['capacity'] }
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, capacity }: WorkerLaunchOptions) {
+interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; startupMs?: number; capacity?: DispatchOptions['capacity'] }
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, startupMs, capacity }: WorkerLaunchOptions) {
   const mergeWriter = 'control-plane' as const;
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
@@ -384,7 +384,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const started = await startHeadlessWorker({ name: profile.agentName, work: work.key, subject: `${work.key}: ${work.title}`, epoch: prepared.epoch, principal: profile.principal, account: launch.account ?? null,
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
-        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run),
+        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), startupMs,
         settle: async ({ output }) => { await stoppedOnLimit(output).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
       if (started.ended) { await settleEarlyExit(started.ended); await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`); }
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
