@@ -75,7 +75,8 @@ function reviewItem(key: string): Work {
 }
 
 async function configure(entries: { name: string; kind: string; failure?: string; contract?: boolean; wait?: boolean }[]) {
-  const runtimes = [], accounts = [];
+  const runtimes = [];
+  const accounts = (await registry.document(coordinator)).accounts.filter(account => !entries.some(entry => entry.name === account.name)).map(({ quota, quotaDecision, smoke, unjudged, ...account }) => ({ ...account, enabled: false }));
   for (const entry of entries) {
     const home = await temporaryDirectory(entry.name, scratch); homes.set(entry.name, home);
     await writeFile(join(home, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: 'fixture-key' } }));
@@ -99,7 +100,7 @@ console.log(JSON.stringify({ verdict: 'APPROVE', body: 'Reviewed head ${head} ag
 `, { mode: 0o755 });
     runtimes.push({ name: entry.name, launch: { kind: entry.kind, args: ['--interactive-must-not-appear'], ...(entry.contract === false ? {} : { headlessArgs: ['one-task', '--prompt', '{request}'] }),
       environment: { PATH: `${bin}:/usr/bin:/bin`, HOME: home }, homeVariable: 'RUNTIME_HOME', modelFlag: '--model', toolsFlag: '--tools' } });
-    accounts.push({ name: entry.name, runtime: entry.name, model: 'fixture', credential: { host: hostId, home } });
+    accounts.push({ enabled: true, maxSessions: null, name: entry.name, runtime: entry.name, model: 'fixture', credential: { host: hostId, home } });
   }
   await registry.mutate(coordinator, 'apply', { runtimes, accounts, models: [{ name: 'fixture', id: 'fixture-model' }],
     roles: [{ name: 'reviewer', accounts: entries.map(entry => entry.name), concurrency: 4, policy: { args: ['--role-policy'], tools: ['read'] } }], reason: 'fixture runtime matrix' }, randomUUID());
@@ -226,7 +227,7 @@ test('e2e:headless-reviewers — confinement refusal starts no model and never f
 });
 
 test('e2e:headless-reviewers — exhausting every account leaves the exact request pending with its diagnosis', async () => {
-  await configure([{ name: 'last-login', kind: 'claude', failure: 'Not logged in' }, { name: 'last-limit', kind: 'muse', failure: "You've hit your session limit" }]);
+  await configure([{ name: 'last-login', kind: 'muse', failure: 'Not logged in' }, { name: 'last-limit', kind: 'claude', failure: "You've hit your session limit" }]);
   const work = reviewItem('GY-9480');
   const launched = await dispatch(work);
   const record = await reviewed(launched.id);
