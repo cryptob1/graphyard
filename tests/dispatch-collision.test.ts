@@ -7,16 +7,16 @@ import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { capacityRefusal } from '../src/fleet.js';
-import { dispatchWork, setupMaster, watchSupervisorRunning, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { dispatchWork, setupMaster, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { startedAtOnce } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { workFixture } from './helpers/work-fixture.js';
 
-// GY-273: concurrent dispatchers launch implementation work from their own snapshots of
-// Herdr's agents. Two of them picking one profile used to mean two claims, two runtimes started,
-// and the loser — refused its name by Herdr — closing the pane of the worker it had just started.
+// GY-273: concurrent dispatchers launch implementation work from their own snapshots. Two of them
+// picking one profile used to mean two claims and two runtimes started; the registry's slot is
+// taken before any claim, so only one launches.
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const workerToken = 'worker-token-'.padEnd(40, 'x');
@@ -26,31 +26,6 @@ function work(key: string, overrides: Partial<Work> = {}): Work {
   return workFixture({ key, createdAt: at, updatedAt: at, stageEnteredAt: at, ...overrides });
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
-
-/**
- * One Herdr the dispatchers share: panes are created with distinct ids, a rename takes the name
- * only while no live agent holds it (Herdr's own agent_name_taken), and `agent list` answers the
- * names taken so far. `failRename` makes every rename fail after the command line is in the pane.
- */
-function fakeHerdr(options: { failRename?: boolean } = {}) {
-  const calls: string[][] = [], agents: HerdrAgent[] = [], closed: string[] = [], typed: string[] = [];
-  let panes = 0;
-  const run = (_command: string, args: string[]) => {
-    calls.push(args);
-    const json = (result: unknown) => JSON.stringify({ result });
-    if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${++panes}`; return json({ type: 'tab_created', root_pane: { pane_id: pane, tab_id: `tab-${panes}` }, tab: { tab_id: `tab-${panes}` } }); }
-    if (args[0] === 'agent' && args[1] === 'list') return json({ agents: agents.map(agent => ({ ...agent })) });
-    if (args[0] === 'agent' && args[1] === 'rename') {
-      if (options.failRename || agents.some(agent => agent.name === args[3])) throw Object.assign(new Error(`herdr: {"code":"agent_name_taken","message":"agent name ${args[3]} is taken"}`), { herdrCode: 'agent_name_taken' });
-      agents.push({ name: args[3], pane_id: args[2], agent: 'codex', agent_status: 'working' });
-    }
-    if (args[0] === 'pane' && args[1] === 'run') typed.push(args[2]);
-    if (args[0] === 'pane' && args[1] === 'close') { closed.push(args[2]); return json({}); }
-    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
-    return startedAtOnce(args) ?? json({});
-  };
-  return { run, calls, agents, closed, typed };
-}
 
 /** The control plane's claim, as the fake sees it: one epoch per item, a second claim of a held item refused. */
 function fakeClaims(root: string) {
@@ -78,50 +53,29 @@ test('unit:profile-reserved-before-claim — two concurrent dispatchWork calls f
   const fixture = await installation();
   try {
     const profile = launchProfile('one', fixture.credential);
-    const herdr = fakeHerdr(), claims = fakeClaims(fixture.root);
+    const worker = recordedRuns({ running: true }), claims = fakeClaims(fixture.root);
     const first = work('GY-1'), second = work('GY-2');
     // GY-3030: the control-plane registry is the only slot authority. The worker role holds one
     // session, so of two dispatchers that chose the profile from the same snapshot, the registry
     // refuses the second its slot before it claims anything.
     const registry = registryFixture(hostname(), ['codex'], ['worker'], 1);
-    const observedAt = new Date().toISOString(), snapshot: HerdrAgent[] = [];
-    const results = await Promise.allSettled([first, second].map(item => dispatchWork(fixture.root, item, profile, snapshot, herdr.run, [first, second], claims.prepare, claims.release, 1, observedAt, { probe: registry.probe })));
+    const observedAt = new Date().toISOString();
+    const results = await Promise.allSettled([first, second].map(item => dispatchWork(fixture.root, item, profile, { allWork: [first, second], prepare: claims.prepare, release: claims.release, observedAt, headless: worker.exec, startupMs: worker.startupMs, probe: registry.probe })));
     const launched = results.filter(result => result.status === 'fulfilled'), refused = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
     assert.equal(launched.length, 1, 'exactly one dispatch launches');
     assert.equal(refused.length, 1, 'the other is refused');
     assert.match(capacityRefusal(refused[0].reason) ?? '', /role worker is at its concurrency limit/, `the refusal is the registry's slot refusal, not a failed launch: ${refused[0].reason?.message}`);
     assert.equal(claims.claims.size, 1, 'exactly one item was claimed');
     assert.deepEqual(claims.released, [], 'nothing was claimed and then released');
-    assert.equal(herdr.calls.filter(args => args[0] === 'tab' && args[1] === 'create').length, 1, 'exactly one pane was created');
-    assert.equal(herdr.typed.length, 1, 'exactly one runtime was started');
-    assert.deepEqual(herdr.closed, [], 'no pane was closed');
-    assert.deepEqual(herdr.agents.map(agent => agent.name), ['agent-one']);
+    assert.equal(worker.runs.length, 1, 'exactly one run was started');
     assert.equal(registry.sessions().filter(session => !session.endedAt).length, 1, 'the registry holds one live worker session');
 
     // A dispatcher that reads its snapshot before that launch dispatches while the launched session
     // still holds the slot: the registry refuses it, still before any claim.
-    const late = await dispatchWork(fixture.root, work('GY-3'), profile, [], herdr.run, [work('GY-3')], claims.prepare, claims.release, 1, observedAt, { probe: registry.probe }).then(() => null, error => error);
+    worker.forget();
+    const late = await dispatchWork(fixture.root, work('GY-3'), profile, { allWork: [work('GY-3')], prepare: claims.prepare, release: claims.release, observedAt, headless: worker.exec, startupMs: worker.startupMs, probe: registry.probe }).then(() => null, error => error);
     assert.match(capacityRefusal(late) ?? '', /role worker is at its concurrency limit/, `a stale snapshot is refused cleanly: ${late?.message}`);
     assert.equal(claims.claims.size, 1, 'the stale dispatcher claimed nothing');
-    assert.equal(herdr.typed.length, 1, 'the stale dispatcher started nothing');
+    assert.equal(worker.runs.length, 1, 'the stale dispatcher started nothing');
   } finally { await fixture.cleanup(); }
 });
-
-test('unit:launch-failure-closes-pane — a rename refused after `pane run` closes the pane, a watch supervisor there ending with it, and releases the claim', async () => {
-  const fixture = await installation();
-  try {
-    const empty = fakeHerdr({ failRename: true }), emptyClaims = fakeClaims(fixture.root);
-    await assert.rejects(dispatchWork(fixture.root, work('GY-2'), launchProfile('two', fixture.credential), [], empty.run, [work('GY-2')], emptyClaims.prepare, emptyClaims.release, 1, new Date().toISOString(), { probe: registryFixture(hostname(), ['codex']).probe }), /agent_name_taken/);
-    assert.deepEqual(empty.closed, ['pane-1'], 'the pane is closed');
-    assert.deepEqual(emptyClaims.released, ['GY-2@1']);
-
-    // The host's own check reads the supervisor's exact command line from the process table.
-    const table: Record<number, string> = { 10: ['node', '/cli.mjs', 'watch', 'GY-7', '3', '--', 'codex'].join('\0'), 11: ['vim', 'watch', 'GY-7'].join('\0') };
-    const read = (pid: number) => { if (!(pid in table)) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return table[pid]; };
-    assert.equal(watchSupervisorRunning({ key: 'GY-7', epoch: 3 }, read, () => ['10', '11', 'self']), true);
-    assert.equal(watchSupervisorRunning({ key: 'GY-7', epoch: 4 }, read, () => ['10', '11']), false, 'another epoch is not this supervisor');
-    assert.equal(watchSupervisorRunning({ key: 'GY-8', epoch: 3 }, read, () => ['11', '12']), false, 'a loose `watch` argument is not a supervisor');
-    assert.equal(watchSupervisorRunning({ key: 'GY-7', epoch: 3 }, read, () => { throw new Error('no /proc'); }), true, 'an unreadable process table leaves the pane alone');
-  } finally { await fixture.cleanup(); }
-});
-
