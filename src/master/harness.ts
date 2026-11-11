@@ -229,7 +229,7 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
  * control-plane truth (master-session.ts masterRequest), so both paths start the same session.
  */
 /** GY-3233: the master's rule for a fault in Graphyard itself, on an install for another repository; guide master states it too. */
-export const upstreamRule = (repository: string) => `A Graphyard fault (stuck upgrade, stalled loop step, sandbox or launch failure) goes upstream: the loop files it to master.json's upstream or raises it in master status; never file or work around it in ${repository}.`;
+export const upstreamRule = (repository: string) => `A Graphyard fault (stuck upgrade, stalled loop step, sandbox, launch or trial-host failure: network, disk, missing trial-image tool) goes to master.json's upstream or master status; never file it in ${repository} or change ${repository} to work around it.`;
 export function masterPrompt(config: MasterConfig): string {
   // GY-1501: a supervised install has no operator-agent identity by design; that is its mode, not an onboarding fault.
   const supervised = config.supervision === 'supervised';

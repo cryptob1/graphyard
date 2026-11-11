@@ -499,6 +499,38 @@ export class TrialReadOnlyError extends Error {
     this.name = 'TrialReadOnlyError';
   }
 }
+/**
+ * GY-3249: a trial step that could not fetch from an external host, on its rerun too — the trial
+ * host's network, not the head's. It reaches no verdict and is not retried: the head is neither
+ * refused nor reworked, and the loop reports the fault upstream (daemon/control-plane.ts).
+ */
+export const trialHostFaultPrefix = 'Trial-host fault';
+export class TrialHostFaultError extends Error {
+  constructor(readonly phase: string, readonly host: string) {
+    super(`${trialHostFaultPrefix}: the trial's ${phase} step could not fetch from ${host}, rerun included; this is the trial host's network, not the head's`);
+    this.name = 'TrialHostFaultError';
+  }
+}
+/** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
+export const trialHostFaultHost = (error: unknown): string | null =>
+  new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+const localHost = /^(?:localhost|127\.[\d.]+|0\.0\.0\.0|::1|\[::1\])$/i;
+/**
+ * The external host a failed step's output shows a network fetch failure to, or null: a resolver or
+ * socket error (ENOTFOUND, EAI_AGAIN, ETIMEDOUT, ECONNRESET, ECONNREFUSED), a 'Failed to fetch', or
+ * next/font crashing on what Google Fonts answered (the Huck trials of 11-10; its
+ * validation errors stay the head's). The host is the one
+ * the error names, else the URL nearest it; a loopback host is the build's own, never the trial host's.
+ */
+export function networkFaultHost(out: string): string | null {
+  const flat = out.replace(ansiEscape, '');
+  const marker = /\b(?:ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED)\b|Failed to fetch|An error occurred in `next\/font`\.[^]{0,120}?\bTypeError:/.exec(flat);
+  if (!marker) return null;
+  const named = /\b(?:ENOTFOUND|EAI_AGAIN)\s+([\w.-]+)|\b(?:ECONNREFUSED|ETIMEDOUT|ECONNRESET)\s+([\w.-]+|\[[\da-f:]+\]):\d+/i.exec(flat);
+  const nearest = [...flat.matchAll(/https?:\/\/([\w.-]+)/g)].sort((a, b) => Math.abs(a.index! - marker.index) - Math.abs(b.index! - marker.index))[0]?.[1];
+  const host = named?.[1] ?? named?.[2] ?? (/Google Fonts|next\/font/.test(flat) ? 'fonts.googleapis.com' : nearest);
+  return host && !localHost.test(host) ? host : null;
+}
 /** The path a 'Read-only file system' failure names in `out` — the quoted absolute path nearest the failure, for Node's EROFS names it after the phrase and turbo's wrapped report before it — or null when it names none. */
 export function readOnlyPath(out: string): string | null {
   const flat = out.replace(ansiEscape, '').replace(/\n[ \t]*[|`]?(?:->)?[ \t]*/g, '');
@@ -794,7 +826,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -932,6 +964,15 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const granted = [checkout.directory, place, temporary, home].filter((directory): directory is string => !!directory);
     if (path && granted.some(directory => path === directory || path.startsWith(`${directory}/`))) throw new TrialReadOnlyError(phase, path);
   };
+  // GY-3249: a step whose output shows a failed fetch from an external host runs once more; failing so again, it is a trial-host fault.
+  const fetching = async (phase: string, step: () => Promise<Ended>): Promise<Ended> => {
+    const first = await step();
+    if (first.ok || !networkFaultHost(first.out)) return first;
+    log.push(`[rerun] the ${phase} step failed fetching from ${networkFaultHost(first.out)}; running it once more`);
+    const again = await step(), host = again.ok ? null : networkFaultHost(again.out);
+    if (host) throw new TrialHostFaultError(phase, host);
+    return again;
+  };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
@@ -1010,7 +1051,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       if (manager.name === 'npm' && existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
       else if (manager.name === 'pnpm' || await holds('package-lock.json')) {
         const [command, ...args] = installArgv(manager);
-        const installed = await child('install', command!, args, { env: npmCiEnvironment(env) });
+        const installed = await fetching('install', () => child('install', command!, args, { env: npmCiEnvironment(env) }));
         if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
         readOnly('install', installed);
         if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
@@ -1023,7 +1064,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         enter('build');
         enterStep('build');
         const [command, ...args] = argv;
-        const built = await child('build', command!, args);
+        const built = await fetching('build', () => child('build', command!, args));
         if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
         readOnly('build', built);
         if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
