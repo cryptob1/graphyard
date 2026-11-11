@@ -41,7 +41,8 @@ export interface AffectedPackages { packages: string[] | null; summary: string }
 export function affectedPackages(root: string, changedFiles: readonly string[]): AffectedPackages {
   const trigger = changedFiles.find(rootTrigger);
   if (trigger) return { packages: null, summary: `all (root trigger ${trigger})` };
-  const patterns = [...readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8').matchAll(/^\s*-\s*['"]?([^'"#\n]+?)['"]?\s*$/gm)].map(match => match[1]!);
+  const listed = /^packages:\s*\n((?:[ \t]+.*\n?|\s*\n)*)/m.exec(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'))?.[1] ?? '';
+  const patterns = [...listed.matchAll(/^\s*-\s*['"]?([^'"#\n]+?)['"]?\s*$/gm)].map(match => match[1]!);
   const dirs = globSync(patterns.filter(pattern => !pattern.startsWith('!')).map(pattern => `${pattern}/package.json`), { cwd: root, exclude: ['**/node_modules/**', ...patterns.filter(pattern => pattern.startsWith('!')).map(pattern => `${pattern.slice(1)}/package.json`)] }).map(file => dirname(file));
   const packages = dirs.map(dir => {
     const manifest = JSON.parse(readFileSync(join(root, dir, 'package.json'), 'utf8'));
