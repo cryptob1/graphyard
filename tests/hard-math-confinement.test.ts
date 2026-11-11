@@ -140,39 +140,19 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
     if (url.endsWith('/review-launch')) return Response.json({ launch: 'fixture-review-launch' });
     throw new Error(`Unexpected fixture HTTP request: ${url}`);
   });
-  const typed: string[] = [];
-  let readinessPolls = 0;
-  // The headless reviewer's model call: the real confined argv probes the boundary, then holds.
-  let reviewLaunch: { command: string; args: string[]; cwd: string } | null = null;
+  // The headless model calls: a worker's run (under `graphyard watch`) finishes at once; the
+  // reviewer's real confined argv probes the boundary, then holds.
+  let reviewLaunch: { command: string; args: string[]; cwd: string } | null = null, workerLaunch: { command: string; args: string[]; cwd: string } | null = null;
   const headless: import('../src/headless-session.js').HeadlessExec = (command, args, options) => {
+    if (args.includes('watch')) { workerLaunch = { command, args, cwd: options.cwd }; return Promise.resolve(''); }
     reviewLaunch = { command, args, cwd: options.cwd };
     return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('fixture review stopped')), { once: true }));
   };
+  // Herdr is read for the session inventory only: no pane is opened for a worker or a review.
   const run = (command: string, args: string[]) => {
     if (command !== 'herdr') return execFileSync(command, args, { encoding: 'utf8' });
-    if (args[0] === 'tab' && args[1] === 'create') {
-      return JSON.stringify({ result: { root_pane: { pane_id: 'fixture-pane', tab_id: 'fixture-tab' } } });
-    }
-    if (args[0] === 'pane' && args[1] === 'run') {
-      typed.push(args[3]);
-      readinessPolls = 0;
-      return '';
-    }
-    // A supervised worker starts watch -> bwrap -> pi. Report the transport's
-    // observed foreground, not the first program parsed from that nested argv.
-    // Keep one wrapper poll so production readiness must wait for the runtime.
-    if (args[0] === 'agent' && args[1] === 'get') {
-      readinessPolls++;
-      return JSON.stringify({ result: { agent: { agent: readinessPolls === 1 ? 'bwrap' : 'pi', agent_status: 'idle', pane_id: args[2] } } });
-    }
-    if (args[0] === 'pane' && args[1] === 'read') return readinessPolls <= 1 ? 'Starting runtime\n' : 'pi ready\n';
-    if (args[0] === 'pane' && args[1] === 'process-info') return JSON.stringify({ result: { process_info: {
-      shell_pid: 100, foreground_process_group_id: 200,
-      foreground_processes: [{ argv: [readinessPolls <= 1 ? 'bwrap' : 'pi'] }],
-    } } });
-    if (args[0] === 'agent' && args[1] === 'rename') return JSON.stringify({ result: { agent: { agent: 'pi', agent_status: 'idle', name: args[3] } } });
-    if (args[0] === 'agent' && args[1] === 'list') return JSON.stringify({ result: { agents: [] } });
-    return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+    assert.deepEqual(args.slice(0, 2), ['agent', 'list'], 'no Herdr pane is opened for workers or reviews');
+    return JSON.stringify({ result: { agents: [] } });
   };
   const snapshot = () => Promise.resolve({ work: [item], now: new Date().toISOString() });
   const effects = daemonEffects(root, config, { coordinatorRoot: root, snapshot, run, headless, mutate: async () => ({}) });
@@ -181,8 +161,9 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
   try {
     await t.test('worker dispatch', async () => {
       await effects.dispatch(item, config.workers[0], [], await snapshot());
-      assert.ok(readinessPolls >= 2, 'worker readiness must wait for pi after the wrapper');
-      probe(typed.at(-1)!, worker, [producer, config.credentialFile, oracleFile, sourceCredential]);
+      const launched = workerLaunch as { command: string; args: string[]; cwd: string } | null;
+      assert.ok(launched, 'the worker started a headless run');
+      probe([launched.command, ...launched.args], worker, [producer, config.credentialFile, oracleFile, sourceCredential]);
     });
     await t.test('review dispatch tick', async () => {
       const review = requested(2);

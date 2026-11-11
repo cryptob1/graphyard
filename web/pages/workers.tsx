@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
 import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
 import { prSteps } from '../../src/model/pr-steps';
+import { transcriptRun } from '../../src/model/sessions';
 import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
@@ -89,7 +90,9 @@ function Health({ row, now }: { row: WorkerRow; now: number }) {
     data-reconciled={row.reconciled ?? undefined} title={row.outcome ? shortShas(row.outcome) : undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
 }
 
-function Attach({ row }: { row: WorkerRow }) {
+function Attach({ row, open }: { row: WorkerRow; open(): void }) {
+  // A headless worker's output is its run log, on its item's page (GY-3259).
+  if (transcriptRun(row.transcript)) return <span className="attach"><button type="button" className="text-button" onClick={open}>Run log</button></span>;
   if (row.state === 'running' && !row.leftOn) {
     if (!row.local) return <span className="muted">no attach command recorded</span>;
     return <span className="attach">
@@ -117,7 +120,7 @@ function since(row: WorkerRow, now: number) {
 
 function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
+    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row} open={() => setSelected(row.workId)}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now, release)}</td>
