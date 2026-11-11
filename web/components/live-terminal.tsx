@@ -38,7 +38,8 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
   const [session, setSession] = useState<Session | null>(null);
   const [reason, setReason] = useState('');
   useEffect(() => {
-    if (!token) { setState('refused'); return; }
+    setSession(null); setReason(''); setState('connecting');
+    if (!token) { setReason('Sign in to open the terminal.'); setState('refused'); return; }
     let live = true, stop = () => {};
     loadTerminal().then(Terminal => {
       if (!live) return;
@@ -61,15 +62,17 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       };
       const connect = () => {
         if (!live) return;
-        setState('connecting'); writable = false;
+        writable = false;
+        let opened = false, refused = false;
         const query = new URLSearchParams({ ...(pane ? { pane } : {}), cols: String(terminal.cols), rows: String(terminal.rows) });
         socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/terminal?${query}`, ['graphyard', token]);
         socket.binaryType = 'arraybuffer';
+        socket.onopen = () => { opened = true; };
         socket.onmessage = event => {
           if (!live) return;
           if (typeof event.data === 'string') {
             const message = JSON.parse(event.data);
-            if (message.refused) { setReason(message.refused); setState('refused'); return; }
+            if (message.refused) { refused = true; writable = false; setReason(message.refused); setState('refused'); return; }
             if (message.type === 'scrollback') { terminal.reset(); terminal.write(message.data.replace(/\r?\n/g, '\r\n')); return; }
             if (message.session) setSession(message.session);
             if (message.mode) {
@@ -81,10 +84,19 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
           }
           terminal.write(new Uint8Array(event.data));
         };
-        socket.onclose = () => {
+        socket.onclose = async () => {
           writable = false;
-          if (!live) return;
-          setState(current => current === 'refused' ? current : 'connecting');
+          if (!live || refused) return;
+          // Browsers hide HTTP upgrade refusal details. Distinguish an unavailable
+          // terminal from an offline server before deciding whether to retry.
+          if (!opened) {
+            const response = await fetch('/api/status', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) }).catch(() => null);
+            if (!live) return;
+            if (response && response.status < 500) {
+              setReason('Not available: sign in, and check the session still has a pane.'); setState('refused'); return;
+            }
+          }
+          setState('reconnecting');
           reconnect = setTimeout(connect, delay); delay = Math.min(2000, delay * 2);
         };
       };
@@ -119,8 +131,8 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
   }, [token, pane]);
   return <section ref={section} className="live-terminal" aria-label={label} data-terminal={state}>
     <div className="terminal-info" role="status">
-      {session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
-      <span>{state === 'connecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'read-only: only the operator and maintainers can type into the master' : `refused: ${reason}`}</span>
+      {!pane && session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
+      <span>{state === 'connecting' ? 'Connecting…' : state === 'reconnecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'read-only: only the operator and maintainers can type into the master' : `refused: ${reason}`}</span>
       {session?.state === 'absent' && <span>The loop relaunches the master on its own.</span>}
       {reason && state !== 'refused' && <span>{reason}</span>}
     </div>

@@ -12,7 +12,7 @@
     {
       "kind": "command",
       "name": "Exercise the Master terminal in Playwright",
-      "run": "npm run test:browser -- browser-tests/master-page-ux.spec.ts --grep e2e:master-page-ux",
+      "run": "npm run test:browser -- browser-tests/master-page-ux.spec.ts browser-tests/master-page-terminal.spec.ts browser-tests/master-page-terminal-refused.spec.ts --grep 'e2e:master-page-(ux|terminal)'",
       "timeoutSeconds": 240
     }
   ]

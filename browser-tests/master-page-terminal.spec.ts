@@ -73,6 +73,8 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     // A worker's pane opens from the Workers page, read-only even for the operator.
     await operator.getByRole('row', { name: /work-claude/ }).getByRole('button', { name: 'Watch', exact: true }).click();
     await expect(rows(operator)).toContainText('screen of w1:worker', settled);
+    await expect(operator.locator('.terminal-session')).toHaveCount(0);
+    await expect(operator.getByRole('status')).not.toContainText('unknown');
     await expect(operator.getByRole('status')).toContainText('read-only', settled);
     expect((await calls()).some(entry => entry.args?.slice(0, 4).join(' ') === 'terminal session observe w1:worker')).toBe(true);
     await operator.getByRole('button', { name: 'Close', exact: true }).click();
