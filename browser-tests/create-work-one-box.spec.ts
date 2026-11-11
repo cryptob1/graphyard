@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { withDatabase } from '../tests/helpers/postgres';
@@ -134,6 +134,31 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     const specified = await (await advanced).json();
     expect(specified.criteria).toEqual(criteria); expect(specified.ready).toBe(false);
     await expect(page.locator('article.item-page')).not.toContainText(waiting);
+
+    // Advanced holds delivery rules too: opening it alone never requires criteria, and within a
+    // row one filled field requires its pair. Rules-only changes file a draft.
+    await page.getByRole('button', { name: '← Back' }).click();
+    await page.getByRole('button', { name: '＋ New work item' }).click();
+    await form.getByLabel('Title', { exact: true }).fill('Export checks change');
+    await form.getByText('Advanced', { exact: true }).click();
+    const criterion = form.getByLabel('Acceptance criterion');
+    const proof = form.getByLabel('Required proof');
+    const required = (input: Locator) => input.evaluate(el => (el as HTMLInputElement).required);
+    expect(await required(criterion)).toBe(false);
+    await criterion.fill('Typed a criterion first');
+    expect(await required(proof)).toBe(true);
+    await proof.fill('e2e:export-checks');
+    expect(await required(criterion)).toBe(true);
+    await criterion.fill('');
+    await proof.fill('');
+    expect(await required(proof)).toBe(false);
+    await form.getByLabel(/CI checks/).fill('test');
+    const rulesOnly = page.waitForResponse(response => response.url().endsWith('/api/work') && response.request().method() === 'POST');
+    await form.getByRole('button', { name: 'Create work item', exact: true }).click();
+    const rulesDraft = await (await rulesOnly).json() as Work;
+    expect(rulesDraft.criteria).toEqual([]); expect(rulesDraft.ready).toBe(false);
+    expect(rulesDraft.policy).toEqual({ review: true, checks: ['test'] });
+    await expect(page.locator('article.item-page')).toContainText(waiting);
   } finally {
     await page.unrouteAll({ behavior: 'wait' });
     http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); await store.close();
