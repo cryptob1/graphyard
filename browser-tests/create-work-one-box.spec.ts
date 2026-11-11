@@ -100,7 +100,10 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
       masterSession: { launch: async handover => { handovers.push(handover); masterVisible = true; return { agentName: 'master-session', pane: 'master-pane', runtime: 'codex', account: null, session: null }; }, wake: async (_pane, prompt) => { wakes.push(prompt); } },
       closeSession: () => {}, persist: async () => {},
     };
-    await runCycle(config, state, effects); await runCycle(config, state, effects);
+    await runCycle(config, state, effects);
+    await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{ready}', 'true') WHERE id=$1", [draft.id]);
+    await runCycle(config, state, effects);
+    await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{ready}', 'false') WHERE id=$1", [draft.id]);
     expect(released).toEqual([]); expect(dispatched).toEqual([]); expect(checks).toEqual([]);
     expect(wakes).toHaveLength(1); expect(wakes[0]).toContain(`master requirements ${draft.key} FILE REASON`);
     expect(masterCauses([draft])[0].detail).toContain(waiting);

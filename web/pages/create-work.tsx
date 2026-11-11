@@ -13,7 +13,7 @@ export default function CreateWork({ work, error, busy, setCreating, setBusy, se
   return <Dialog onClose={() => setCreating(false)}><section className="modal" role="dialog" aria-modal="true" aria-label="New work item"><button className="close" aria-label="Close form" onClick={() => setCreating(false)}>×</button><h2>New work item</h2><form onSubmit={async e => {
     e.preventDefault(); const f = new FormData(e.currentTarget); const epoch = sessionEpoch.current; setBusy(true);
     try {
-      const specified = rows.some(row => String(f.get(`criterion-${row}`) ?? '').trim() || split(f.get(`proof-${row}`)).length);
+      const specified = rows.some(row => String(f.get(`criterion-${row}`) ?? '').length || String(f.get(`proof-${row}`) ?? '').length);
       const criteria = specified ? rows.map((row, i) => ({ id: `AC-${i + 1}`, text: String(f.get(`criterion-${row}`)), proofs: split(f.get(`proof-${row}`)) })) : [];
       const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, checks: split(f.get('checks')) } });
       if (epoch !== sessionEpoch.current) return; setCreating(false); await refresh(epoch); if (epoch === sessionEpoch.current) setSelected(created.id);
