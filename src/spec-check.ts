@@ -147,7 +147,6 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const launch = accountLaunch(profile, selected.account, { writable, headless: true });
       const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, checkout: checkout.worktree });
       // A headless check (headless-session.ts) holds no binding: the launcher posts its answer.
-      const runHeadless = headless;
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
       // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
       const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
@@ -165,7 +164,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         // What posting a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
         const context: HeadlessSpecCheckContext = { cliPath: config.cliPath, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
+          contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: headless, moveAccount,
           holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
           answer: output => postHeadlessSpecCheck(context, output), root, route: 'spec-check', context });

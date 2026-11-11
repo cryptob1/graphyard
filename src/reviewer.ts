@@ -1034,7 +1034,6 @@ export async function launchReview(root: string, work: Work, profileName: string
       // GY-2995: that launch directory under the config home is kept readable, and with it the
       // deploy checkout the CLI it must run lives in.
       // A headless session (headless-session.ts) holds no binding at all: the launcher posts its answer.
-      const runHeadless = headless;
       const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       const delivery: RequestDelivery = 'request';
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
@@ -1062,7 +1061,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           });
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
-            contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
+            contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: headless, moveAccount,
             onRun: async run => {
               headlessContext!.kind = run.kind;
               await updateReviewLedger(root, ledger => { const record = ledger.reviews.find(entry => entry.id === id); if (record) { record.headless = run; record.session = registrySessionOf(on.current); } });

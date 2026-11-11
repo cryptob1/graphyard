@@ -1,5 +1,5 @@
-import { insideMasterConfinement } from '../../master/confinement.js';
 // Concern: `graphyard master run` — wiring the durable loop to its effects.
+import { insideMasterConfinement } from '../../master/confinement.js';
 import { parseArgs } from 'node:util';
 import { liveMasterConfig } from '../../master.js';
 import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
