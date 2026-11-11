@@ -6,8 +6,11 @@ import { npmCiArgs } from './cli/test-isolation.js';
 
 export type PackageManager = { name: 'npm' } | { name: 'pnpm'; version: string; workspace: boolean; turbo: boolean };
 
-const readManifest = (root: string): { packageManager?: unknown; devDependencies?: Record<string, unknown>; dependencies?: Record<string, unknown> } => {
-  try { return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) ?? {}; } catch { return {}; }
+// Tolerant on purpose: a manifest a merge broke is its failed install or build, never a thrown
+// host error — the root manifest's own rule (PRRT_kwDOUZby-s6tZbNG). An unreadable one reads as {}.
+type Manifest = { name?: unknown; packageManager?: unknown; dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown>; peerDependencies?: Record<string, unknown>; optionalDependencies?: Record<string, unknown> };
+const readManifest = (dir: string): Manifest => {
+  try { return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) ?? {}; } catch { return {}; }
 };
 
 /** pnpm-lock.yaml means pnpm, at package.json packageManager's version (else 10); anything else is npm, as before. */
@@ -36,16 +39,19 @@ export interface AffectedPackages { packages: string[] | null; summary: string }
  * The packages a pnpm workspace change affects, from the candidate's own changed files (the trial
  * base to its merge commit, so commits a back-merge brought that the base already holds are not
  * among them): each package holding a changed file, then every package depending on one of those,
- * transitively. `summary` names each and why, for the trial log.
+ * transitively. A workspace manifest the merge broke is its failed install, never a thrown host
+ * error, so an unreadable one reads as empty; a packages list that yields no patterns (flow style,
+ * comments) selects all, never silently none. `summary` names each and why, for the trial log.
  */
 export function affectedPackages(root: string, changedFiles: readonly string[]): AffectedPackages {
   const trigger = changedFiles.find(rootTrigger);
   if (trigger) return { packages: null, summary: `all (root trigger ${trigger})` };
   const listed = /^packages:\s*\n((?:[ \t]+.*\n?|\s*\n)*)/m.exec(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'))?.[1] ?? '';
   const patterns = [...listed.matchAll(/^\s*-\s*['"]?([^'"#\n]+?)['"]?\s*$/gm)].map(match => match[1]!);
+  if (!patterns.length) return { packages: null, summary: 'all (packages list not parsed)' };
   const dirs = globSync(patterns.filter(pattern => !pattern.startsWith('!')).map(pattern => `${pattern}/package.json`), { cwd: root, exclude: ['**/node_modules/**', ...patterns.filter(pattern => pattern.startsWith('!')).map(pattern => `${pattern.slice(1)}/package.json`)] }).map(file => dirname(file));
   const packages = dirs.map(dir => {
-    const manifest = JSON.parse(readFileSync(join(root, dir, 'package.json'), 'utf8'));
+    const manifest = readManifest(join(root, dir));
     return { dir, name: String(manifest.name ?? dir), uses: Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.peerDependencies, ...manifest.optionalDependencies }) };
   }).sort((a, b) => b.dir.length - a.dir.length || a.dir.localeCompare(b.dir));
   const reasons = new Map<string, string>();

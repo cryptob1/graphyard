@@ -95,6 +95,14 @@ test('unit:tests/package-manager.test.ts — turbo build and test: with turbo.js
   assert.deepEqual(testArgv(manager, null), [...pnpm10, 'exec', 'turbo', 'run', 'test']);
   // A nested package.json or tsconfig is no root trigger.
   assert.deepEqual(affectedPackages(root, ['apps/one/package.json', 'apps/one/tsconfig.json']).packages, ['one']);
+  // A workspace manifest the merge broke is the merge's failed install, never the host's trial:
+  // selection reads it as empty instead of throwing (it names by directory, as a nameless one does).
+  write(root, { 'apps/two/package.json': '' });
+  assert.deepEqual(affectedPackages(root, ['apps/one/page.tsx']), { packages: ['one'], summary: 'one (changed)' });
+  assert.deepEqual(affectedPackages(root, ['apps/two/page.tsx']), { packages: ['apps/two'], summary: 'apps/two (changed)' });
+  // A packages list that yields no patterns (flow style, comments) selects all, never silently none.
+  write(root, { 'pnpm-workspace.yaml': 'packages: [apps/*, packages/*]\n' });
+  assert.deepEqual(affectedPackages(root, ['apps/one/page.tsx']), { packages: null, summary: 'all (packages list not parsed)' });
   // Without turbo, pnpm builds the affected packages with their dependencies, everything on a root trigger, and nothing when none changed.
   const plain = { ...manager, turbo: false };
   assert.deepEqual(buildArgv(plain, ['one']), [...pnpm10, '--recursive', '--if-present', '--filter=one...', 'run', 'build']);
