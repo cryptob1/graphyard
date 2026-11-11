@@ -77,6 +77,8 @@ export interface GateRecord {
    * never landed catches it up.
    */
   published?: string | null;
+  /** Last successfully deployed commit handed to the release workflow; retained across loop restarts. */
+  releaseTagged?: string | null;
   /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
   held: { tip: string; reason: string; at: string } | null;
   /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
