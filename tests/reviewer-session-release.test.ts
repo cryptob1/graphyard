@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -10,7 +11,7 @@ import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient } from '../src/fleet.js';
 import { loadMasterConfig, type MasterConfig } from '../src/master.js';
-import { launchReview, readReviewLedger, reconcileReviews } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews } from '../src/reviewer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';

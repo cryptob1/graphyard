@@ -54,6 +54,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
+  headless?: import('../headless-session.js').HeadlessExec;
   /** Explicit confinement root for an embedded, non-CLI coordinator. */
   coordinatorRoot?: string;
   fetcher?: typeof fetch;
@@ -205,7 +206,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // still running past its step's timeout is not started twice.
     dispatchTick: snapshot => ticking ??= (async () => {
       cursor ??= await readDispatchCursor(root, current());
-      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, coordinatorRoot: deps.coordinatorRoot }));
+      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, headless: deps.headless, coordinatorRoot: deps.coordinatorRoot }));
     })().finally(() => { ticking = null; }),
     personalMasterSession: config => ({
       ...masterSessionEffects(root, () => config, run),

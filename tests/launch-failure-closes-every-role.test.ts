@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile, access, rm } from 'node:fs/promises';
+import { mkdir, writeFile, access, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { fleet, requested } from './helpers/review-fleet.js';
@@ -49,7 +49,7 @@ function memoryRegistry(host: string, home: string) {
   return { registry, client, live: () => registry.sessions.filter(session => !session.endedAt) };
 }
 
-test('unit:launch-failure-closes-every-role — a spec-check start failure closes its pane before releasing the account claim and removes its token', async () => {
+test('unit:launch-failure-closes-every-role — a failed headless spec check releases its account claim and removes its token without a pane', async () => {
   const host = await fleet({ name: 'checker', agentName: 'spec-checker', kind: 'claude', agentArgs: ['--setting-sources', 'user'] }, null);
   const login = await claudeLogin('checker');
   try {
@@ -74,15 +74,21 @@ test('unit:launch-failure-closes-every-role — a spec-check start failure close
       if (args[0] === 'pane' && args[1] === 'close') order.push('close');
       return host.run(command, args);
     };
-    await assert.rejects(launchSpecCheck(host.root, item, 'checker', [], new Date().toISOString(), {
+    let binding = '';
+    const launched = await launchSpecCheck(host.root, item, 'checker', [], new Date().toISOString(), {
       run, probe: { registry: registry.client, quota: false, cacheMs: 0 },
+      headless: async (_command, _args, options) => {
+        assert.ok(registered, 'registration precedes runtime start');
+        assert.equal(registry.live().length, 1, 'the runtime starts under an account claim');
+        binding = JSON.parse(await readFile(join(options.run, 'session.json'), 'utf8')).context.GH_CONFIG_DIR;
+        order.push('start'); throw new Error('fixture runtime start failed');
+      },
       registerLaunch: async () => { registered = true; return { launch: 'spec-check-launch' }; },
-    }), /fixture runtime start failed.*pane pane-1 was closed/);
-    assert.deepEqual(order, ['start', 'close', 'release']);
-    assert.deepEqual(host.closes, ['pane-1']);
+    });
+    assert.match((await launched.settled)!, /fixture runtime start failed/);
+    assert.deepEqual(order, ['start', 'start', 'release'], 'the existing answer retry runs once before settlement');
+    assert.deepEqual(host.closes, []);
     assert.equal(registry.live().length, 0);
-    const created = host.calls.find(args => args[0] === 'tab' && args[1] === 'create')!;
-    const binding = created.find(arg => arg.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length);
     await assert.rejects(access(binding), { code: 'ENOENT' });
   } finally { await host.cleanup(); await rm(login, { recursive: true, force: true }); }
 });

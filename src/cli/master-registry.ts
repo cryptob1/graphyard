@@ -11,7 +11,7 @@ export const registryHelp = [
   '                                Discover the agent environments on this host (~/.coding_agents: Claude,',
   '                                Codex, Cursor, OpenCode, Pi) and propose the runtimes, models, accounts',
   '                                and roles for them; --apply stores it as a registry revision',
-  '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--home-variable VAR]',
+  '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--headless-arg=A]… [--home-variable VAR]',
   '              [--model-flag=FLAG] [--tools-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
@@ -84,12 +84,12 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   if (action !== 'set') throw new Error(`Use master registry ${collection} set … or master registry ${collection} remove NAME --reason REASON`);
   const current: AgentRegistry = await api.read('agent-registry/document');
   if (collection === 'runtime') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, kind: { type: 'string' }, arg: { type: 'string', multiple: true }, 'home-variable': { type: 'string' }, 'model-flag': { type: 'string' }, 'tools-flag': { type: 'string' }, login: { type: 'string' }, 'login-file': { type: 'string' }, env: { type: 'string', multiple: true }, description: { type: 'string' } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, kind: { type: 'string' }, 'headless-arg': { type: 'string', multiple: true }, arg: { type: 'string', multiple: true }, 'home-variable': { type: 'string' }, 'model-flag': { type: 'string' }, 'tools-flag': { type: 'string' }, login: { type: 'string' }, 'login-file': { type: 'string' }, env: { type: 'string', multiple: true }, description: { type: 'string' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry runtime set NAME|@FILE [--kind K] [--arg=A]… --reason REASON; a value that starts with a dash is written onto its flag with =, as --arg=--yes-always and --model-flag=--model');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/runtimes', { runtime: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.runtimes.find(runtime => runtime.name === positionals[0]);
     const environment = values.env ? Object.fromEntries(values.env.map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes NAME=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; })) : undefined;
-    const launch = { ...(existing?.launch ?? { kind: positionals[0] }), ...defined({ kind: values.kind, args: values.arg, homeVariable: values['home-variable'], modelFlag: values['model-flag'], toolsFlag: values['tools-flag'], login: values.login, loginFile: values['login-file'], environment }) };
+    const launch = { ...(existing?.launch ?? { kind: positionals[0] }), ...defined({ kind: values.kind, args: values.arg, headlessArgs: values['headless-arg'], homeVariable: values['home-variable'], modelFlag: values['model-flag'], toolsFlag: values['tools-flag'], login: values.login, loginFile: values['login-file'], environment }) };
     return api.write('agent-registry/runtimes', { runtime: { ...defined({ description: values.description ?? existing?.description }), name: positionals[0], launch }, reason: values.reason });
   }
   if (collection === 'model') {

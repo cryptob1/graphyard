@@ -1,3 +1,4 @@
+import { pendingHeadless, launchLegacyReview } from './helpers/pending-review.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -166,16 +167,15 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
     const herdr = new FakeHerdr();
     // Reviewer on Claude Code: the request rides after the approval flag; no `agent prompt` follows.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request' });
+    let reviewArgs: string[] = [];
+    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request', headless: (command, args, options) => { reviewArgs = args; return pendingHeadless(command, args, options); } });
     assert.equal(reviewed.delivery, 'request');
-    const reviewer = herdr.named('review-claude-1');
-    assert.match(reviewer.request!, /Review head a1f+ against base b1f+/);
-    assert.equal(reviewer.toolCalls.length, 1, 'the reviewer began its first tool call on its request');
-    assert.deepEqual(reviewer.pasted, [], 'nothing was pasted into the reviewer');
-    const reviewStart = typedLaunches(herdr)[0];
-    assert.equal(reviewStart.kind, 'claude');
-    assert.deepEqual(reviewStart.args.slice(0, 2), ['--permission-mode', 'bypassPermissions'], 'the non-interactive contract still leads the arguments');
-    assert.equal(reviewStart.args.at(-1), reviewer.request, 'the request is the last argument, the positional prompt, read from the request file');
+    const reviewerRequest = reviewArgs.at(-1)!;
+    assert.match(reviewerRequest, /Review head a1f+ against base b1f+/);
+    assert.equal(reviewed.pane, null);
+    assert.deepEqual(typedLaunches(herdr), [], 'the reviewer never uses a pane');
+    assert.ok(reviewArgs.includes('-p'));
+    assert.deepEqual(reviewArgs.slice(0, 2), ['--permission-mode', 'bypassPermissions']);
     assert.equal((await readReviewLedger(root)).reviews[0].delivery, 'request');
 
     // Producer on Codex: the request comes after the sandbox flags and their values.
@@ -317,7 +317,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request', now: () => new Date(clock) })).agentName;
+    reviewerName = (await launchLegacyReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request', now: () => new Date(clock) })).agentName;
     const reviewPrompts: string[] = [];
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: reviewerName, pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
@@ -378,7 +378,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     const slowReviews = await readReviewLedger(root);
     slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
-    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) })).agentName;
+    reviewerName = (await launchLegacyReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) })).agentName;
     reviewPrompts.length = 0;
     const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: reviewerName, pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
     reviewRecord = await slowReview('done', `● ${words}\n`, 10_000);
@@ -393,7 +393,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     const acknowledgedReviews = await readReviewLedger(root);
     acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
-    reviewerName = (await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) })).agentName;
+    reviewerName = (await launchLegacyReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) })).agentName;
     reviewRecord = await slowReview('working', '', 5_000);
     reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);
     assert.equal(reviewRecord.acknowledgedAt, iso(5_000 + sustainedActivityMs));
@@ -507,13 +507,13 @@ await t.test('manual:launch-authorization-onboarding-review — a Claude Code ro
     assert.equal(harness.role, launchAuthorization.replace(/\s+/g, ' '), 'the authorization is the session\'s role text, written to its role file rather than typed (GY-121)');
     const codex = await prepareSessionHarness(root, config, { role: 'reviewer', kind: 'codex', profile: 'r', pr: 93 });
     assert.deepEqual([codex.args, codex.role], [[], null], 'Codex reads AGENTS.md from the repository; no Claude flag rides its command line');
-    // Launched under the role file, a Claude session loads the authorization from that file.
+    // Headless Claude receives the authorization directly in its one task prompt.
     const herdr = new FakeHerdr();
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request' });
-    const launched = herdr.named('review-claude-1');
-    assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
-    assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');
+    let argv: string[] = [];
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { headless: (command, args, options) => { argv = args; return pendingHeadless(command, args, options); }, run: herdr.run, probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request' });
+    assert.ok(argv.at(-1)!.includes(launchAuthorization.replace(/\s+/g, ' ')));
+    assert.equal(herdr.calls.some(args => args[0] === 'tab'), false);
   } finally { await cleanup(); }
 });
 

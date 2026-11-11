@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -16,7 +17,7 @@ import { neededRework } from '../src/daemon/rework.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
 import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, screenshotUploads, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
 import { independenceRefusal, headRefusal, reviewLaunchBodySchema, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
-import { assertReviewCandidate, launchReview, readReviewLedger, reviewRecordSchema, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
+import { assertReviewCandidate, readReviewLedger, reviewRecordSchema, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

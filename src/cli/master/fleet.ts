@@ -1,3 +1,4 @@
+import { headlessInventory, sessionAgents } from '../../session-inventory.js';
 
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
@@ -11,7 +12,7 @@ import { unhandled, type MasterSession } from './session.js';
 /** Launch profiles, the master session, reviewer launches and the master's harness rules. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation } = session;
-  const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
+  const reviewCommand = (...a: Parameters<typeof launchReview>) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
   if (id === 'start') {
     const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
     const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
@@ -26,7 +27,7 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   // The fleet on this host against the CLI checkout's commit: the release a restart would load.
   if (id === 'review') {
     const snapshot = await masterApi('work-snapshot');
-    return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
+    return print(await reviewCommand(root, args, snapshot, sessionAgents(headlessInventory())));
   }
   if (id === 'harness') {
     const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });

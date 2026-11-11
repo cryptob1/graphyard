@@ -1,3 +1,4 @@
+import { insideMasterConfinement } from '../../master/confinement.js';
 // Concern: `graphyard master run` — wiring the durable loop to its effects.
 import { parseArgs } from 'node:util';
 import { liveMasterConfig } from '../../master.js';
@@ -24,6 +25,7 @@ export const loopHerdrReport = (host: string | null, master: string | null = nul
 export async function loopCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator, assertProtocol } = session;
   if (id === 'run') {
+    if (insideMasterConfinement()) throw new Error('master run must execute on the unconfined host to launch confined reviewers; use the install host loop.');
     if (master.forPerson) throw new Error('Personal masters use the install’s shared loop; run master run from the install checkout');
     const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
     const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;

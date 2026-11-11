@@ -1,3 +1,4 @@
+import { launchReview, launchLegacyReview, pendingHeadless } from './helpers/pending-review.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -18,7 +19,7 @@ import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
 import { launchProducer, producerPrompt, readProducerLedger, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
-import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
@@ -119,14 +120,13 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
 
     // A reviewer session: the same root, the same rule, and a harness that lets it check the head
     // out at that one path only.
-    const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') });
+    const reviewCalls: string[][] = []; let reviewStart: string[] = [];
+    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { headless: (command, args, options) => { reviewStart = args; return pendingHeadless(command, args, options); }, run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') });
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
-    const reviewStart = launchOf(reviewCalls).args;
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), -1), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
-    assert.ok(promptOf(reviewCalls).includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), reviewStart.indexOf('--skip-git-repo-check')), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
+    assert.ok(reviewStart.at(-1)!.includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
     assert.ok(!plan.allow.some(entry => entry.rule === 'Bash(git worktree add:*)'));
@@ -244,7 +244,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     // Reviewer sessions, the same four ways.
     const registerLaunch = async () => ({ launch: 'fixture-launch' });
     const review = async (key: string) => {
-      const launched = await launchReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
+      const launched = await launchLegacyReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
       await occupy(git, launched.checkout);
       return launched.checkout;
     };
@@ -266,7 +266,9 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const broken = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw new Error('herdr pane run failed'); return herdr()(_command, args); };
     const unlucky = request();
     await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable, probe: fleet('producer') }), /herdr pane run failed/);
-    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, registerLaunch, filesystem: durable, probe: fleet('reviewer') }), /herdr pane run failed/);
+    const refused = await launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { headless: async () => { throw new Error('model spawn failed'); }, run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
+    await failedReview(root, refused.review);
+
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
 
     // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
@@ -277,7 +279,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     // No checkout outlives its session record: every record that is not pending has no directory,
     // and every directory under the root belongs to a record that is.
     const records = [...(await readProducerLedger(root)).producers, ...(await readReviewLedger(root)).reviews];
-    assert.equal(records.length, 9); assert.ok(records.every(record => record.checkout));
+    assert.equal(records.length, 10); assert.ok(records.every(record => record.checkout));
     for (const record of records.filter(entry => entry.state !== 'pending')) gone(record.checkout!);
     const pending = records.filter(record => record.state === 'pending').map(record => record.checkout!);
     assert.deepEqual((await readdir(managed)).filter(name => name.startsWith('graphyard-')).map(name => join(managed, name)), pending);
@@ -417,8 +419,10 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
       assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run; its Herdr pane pane-1 was closed\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
-    await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') }),
-      new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*free space on the volume`));
+    const refused = await launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { headless: async () => { throw new Error('write error: No space left on device'); }, run: herdr(), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable, probe: fleet('reviewer') });
+    const failed = await failedReview(root, refused.review);
+    assert.match(failed.resolution!, /No space left on device/);
+
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
   } finally { await cleanup(); }
 
@@ -561,3 +565,12 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
     assert.equal(withVerificationPath({}, { PATH: '/account/bin' }).PATH, '/account/bin', 'no slots, no wrappers');
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
+
+async function failedReview(root: string, id: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const record = (await readReviewLedger(root)).reviews.find(entry => entry.id === id)!;
+    if (record.state === 'failed') return record;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('headless failure did not settle its checkout');
+}

@@ -1,3 +1,4 @@
+import { launchReview, pendingHeadless } from './helpers/pending-review.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
-import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
 import { readDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
@@ -295,8 +296,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe: spentFleet({ reviewer: ['claude-a', 'claude-b'] }) }), (error: any) => error.accountsExhausted === true);
     assert.equal(minted, 0); assert.deepEqual((await readReviewLedger(root)).reviews, []);
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch, probe: registry({ reviewer: ['claude-c'] }) });
-    assert.equal(reviewed.account!.environment, 'claude-c'); assert.equal(tabEnvironment(reviewCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
+    let reviewEnvironment: Record<string, string> = {};
+    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { headless: (command, args, options) => { reviewEnvironment = options.env; return pendingHeadless(command, args, options); }, run: herdr(reviewCalls), registerLaunch, probe: registry({ reviewer: ['claude-c'] }) });
+    assert.equal(reviewed.account!.environment, 'claude-c'); assert.equal(reviewEnvironment.CLAUDE_CONFIG_DIR, homes.fresh);
     const produceCalls: string[][] = [];
     const requested = { id: 'request-producer', kind: 'producer', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, group: 'integration', proofs: ['integration:agent-quota-failover'], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
     const producing = work({ autoDispatch: { review: null, producers: [requested], history: [] } } as any);
@@ -429,9 +431,9 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(workerCalls).includes('worker-oc-token-'), false);
     await saveReviewerProfile(root, { name: 'review-oc', agentName: 'review-oc', kind: 'opencode', accounts: ['opencode-a'] });
     const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { reviewer: ['opencode-a'] }) } });
-    const reviewTab = tabEnvironment(reviewCalls[0]);
-    assert.equal(JSON.parse(reviewTab.OPENCODE_PERMISSION)['*'], 'allow'); assert.ok(reviewTab.GH_CONFIG_DIR);
+    let reviewTab: Record<string, string> = {};
+    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { headless: (command, args, options) => { reviewTab = options.env; return pendingHeadless(command, args, options); }, run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { reviewer: ['opencode-a'] }) } });
+    assert.equal(JSON.parse(reviewTab.OPENCODE_PERMISSION)['*'], 'allow'); assert.equal(reviewTab.GH_CONFIG_DIR, undefined, 'the host posts the answer; the model receives no callback credential');
     assert.equal(reviewTab.GRAPHYARD_TOKEN_FILE, undefined, 'a reviewer still holds no Graphyard credential');
 
     // The master itself launches with its broadest mode, on its own request (GY-93).
