@@ -8,6 +8,7 @@ import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 import { bridgeTerminals } from '../src/master/terminal-bridge';
 import { terminalSessionReader } from '../src/master/terminal-session';
 import type { MasterConfig } from '../src/master/profiles';
+import { serveXterm } from './xterm';
 
 const settled = { timeout: 15_000 };
 async function fixture(browser: Browser, phone = false) {
@@ -30,6 +31,7 @@ async function fixture(browser: Browser, phone = false) {
   const stopping = new AbortController();
   await new Promise<void>(done => bridgeTerminals(url, 'test-coordinator', stopping.signal, done, terminalSessionReader(() => ({ credentialFile: join(site, 'master.token') }) as MasterConfig)));
   const context = await browser.newContext({ viewport: phone ? { width: 390, height: 844 } : { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
+  await serveXterm(context);
   const page = await context.newPage();
   // Capture the real xterm instance for buffer/dimension assertions, without replacing its behavior.
   await page.addInitScript(() => {
@@ -88,17 +90,19 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     await page.locator('.terminal-host').click({ button: 'right' });
     await expect.poll(f.inputs).toContain('\x1b[200~right click paste\x1b[201~');
     await page.evaluate(() => (window as any).survivedDrop = true);
+    // The pane's output changes before the drop: the reconnect re-reads it 250 ms later, and output
+    // written after the drop could miss that read (GY-3261).
+    f.current.gap = 'output produced during the gap'; await f.save();
     f.child.send('drop-terminals');
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
-    f.current.gap = 'output produced during the gap'; await f.save();
     await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
     expect(await page.evaluate(() => (window as any).survivedDrop)).toBe(true);
     // A failed reconnect while offline must keep retrying once the network returns.
     await page.context().setOffline(true);
+    f.current.gap = 'output while offline'; await f.save();
     f.child.send('drop-terminals');
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
     await page.waitForTimeout(1000);
-    f.current.gap = 'output while offline'; await f.save();
     await page.context().setOffline(false);
     await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
     f.current.master.pane = 'w1:replacement'; f.current.master.account = 'second-account'; f.current.status = 'working'; await f.save();
