@@ -117,7 +117,7 @@ export const rolePolicySchema = z.object({
   model: entryName.nullable().default(null),
 }).strict();
 export const roleSchema = z.object({
-  name: z.enum(registryRoles),
+  name: z.enum(registryRoles), // Active assignments only; the ledger retains historical roles.
   /** Eligible accounts, most preferred first. */
   accounts: z.array(entryName).max(50).refine(list => new Set(list).size === list.length, 'A role lists each account once'),
   /** How many sessions of this role may run at once; 0 pauses the role. */

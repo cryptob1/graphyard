@@ -146,13 +146,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  // GY-1918: init writes the fields it owns from its inputs — the url-checked credentialFile,
-  // cliPath, repository, base branch, GitHub App id, host, Herdr workspace, master agent name, the
-  // merge preferences and the run settings — and keeps every other field of the previous config
-  // exactly as it stands: the operator-agent and approver identities `master autonomy --apply`
-  // records among them, and any field a future command adds to the schema, so rerunning setup (as
-  // `up`'s master-loop step does) can no longer drop an identity another command wrote and strand
-  // every goal in acceptance drafting.
+  // Init updates its own fields and preserves other active or future settings, including operator identity.
   const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;

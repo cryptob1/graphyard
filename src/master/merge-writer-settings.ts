@@ -1,4 +1,4 @@
-// Concern: the merge writer's trial timeout and `run.mergeWriter` (GY-1524) settings and the defaults they resolve to, and the retired `run.candidates` (GY-1526).
+// Concern: the merge writer's trial timeout and `run.mergeWriter` (GY-1524) settings and the defaults they resolve to.
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -20,15 +20,13 @@ export const defaultMergeTokenFile = (installId: string, home?: string) => join(
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
  * how many heads it trials at once. Unset, the key is the install's default and the trials
- * `defaultMergeWriterParallel`. `retrials` is retired (GY-3120: a passing head lands without
- * another trial); it is still parsed so an older master.json loads, and ignored.
+ * `defaultMergeWriterParallel`.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
   tokenFile: z.string().trim().min(1).max(1000).optional(),
-  retrials: z.number().int().min(0).optional(),
   parallel: z.number().int().min(1).max(maxMergeWriterParallel).optional(),
-}).strict().refine(settings => !(settings.deployKeyFile && settings.tokenFile), { message: 'Set run.mergeWriter.deployKeyFile or tokenFile, not both' });
+}).passthrough().transform(({ retrials, ...kept }) => kept).refine(settings => !(settings.deployKeyFile && settings.tokenFile), { message: 'Set run.mergeWriter.deployKeyFile or tokenFile, not both' });
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 
 /** `~/` at the start of a configured path is the home directory, as a shell would read it. */
@@ -42,11 +40,3 @@ export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, 
   if (!run.mergeWriter?.deployKeyFile && existsSync(defaultMergeTokenFile(installId, home))) return { tokenFile: defaultMergeTokenFile(installId, home), parallel };
   return { deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), base), parallel };
 };
-
-// ---- The retired candidate cut (GY-1526, removed by GY-1983) ----------------------------------------
-
-/** `run.candidates` in .graphyard/master.json: unused since GY-1983 removed the loop's candidate cut; still parsed so an older master.json loads. */
-export const candidateSettingsSchema = z.object({
-  everyMerges: z.number().int().min(1).optional(),
-  idleMinutes: z.number().int().min(1).optional(),
-}).strict();

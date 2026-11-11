@@ -59,7 +59,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
         : 'Rerun with --apply to store this proposal in the control plane; then name each model and its cost with graphyard master registry model set' };
     if (!values.apply || empty) return report;
     const applied = await api.write('agent-registry/apply', { ...proposal, reason: values.reason ?? `Setup proposal from the agent CLIs logged in on ${master.hostId}` });
-    return { ...report, applied: true, revision: applied.revision, registry: applied.registry, next: 'The registry decides every launch from now on; graphyard master registry shows each account and why any is ineligible' };
+    return { ...report, applied: true, attention: applied.attention, revision: applied.revision, registry: applied.registry, next: 'The registry decides every launch from now on; graphyard master registry shows each account and why any is ineligible' };
   }
   // A session the registry still counts but that nothing is running any more: a launcher killed
   // mid-flight, a host that went away. Every other end is the control plane's own doing.
