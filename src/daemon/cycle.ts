@@ -317,7 +317,7 @@ async function closeStep(cycle: Cycle) {
   // GY-3188: a pane Graphyard launched is closed once its session has ended (its item done, or its
   // session no longer running) unless its agent is still working, and so is one whose runtime exited
   // in a worktree since removed. A live session's pane is never touched.
-  const launched = new Set([...snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)), ...Object.values(state.actions).map(action => action.pane)]);
+  const launched = new Set(snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)));
   const ended = new Set<string>(), live = new Set<string>();
   const judge = (item: Work, session: NonNullable<Work['sessions']>[number]) => {
     if (!session.pane) return;
