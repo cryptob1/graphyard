@@ -9,7 +9,7 @@
 // the next loop adopts it from that directory and posts its answer.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
@@ -351,7 +351,7 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const stop = new AbortController(), detached = new AbortController();
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
   const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), input.startupMs ?? workerStartupMs).unref())]);
-  const printed = () => readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '';
+  const printed = () => runLogTail(input.root, id) ?? '';
   if (ended) return { id, ended: { ...ended, output: printed() } };
   void watchWorker(record, directory, running, stop, detached).then(async () => detached.signal.aborted ? undefined : input.settle?.({ output: printed(), ok: await running.then(() => true, () => false) })).catch(() => {});
   return { id, ended: null };
@@ -383,6 +383,15 @@ export function adoptHeadlessWorkers(root: string): AdoptedRun[] {
   });
 }
 const readWorkerRecord = (directory: string) => { try { return workerRecordSchema.parse(JSON.parse(readFileSync(join(directory, sessionFile), 'utf8'))); } catch { return null; } };
+
+/** The last of what a worker run printed, as text: what its limit notice, login refusal or crash is read from. Null for a run this installation does not hold. */
+export function runLogTail(root: string, id: string, bytes = 4000): string | null {
+  if (!z.string().uuid().safeParse(id).success) return null;
+  let text: string;
+  try { text = readFileSync(join(workerRunsDirectory(root), id, runLogName), 'utf8'); } catch { return existsSync(join(workerRunsDirectory(root), id)) ? '' : null; }
+  const lines = text.split('\n').filter(Boolean).flatMap(line => { try { return [(JSON.parse(line) as RunLogLine).text]; } catch { return []; } });
+  return lines.join('\n').slice(-bytes);
+}
 
 /** The most a log read returns at once. */
 export const runLogChunkBytes = 64 * 1024;

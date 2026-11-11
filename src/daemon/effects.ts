@@ -48,8 +48,8 @@ export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   /** Records a session's handle on its item: the launch writes it running, the close step finished. */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
-  /** The session's terminal, as text; null when the runtime cannot be read (the limit-notice judge reads it). A master pane is judged by pane and name alone. */
-  sessionScreen?: (session: Pick<SessionHandle, 'pane' | 'agentName'>) => string | null | Promise<string | null>;
+  /** The session's terminal, as text — a headless worker's run-log tail; null when the runtime cannot be read (the limit-notice judge reads it). A master pane is judged by pane and name alone. */
+  sessionScreen?: (session: Pick<SessionHandle, 'pane' | 'agentName'> & { transcript?: string | null }) => string | null | Promise<string | null>;
   /**
    * Ends a worker attempt whose lease lapsed with nothing submitted (GY-2953): keeps what the
    * attempt had not committed as one WIP commit on its own branch in its own worktree, and records

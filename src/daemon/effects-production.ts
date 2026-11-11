@@ -35,6 +35,8 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { liveRuns } from '../runner/registry.js';
+import { runLogTail } from '../headless-session.js';
+import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
@@ -102,7 +104,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     closeSession: pane => closeHerdrPane(pane, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    sessionScreen: session => session.pane || session.agentName ? readSessionScreen(session.pane ?? session.agentName!, run) : null,
+    // A headless worker's screen is the tail of its run log (GY-3259).
+    sessionScreen: session => transcriptRun(session.transcript) ? runLogTail(root, transcriptRun(session.transcript)!) : session.pane || session.agentName ? readSessionScreen(session.pane ?? session.agentName!, run) : null,
     // GY-2953: a lease a supervisor's time bound or a worker's silence ended without a submission
     // still holds the attempt's work in its worktree. Before the cleanup removes that tree, the
     // uncommitted rest is committed on the attempt's own branch and the capacity record that ends

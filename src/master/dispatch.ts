@@ -419,15 +419,15 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    */
   async function settleEarlyExit({ output, ok }: { output: string; ok: boolean }) {
     const notice = await stoppedOnLimit(output);
-    if (notice) throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true);
+    if (notice) throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true, prepared.epoch);
     if (ok) return;
     const loggedOut = detectLoggedOut(output);
-    if (loggedOut) throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once: ${loggedOut}`, true);
-    throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once${output.trim() ? `: ${output.trim().slice(-300)}` : ' without output'}`, false);
+    if (loggedOut) throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once: ${loggedOut}`, true, prepared.epoch);
+    throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once${output.trim() ? `: ${output.trim().slice(-300)}` : ' without output'}`, false, prepared.epoch);
   }
 }
 /** A worker run that ended inside its startup observation; `moveOn` refuses its account so the dispatch tries the next. */
-export class HeadlessWorkerExit extends Error { constructor(message: string, readonly moveOn: boolean) { super(message); } }
+export class HeadlessWorkerExit extends Error { constructor(message: string, readonly moveOn: boolean, readonly epoch: number) { super(message); } }
 /**
  * Every launched session decides and acts on its own. The only way out without its result is a
  * recorded blocker that names the exact command that was blocked; a session that stops to ask for

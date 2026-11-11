@@ -8,7 +8,7 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
-import { assertDispatchable } from '../master/dispatch.js';
+import { assertDispatchable, HeadlessWorkerExit } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates, runTranscript } from '../model/sessions.js';
 import { checkoutTrustLine } from '../harness.js';
@@ -590,6 +590,12 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
       return;
     }
     recordLaunchFailure(state, runtime, item, message(error), now());
+    // A worker run that exited at once is the item's launch incident, as an early exit after its start is (GY-3104, worker-launch-health.ts).
+    if (error instanceof HeadlessWorkerExit) {
+      const previous = state.actions[earlyExitKey(item)];
+      await record(state, earlyExitKey(item), { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: error.epoch, state: 'failed', detail: `${item.key} epoch ${error.epoch}: ${error.message}`.slice(0, 500),
+        attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    }
     sink.push(await entry('failed', `Dispatch of ${item.key} to ${profile.name} failed: ${message(error)}; it is retried next cycle`));
   }
 }
