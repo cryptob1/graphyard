@@ -1,4 +1,6 @@
-import { test } from 'node:test';
+import { saveProducerLedger } from '../src/producer.js';
+import { saveReviewLedger } from '../src/reviewer.js';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -159,7 +161,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     assert.deepEqual(ledger.producers.map(record => [record.requestId, record.attempt, record.state]), [[request.id, 1, 'failed'], [request.id, 2, 'pending']]);
     // At the limit the launcher refuses the request itself, whatever the loop asks.
     ledger.producers = [1, 2, 3, 4].map(attempt => ({ ...ledger.producers[0], id: randomUUID(), attempt, state: 'expired' as const }));
-    await writeFile(join(root, '.graphyard/producers.json'), JSON.stringify(ledger), { mode: 0o600 });
+    await saveProducerLedger(root, ledger);
     await assert.rejects(launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr([]), probe: fleet() }), /no further automatic attempt/);
     void credentials;
   } finally { await cleanup(); }
@@ -424,7 +426,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     for (const file of [workerFile, reviewerFile, producerFile]) assert.ok(file.startsWith(join(root, '.graphyard/harness/')));
     // A runtime that does not read Claude settings is launched with its profile arguments unchanged.
     await saveReviewerProfile(root, { name: 'cursor-reviewer', agentName: 'review-cursor-1', kind: 'cursor' });
-    const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
+    const ledger = await readReviewLedger(root); ledger.reviews = []; await saveReviewLedger(root, ledger);
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), probe: fleet('cursor'), registerLaunch });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
@@ -475,7 +477,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     assert.match(review.resolution!, /the reviewer session ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own, without a verdict/);
     // A session Herdr cannot read is never judged finished.
     const reviewLedger = await readReviewLedger(root); reviewLedger.reviews[0] = { ...reviewLedger.reviews[0], state: 'pending', idleSince: undefined, closedAt: undefined, resolution: undefined };
-    await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(reviewLedger), { mode: 0o600 });
+    await saveReviewLedger(root, reviewLedger);
     const blind = await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: null, now: () => new Date(reviewStart + 10 * 60_000) });
     assert.equal(blind.reviews[0].state, 'pending'); assert.equal(blind.reviews[0].idleSince, undefined);
   } finally { await cleanup(); }

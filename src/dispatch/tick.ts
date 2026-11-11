@@ -14,7 +14,7 @@ import { answeredByPendingReview, LauncherUnavailableError, UnknownReviewerProfi
 import { launchRefusalProbeDue, owedPostMergeReviews, postMergeRefusalProbeMs } from '../model/post-merge-review.js';
 import { answeredByPendingSession, independentProducerProfiles, sessionRetry } from '../producer.js';
 import { unexercisedFindings } from '../model/mechanical-proofs.js';
-import { cursorTextLimit, bounded, closeFailureReasons, type DispatchLaunch, type DispatchWait, dispatchAttemptCeiling, type DispatchFailure, type DispatchCursor, dispatchRetryMinMs, dispatchRetryMaxMs, capacityRecheckMs, sessionMissLimit, dispatchReadTimeoutMs, attributePersistFailure, tickWaits, capacityReasonLimit, dispatchFailureReasonLimit, closureFailureReasonLimit, dispatchFailureLimit, verdictIngestGraceMs, backedOffProfiles, probeBackoffFailures, probeBackoffMs } from './cursor.js';
+import { cursorTextLimit, bounded, closeFailureReasons, type DispatchLaunch, type DispatchWait, dispatchAttemptCeiling, type DispatchFailure, type DispatchCursor, dispatchRetryMinMs, dispatchRetryMaxMs, capacityRecheckMs, dispatchReadTimeoutMs, attributePersistFailure, tickWaits, capacityReasonLimit, dispatchFailureReasonLimit, closureFailureReasonLimit, dispatchFailureLimit, verdictIngestGraceMs, backedOffProfiles, probeBackoffFailures, probeBackoffMs } from './cursor.js';
 import { describeAttempts, unactedProducerSession, requestSpentAt, preferFreshProfiles, requestSessions, limitNoticeExit, type DispatchedSession } from './attempts.js';
 import { selectReviewerProfile, launchWithFailover, type InstantExit } from './launch-failover.js';
 import { launchedSessionHandle, type SessionClosure, sessionHandleKey, reconcileSessionLiveness, reportClosure, sweepRegistrySessions } from './session-sweep.js';
@@ -101,10 +101,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const report = observeSessions(snapshot.work, herdr, new Date(clock), { states: runtimeEndedStates, hostId: config.hostId, settled: superseded, firstMissed: cursor.sessionMisses });
   const closures = [...sweep.closures, ...report.entries.filter(entry => entry.closed).map(reportClosure)];
   // What the runtime did not report this tick, for the closing reason to say how long. The map
-  // holds only handles currently missing, so it is bounded by the graph's live sessions; the
-  // ceiling is there because the cursor is a file, not a database.
+  // holds only handles currently missing, so it is bounded by the graph's live sessions.
   // A tick that could not read the runtime reported nothing, so it leaves them as they were.
-  if (herdr) cursor.sessionMisses = Object.fromEntries(Object.entries(report.missing).slice(0, sessionMissLimit));
+  if (herdr) cursor.sessionMisses = report.missing;
   const byId = new Map(snapshot.work.map(item => [item.id, item]));
   const sessions = tick.sessions = { observed: report.entries.length, written: 0, failures: [] as { work: string; id: string; reason: string }[] };
   await (async () => {

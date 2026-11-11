@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -250,7 +250,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     assert.equal(both.consent[0].prompt, both.consent[1].prompt); assert.match(both.consent[2].prompt, /crash reports when it fails/);
     assert.deepEqual(second.keys, [['2'], ['2'], ['2']]);
 
-    await saveProducerLedger(root, { version: 1, producers: [] });
+    await saveProducerLedger(root, { ...await readProducerLedger(root), producers: [] });
     for (const [screen, kind] of [[loginDialog, 'credential'], [paymentDialog, 'payment']] as const) {
       const pane = new ConsentPane('codex', screen, ['1']);
       const closed: string[] = [];

@@ -1,3 +1,4 @@
+import { loopState } from './tables/loop-state.js';
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
 import { humanSignInSessions, teamMembers } from './tables/human-sign-in.js';
@@ -20,7 +21,7 @@ import { registryRefusalTables } from './tables/registry-refusals.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers,
+  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers, loopState,
 ];
 
 /** Tables retired from the schema and logical backups. */

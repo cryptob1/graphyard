@@ -1,8 +1,9 @@
-import { test } from 'node:test';
+import { saveReviewLedger } from '../src/reviewer.js';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { rm, writeFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster, type MasterConfig } from '../src/master.js';
@@ -69,7 +70,7 @@ async function session(root: string, credentialDirectory: string, fields: Partia
     mode: 'control-plane', launch: 'fixture-launch', acknowledgedAt: iso(start + 1000), ...fields,
   });
   const ledger: ReviewLedger = { version: 1, reviews: [record] };
-  await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
+  await saveReviewLedger(root, ledger);
   return { record, start };
 }
 
