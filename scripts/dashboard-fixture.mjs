@@ -128,7 +128,9 @@ export function readableWords(html) {
       continue;
     }
     if (voids.has(name) || token.endsWith('/>')) continue;
-    const hidden = /\shidden(\s|=|$)/.test(attributes) || /\sdata-title(\s|=|$)/.test(attributes) || /aria-hidden="true"/.test(attributes);
+    // A collapsed native select shows only its selected option.
+    const unselectedOption = name === 'option' && !/\sselected(\s|=|$)/.test(attributes);
+    const hidden = unselectedOption || /\shidden(\s|=|$)/.test(attributes) || /\sdata-title(\s|=|$)/.test(attributes) || /aria-hidden="true"/.test(attributes);
     // A closed <details> shows only its <summary>: the rest is skipped once the summary closes.
     stack.push({ name, skip: hidden, open: name === 'details' && /\sopen(\s|=|$)/.test(attributes), term: name === 'abbr' && /class="term"/.test(attributes) && /\stitle="/.test(attributes) });
   }

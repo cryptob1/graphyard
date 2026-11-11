@@ -43,16 +43,13 @@ Run `npx @cryptob1/graphyard doctor` in the checkout to check credentials, agent
 
 ## Reviewer runtimes
 
-Reviews run once, headlessly, on the host master loop, with the selected account home, tool policy and credential masking. Workers and the master still use Herdr. Claude, Codex, Cursor, Pi, OpenCode and Muse have built-in one-task forms. Other runtimes require `launch.headlessArgs` in their registry runtime (`master registry runtime set NAME --headless-arg=ARG … --reason REASON`, or `NAME|@FILE`).
-
-`headlessArgs` replaces `launch.args` and the built-in one-task form. It must contain exactly one `{request}` argument and must exit after answering. A leading subcommand comes first, then the launch's approval, role-policy, model, tool and harness flags, then the remaining contract arguments. For example:
+Reviews run headlessly on the host master loop, under the account's home, tool policy and confinement. Claude, Codex, Cursor, Pi, OpenCode and Muse have built-in one-task forms; other runtimes need `launch.headlessArgs` (`master registry runtime set NAME --headless-arg=ARG … --reason REASON`). It replaces `launch.args`, holds exactly one `{request}`, and must exit after one answer; arguments pass literally, without a shell. A runtime without one is refused and the next account is tried:
 
 ```json
-{"name":"muse","launch":{"kind":"muse","headlessArgs":["exec","{request}"]}}
 {"name":"custom","launch":{"kind":"kilo","headlessArgs":["ONE_TASK_SUBCOMMAND","--prompt","{request}"]}}
 ```
 
-Replace the custom example with that runtime's documented one-task arguments. Arguments and the prompt are passed literally, without shell expansion or a PTY; the shared detached supervisor only records output and exit status. Missing contracts are configuration refusals, never pane fallbacks. Dispatch observes each child's first second: an early login or limit exit holds its account and starts the next eligible account before returning; a still-running review continues in the background under the existing timeout. A confined master leaves its durable request for the host loop. `.graphyard/reviews.json` links each stable `headless.id` and actual `headless.kind` to its exact head/base/policy and verdict ID, including after restart adoption.
+Operators and maintainers can change priority (P0–P3) on a work row or item page. Changes record who changed it and why in History; the next dispatch uses the new priority. Existing P4 items retain P4 until changed. `graphyard priority GY-N 0|1|2|3 REASON` and `graphyard master priority GY-N 0|1|2|3 REASON` require an audit reason.
 
 ## Learn more
 
