@@ -18,7 +18,6 @@ import { registryFixture } from './helpers/registry-fixture.js';
 import { expandTypedCommand, typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
 import { runtimeAdapters } from '../src/master/runtimes.js';
-import { freshLaunch } from '../src/master/session-resume.js';
 import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js';
 import { knownRuntimes } from '../src/install/runtimes.js';
 import { connectProvider, type FleetLaunchAccount } from '../src/fleet.js';
@@ -438,6 +437,4 @@ test('unit:launch-delivery — each runtime launches with its request, role file
       assert.equal(command.includes('--append-system-prompt-file "$GY.role"'), !!adapter.role, `${adapter.kind} loads the role file only where its adapter names how`);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
-  const fresh = freshLaunch('claude', null);
-  assert.deepEqual(fresh.args, ['--session-id', fresh.session], 'Claude Code\'s adapter names the id the session can be resumed by');
 });

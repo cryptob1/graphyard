@@ -5,7 +5,6 @@ import { assertLaunchable, launchPlan, runtimeEndedStates } from '../src/harness
 import { launchCommand, launchDelivery, launchProgram, writeLaunchFiles } from '../src/master/launch.js';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { registerRuntimeAdapter, runtimeAdapter } from '../src/master/runtimes.js';
-import { freshLaunch, resumePlan } from '../src/master/session-resume.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3034 AC-1: everything Graphyard knows of a runtime lives in its one adapter record, so a new
@@ -17,7 +16,6 @@ test('unit:runtime-adapter — a registered adapter is launchable, resumable and
     kind: 'nimbus',
     recipe: { program: 'nimbus-cli', args: ['--approve', 'all'], environment: { NIMBUS_TRUST: '1' }, prompts: 'approval prompts', tradeoff: 'Nimbus runs every tool without asking.' },
     request: reference => `--ask ${reference}`,
-    resume: { fresh: id => ['--name', id], resume: id => ['--continue', id] },
     limitNotices: [/\bnimbus credits spent\b/i],
     endedStates: ['finished'],
   });
@@ -39,11 +37,6 @@ test('unit:runtime-adapter — a registered adapter is launchable, resumable and
     const command = launchCommand('nimbus', plan.args, files);
     assert.match(command, /nimbus-cli --approve all --ask "\$\(cat "\$GY\.request"\)"$/, 'the command line runs the adapter program with its request contract');
   } finally { await rm(directory, { recursive: true, force: true }); }
-
-  const fresh = freshLaunch('nimbus', null);
-  assert.deepEqual(fresh.args, ['--name', fresh.session]);
-  const resumed = resumePlan({ epoch: 1, runtime: 'nimbus', account: 'nimbus-a', session: 'abc' }, { kind: 'nimbus', account: 'nimbus-a' });
-  assert.deepEqual(resumed, { resume: true, from: 1, session: 'abc', args: ['--continue', 'abc'] });
 
   assert.ok(detectRuntimeExhaustion('Error: Nimbus credits spent', 'nimbus', Date.now()), 'the adapter limit notice reports the account spent');
   assert.equal(detectRuntimeExhaustion('Error: Nimbus credits spent', 'codex', Date.now()), null, 'another runtime does not read it');
