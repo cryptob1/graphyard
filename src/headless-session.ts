@@ -111,6 +111,12 @@ export function awaitHeadlessRun(directory: string, options: { signal?: AbortSig
 export const defaultHeadlessExec = (): HeadlessExec => underTestRunner() ? async () => { throw new Error('A test must supply a headless model executable; the host runtime is never used by tests'); } : spawnHeadless;
 /** A live child may return from dispatch after this startup observation; early failures move accounts first. */
 export const headlessStartupMs = 1000;
+/**
+ * A worker run's startup observation (GY-3259): its supervisor checks its assignment with the
+ * control plane before the runtime starts, so a run that stops at once on its provider's limit
+ * notice has ended well inside this, and the dispatch moves to the next account before it returns.
+ */
+export const workerStartupMs = 10_000;
 
 /**
  * The last JSON object the run printed that `schema` accepts. Runtimes print prose or a code fence
@@ -326,7 +332,7 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
  * Start one worker run: its runtime's one-task form under `graphyard watch`, which claims nothing
  * itself but heartbeats the lease the launcher claimed under the worker's own identity, stops the
  * runtime the moment that lease is lost and releases it when the runtime exits without `complete`.
- * The run is watched for `headlessStartupMs`; one that ended in that time is returned with what it
+ * The run is watched for `workerStartupMs`; one that ended in that time is returned with what it
  * printed, so the launcher can move a spent account on before it returns. Otherwise it is listed as
  * a live session until it ends, and its log and record stay on disk after.
  */
@@ -340,7 +346,7 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const argv = [...input.supervisor, ...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, launch.request, launch.contract)];
   const stop = new AbortController(), detached = new AbortController();
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
-  const ended = await Promise.race([running.then(() => true, () => true), new Promise<false>(done => setTimeout(() => done(false), headlessStartupMs).unref())]);
+  const ended = await Promise.race([running.then(() => true, () => true), new Promise<false>(done => setTimeout(() => done(false), workerStartupMs).unref())]);
   if (ended) return { id, ended: readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '' };
   watchWorker(record, directory, running, stop, detached);
   return { id, ended: null };
