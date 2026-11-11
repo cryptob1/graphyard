@@ -1,18 +1,15 @@
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { assertDispatchable, awaitRuntimeStart, consentHold, dispatchWork, loadMasterConfig, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, type WorkerProfile } from '../src/master.js';
-import { consentAnswers, consentHoldMs, detectConsentPrompt, readConsentHolds, writeConsentHold } from '../src/consent-prompt.js';
-import { assignmentSurrender, consentHoldProbe, supervise } from '../src/session-watch.js';
+import { awaitRuntimeStart, loadMasterConfig, saveProducerProfile, SessionStartError, setupMaster, startAgentSession } from '../src/master.js';
+import { consentAnswers, detectConsentPrompt } from '../src/consent-prompt.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
-import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { hostname } from 'node:os';
@@ -24,10 +21,9 @@ const registry = (role: 'worker' | 'producer') => registryFixture(hostname(), ['
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
 // launcher reads the prompt off the pane, answers only the prompts on its allow-list with their
-// least-privilege option, holds a worker on any other prompt, and the
-// watch supervisor gives the slot back once the hold outlives its bound. One case per proof:
-// unit:consent-prompt-detected, integration:known-consent-answered-unknown-escalated,
-// integration:unconsented-session-releases-its-slot, manual:consent-prompt-docs-review.
+// least-privilege option, and refuses the launch on any other prompt (workers run headless since
+// GY-3259, so no pane is ever held). One case per proof: unit:consent-prompt-detected,
+// integration:known-consent-answered-unknown-escalated, manual:consent-prompt-docs-review.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -106,7 +102,6 @@ async function installed() {
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   return { root, token, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
-const workerProfile = (credentialFile: string, kind: WorkerProfile['kind'] = 'claude'): WorkerProfile => ({ name: 'cursor-primary', principal: 'graphyard-cursor-1', agentName: 'eng-consent', mode: 'launch', kind, credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 
 test('unit:consent-prompt-detected — a launched session stopped on a first-run trust dialog while Herdr reports it idle is reported awaiting consent with the prompt\'s own text, never as a started session', async () => {
   // The detector: every consent kind the item names is recognised, with the dialog's own text;
@@ -126,38 +121,12 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
   const directory = await temporaryDirectory('consent-unit');
   try {
     // A stub runtime that draws a sign-in dialog and waits: Herdr reports it idle, which alone would
-    // count as started. The launch is reported awaiting consent instead, with the prompt's text, and
-    // nothing is typed into the dialog. A sign-in is a credential only a human gives; a trust or
-    // approval dialog is never left for one, because every launch records its folder trusted and
-    // starts in its runtime's no-approval mode first (GY-184, tests/autonomy-contract.test.ts).
+    // count as started. The launch is refused as awaiting consent instead, with the prompt's text, and
+    // nothing is typed into the dialog: a sign-in is a credential only a human gives.
     const pane = new ConsentPane('codex', loginDialog);
-    const held = await startAgentSession('eng-consent', 'codex', 'w1V:pC1', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], 'Implement GY-130', pane.run, { directory, ...pane.bounds(), holdConsent: true });
-    assert.equal(held.started.state, 'awaiting consent');
-    assert.equal(held.awaiting!.kind, 'credential');
-    assert.equal(held.awaiting!.prompt, 'Sign in with ChatGPT to use Codex as part of your paid plan / or connect an API key for usage-based access / > 1. Sign in with ChatGPT / 2. Provide your own API key');
-    assert.match(held.started.detail, /awaiting consent on a credential prompt/);
+    await assert.rejects(startAgentSession('eng-consent', 'codex', 'w1V:pC1', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], 'Implement GY-130', pane.run, { directory, ...pane.bounds() }),
+      (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && error.message.includes('on a credential prompt') && error.message.includes('Sign in with ChatGPT to use Codex as part of your paid plan / or connect an API key for usage-based access / > 1. Sign in with ChatGPT / 2. Provide your own API key'));
     assert.deepEqual(pane.keys, [], 'a prompt outside the allow-list is never answered');
-    assert.equal(pane.renamed, 'eng-consent', 'the held session is named so a human can find it');
-
-    // Every launched runtime takes its request on its command line (GY-184), so a held one is never
-    // pasted into its dialog and has nothing pending: it reads the request once the dialog is answered.
-    const geminiPane = new ConsentPane('gemini', loginDialog);
-    const geminiHeld = await startAgentSession('eng-gemini', 'gemini', 'w1V:pC1', ['--yolo'], 'Implement GY-130', geminiPane.run, { directory, ...geminiPane.bounds(), holdConsent: true });
-    assert.equal(geminiHeld.delivery, 'request'); assert.equal(geminiHeld.started.state, 'awaiting consent');
-    assert.equal(geminiPane.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false);
-    assert.equal(geminiHeld.awaiting!.request, null);
-    assert.equal(await readFile(geminiHeld.files.request!, 'utf8'), `${autonomyContract} Implement GY-130`, 'the request carries the autonomy contract ahead of the task (GY-184)');
-    assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-gemini', 'w1V:pC1', geminiHeld.awaiting!, clock).request, undefined);
-    assert.equal(held.awaiting!.request, null, 'a runtime that read its request from the command line has nothing pending');
-    assert.equal(held.awaiting!.named, true);
-
-    // A rename Herdr fails while the dialog is up keeps the hold, recorded unnamed for the supervisor to retry.
-    const unnamedPane = new ConsentPane('codex', loginDialog);
-    const unnamedRun = (command: string, args: string[]) => { if (args[0] === 'agent' && args[1] === 'rename') throw new Error('herdr: agent busy'); return unnamedPane.run(command, args); };
-    const unnamed = await startAgentSession('eng-consent', 'codex', 'w1V:pC1', [], 'Implement GY-130', unnamedRun, { directory, ...unnamedPane.bounds(), holdConsent: true });
-    assert.equal(unnamed.started.state, 'awaiting consent'); assert.equal(unnamed.awaiting!.named, false);
-    assert.equal(consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', unnamed.awaiting!, clock).named, false);
-    assert.equal('named' in consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', held.awaiting!, clock), false, 'a named session\'s hold says nothing about it');
 
     // A pane read that fails rules nothing out: an idle runtime whose screen could not be read is
     // still starting and read again, so the dialog behind it is found, never taken as started. The
@@ -166,12 +135,12 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     const flaky = new ConsentPane('claude', folderDialog);
     let unread = 3;
     const flakyRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read' && unread-- > 0) throw new Error('herdr: pane read failed'); return flaky.run(command, args); };
-    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true }),
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, flaky.bounds()),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && /stopped at a workspace-trust prompt/.test(error.message));
     assert.equal(unread, -1, 'the dialog was found once a read succeeded');
     const blind = new ConsentPane('claude', folderDialog);
     const blindRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('herdr: pane read failed'); return blind.run(command, args); };
-    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, { ...blind.bounds(), holdConsent: true }),
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, blind.bounds()),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'still starting' && /Herdr reports the claude runtime idle but its pane could not be read, so a consent prompt is not ruled out/.test(error.message));
 
     // Without a hold the same launch is refused as awaiting consent, carrying the prompt's text.
@@ -179,21 +148,10 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', refusedPane.run, refusedPane.bounds()),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && error.screen.startsWith('Do you trust the files in this folder?') && /workspace-trust prompt in pane w1V:pC1 although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "Do you trust the files in this folder\?/.test(error.message));
 
-    // The worker launch itself: dispatchWork reports the session awaiting consent, not started.
-    const { root, token, cleanup } = await installed();
-    try {
-      const workerPane = new ConsentPane('codex', loginDialog);
-      const assigned = join(root, 'assigned');
-      const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], workerPane.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: workerPane.bounds(), probe: registry('worker') });
-      assert.equal(dispatched.started, 'awaiting consent');
-      assert.equal(dispatched.consent.awaiting!.prompt, held.awaiting!.prompt);
-      assert.equal(dispatched.consent.awaiting!.pane, 'w1V:pC1');
-      assert.equal(dispatched.consent.awaiting!.attach, 'herdr pane attach w1V:pC1 --workspace w1V');
-    } finally { await cleanup(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('integration:known-consent-answered-unknown-escalated — the launcher answers a hooks-trust dialog with "Continue without trusting" and records it on the session, holds a worker on any other prompt, and never answers a credential or payment prompt', async () => {
+test('integration:known-consent-answered-unknown-escalated — the launcher answers a hooks-trust dialog with "Continue without trusting" and records it on the session, and never answers a credential or payment prompt', async () => {
   // The allow-list never grants hook execution, folder trust or a sandbox escape.
   assert.deepEqual(consentAnswers.map(rule => rule.id), ['hooks-continue-untrusted', 'telemetry-decline']);
   assert.deepEqual(detectConsentPrompt(hooksDialog)!.keys, ['3'], 'the default answer to the hooks dialog is option 3, found by its label');
@@ -227,13 +185,10 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
 
     // A credential prompt and a payment prompt are never answered: a producer launch is refused
     // with the prompt's text, and its pane closed; nothing is typed into either.
-    // A dialog still drawn after its answer is given time to close before it is answered again,
-    // and one that never closes is answered twice at most and then held like any other prompt.
+    // A dialog still drawn after its answer is answered twice at most and then refused like any other prompt.
     const stubborn = new ConsentPane('codex', hooksDialog);
-    const stuck = await awaitRuntimeStart('w1V:pC1', 'codex', 'GY=/s; codex', stubborn.run, { ...stubborn.bounds(), holdConsent: true });
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'codex', 'GY=/s; codex', stubborn.run, stubborn.bounds()), /answered it 2 times and it is still showing/);
     assert.deepEqual(stubborn.keys, [['3'], ['3']]);
-    assert.ok(Date.parse(stuck.consent[1].at) - Date.parse(stuck.consent[0].at) >= 5_000, 'no second keystroke inside the settle period');
-    assert.match(stuck.awaiting!.why, /answered it 2 times and it is still showing/);
     // Attempts are counted per dialog: a second dialog the same rule matches, drawn after the first
     // took both its answers, still gets its own least-privilege answer.
     const crashDialog = [' Send crash reports?', ' Allow the CLI to send crash reports when it fails?', '', '● 1. Yes, send crash reports', '  2. No, do not send'].join('\n');
@@ -244,8 +199,8 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
       if (args[0] === 'pane' && args[1] === 'send-keys' && second.keys.length === 2) Object.assign(second as unknown as { screen: string; accepts: string[] }, { screen: crashDialog, accepts: ['2'] });
       return result;
     };
-    const both = await awaitRuntimeStart('w1V:pC1', 'gemini', 'GY=/s; gemini', secondRun, { ...second.bounds(), holdConsent: true });
-    assert.equal(both.state, 'ready'); assert.equal(both.awaiting, null);
+    const both = await awaitRuntimeStart('w1V:pC1', 'gemini', 'GY=/s; gemini', secondRun, second.bounds());
+    assert.equal(both.state, 'ready');
     assert.deepEqual(both.consent.map(answer => answer.rule), ['telemetry-decline', 'telemetry-decline', 'telemetry-decline']);
     assert.equal(both.consent[0].prompt, both.consent[1].prompt); assert.match(both.consent[2].prompt, /crash reports when it fails/);
     assert.deepEqual(second.keys, [['2'], ['2'], ['2']]);
@@ -260,164 +215,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
       assert.ok(closed.includes('w1V:pC1'), 'a refused reviewer or producer launch does not hold a slot');
     }
 
-    // A worker on a prompt outside the list is held.
-    const assigned = join(root, 'assigned');
-    const login = new ConsentPane('codex', loginDialog, ['1']);
-    const dispatched = await dispatchWork(root, work(), workerProfile(await token('worker'), 'codex'), [], login.run, [work()], async () => ({ epoch: 1, path: assigned, base: 'c'.repeat(40) }), async () => { throw new Error('a held session keeps its claim'); }, 5_000, at, { start: login.bounds(), probe: registry('worker') });
-    assert.equal(dispatched.started, 'awaiting consent'); assert.deepEqual(login.keys, []);
-    const holds = readConsentHolds(assigned);
-    assert.equal(holds.length, 1);
   } finally { await cleanup(); }
 });
 
-test('integration:unconsented-session-releases-its-slot — the watch supervisor stops renewing the lease of a session still awaiting consent past the hold bound, releases the assignment, and the item is dispatchable again', async () => {
-  assert.equal(consentHoldMs, 15 * 60_000);
-  const checkout = await temporaryDirectory('consent-slot');
-  try {
-    await mkdir(join(checkout, '.graphyard/launch'), { recursive: true });
-    // The control plane as far as this assignment goes: the lease the supervisor renews, and the
-    // blocked/release calls its surrender makes.
-    let item = work({ epoch: 1, lease: { epoch: 1, owner: 'graphyard-cursor-1', expiresAt: new Date(clock + 240_000).toISOString() } });
-    const posted: { path: string; body: any }[] = [];
-    const post = async (_url: string, _token: string, path: string, body: any) => {
-      posted.push({ path, body });
-      if (path.endsWith('/blocked')) item = { ...item, blocker: body.reason };
-      if (path.endsWith('/release')) item = { ...item, lease: null };
-    };
-    const surrender = assignmentSurrender(1, ['node', launcher, 'watch', 'GY-130', '1', '--', 'codex'], { GRAPHYARD_URL: 'https://graphyard.example', GRAPHYARD_TOKEN: 'worker-token' }, post)!;
-    assert.ok(surrender);
-
-    // The launcher's hold, beside the launch files; the pane still shows the dialog.
-    const hold = consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', { prompt: detectConsentPrompt(loginDialog)!.text, kind: 'credential' }, clock);
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), hold);
-    assert.equal(hold.releaseAt, new Date(clock + consentHoldMs).toISOString());
-    let now = clock;
-    const reads: string[] = [];
-    const probe = consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, (_command, args) => { reads.push(args[2]); return loginDialog; }, () => now);
-    assert.equal(probe(), null, 'inside the bound the hold keeps the slot');
-
-    let renewals = 0, renewedAfterRelease = 0, released = false;
-    const renew = async () => {
-      renewals++; if (released) renewedAfterRelease++;
-      // Past the bound on the third renewal: the next check finds the hold expired.
-      if (renewals === 3) now = clock + consentHoldMs;
-      return { lease: { epoch: 1, expiresAt: new Date(Date.now() + 240_000).toISOString() }, updatedAt: new Date().toISOString() } as any;
-    };
-    const code = await supervise(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], 1, renew, {
-      intervalMs: 40, graceMs: 50, platform: 'linux', detached: true,
-      session: { visible: () => null, surrender: async cause => { released = true; await surrender(cause); }, unconsented: probe },
-    });
-    assert.equal(code, 1, 'the supervisor stopped the session');
-    assert.equal(renewals, 3, 'no renewal after the hold outlived its bound');
-    assert.equal(renewedAfterRelease, 0);
-    assert.deepEqual(reads.every(pane => pane === 'w1V:pC1'), true, 'the supervisor reads its own pane');
-    assert.deepEqual(posted.map(entry => entry.path), ['work/GY-130/release'], 'one release carries the cause, so no standing blocker holds the freed item');
-    assert.match(posted[0].body.cause, /^Watch supervisor ended attempt 1: its session never took its request: it waited on a credential consent prompt outside the launcher's allow-list .* — "Sign in with ChatGPT/);
-
-    // The lease has ended and the item is dispatchable again, for this profile or another.
-    assert.equal(item.lease, null); assert.equal(item.blocker, null);
-    assert.doesNotThrow(() => assertDispatchable(item, [item], new Date(clock + consentHoldMs + 60_000).toISOString()));
-    const heldItem = work({ epoch: 1, lease: { epoch: 1, owner: 'graphyard-cursor-1', expiresAt: new Date(clock + 240_000).toISOString() } });
-    assert.throws(() => assertDispatchable(heldItem, [heldItem], new Date(clock).toISOString()), /active owner graphyard-cursor-1/, 'while held, the slot was the held session\'s');
-
-    // A prompt a human answered clears the hold: the session has its request and keeps its slot.
-    const answered = consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, () => workingScreen, () => clock + 2 * consentHoldMs);
-    assert.equal(answered(), null);
-    assert.equal(existsSync(join(checkout, '.graphyard/launch/eng-consent.consent')), false, 'the hold is cleared once the prompt is off the screen');
-    assert.equal(consentHoldProbe(checkout, {}, () => loginDialog, () => clock + 2 * consentHoldMs)(), null, 'no hold, nothing to release');
-
-    // A pane read that fails past the bound releases nothing: the prompt may already be answered,
-    // so the hold waits for a read that shows it either way.
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), hold);
-    const unread = consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, () => { throw new Error('herdr: connection refused'); }, () => clock + 2 * consentHoldMs);
-    assert.equal(unread(), null);
-    assert.equal(readConsentHolds(checkout).length, 1, 'the hold stands until a read confirms it');
-    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, () => loginDialog, () => clock + 2 * consentHoldMs)() ?? '', /never took its request/);
-
-    // A runtime prompted after it starts (no request contract) is sent its request once a human
-    // clears the prompt; a delivery Herdr refuses keeps the hold, and past the bound gives the slot back.
-    const requestFile = join(checkout, '.graphyard/launch/eng-consent.request');
-    await writeFile(requestFile, 'Implement GY-130');
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...hold, request: requestFile });
-    const prompts: string[][] = [];
-    let refuse = true;
-    const herdr = (_command: string, args: string[]) => {
-      if (args[0] === 'pane') return workingScreen;
-      prompts.push(args);
-      if (refuse) throw new Error('agent_prompt_stalled');
-      return '{}';
-    };
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, herdr, () => clock)(), null, 'inside the bound a refused delivery is tried again later');
-    assert.equal(readConsentHolds(checkout).length, 1);
-    refuse = false;
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, herdr, () => clock)(), null);
-    assert.deepEqual(prompts.map(args => args.slice(0, 4)), [['agent', 'prompt', 'w1V:pC1', 'Implement GY-130'], ['agent', 'prompt', 'w1V:pC1', 'Implement GY-130']]);
-    assert.equal(readConsentHolds(checkout).length, 0, 'delivered, the hold is cleared');
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...hold, request: requestFile });
-    refuse = true;
-    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, herdr, () => clock + consentHoldMs)() ?? '', /the credential consent prompt was answered, but the request could not be delivered by the hold bound/);
-
-    // A different dialog that follows the held one — a sign-in after a human answered folder trust —
-    // is a new prompt: the hold is rewritten for it with a fresh bound, classified for
-    // the prompt now showing. A cursor moved between the options is the same dialog.
-    for (const path of readConsentHolds(checkout).map(entry => entry.path)) await rm(path);
-    const folderHold = consentHold({ herdrWorkspace: 'wE' }, 'GY-130', 1, 'eng-consent', 'w1V:pC1', { prompt: detectConsentPrompt(folderDialog)!.text, kind: 'folder', request: requestFile }, clock);
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), folderHold);
-    const moved = folderDialog.replace(' ❯ 1. Yes', '   1. Yes').replace('   2. No', ' ❯ 2. No');
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, () => moved, () => clock + 60_000)(), null);
-    assert.equal(readConsentHolds(checkout)[0].since, folderHold.since, 'the same dialog keeps its hold and bound');
-    const later = clock + consentHoldMs - 60_000, sent: string[][] = [];
-    const signIn = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') return loginDialog; sent.push(args); return ''; };
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => later)(), null, 'a new dialog is not released on the old bound');
-    const reclassified = readConsentHolds(checkout)[0];
-    assert.equal(reclassified.kind, 'credential');
-    assert.equal(reclassified.prompt, detectConsentPrompt(loginDialog)!.text);
-    assert.equal(reclassified.since, new Date(later).toISOString());
-    assert.equal(reclassified.releaseAt, new Date(later + consentHoldMs).toISOString());
-    assert.equal(reclassified.request, requestFile, 'the undelivered request stays with the hold');
-    assert.equal(sent.length, 0, 'a credential prompt is never answered');
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => clock + consentHoldMs)(), null, 'the old bound no longer releases it');
-    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, signIn, () => later + consentHoldMs)() ?? '', /waited on a credential consent prompt .* past the hold bound \(/);
-
-    // A following dialog on the allow-list is answered once with its least-privilege option and recorded on the hold.
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), folderHold);
-    const telemetry = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') return telemetryDialog; sent.push(args); return ''; };
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, telemetry, () => later)(), null);
-    assert.deepEqual(sent, [['pane', 'send-keys', 'w1V:pC1', '2']]);
-    const answeredHold = readConsentHolds(checkout)[0];
-    assert.equal(answeredHold.kind, 'telemetry');
-    assert.deepEqual(answeredHold.answered?.map(entry => [entry.rule, entry.answer, entry.keys]), [['telemetry-decline', 'Decline (nothing is sent)', ['2']]]);
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, telemetry, () => later + 60_000)(), null);
-    assert.equal(sent.length, 1, 'the same dialog is not answered again');
-
-    // A session Herdr has not taken the name of is renamed on every check, and its hold is not
-    // cleared — nor its request delivered — until Herdr reports it under the profile's agent name;
-    // past the bound it gives the slot back rather than run where the master cannot find it.
-    for (const path of readConsentHolds(checkout).map(entry => entry.path)) await rm(path);
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...hold, request: requestFile, named: false });
-    let takesName = false, herdrName = 'claude-1';
-    const renames: string[][] = [], delivered: string[][] = [];
-    const renaming = (_command: string, args: string[]) => {
-      if (args[0] === 'pane' && args[1] === 'read') return workingScreen;
-      if (args[0] === 'agent' && args[1] === 'rename') { renames.push(args); if (!takesName) throw new Error('herdr: agent busy'); herdrName = args[3]; return '{}'; }
-      if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { name: herdrName, pane_id: args[2] } } });
-      delivered.push(args); return '{}';
-    };
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock)(), null);
-    assert.equal(readConsentHolds(checkout)[0].named, false, 'a refused rename keeps the hold, though the prompt is cleared');
-    assert.equal(delivered.length, 0, 'the request waits for the name');
-    assert.match(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock + consentHoldMs)() ?? '', /Herdr did not take the session's name eng-consent by the hold bound/);
-    takesName = true;
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, renaming, () => clock + 60_000)(), null);
-    assert.deepEqual(renames.map(args => args.slice(2)), [['w1V:pC1', 'eng-consent'], ['w1V:pC1', 'eng-consent'], ['w1V:pC1', 'eng-consent']]);
-    assert.equal(herdrName, 'eng-consent');
-    assert.deepEqual(delivered.map(args => args.slice(0, 3)), [['agent', 'prompt', 'w1V:pC1']], 'named, the request is delivered');
-    assert.equal(readConsentHolds(checkout).length, 0, 'named and delivered, the hold is cleared');
-    // A rename Herdr accepts but does not report is not confirmed: the hold stays unnamed.
-    writeConsentHold(join(checkout, '.graphyard/launch/eng-consent'), { ...folderHold, named: false });
-    const unconfirmed = (_command: string, args: string[]) => args[0] === 'pane' ? folderDialog : args[1] === 'get' ? JSON.stringify({ result: { agent: { name: 'claude-1' } } }) : '{}';
-    assert.equal(consentHoldProbe(checkout, { HERDR_PANE_ID: 'w1V:pC1' }, unconfirmed, () => clock)(), null);
-    assert.equal(readConsentHolds(checkout)[0].named, false);
-  } finally { await rm(checkout, { recursive: true, force: true }); }
-});
 

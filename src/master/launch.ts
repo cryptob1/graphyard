@@ -317,7 +317,6 @@ export const startedStates = ['idle', 'done', 'working'], promptableStates = ['i
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent' | 'exited';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
 export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
-  /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean;
   /** Where the start's duration is logged (GY-413); standard error unless a caller collects it. */ log?: (line: string) => void }
 export class SessionStartError extends Error {
   constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent' | 'exited', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
@@ -498,7 +497,7 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
   const consent: ConsentAnswer[] = [];
   for (;;) {
     const observed = await observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
-    if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent, awaiting: null };
+    if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent };
     if (observed.state === 'consent') {
       const prompt = observed.prompt!, rule = prompt.rule;
       // Answers are counted per dialog, not per rule: a second dialog the same rule matches (a
@@ -518,9 +517,7 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
       // fails naming it, and is never held as a session keeping its lease while it waits.
       if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane} although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
       const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
-      // A session held for a human is reported, not refused: it has not taken its request, and it
-      // is never counted as started. Everything else refuses the launch with the prompt's own text.
-      if (bounds.holdConsent) return { ...observed, waitedMs, extended, consent, awaiting: { prompt: prompt.text, kind: prompt.kind, why } };
+      // A prompt nobody here answers refuses the launch with the prompt's own text.
       throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
     }
     if (observed.state === 'exited') throw new SessionStartError('exited', pane, observed.line, waitedMs, `the ${kind} runtime exited back to the shell in pane ${pane} before it was ready; it last printed: "${observed.line}"`);
@@ -614,25 +611,18 @@ export async function startAgentSession(name: string, kind: string, pane: string
       throw error;
     }
     const runtimeStartedAt = new Date().toISOString();
-    log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime ${started.awaiting ? 'awaiting consent' : 'started'} after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
-    let named = true;
+    log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime started after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
     try { await herdrJson(['agent', 'rename', pane, name], run); }
     catch (error) {
       // A runtime whose own naming rules are narrower than the ones checked above says so in its
       // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
       if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-      // A held session is still named so a human can find it, but a runtime that will not take the
-      // name before its dialog is answered does not turn the hold into a failed start.
-      // The hold records it unnamed, so the watch supervisor retries the name before it clears.
-      if (!started.awaiting) throw error;
-      named = false;
+      throw error;
     }
     launched = true;
-    // The request is already the runtime's own first argument, so nothing waits to be pasted: a
-    // session held on a consent dialog reads it once the dialog is answered.
-    return { runtimeStartedAt, delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
-      confinement,
-      started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+    // The request is already the runtime's own first argument, so nothing waits to be pasted.
+    return { runtimeStartedAt, delivery, command, files, trust: trust ?? null, consent: started.consent, confinement,
+      started: { state: 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
   } finally { settle(launched); }
 }
 
