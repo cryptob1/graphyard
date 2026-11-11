@@ -1,7 +1,7 @@
 {
   "id": "herdr-shared-installs",
   "title": "Two installs share main Herdr in separate workspaces",
-  "description": "Bind two installations against one stub Herdr server, dispatch workers into their own workspaces, resolve plugin credentials by pane and cwd, and recover missing workspaces without adopting the other install.",
+  "description": "Bind two installations against one stub Herdr server, start each master in its own workspace, resolve plugin credentials by pane and cwd, and recover missing workspaces without adopting the other install.",
   "target": "any",
   "required": false,
   "steps": [{ "kind": "command", "name": "Shared bindings, dispatch and recovery", "run": "node --import tsx tests/helpers/run-tests.ts tests/herdr-shared-installs.test.ts", "timeoutSeconds": 180 }]

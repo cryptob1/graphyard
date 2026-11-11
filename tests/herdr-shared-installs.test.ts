@@ -9,16 +9,13 @@ import { hostname } from 'node:os';
 import { setupRepository } from '../src/repository-setup.js';
 import { setupMaster, loadMasterConfig, reresolveHerdrWorkspace } from '../src/master/config.js';
 import { startMaster } from '../src/master/harness.js';
-import { dispatchWork } from '../src/master/dispatch.js';
 import { liveHerdrWorkspace, scopeHerdr, listHerdrAgents } from '../src/master/herdr.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { registryFixture } from './helpers/registry-fixture.js';
-import type { Work } from '../src/model.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 
-test('two installations bind, dispatch and recover independently on one main Herdr server', async () => {
+test('two installations bind, start their masters and recover independently on one main Herdr server', async () => {
   const home = await temporaryDirectory('shared-herdr'), pluginHome = join(home, 'plugin');
   // A separate thread serves the synchronous setup calls and the asynchronous runtime calls.
   const server = new Worker(`
@@ -84,13 +81,9 @@ test('two installations bind, dispatch and recover independently on one main Her
         async () => new Response(JSON.stringify({ repository: `acme/${name}`, baseBranch: 'main', actor: { id: 'master', role: 'coordinator' } })));
       const masterPane = await startMaster(root, 'codex', [], [], run);
       assert.ok(masterPane.pane.startsWith(`${workspace}:`));
-      const credentialFile = join(credentials, 'worker.token'); await writeFile(credentialFile, token, { mode: 0o600 });
-      const work = { id: 'id-1', key: 'GY-1', type: 'chore', title: 'Dispatch in own workspace', stage: 'ready', ready: true, epoch: 0, lease: null, criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }], evidence: [], scenarioRequirements: [], policy: { checks: [], review: false } } as unknown as Work;
-      const launched = await dispatchWork(root, work, { name, principal: name, agentName: name, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} }, [], run, [work],
-        async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 1, new Date().toISOString(), { probe: registryFixture(hostname(), ['codex']).probe });
-      assert.ok(launched.pane?.startsWith(`${workspace}:`));
       scopeHerdr(workspace);
-      assert.equal((await listHerdrAgents(run)).length, 2);
+      // Workers run headless (GY-3259): the master is the one pane each install opens.
+      assert.equal((await listHerdrAgents(run)).length, 1);
     }
     assert.notEqual(workspaces[0], workspaces[1]);
     const config = JSON.parse(await readFile(join(home, 'bindings/config.json'), 'utf8'));
