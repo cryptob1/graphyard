@@ -326,6 +326,8 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
   root: string; exec: HeadlessExec;
   /** The run's hard bound, the configured attempt ceiling; the loop's attempt bound stops a run without progress first. */
   timeoutMs: number;
+  /** Ends the run's agent-registry reservation once its process has ended, so its account's slot frees. */
+  settle?: (reason: string) => Promise<unknown>;
 }
 
 /**
@@ -348,7 +350,7 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
   const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), workerStartupMs).unref())]);
   if (ended) return { id, ended: { ...ended, output: readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '' } };
-  watchWorker(record, directory, running, stop, detached);
+  void watchWorker(record, directory, running, stop, detached).then(() => detached.signal.aborted ? undefined : input.settle?.(`the ${record.kind} worker run ${id} ended`)).catch(() => {});
   return { id, ended: null };
 }
 

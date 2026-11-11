@@ -222,7 +222,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     options.onRuntime?.(launch.kind ?? profile.kind ?? 'unknown');
     try {
       assertClaimDeadline(work.key, options.claimBy);
-      result = await launchWorker(root, config, work, profile, launch, prepare, release, { sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
+      result = await launchWorker(root, config, work, profile, launch, prepare, release, { settleReservation: async reason => chosen.release?.(reason), sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
         renew: options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), renewIntervalMs: options.renewIntervalMs, verificationMaps: options.verificationMaps ?? readVerificationMaps, rework, cycle: observedAt,
         diagnosis: options.diagnosis ?? '', maskProbe: options.maskProbe, headless: options.headless ?? defaultHeadlessExec(), capacity: options.capacity });
     } catch (error) {
@@ -321,8 +321,8 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
 }
 
 
-interface WorkerLaunchOptions { sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; capacity?: DispatchOptions['capacity'] }
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, capacity }: WorkerLaunchOptions) {
+interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; capacity?: DispatchOptions['capacity'] }
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, capacity }: WorkerLaunchOptions) {
   const mergeWriter = 'control-plane' as const;
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
@@ -384,8 +384,8 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const started = await startHeadlessWorker({ name: profile.agentName, work: work.key, subject: `${work.key}: ${work.title}`, epoch: prepared.epoch, principal: profile.principal, account: launch.account ?? null,
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
-        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run) });
-      if (started.ended) await settleEarlyExit(started.ended);
+        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), settle: settleReservation });
+      if (started.ended) { await settleEarlyExit(started.ended); await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`); }
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
     } catch (error) {
       await keepAlive?.stop();

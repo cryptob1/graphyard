@@ -213,7 +213,7 @@ test('e2e:headless-workers — a limit exit hands the item to the next account w
   assert.equal(done.body.run.account, 'successor');
   assert.ok(done.body.lines.some((line: any) => line.stream === 'stdout' && /^submitted [0-9a-f]{40} 200$/.test(line.text)));
   // Access is the item's readers': a remote request without a credential is refused, and another item's path never reaches a run it does not name.
-  for (const headers of [{ 'X-Forwarded-For': '203.0.113.9' }, { Authorization: `Bearer not-a-token-${'y'.repeat(32)}` }])
+  for (const headers of [{ 'X-Forwarded-For': '203.0.113.9' }, { Authorization: `Bearer not-a-token-${'y'.repeat(32)}` }] as Record<string, string>[])
     assert.equal((await fetch(`${url}/api/work/${work.key}/runs/${launched.run}/log`, { headers })).status, 401, 'a remote reader without this repository\'s credential is refused');
   const other = await readyItem('GY-9651');
   assert.equal((await runLog(other, launched.run)).status, 404);
