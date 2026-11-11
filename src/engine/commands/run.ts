@@ -81,7 +81,7 @@ export async function runCommand(engine: Engine, actor: Principal, command: Comm
       return work;
     }, {
       store: work => command === 'heartbeat' ? compactHeartbeatReceipt(work) : work,
-      replay: async work => { if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, command === 'priority' && data.source === 'dashboard' ? { ...data, reason: 'Dashboard priority change' } : data, work, engine.repository); },
+      replay: async work => { if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, work, engine.repository); },
     });
   // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
   // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.

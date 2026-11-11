@@ -5,11 +5,8 @@ import { promisify } from 'node:util';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { priorityServer } from './helpers/priority-server.js';
+import { priorityServer, nextPriorityDispatch } from './helpers/priority-server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { masterConfigSchema } from '../src/master.js';
-import { emptyDaemonState } from '../src/daemon/state.js';
-import { Launcher, runCycle } from '../src/daemon/cycle.js';
 import { intentCommand } from '../src/cli/master/intent.js';
 import type { MasterSession } from '../src/cli/master/session.js';
 
@@ -32,19 +29,7 @@ test('change-priority: authenticated roles, validation, audit, CLI and next disp
     assert.deepEqual(events.find((event: any) => event.kind === 'priority').payload.details, { priority: 0, source: 'dashboard', oldPriority: 3, newPriority: 0, reason: 'Priority changed from P3 to P0 from the dashboard' });
     assert.equal(events.find((event: any) => event.kind === 'priority').actor, 'operator');
 
-    // One real loop cycle over the API's ready, unowned, otherwise equivalent items.
-    const directory = await temporaryDirectory('priority-dispatch');
-    const credential = join(directory, 'worker.token'); await writeFile(credential, f.tokens.worker, { mode: 0o600 });
-    const master = masterConfigSchema.parse({ version: 1, url: f.url, credentialFile: credential, cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host', masterAgentName: 'test-master', workers: [{ name: 'only-worker', principal: 'worker', agentName: 'worker', mode: 'launch', kind: 'codex', credentialFile: credential }] });
-    const launched: string[] = [];
-    const launcher = new Launcher();
-    await runCycle(master, emptyDaemonState(master), {
-      agents: () => [], credentials: async () => ({ 'only-worker': { available: true, reason: null } }),
-      snapshot: async () => ({ work: await f.store.list(), now: new Date().toISOString() }),
-      closeSession: () => {}, persist: async () => {}, dispatch: async item => { launched.push(item.key); },
-    }, Date.now, launcher);
-    await launcher.idle();
-    assert.deepEqual(launched, [later.key]);
+    assert.deepEqual(await nextPriorityDispatch(f), [later.key]);
     assert.equal((await f.store.workDocument(later.id))!.lease, null, 'priority did not force a claim');
 
     const maintainer = await f.teammate('maintainer'), viewer = await f.teammate('viewer');
@@ -61,6 +46,7 @@ test('change-priority: authenticated roles, validation, audit, CLI and next disp
     }
     const legacy = await f.ok('work', { ...fields, title: 'Existing P4', priority: 4 });
     assert.equal((await f.store.workDocument(legacy.id))!.priority, 4);
+    const directory = await temporaryDirectory('priority-cli');
     const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: f.url, GRAPHYARD_TOKEN: f.tokens.operator }; delete env.GRAPHYARD_TOKEN_FILE;
     const output = await promisify(execFile)(process.execPath, [cli, 'priority', later.key, '1', 'CLI caller reason'], { cwd: directory, env });
     assert.equal(JSON.parse(output.stdout).priority, 1);
@@ -69,7 +55,7 @@ test('change-priority: authenticated roles, validation, audit, CLI and next disp
     const masterCredential = join(directory, 'master.token'); await writeFile(masterCredential, f.tokens.master, { mode: 0o600 });
     let printed: any;
     await intentCommand({ id: 'priority', args: [later.key, '0', 'Master caller reason'], root: process.cwd(),
-      master: { ...master, operatorAgent: { id: 'master', credentialFile: masterCredential } },
+      master: { operatorAgent: { id: 'master', credentialFile: masterCredential } },
       masterMutation: (route: string, body: unknown, _key: string, token: string) => f.ok(route, body, token), print: (value: unknown) => { printed = value; },
     } as unknown as MasterSession);
     assert.equal(printed.priority, 0);
