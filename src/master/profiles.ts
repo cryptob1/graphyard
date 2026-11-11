@@ -413,12 +413,12 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
  * whatever master.json still records, so the loop applies no rework itself; its reviewer answers in control-plane mode
  * (GY-1978), which needs a profile, not an App. Autonomous configs pass unchanged.
  */
-export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T {
+export function withSupervision<T extends { supervision?: Supervision; operatorAgent?: unknown }>(config: T): T {
   if (config.supervision !== 'supervised') return config;
-  const { reviewer: _reviewer, operatorAgent: _operatorAgent, ...kept } = config;
+  const { operatorAgent: _operatorAgent, ...kept } = config;
   return kept as T;
 }
-export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
 
 /** The master config's githubAppId on an install that registered no GitHub App (GY-1413); since GY-2010 none binds one. */
 export const APP_PENDING = 0;

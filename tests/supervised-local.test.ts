@@ -26,9 +26,8 @@ const GH_TOKEN = `gho_${'g'.repeat(36)}`;
 const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ version: 1, url: SERVER, credentialFile: '/outside/master.token', cliPath: launcher, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-shop', workers: [], reviewers: [], producers: [],
   run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } as MasterConfig['run'], ...extra });
 const identities = {
-  reviewer: { slug: 'graphyard-reviewer', appId: 9, installationId: 10, credentialFile: '/outside/reviewer.json', boundAt: '2026-10-08T00:00:00.000Z' },
   operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: '/outside/operator.token' },
-} as unknown as Pick<MasterConfig, 'reviewer' | 'operatorAgent'>;
+} as unknown as Pick<MasterConfig, 'operatorAgent'>;
 
 /** A local control plane: no App, a worker and a reviewing account; the loop starts on restart. */
 interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number; deployKeys?: number }
@@ -178,7 +177,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   assert.equal(selectReviewerProfile(supervised).profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
-  assert.ok(autonomous.reviewer && autonomous.operatorAgent);
+  assert.ok(autonomous.operatorAgent);
 });
 
 test('unit:supervised-no-identity-collapse — up --local hands the operator\'s gh login to no worker, reviewer or producer credential; master status raises no own-login attention, since no pull request awaits the operator', async () => {

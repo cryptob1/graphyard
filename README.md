@@ -4,6 +4,8 @@
 
 [![Graphyard walkthrough: a goal moves from the master to a worker, through spec check, independent review and a merge trial on the latest main, then deploys, with automatic revert on failure](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
+The four roles are worker, reviewer, producer and master.
+
 ## Why Graphyard
 
 - **You decide only goals, money and credentials.** An AI master plans everything else.
@@ -18,7 +20,7 @@ In your repository's checkout, on a Linux host with Node 24+, Git, Docker and th
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-It installs Graphyard and prints a Setup link: open it and connect accounts for the four roles: worker, reviewer, producer and master (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). Then file a goal in **New work item** with acceptance criteria and required proof names, and watch it with `npx @cryptob1/graphyard master status`. Graphyard updates itself daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates it now. Installs share your main Herdr.
+It installs Graphyard and prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). Then file a goal in **New work item** with acceptance criteria and required proof names, and watch it with `npx @cryptob1/graphyard master status`. Graphyard updates itself daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates it now. Installs share your main Herdr.
 
 ## Learn more
 
