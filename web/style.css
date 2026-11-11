@@ -316,3 +316,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 .terminal-keys{display:none;flex-shrink:0;gap:3px}
 @media(max-width:650px){.terminal-keys{display:flex}.terminal-keys button{flex:1;min-width:0;padding:12px 2px;font-size:11px}.terminal-info{font-size:11px}.master-heading h1{margin:8px 0 4px}}
 .watching{margin-bottom:var(--space-4)}
+
+/* A compact priority picker beside the item title, sized independently of form fields. */
+.priority-control{display:inline-flex;align-self:flex-start}
+.priority-control select{width:auto;min-height:32px;padding:4px 8px;font-size:var(--type-tiny)}
