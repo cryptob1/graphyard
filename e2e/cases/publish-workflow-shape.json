@@ -1,0 +1,14 @@
+{
+  "id": "publish-workflow-shape",
+  "title": "Verified deployments hand publication to the tag-only OIDC workflow",
+  "description": "Offline: the real batch-gate loop and merge-writer git push use a temporary bare origin. Verification alone and failed deployments publish nothing; successful deployment pushes exactly one version tag, retained across restarts. Check the workflow's tag-only trigger, OIDC and packages permissions, provenance invocation and absence of npm token secrets. Exercise the shared publisher's server and trial image pushes with command stand-ins.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Verify release workflow and post-deploy tag handoff without network",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/publish-tag.test.ts tests/publish-verified.test.ts",
+    "timeoutSeconds": 120
+  }]
+}

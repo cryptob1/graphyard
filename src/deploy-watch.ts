@@ -18,7 +18,7 @@ import { graphyardRepository } from './scenarios.js';
  * repository cannot pass for another's release health; records written before it was kept (or by a
  * checkout whose origin names no repository) name none (GY-2955).
  */
-export interface DeployRecord { tip: string | null; failed: string | null; reason: string | null; at: string; restore?: string | null; attempts?: number; repository?: string | null }
+export interface DeployRecord { tip: string | null; failed: string | null; reason: string | null; at: string; restore?: string | null; attempts?: number; repository?: string | null; /** This successful deploy selected a batch-gate verified tip. */ verified?: boolean }
 export const deployRecordPath = (root: string) => join(root, '.graphyard', 'deploy.json');
 export function readDeployRecord(file: string): DeployRecord | null {
   if (!existsSync(file)) return null;
@@ -213,7 +213,7 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   const before = await ports.database().catch(() => null);
   try {
     await run(tip);
-    await write({ tip, failed: null, reason: null });
+    await write({ tip, failed: null, reason: null, verified: gated === tip });
     await noteControl({ commit: tip, updatedAt: new Date().toISOString(), failedStep: null, failedReason: null, failedAt: null });
     log(`[graphyard-deploy] serving ${tip.slice(0, 12)}`);
     await ports.prune(previous ? [tip, previous] : [tip]);

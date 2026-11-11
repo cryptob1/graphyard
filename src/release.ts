@@ -109,3 +109,8 @@ export const releaseInfo = () => {
 };
 
 export { schemaGenerations, schemaVersion } from './store/schema-lineage.js';
+
+/** One commit, one npm version, using the commit's own UTC date. */
+export function publishedVersion(commit: string, committedAt: Date) {
+  return `${committedAt.getUTCFullYear()}.${committedAt.getUTCMonth() + 1}.${committedAt.getUTCDate()}-${commit.slice(0, 12)}`;
+}
