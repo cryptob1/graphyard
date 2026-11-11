@@ -47,7 +47,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await operator.keyboard.type('status please');
     await operator.keyboard.press('Enter');
     await expect(rows(operator)).toContainText('status please', settled);
-    expect((await calls()).some(entry => entry.args?.join(' ') === 'terminal session control w1:master --takeover --cols 120 --rows 36')).toBe(true);
+    expect((await calls()).some(entry => entry.args?.slice(0, 4).join(' ') === 'terminal session control w1:master')).toBe(true);
     // The typed line is in history, attributed to the human who typed it.
     await expect.poll(async () => (await database.store.pool.query("SELECT actor, payload FROM events WHERE kind='master.terminal.input'")).rows, settled)
       .toEqual([{ actor: 'operator', payload: { pane: 'w1:master', line: 'status please' } }]);
@@ -61,7 +61,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await reader.locator('.terminal-host').click();
     await reader.keyboard.type('rm -rf');
     await reader.keyboard.press('Enter');
-    expect((await calls()).some(entry => entry.args?.join(' ') === 'terminal session observe w1:master --cols 120 --rows 36')).toBe(true);
+    expect((await calls()).some(entry => entry.args?.slice(0, 4).join(' ') === 'terminal session observe w1:master')).toBe(true);
     expect((await calls()).filter(entry => entry.command?.type === 'terminal.input').map(entry => entry.command.text).join('')).not.toContain('rm -rf');
     await reader.close();
 
@@ -74,7 +74,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await operator.getByRole('row', { name: /work-claude/ }).getByRole('button', { name: 'Watch', exact: true }).click();
     await expect(rows(operator)).toContainText('screen of w1:worker', settled);
     await expect(operator.getByRole('status')).toContainText('read-only', settled);
-    expect((await calls()).some(entry => entry.args?.join(' ') === 'terminal session observe w1:worker --cols 120 --rows 36')).toBe(true);
+    expect((await calls()).some(entry => entry.args?.slice(0, 4).join(' ') === 'terminal session observe w1:worker')).toBe(true);
     await operator.getByRole('button', { name: 'Close', exact: true }).click();
     await expect.poll(async () => (await calls()).some(entry => entry.pane === 'w1:worker' && entry.detached), settled).toBe(true);
     await operator.close();

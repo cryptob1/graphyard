@@ -1,0 +1,19 @@
+{
+  "id": "master-page-phone",
+  "title": "Master terminal phone",
+  "description": "Real dashboard and host bridge with a host-only Herdr TUI fixture.",
+  "tags": [
+    "dashboard",
+    "master"
+  ],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Exercise the Master terminal in Playwright",
+      "run": "npm run test:browser -- browser-tests/master-page-ux.spec.ts --grep e2e:master-page-phone",
+      "timeoutSeconds": 240
+    }
+  ]
+}

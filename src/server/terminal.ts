@@ -1,12 +1,12 @@
 // Concern: the live terminal the dashboard's Master page and Workers page show (GY-3211) — a WebSocket bridged to Herdr's terminal session stream.
-import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { createInterface } from 'node:readline';
 import type { Principal } from '../model.js';
 import { loopPanesRegistry } from '../model/loop-presence.js';
-import { herdrInvocation, herdrTarget, herdrTerminalArgs } from '../master/herdr.js';
+import { herdrTarget } from '../master/herdr.js';
+import { terminalStream, terminalSessionReader, type TerminalRequest } from '../master/terminal-session.js';
+import { loadMasterConfig } from '../master/config.js';
 import { authenticate } from './auth.js';
 import { canTypeIntoMasterPane } from './principals.js';
 import type { Services } from './routes.js';
@@ -47,7 +47,7 @@ const readFrames = (socket: Duplex, on: (opcode: number, payload: Buffer) => voi
 /** A herdr terminal stream, wherever it runs: a command goes in as a JSON line, lines come out through the handlers. */
 interface Stream { send(command: unknown): void; end(): void }
 interface Handlers { line(line: string): void; exit(reason: string): void }
-interface StreamRequest { control: boolean; pane: string; cols: string; rows: string }
+type StreamRequest = TerminalRequest;
 
 /**
  * On a compose install the server container has no herdr: the loop, running on the host beside
@@ -83,17 +83,6 @@ const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest,
   return { send: command => send({ type: 'command', command }), end: () => { send({ type: 'close' }); bridge.streams.delete(id); } };
 };
 
-const localStream = (args: string[], instance: Parameters<typeof herdrInvocation>[1], handlers: Handlers): Stream => {
-  const call = herdrInvocation(args, instance);
-  const herdr = spawn(call.command, call.args, { env: call.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
-  let stderr = '';
-  herdr.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-300); });
-  herdr.on('error', error => handlers.exit((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'herdr is not installed where the server runs, and no host supervisor is connected to stream it' : error.message))
-    .on('exit', code => handlers.exit(stderr.trim() || `herdr exited with code ${code}`));
-  createInterface({ input: herdr.stdout }).on('line', handlers.line);
-  return { send: command => { if (herdr.stdin.writable) herdr.stdin.write(`${JSON.stringify(command)}\n`); }, end: () => { herdr.stdin.end(); setTimeout(() => herdr.kill(), 1_000).unref(); } };
-};
-
 /**
  * `GET /api/terminal?pane=PANE&cols=C&rows=R` upgraded to a WebSocket. A browser cannot set an
  * Authorization header on a WebSocket, so the dashboard's token rides as the second subprotocol
@@ -117,17 +106,17 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   try { actor = await authenticate(services, `Bearer ${token}`, services.repository); } catch { return refuse(socket, 401, 'Unauthorized'); }
   const panes = loopPanesRegistry(services.engine).latest, master = panes?.master ?? null;
   const pane = url.searchParams.get('pane') || master;
-  if (!pane) return refuse(socket, 404, 'Not Found');
-  if (pane !== master && !(await services.engine.store.pool.query('SELECT 1 FROM work_items WHERE document->\'sessions\' @> $1::jsonb LIMIT 1', [JSON.stringify([{ pane, state: 'running' }])])).rowCount) return refuse(socket, 404, 'Not Found');
-  const control = pane === master && canTypeIntoMasterPane(actor);
+  const followsMaster = !url.searchParams.get('pane');
+  if (!followsMaster && pane !== master && !(await services.engine.store.pool.query('SELECT 1 FROM work_items WHERE document->\'sessions\' @> $1::jsonb LIMIT 1', [JSON.stringify([{ pane, state: 'running' }])])).rowCount) return refuse(socket, 404, 'Not Found');
+  const control = (followsMaster || pane === master) && canTypeIntoMasterPane(actor);
   const size = (name: string, fallback: number) => String(Math.min(500, Math.max(10, Number(url.searchParams.get(name)) || fallback)));
   accept(req, socket, protocol);
-  socket.write(text({ pane, mode: control ? 'control' : 'observe' }));
 
   // The loop's host stream when one is connected (a compose install), else herdr where the server runs.
   const instance = panes?.configHome && panes.session ? { configHome: panes.configHome, session: panes.session } : herdrTarget();
   const [cols, rows] = [size('cols', 120), size('rows', 40)];
   let closed = false, framed = false;
+  let activePane = pane;
   const close = () => {
     if (closed) return; closed = true;
     if (control) herdr.send({ type: 'terminal.release' });
@@ -137,20 +126,28 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const handlers: Handlers = {
     line: line => {
       let record: any; try { record = JSON.parse(line); } catch { return; }
+      if (['hello', 'session', 'scrollback'].includes(record.type)) {
+        if (record.session) activePane = record.session.pane;
+        socket.write(text(record));
+      }
       if (record.type === 'terminal.frame' && typeof record.bytes === 'string') { framed = true; socket.write(frame(2, Buffer.from(record.bytes, 'base64'))); }
       if (record.type === 'terminal.closed') close();
     },
     // A stream that ends before showing anything is a refusal the page words with its cause, not a detach.
     exit: reason => { if (!framed && socket.writable) socket.write(text({ refused: reason })); close(); },
   };
-  const herdr = host ? bridgedStream(host, { control, pane, cols, rows }, handlers) : localStream(herdrTerminalArgs(control, pane, cols, rows), instance, handlers);
+  const request = { control, pane, cols, rows, master: followsMaster };
+  const herdr = host ? bridgedStream(host, request, handlers) : terminalStream(request, handlers, async () => {
+    const config = await loadMasterConfig(process.cwd()).catch(() => null);
+    return config ? terminalSessionReader(() => config)() : { pane: loopPanesRegistry(services.engine).latest?.master ?? null, account: null, runtime: null, state: 'unknown' };
+  }, instance);
   const command = herdr.send;
 
   let typed = '';
-  const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
+  const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane: activePane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
   const message = (text: string) => {
     let input: any; try { input = JSON.parse(text); } catch { return; }
-    if (!control) return;
+    if (!control || !activePane) return;
     if (input.type === 'resize') command({ type: 'terminal.resize', cols: Number(input.cols), rows: Number(input.rows) });
     if (input.type !== 'input' || typeof input.data !== 'string') return;
     command({ type: 'terminal.input', text: input.data });
