@@ -40,13 +40,16 @@ export async function recordLoggedOut(config: HoldConfig, account: string, reaso
  * the one it ended on. With no account left the selection's own refusal ends the run.
  */
 export function moveOffLoggedOutAccount<L>(config: HoldConfig & Pick<MasterConfig, 'environments' | 'run'>, profile: Parameters<typeof selectAccount>[2], work: string, selection: { current: LaunchSelection }, probe: FleetProbe | undefined, launchOn: (selected: LaunchSelection) => Promise<L>) {
-  return async (reason: string): Promise<L> => {
+  const tried = new Set(probe?.exclude ?? []);
+  return async (reason: string, cause: 'login' | 'limit' | 'configuration' = 'login'): Promise<L> => {
     const account = selection.current.account?.name;
     if (!account) throw new Error(`the agent reported it is not logged in (${reason}), on no registry account to hold`);
-    await recordLoggedOut(config, account, reason, probe?.registry);
-    await selection.current.release?.(`${account} is not logged in: ${reason}`.slice(0, 400)).catch(() => false);
+    tried.add(account);
+    if (cause === 'login') await recordLoggedOut(config, account, reason, probe?.registry);
+    await selection.current.release?.(`${account}: ${reason}`.slice(0, 400)).catch(() => false);
     selection.current = { account: null, health: null, skipped: [] };
-    selection.current = await selectAccount(config, 'reviewer', profile, { ...probe, work });
+    try { selection.current = await selectAccount(config, 'reviewer', profile, { ...probe, work, exclude: [...tried] }); }
+    catch (error) { throw new Error(`${reason}; ${error instanceof Error ? error.message : String(error)}`); }
     return launchOn(selection.current);
   };
 }

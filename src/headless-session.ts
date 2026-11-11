@@ -10,7 +10,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
@@ -23,7 +23,7 @@ import type { CredentialMask } from './master/confinement.js';
 import { endRun, liveRun, registerRun, type AdoptedRun } from './runner/registry.js';
 import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
-import { underTestRunner } from './runtime-environment.js';
+import { runtimeAdapter } from './master/runtimes.js';
 import { confinedRuntimeArgs } from './worker-sandbox.js';
 
 /**
@@ -40,20 +40,20 @@ export type HeadlessExec = (command: string, args: string[], options: { cwd: str
  * last argument, or takes a registry contract's `{request}` place. A runtime without a form here
  * keeps its pane session.
  */
-const headlessForms: Record<string, { program?: string; before: string[]; flags: string[]; drop?: string[] }> = {
-  claude: { before: [], flags: ['-p'] },
-  codex: { before: ['exec'], flags: ['--skip-git-repo-check'], drop: ['--ask-for-approval', '-a'] },
-  // Print mode accepts cursor-agent directly. The interactive `agent` alias can point to a
-  // host mise wrapper outside the runtime's pinned PATH and resolve a different installation.
-  cursor: { program: 'cursor-agent', before: [], flags: ['-p'] },
-  pi: { before: [], flags: ['-p'] },
-  opencode: { before: ['run'], flags: [] },
-};
-export const headlessKind = (kind: string | undefined): kind is string => !!kind && Object.hasOwn(headlessForms, kind);
+export const headlessKind = (kind: string | undefined, contract?: RegisteredLaunch | null): kind is string => !!kind && (!!runtimeAdapter(kind)?.headless || !!contract?.headlessArgs);
+export class HeadlessConfigurationError extends Error {}
 
-/** The runtime's one-shot arguments around the launch's own (`args`), with `prompt` as its request. */
-export function headlessArgs(kind: string, args: readonly string[], prompt: string): string[] {
-  const form = headlessForms[kind]!, drop = form.drop ?? [];
+/** Explicit argv replaces the interactive argv and built-in form. A leading subcommand precedes policy flags. */
+export function headlessArgs(kind: string, args: readonly string[], prompt: string, contract?: RegisteredLaunch | null): string[] {
+  if (contract?.headlessArgs) {
+    const words = contract.headlessArgs;
+    if (words.filter(word => word === requestPlaceholder).length !== 1) throw new HeadlessConfigurationError(`${kind}: launch.headlessArgs must contain exactly one {request}`);
+    const subcommand = words[0] !== requestPlaceholder && !words[0]?.startsWith('-') ? 1 : 0;
+    return [...words.slice(0, subcommand), ...args.filter(arg => arg !== requestPlaceholder), ...words.slice(subcommand).map(arg => arg === requestPlaceholder ? prompt : arg)];
+  }
+  const form = runtimeAdapter(kind)?.headless;
+  if (!form) throw new HeadlessConfigurationError(`The ${kind} runtime has no one-task contract. Set launch.headlessArgs with exactly one {request} using graphyard master registry runtime set NAME --headless-arg=ARG --reason REASON; reviews never use Herdr.`);
+  const drop = form.drop ?? [];
   const kept = args.filter((arg, index) => !drop.some(flag => arg === flag || arg.startsWith(`${flag}=`) || args[index - 1] === flag));
   const placed = kept.includes(requestPlaceholder);
   return [...form.before, ...kept.map(arg => arg === requestPlaceholder ? prompt : arg), ...form.flags, ...(placed ? [] : [prompt])];
@@ -71,7 +71,7 @@ const readText = (file: string) => { try { return readFileSync(file, 'utf8'); } 
 export const spawnHeadless: HeadlessExec = async (command, args, options) => {
   mkdirSync(options.run, { recursive: true, mode: 0o700 });
   rmSync(runFiles(options.run).exit, { force: true });
-  const id = randomUUID(), containment = runContainment(), launch = detachedLaunch(options.run, id, command, args, containment);
+  const id = basename(options.run), containment = runContainment(), launch = detachedLaunch(options.run, id, command, args, containment);
   let failure: string | null = null;
   const child = spawn(launch.file, launch.args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
   child.on('error', error => { failure = `${command} could not be started: ${error.message}`; });
@@ -108,8 +108,9 @@ export function awaitHeadlessRun(directory: string, options: { signal?: AbortSig
     tick();
   });
 }
-/** The launcher's exec: the host's, except under the test runner, where only a test's fake runs and launches keep their pane path. */
-export const defaultHeadlessExec = (): HeadlessExec | null => underTestRunner() ? null : spawnHeadless;
+export const defaultHeadlessExec = (): HeadlessExec => spawnHeadless;
+/** A live child may return from dispatch after this startup observation; early failures move accounts first. */
+export const headlessStartupMs = 1000;
 
 /**
  * The last JSON object the run printed that `schema` accepts. Runtimes print prose or a code fence
@@ -154,12 +155,12 @@ export interface HeadlessSession<T> {
    * the agent's message and answers with the launch on the role's next eligible account, where the
    * request runs again at once. A throw (no account left) ends the session with that reason.
    */
-  moveAccount?: (reason: string) => Promise<HeadlessAccountLaunch>;
+  moveAccount?: (reason: string, cause?: 'login' | 'limit' | 'configuration') => Promise<HeadlessAccountLaunch>;
+  /** Persist the stable run and actual runtime beside the request's verdict. */
+  onRun?: (run: { id: string; kind: string; reason?: string }) => Promise<void>;
 }
 /** What the account a headless run is on decides of its launch. */
 export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'args' | 'environment' | 'contract' | 'credentialMask' | 'role'>;
-/** How many logged-out accounts one session moves off before it ends as any failed run does. */
-const accountMoveLimit = 4;
 
 /**
  * Start a headless session: refused before anything runs when the runtime has no launch contract,
@@ -169,6 +170,7 @@ const accountMoveLimit = 4;
  */
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
   const prepare = async (on: HeadlessAccountLaunch) => {
+    headlessArgs(on.kind, on.args, input.prompt, on.contract);
     assertLaunchable(on.kind, on.contract);
     const trust = await launchRecipe(on.kind)?.trust?.(input.directory, on.environment, on.args);
     const confinement = await sessionConfinement(on.kind, on.args, { directory: input.directory, cwd: input.directory, environment: on.environment, ownGitHubCredential: true, credentialMask: on.credentialMask }, input.coordinatorRoot);
@@ -176,45 +178,68 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
     const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(on.kind, on.args) : on.args;
     // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
     const carried = withAutonomyContract(false, { request: input.prompt, role: on.role });
-    return { kind: on.kind, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
+    return { kind: on.kind, contract: on.contract, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
   };
-  let launch = await prepare(input);
+  const prepareAccount = async (initial: HeadlessAccountLaunch) => {
+    let on = initial;
+    for (;;) {
+      try { return await prepare(on); }
+      catch (error) {
+        if (!(error instanceof HeadlessConfigurationError) || !input.moveAccount) throw error;
+        on = await input.moveAccount(error.message, 'configuration');
+      }
+    }
+  };
+  let launch = await prepareAccount(input);
   const controller = new AbortController(), detached = new AbortController(), startedAt = new Date().toISOString();
-  const runDirectory = resolve(headlessRunsDirectory(input.root), randomUUID());
+  const id = randomUUID(), runDirectory = resolve(headlessRunsDirectory(input.root), id);
   mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
-  writeFileSync(join(runDirectory, sessionFile), JSON.stringify({ name: input.name, work: input.work, subject: input.subject, kind: input.kind, route: input.route, context: input.context, startedAt } satisfies HeadlessSessionRecord), { mode: 0o600 });
+  const persist = () => writeFileSync(join(runDirectory, sessionFile), JSON.stringify({ id, name: input.name, work: input.work, subject: input.subject, kind: launch.kind, route: input.route, context: input.context, startedAt } satisfies HeadlessSessionRecord), { mode: 0o600 });
+  persist();
   let settled!: Promise<T>;
   registerRun({ name: input.name, role: 'reviewer', work: input.work, subject: input.subject, agent: input.kind, run: {
-    id: randomUUID(), directory: runDirectory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
+    id, directory: runDirectory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
     result: () => settled.then(payload => ({ ok: true as const, tool: 'answer', payload, payloads: [payload] }), error => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: String(error?.message ?? error) }, payloads: [] })),
   } }, true);
+  let ready!: () => void;
+  const started = new Promise<void>(resolve => { ready = resolve; });
   settled = (async () => {
-    let refused = '', moves = 0;
+    let refused = '';
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const env = runEnvironment(process.env, launch.environment);
-      const argv = [...launch.wrapper, realRuntimeBinary(headlessForms[launch.kind]?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, prompt)];
+      const argv = [...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, prompt, launch.contract)];
+      persist();
+      const active = liveRun(input.name);
+      if (active) active.agent = launch.kind;
+      await input.onRun?.({ id, kind: launch.kind, ...(refused ? { reason: refused } : {}) });
       let output: string | null = null;
+      let startup: NodeJS.Timeout | undefined;
       try {
-        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
+        const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
+        startup = setTimeout(ready, headlessStartupMs);
+        output = await running.finally(() => clearTimeout(startup));
         return await input.answer(output);
       } catch (error) {
+        clearTimeout(startup);
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
         const printed = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error);
         const notice = detectRuntimeExhaustion(printed, launch.kind, Date.now());
         if (notice) {
           await input.holdAccount?.(notice);
+          if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${notice.reason}`, 'limit')); attempt = 0; continue; }
           throw new Error(`the headless run stopped on its provider's limit notice: ${notice.reason}; its account is held until ${notice.resetsAt ?? 'its reset'}`);
         }
         // A failed run whose agent said it is not logged in (GY-3218): its account is held and the request runs on the next.
-        const loggedOut = output === null && input.moveAccount && moves < accountMoveLimit && !controller.signal.aborted ? detectLoggedOut(printed) : null;
-        if (loggedOut) { moves++; launch = await prepare(await input.moveAccount!(loggedOut)); attempt = 0; continue; }
+        const loggedOut = output === null && input.moveAccount && !controller.signal.aborted ? detectLoggedOut(printed) : null;
+        if (loggedOut) { launch = await prepareAccount(await input.moveAccount!(loggedOut, 'login')); attempt = 0; continue; }
         if (controller.signal.aborted || attempt >= headlessAttempts) throw new Error(`no answer accepted after ${attempt} run${attempt === 1 ? '' : 's'}: ${refused}`);
       }
     }
-  })();
+  })().finally(ready);
   void settled.catch(() => {}).finally(() => { endRun(input.name, runRecord(input.kind, { events: [] }, null, startedAt, new Date().toISOString())); rmSync(runDirectory, { recursive: true, force: true }); });
+  await started;
   return { settled };
 }
 
@@ -223,7 +248,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
 export const headlessRunsDirectory = (root: string) => resolve(root, '.graphyard', 'headless-runs');
 const sessionFile = 'session.json';
 export type HeadlessRoute = 'review' | 'spec-check';
-const sessionRecordSchema = z.object({ name: z.string().min(1).max(200), work: z.string().min(1).max(200), subject: z.string().min(1).max(200), kind: z.string().min(1).max(40),
+const sessionRecordSchema = z.object({ id: z.string().optional(), name: z.string().min(1).max(200), work: z.string().min(1).max(200), subject: z.string().min(1).max(200), kind: z.string().min(1).max(40),
   route: z.enum(['review', 'spec-check']), context: z.record(z.string(), z.string()), startedAt: z.string().max(40) });
 export type HeadlessSessionRecord = z.infer<typeof sessionRecordSchema>;
 /**
@@ -253,7 +278,7 @@ export function adoptHeadlessSessions(root: string, adopters: Record<HeadlessRou
     const meta = readRunMeta(directory);
     let answered!: Promise<unknown>;
     registerRun({ name: session.name, role: 'reviewer', work: session.work, subject: session.subject, agent: session.kind, run: {
-      id: randomUUID(), directory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
+      id: session.id ?? name, directory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
       result: () => answered.then(payload => ({ ok: true as const, tool: 'answer', payload, payloads: [payload] }), error => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: String(error?.message ?? error) }, payloads: [] })),
     } }, true);
     answered = awaitHeadlessRun(directory, { signal: controller.signal, detached: detached.signal }).then(route.answer);

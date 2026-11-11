@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, launchSession, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
+import { closeFailedLaunch, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
@@ -32,7 +32,7 @@ import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type Sandb
 import { withVerificationPath } from './master/verification-slots.js';
 import { findingLocation } from './review-cap.js';
 import { postReview, verdictStateOf, writeReviewBinding } from './review-post.js';
-import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
+import { defaultHeadlessExec, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { liveRun } from './runner/registry.js';
 import { lostRunReason } from './producer.js';
 import { liveSessions, type AgentRegistry } from './model/registry.js';
@@ -63,6 +63,7 @@ export const reviewRecordSchema = z.object({
   sha: sha40, baseSha: sha40, policyRevision: z.number().int().nonnegative(),
   /** The Herdr session name: the profile's fixed agent name, or one derived per request when the profile runs several sessions (GY-107, sessionAgentName). */
   profile: z.string().min(1).max(80), agentName: z.string().min(1).max(120),
+  headless: z.object({ id: z.string(), kind: z.string(), reason: z.string().optional() }).optional(),
   pane: z.string().min(1).max(200).nullable(), sessionDirectory: z.string().min(1),
   requestedAt: z.string().min(1).max(40), tokenExpiresAt: z.string().min(1).max(40),
   // The control plane's review request this session answers (autoDispatch.review.id); a launch
@@ -896,9 +897,8 @@ export async function launchReview(root: string, work: Work, profileName: string
 } = {}) {
   dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
   const now = dependencies.now ?? (() => new Date());
-  // GY-3237: inside the master session's confinement a headless child would need a bubblewrap of
-  // its own, which Landlock forbids there; the review runs in a Herdr pane the host starts instead.
-  const headless = dependencies.headless !== undefined ? dependencies.headless : insideMasterConfinement() ? null : defaultHeadlessExec();
+  if (insideMasterConfinement()) throw new Error('Review execution belongs to the unconfined host master run loop; the durable control-plane review request remains queued.');
+  const headless = dependencies.headless ?? defaultHeadlessExec();
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
   const postMerge = dependencies.postMerge;
@@ -985,12 +985,9 @@ export async function launchReview(root: string, work: Work, profileName: string
   // A launch that never became a session gives its reservation back; one whose tab Herdr could
   // not confirm closed keeps it, settled as failed with the reason, so the session it may have
   // left behind is still on the record.
-  let startedTab = false;
   const release = (error: unknown) => updateReviewLedger(root, ledger => {
     const reason = error instanceof Error ? error.message : String(error);
-    ledger.reviews = startedTab && /could not confirm (cleanup|the created pane)/.test(reason)
-      ? ledger.reviews.map(entry => entry.id === id ? { ...entry, state: 'failed' as const, launching: undefined, closedAt: now().toISOString(), resolution: `the launch failed: ${reason}`.slice(0, 900), closeFailure: reason.slice(0, 500) } : entry)
-      : ledger.reviews.filter(entry => entry.id !== id);
+    ledger.reviews = ledger.reviews.map(entry => entry.id === id ? { ...entry, state: 'failed' as const, launching: undefined, closedAt: now().toISOString(), resolution: `the launch failed: ${reason}`.slice(0, 900) } : entry);
   }).catch(() => { /* a reservation that cannot be given back is failed by reconciliation once it is stale */ });
   try {
     // GY-1705: re-hold a reviewer account this item's last two sessions each spent, before
@@ -1030,14 +1027,14 @@ export async function launchReview(root: string, work: Work, profileName: string
         catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
       }
       const writable = await sessionWritable(root, config, checkout.directory);
-      const launch = accountLaunch(profile, selected.account, { writable });
+      const launch = accountLaunch(profile, selected.account, { writable, headless: true });
       // The install's credential locations are hidden from this session (GY-1856); a reviewer's
       // own credential is the binding its launch directory carries, and its runtime login stays.
       // GY-2995: that launch directory under the config home is kept readable, and with it the
       // deploy checkout the CLI it must run lives in.
       // A headless session (headless-session.ts) holds no binding at all: the launcher posts its answer.
-      const runHeadless = headless && headlessKind(launch.kind) ? headless : null;
-      const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      const runHeadless = headless;
+      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
       /** The session the run is on: a headless run moves off a logged-out account (GY-3218). */
@@ -1048,17 +1045,16 @@ export async function launchReview(root: string, work: Work, profileName: string
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
         const own = withVerificationPath(harness.environment, launch.environment);
-        const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         // What posting and settling a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
         headlessContext = { id, sha: binding.sha, reviewer: reviewerIdentity, kind: launch.kind!, cliPath: config.cliPath ?? launcherPath,
-          GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: environment.GRAPHYARD_REVIEW, GRAPHYARD_URL: config.url };
+          GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
-        if (runHeadless) {
+        {
           // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
           const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
-            const moved = accountLaunch(profile, next.account, { writable });
+            const moved = accountLaunch(profile, next.account, { writable, headless: true });
             const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
             return { kind: moved.kind!, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
               credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
@@ -1067,14 +1063,16 @@ export async function launchReview(root: string, work: Work, profileName: string
           delivery = 'request';
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
             contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
+            onRun: async run => {
+              headlessContext!.kind = run.kind;
+              await updateReviewLedger(root, ledger => { const record = ledger.reviews.find(entry => entry.id === id); if (record) { record.headless = run; record.session = registrySessionOf(on.current); } });
+            },
             holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
             answer: output => postHeadlessReview(root, headlessContext!, output, dependencies.run), root, route: 'review', context: headlessContext }));
-        } else {
-          startedTab = true;
-          ({ delivery, consent } = await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: request(), workspace: config.herdrWorkspace, label: `${binding.key} review · ${agentName}`, run: dependencies.run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } }));
         }
       } catch (error) {
+        await on.current.release?.(`reviewer launch failed: ${String(error)}`.slice(0, 400));
         // A launch that never became a session leaves no checkout behind.
         await discard();
         const malformedTab = (error as any)?.herdrTab as string | undefined;
@@ -1097,12 +1095,12 @@ export async function launchReview(root: string, work: Work, profileName: string
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
           // A headless run holds its request from its first instant: there is nothing to acknowledge or re-prompt.
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}), ...(answered ? { acknowledgedAt: reserved.acknowledgedAt ?? now().toISOString() } : {}) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(on.current) ? { session: registrySessionOf(on.current) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}), acknowledgedAt: reserved.acknowledgedAt ?? now().toISOString() });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
       } catch (error) {
-        if (answered) liveRun(agentName)?.run.cancel('its ledger record could not be written');
+        liveRun(agentName)?.run.cancel('its ledger record could not be written');
         if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
@@ -1112,7 +1110,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         .catch(() => { /* reconciliation settles a record this could not write */ });
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,
-        account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
+        account: on.current.account ? { environment: on.current.account.name, kind: on.current.account.kind, quota: on.current.health?.quota ?? null, skipped: on.current.skipped } : null,
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
     });
   } catch (error) { await release(error); throw error; }

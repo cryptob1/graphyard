@@ -35,6 +35,9 @@ const launchEnvironment = z.record(
 export const launchContractSchema = z.object({
   kind: entryName,
   args: z.array(z.string().max(1000).refine(notSecret, 'That argument looks like a credential; the registry stores references, never secrets')).max(30).default([]),
+  /** One-task argv, replacing args and the built-in one-shot form. Policy/model/tools follow its subcommand, before {request}. */
+  headlessArgs: z.array(z.string().max(1000).refine(notSecret, 'Arguments must not contain credentials')).max(30)
+    .refine(args => args.filter(arg => arg === '{request}').length === 1, 'headlessArgs must contain exactly one {request} argument').optional(),
   environment: launchEnvironment,
   homeVariable: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher').nullable().default(null),
   modelFlag: z.string().regex(/^--?[a-zA-Z][a-zA-Z0-9-]*$/).nullable().default(null),

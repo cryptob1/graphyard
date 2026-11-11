@@ -434,12 +434,12 @@ export class LaunchRefusedError extends Error { constructor(readonly kind: strin
  * counts as the contract's no-approval arguments; a runtime with a built-in request contract drops it.
  */
 export const requestPlaceholder = '{request}';
-export interface RegisteredLaunch { args: string[]; environment?: Record<string, string>; homeVariable?: string | null }
+export interface RegisteredLaunch { args: string[]; headlessArgs?: string[]; environment?: Record<string, string>; homeVariable?: string | null }
 export const registryContractRefusal = (kind: string) => `Graphyard refuses to launch the ${kind} runtime: its agent-registry launch contract registers no arguments or environment, so nothing suppresses its own approval or trust prompts and the session would wait for a human. Register the flags that start ${kind} without approvals with graphyard master registry runtime set NAME --kind ${kind} --arg=FLAG --reason REASON.`;
 export function assertLaunchable(kind: string, registered: RegisteredLaunch | null = null) {
   if (launchRecipe(kind)) return;
   if (!registered) throw new LaunchRefusedError(kind);
-  if (!registered.args.some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
+  if (!(registered.headlessArgs ?? registered.args).some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
 }
 /**
  * A profile with `approvals: "prompt"` would start its runtime without the recipe above and wait at

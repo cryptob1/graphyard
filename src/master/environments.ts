@@ -334,8 +334,8 @@ export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'p
  * model flag and its tool allowlist on the runtime's tools flag. A role that limits tools on a runtime
  * with no tools flag is refused rather than launched with every tool.
  */
-export function registryLaunchArgs(account: FleetLaunchAccount) {
-  const { contract, policy, modelId } = account.fleet, args = [...contract.args, ...(policy?.args ?? [])];
+export function registryLaunchArgs(account: FleetLaunchAccount, headless = false) {
+  const { contract, policy, modelId } = account.fleet, args = [...(headless && contract.headlessArgs ? [] : contract.args), ...(policy?.args ?? [])];
   // OpenCode's interactive TUI refuses --model (only `run` takes it), so its model rides in
   // OPENCODE_CONFIG_CONTENT instead (GY-3118), whatever flag a stored runtime still names.
   const model = contract.kind !== 'opencode' && contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
@@ -350,14 +350,14 @@ export function registryLaunchArgs(account: FleetLaunchAccount) {
  * detached worktree under the managed worktree root, and is given its own session directory there
  * and nothing beside it.
  */
-export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[]; repositoryRoot?: string } = {}) {
+export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[]; repositoryRoot?: string; headless?: boolean } = {}) {
   // A registry account carries its runtime's launch contract: what to start, its own startup
   // arguments, the variable that selects the login home, and the flag that selects its model.
   const contract = account && 'fleet' in account ? account.fleet.contract : null;
   const kind = account?.kind ?? profile.kind;
   // A registry launch takes its runtime, account, model and policy from the registry alone (GY-170):
   // the local profile's own arguments and environment apply only to roles the registry does not define.
-  const fleetArgs = account && 'fleet' in account ? registryLaunchArgs(account) : null;
+  const fleetArgs = account && 'fleet' in account ? registryLaunchArgs(account, reach.headless) : null;
   const own = fleetArgs ?? (!account || account.kind === profile.kind ? profile.agentArgs : []);
   const profileEnvironment = fleetArgs ? {} : profile.environment;
   // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).

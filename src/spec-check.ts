@@ -15,20 +15,19 @@ import type { SandboxExec } from './worker-sandbox.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, onSelectedSession, selectAccount } from './master/environments.js';
 import { allocateManagedCheckout } from './master/worktrees.js';
 import { autonomousSession } from './master/dispatch.js';
-import { closeHerdrPane } from './master/herdr.js';
-import { launchStartMs, launchSession, type PromptDelivery, type StartBounds } from './master/launch.js';
+import { type PromptDelivery, type StartBounds } from './master/launch.js';
 import { loadMasterConfig, readCredentialFile } from './master/config.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { sessionAgentName } from './master/profiles.js';
 import { selectReviewerProfile } from './dispatch/launch-failover.js';
 import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, reviewerCredentialDirectory, sessionCoordinatorRoot, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
-import { credentialMaskFor } from './master/confinement.js';
+import { credentialMaskFor, insideMasterConfinement } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { z } from 'zod';
 import { postSpecCheck, writeSpecCheckBinding } from './spec-check-post.js';
-import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
+import { defaultHeadlessExec, jsonAnswer, startHeadlessSession, type HeadlessAdopter, type HeadlessExec } from './headless-session.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
 
@@ -104,7 +103,8 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   headless?: HeadlessExec | null;
 } = {}): Promise<SpecCheckLaunchResult> {
   dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
-  const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
+  if (insideMasterConfinement()) throw new Error('Spec checks execute on the unconfined host master loop; the control-plane request remains queued.');
+  const headless = dependencies.headless ?? defaultHeadlessExec();
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A spec-check launch requires a valid Graphyard snapshot clock');
   if (!needsSpecCheck(work)) throw new Error(`${work.key} owes no spec check: bugs and chores skip it`);
@@ -135,7 +135,6 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     // before the launch is registered or any credential material is written.
     const cliRefusal = cliUnreachableRefusal(config, credentialMaskFor(config, {}));
     if (cliRefusal) throw new LauncherUnavailableError(cliRefusal);
-    let pane: string | null = null;
     const sessionDirectory = resolve(reviewerCredentialDirectory(config), 'sessions', id);
     try {
       // The control plane registers the launch before the session starts: the reviewer, the token
@@ -144,22 +143,21 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
       await writeSpecCheckBinding(sessionDirectory, { repository: config.repository, key: work.key, workId: work.id, policyRevision: work.policyRevision, reviewer: profile.agentName, url: config.url, token });
       const writable = await sessionWritable(root, config, checkout.directory);
-      const launch = accountLaunch(profile, selected.account, { writable });
+      const launch = accountLaunch(profile, selected.account, { writable, headless: true });
       const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, checkout: checkout.worktree });
       // A headless check (headless-session.ts) holds no binding: the launcher posts its answer.
-      const runHeadless = headless && headlessKind(launch.kind) ? headless : null;
+      const runHeadless = headless;
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
       // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
-      const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
       const own = withVerificationPath(harness.environment, launch.environment);
-      const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const vendor = await readVendorPrompts();
-      if (runHeadless) {
+      {
         // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
         const on = { current: selected };
         const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
-          const moved = accountLaunch(profile, next.account, { writable });
+          const moved = accountLaunch(profile, next.account, { writable, headless: true });
           const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, checkout: checkout.worktree });
           return { kind: moved.kind!, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
             credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
@@ -179,11 +177,8 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         });
         return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane: null, checkout: checkout.directory, tokenExpiresAt: expiresAt, settled: ended };
       }
-      await launchSession({ name: agentName, kind: launch.kind!, args: [...launch.args, ...harness.args], text: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip), workspace: config.herdrWorkspace, label: `${work.key} spec check · ${agentName}`, run, onPane: nextPane => { pane = nextPane ?? null; }, start: { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask } });
-      return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.
-      if (pane) await closeHerdrPane(pane, run).catch(() => {});
       await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});
       throw error;
     }

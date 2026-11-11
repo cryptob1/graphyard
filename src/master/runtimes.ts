@@ -30,6 +30,7 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
 export interface RuntimeAdapter {
   kind: string;
   recipe?: LaunchRecipe;
+  headless?: { program?: string; before: string[]; flags: string[]; drop?: string[] };
   request?: (reference: string) => string;
   role?: (reference: string) => string;
   screen?: RegExp;
@@ -80,6 +81,7 @@ async function cursorAccount(environment: ProbedHome): Promise<AccountReading> {
 // that never asks can still only act inside its own assigned worktree and its own credentials.
 const builtInAdapters = {
   claude: {
+    headless: { before: [], flags: ['-p'] },
     recipe: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, verify: verifyClaudeTrust, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
       tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository\'s own Claude settings; everything the agent proposes runs without asking.' },
     request: reference => reference,
@@ -95,6 +97,7 @@ const builtInAdapters = {
     identity: { file: '.claude.json', ids: login => [login?.oauthAccount?.accountUuid, login?.oauthAccount?.organizationUuid] },
   },
   codex: {
+    headless: { before: ['exec'], flags: ['--skip-git-repo-check'], drop: ['--ask-for-approval', '-a'] },
     // No Codex flag skips its "Trust this folder?" dialog in a folder its config does not list, so
     // the folder is recorded trusted first (trustCodexFolder, GY-1306).
     recipe: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, trust: trustCodexFolder, verify: verifyCodexTrust, prompts: 'directory-trust and per-command approval prompts',
@@ -107,6 +110,7 @@ const builtInAdapters = {
     identity: { file: 'auth.json', ids: login => [login?.tokens?.account_id] },
   },
   cursor: {
+    headless: { program: 'cursor-agent', before: [], flags: ['-p'] },
     recipe: { program: 'agent', args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
       tradeoff: 'Cursor Agent (`agent`) runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
     request: reference => reference,
@@ -117,6 +121,7 @@ const builtInAdapters = {
     identity: { file: 'cli-config.json', ids: login => [login?.authInfo?.userId] },
   },
   opencode: {
+    headless: { before: ['run'], flags: [] },
     recipe: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
       tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
     request: reference => `--prompt ${reference}`,
@@ -129,6 +134,7 @@ const builtInAdapters = {
     sharedPlan: true,
   },
   pi: {
+    headless: { before: [], flags: ['-p'] },
     // Pi has no approval or trust prompt to suppress: every tool it has runs without asking.
     recipe: { args: [], environment: {}, prompts: 'none: pi has no approval or workspace-trust prompts',
       tradeoff: 'pi runs every tool it proposes in the assigned worktree; it has no approval step to turn off.' },
@@ -153,6 +159,7 @@ const builtInAdapters = {
     request: reference => `--interactive ${reference}`,
   },
   muse: {
+    headless: { before: ['exec'], flags: [] },
     recipe: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts', tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
     request: reference => reference,
     // Muse is the one runtime whose listing reports an exit rather than dropping the session.

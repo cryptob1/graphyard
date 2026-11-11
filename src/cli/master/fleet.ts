@@ -11,7 +11,7 @@ import { unhandled, type MasterSession } from './session.js';
 /** Launch profiles, the master session, reviewer launches and the master's harness rules. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation } = session;
-  const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
+  const reviewCommand = (...a: Parameters<typeof launchReview>) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
   if (id === 'start') {
     const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
     const separator = args.indexOf('--'); const agentArgs = separator < 0 ? [] : args.slice(separator + 1);
