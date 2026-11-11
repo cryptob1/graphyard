@@ -40,7 +40,7 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
  * this host that the running deployment lacks — the install record's — planned, or set with --apply through the
  * provider adapter with one audit entry each. Nothing is printed but names and fingerprints.
  */
-export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
+export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'url'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
   const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
   if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [],
@@ -53,7 +53,7 @@ export async function masterSetup(root: string, master: Pick<MasterConfig, 'repo
   return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, located.derived, { apply: options.apply, audit, now: deps.now, pending }) };
 }
 
-export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>) {
+export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'url'>) {
   const { values } = parseArgs({ args: context.args, options: { apply: { type: 'boolean' }, service: { type: 'string' } }, allowPositionals: false });
   return context.print(await masterSetup(root, master, { apply: !!values.apply, ...(values.service ? { service: values.service } : {}) }));
 }

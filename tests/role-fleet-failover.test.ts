@@ -48,11 +48,11 @@ test('unit:role-fleet-failover-selection — every own account exhausted, logged
   assert.equal(climbed.account && climbed.failover!.reason.includes('claude-b'), false, 'the failover reason is why the role\'s own accounts were passed over');
 
   // Unsupported: a role with a tool allowlist cannot run on a runtime without a tools flag, its own account or the fleet's.
-  const tools = registry({ approver: ['codex-a'] }, [{ name: 'claude-a', quota: exhausted }]);
+  const tools = registry({ producer: ['codex-a'] }, [{ name: 'claude-a', quota: exhausted }]);
   tools.roles[0].policy = { ...tools.roles[0].policy!, tools: ['Read'] };
-  const supported = chooseSession(tools, { role: 'approver', host: HOST }, now);
+  const supported = chooseSession(tools, { role: 'producer', host: HOST }, now);
   assert.equal(supported.account?.name, 'claude-b');
-  assert.match(supported.account ? supported.failover!.reason : '', /codex-a runs codex, which names no tools flag for role approver's tool allowlist/);
+  assert.match(supported.account ? supported.failover!.reason : '', /codex-a runs codex, which names no tools flag for role producer's tool allowlist/);
 
   // A role's own usable account always leads: no failover, nothing recorded.
   const own = chooseSession(registry({ worker: ['claude-a', 'claude-b'] }, [{ name: 'claude-a', quota: exhausted }]), { role: 'worker', host: HOST }, now);

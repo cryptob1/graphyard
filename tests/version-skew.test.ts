@@ -201,13 +201,13 @@ test('unit:state-files-forward-tolerant — master.json reads and writes an unkn
   await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), futureField, browser: { profile: 'Default', futureBrowser }, run: { futureRun: true } }), { mode: 0o600 });
   const loaded = await loadStoredMasterConfig(root);
   assert.deepEqual((loaded as any).futureField, futureField, 'the unknown top-level field parses');
-  assert.deepEqual((loaded as any).browser, { profile: 'Default', futureBrowser }, 'the retired browser field (GY-3003) parses, kept unknown');
+  assert.equal((loaded as any).browser, undefined, 'the retired browser field loads and is removed');
   assert.equal((loaded.run as any).futureRun, true, 'an unknown field under a prefaulted record (run) parses');
   // Writers parse before they save; the unknown fields ride the parse back into the file.
   await writeFile(file, JSON.stringify(masterConfigSchema.parse(loaded), null, 2), { mode: 0o600 });
   const reread = await loadStoredMasterConfig(root);
   assert.deepEqual((reread as any).futureField, futureField);
-  assert.deepEqual((reread as any).browser, { profile: 'Default', futureBrowser }, 'the retired browser field survives the round-trip');
+  assert.equal((reread as any).browser, undefined, 'the retired browser field is absent after save');
   // Declared fields still validate: a malformed one refuses the load as before.
   await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), run: { intervalSeconds: 'nine' } }), { mode: 0o600 });
   await assert.rejects(loadStoredMasterConfig(root));

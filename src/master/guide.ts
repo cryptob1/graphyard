@@ -59,7 +59,7 @@ Missing panes free role capacity after two consecutive misses, including across 
 
 ## Automatic dispatch at submit
 
-The control-plane registry alone owns session capacity. Configure every role there before launching; profile concurrency and Herdr names do not grant slots. Selection reserves a slot transactionally before the runtime starts, so racing executors cannot both take the last slot or replace an active reservation for the same work. Failed launches return their reservation. Launch history files support resume and diagnostics only; there are no filesystem reservation locks.
+The four roles are worker, reviewer, producer and master. Retired assignments are removed on the next registry write, with one attention notice and a history entry; live sessions still reconcile normally. The control-plane registry alone owns session capacity. Configure every role there before launching; profile concurrency and Herdr names do not grant slots. Selection reserves a slot transactionally before the runtime starts, so racing executors cannot both take the last slot or replace an active reservation for the same work. Failed launches return their reservation. Launch history files support resume and diagnostics only; there are no filesystem reservation locks.
 
 Provider exhaustion is reported directly as a registry observation. Every executor skips that account until its reset, even if a fresh provider probe reports available quota. The local environment log records diagnostics and launch attribution, never exhaustion holds. A failed report is an error, not a local fallback.
 
@@ -67,7 +67,7 @@ The loop reads a neutral session inventory from Herdr and headless runners. An u
 
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record \`dispatch.abandoned\`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
 
-Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. The merge trial of a build-passed head runs beside its review; exact-head control-plane approval lets it land on the trial it already passed (GY-3164). A review session that posts no verdict and changes no output for \`run.reviewSilenceMinutes\` (default 10) is ended and relaunched on another reviewer profile. Settings ignore old \`run.awaitReviewers\` and \`run.awaitReviewersMinutes\`; dispatch cursors discard old \`botReviewers\`.
+Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. The merge trial of a build-passed head runs beside its review; exact-head control-plane approval lets it land on the trial it already passed (GY-3164). A review session that posts no verdict and changes no output for \`run.reviewSilenceMinutes\` (default 10) is ended and relaunched on another reviewer profile. Retired settings drop on the next config save; reads leave the file unchanged. Dispatch cursors discard old \`botReviewers\`.
 
 The loop closes exited Graphyard panes left in removed worktrees. If bounded coordination sessions and launch actions no longer identify a leftover, it reads that worktree’s item history once that cycle to recover ownership, without loading the fleet’s history. Master panes, foreign panes and running agents stay open; an existing worktree needs no history lookup.
 `;

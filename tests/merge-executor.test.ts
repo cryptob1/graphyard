@@ -249,7 +249,7 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', parallel: 2 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', parallel: 2 });
   assert.deepEqual(mergeWriterSettings({ mergeWriter: mergeWriterSettingsSchema.parse({ retrials: 11 }) }, 'owner-project', '/home/loop').parallel, defaultMergeWriterParallel, 'the retired retrials key still loads and is ignored');
   assert.throws(() => mergeWriterSettingsSchema.parse({ parallel: 7 }));
-  assert.throws(() => mergeWriterSettingsSchema.parse({ deployKey: '/k' }), /unrecognized/i);
+  assert.deepEqual(mergeWriterSettingsSchema.parse({ futureSetting: '/k', retrials: 'retired' }), { futureSetting: '/k' }, 'future settings survive normalization; retired values do not');
   assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k' } } }).run.mergeWriter?.deployKeyFile, '/k', 'run.mergeWriter is a master.json setting');
 });
 

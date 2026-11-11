@@ -1,5 +1,5 @@
 import { masterRunSchema } from '../src/master/profiles.js';
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -119,7 +119,7 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'integration'), 'herdr', 'only the unit proof producer runs on Pi');
   assert.throws(() => masterRunSchema.parse({ runtimes: { producer: 'opencode' } }), 'an unknown runtime is refused at load');
   assert.deepEqual(masterRunSchema.parse({ runtimes: { approver: 'pi' }, pi: { approverTimeoutMinutes: 10 } }).runtimes, {}, 'the retired approver settings still load and are dropped');
-  assert.throws(() => masterRunSchema.parse({ runtimes: { reviewer: 'pi' } }), 'only the narrow roles are selectable');
+  assert.deepEqual(masterRunSchema.parse({ runtimes: { future: 'pi' } }).runtimes, { future: 'pi' }, 'unknown settings survive without becoming selectable roles');
   assert.deepEqual(piRuntimeSchema.parse({}), { command: 'pi', model: 'zai/glm-5.3-flash' });
 });
 

@@ -4,7 +4,7 @@ import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { emptyRegistry, fleetView, foldObservation, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry';
 import { NOW, boardApi } from './ui-board';
 
-// GY-1325 AC-5: Settings › Agents over a production-sized fleet — 17 accounts, 6 roles, six of them
+// GY-1325 AC-5: Settings › Agents over a production-sized fleet — 17 accounts, 4 roles, six of them
 // spent until the same day — stays readable. At 1440px the page is at most half the height it
 // rendered before the declutter (one row per account, one launch line, spent accounts collapsed),
 // and at 390px the accounts table stacks into one card per account with no sideways scroll. Both
@@ -30,8 +30,6 @@ function registry(): AgentRegistry {
       { name: 'worker', accounts: all, concurrency: 6 },
       { name: 'reviewer', accounts: ['claude-b', 'codex-a', 'codex-b', 'claude-a'], concurrency: 3 },
       { name: 'producer', accounts: ['codex-b', 'pi-c', 'opencode-c', 'muse-a'], concurrency: 3 },
-      { name: 'approver', accounts: ['claude-d', 'codex-b', 'muse-b'], concurrency: 1 },
-      { name: 'escalation-handler', accounts: ['claude-d', 'codex-c'], concurrency: 1 },
       { name: 'master', accounts: ['claude-d'], concurrency: 1 },
     ],
     reason: 'production-sized fleet',
@@ -69,7 +67,7 @@ async function openAgents(page: Page, phone: boolean) {
   await page.waitForTimeout(250);
 }
 
-for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }] as const) test(`manual:fleet-settings-declutter-screenshots — Settings › Agents over 17 accounts and 6 roles at ${viewport.width}px: no sideways scroll, ${viewport.width === 1440 ? 'at most half its former height' : 'one card per account'}`, async ({ page }) => {
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }] as const) test(`manual:fleet-settings-declutter-screenshots — Settings › Agents over 17 accounts and 4 roles at ${viewport.width}px: no sideways scroll, ${viewport.width === 1440 ? 'at most half its former height' : 'one card per account'}`, async ({ page }) => {
   test.setTimeout(60_000);
   mkdirSync(out, { recursive: true });
   await page.setViewportSize(viewport);

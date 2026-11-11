@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';

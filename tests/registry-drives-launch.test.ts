@@ -1,4 +1,5 @@
-import { after, test } from 'node:test';
+import { after } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -88,7 +89,7 @@ function fleet(registry: ReturnType<typeof memoryRegistry>, host: string, home: 
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude' || runtime.name === 'pi'),
     models: [{ name: 'opus', id: 'claude-opus-5' }, { name: 'sonnet', id: 'claude-sonnet-5' }, { name: 'glm', id: 'zai/glm-5.3' }, { name: 'glm-flash', id: 'zai/glm-5.3-flash' }],
     accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: home.claude } }, { name: 'pi-a', runtime: 'pi', model: 'glm', credential: { host, home: home.pi } }],
-    roles: [{ name: 'approver', accounts: ['claude-b'], concurrency: 4, policy: { args: ['--verbose'], tools: ['Read', 'Grep'], model: null } }],
+    roles: [{ name: 'producer', accounts: ['claude-b'], concurrency: 4, policy: { args: ['--verbose'], tools: ['Read', 'Grep'], model: null } }],
     reason: 'fixture',
   });
 }

@@ -1,11 +1,11 @@
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
-import { dispatchAttemptCeiling, dispatchCursorPath, dispatchCursorSchema, dispatchFailureLimit, emptyDispatchCursor, writeDispatchCursor } from '../src/dispatch/cursor.js';
+import { dispatchAttemptCeiling, readDispatchCursor, dispatchFailureLimit, emptyDispatchCursor, writeDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { unknownParent } from '../src/dispatch/post-merge.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
@@ -151,8 +151,8 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
     assert.equal(cursor.failures[requestIdOf(key)]!.attempts, dispatchAttemptCeiling, `${key}'s count holds at the clamp while the probe goes on`);
     assert.ok(attemptsOf(key).length >= clamped + 6, `${key} is still probed hourly at the clamp, not stranded silently`);
   }
-  const persisted = dispatchCursorSchema.parse(JSON.parse(await readFile(dispatchCursorPath(config), 'utf8')));
-  assert.deepEqual(keys.map(key => persisted.failures[requestIdOf(key)]!.attempts), [dispatchAttemptCeiling, dispatchAttemptCeiling, dispatchAttemptCeiling], 'the cursor on disk carries the clamped counts the production writer accepted');
+  const persisted = await readDispatchCursor(root, config);
+  assert.deepEqual(keys.map(key => persisted.failures[requestIdOf(key)]!.attempts), [dispatchAttemptCeiling, dispatchAttemptCeiling, dispatchAttemptCeiling], 'the cursor in Postgres carries the clamped counts the production writer accepted');
   await assertNothingAccumulates();
 
   // The cause is gone: the next hourly probe launches each request exactly once through the real

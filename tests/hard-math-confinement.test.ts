@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';

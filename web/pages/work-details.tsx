@@ -4,6 +4,7 @@ import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
 import { diagnose, obligationLedger, proofPreview } from '../../src/coordination';
+import Priority, { mayChangePriority } from '../components/priority';
 import History from '../history';
 import RequirementsEditor from '../requirements';
 import { assignment } from '../../src/model/assignment';
@@ -216,7 +217,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
-        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
+        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())}</span><Priority item={item} disabled={busy} onChange={mayChangePriority(status?.actor) ? priority => { void action(item.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>

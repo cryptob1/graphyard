@@ -1,4 +1,4 @@
-import { atomicPrivateWrite, privateFile } from './private-file.js';
+import { loopStateClient, migrateLoopFile, ledgerSnapshot, saveLedger } from './loop-state.js';
 import { writeFailure } from './disk-space.js';
 import { parseEnvValue } from './env-file.js';
 import { randomUUID } from 'node:crypto';
@@ -23,7 +23,7 @@ import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, worktreeRoot, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { anchorSessionCheckout, sessionCoordinatorRoot, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { anchorSessionCheckout, sessionCoordinatorRoot, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, retainSessionRecords, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
@@ -132,7 +132,7 @@ export const producerRecordSchema = z.object({
   requestId: z.string().min(1).max(64),
   /** Which launch for the request this is: a failed or expired session is relaunched as the next attempt. */
   attempt: z.number().int().min(1).max(50).default(1),
-  /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (reviewer.ts boundSessionLedger). */
+  /** When the loop saw the control plane no longer request `requestId`; until then the record is pinned (reviewer.ts retainSessionRecords). */
   requestClosedAt: z.string().min(1).max(40).optional(),
   /** The agent registry session the launch was chosen under (GY-205): ended once this record settles, so the role's slot frees with it. */
   session: z.string().min(1).max(200).optional(),
@@ -172,19 +172,17 @@ export const producerRecordSchema = z.object({
   run: runRecordSchema.optional(),
 }).strict();
 export type ProducerRecord = z.infer<typeof producerRecordSchema>;
-// Bounded and reaped on write by the one implementation the review ledger uses (reviewer.ts
-// boundSessionLedger, GY-131): the same bound, the same retention, the same refusal.
 export const producerLedgerSchema = z.object({ version: z.literal(1), producers: z.array(producerRecordSchema).default([]) }).strict();
 export type ProducerLedger = z.infer<typeof producerLedgerSchema>;
 export const producerLedgerSpec: SessionLedgerSpec = { name: 'producer ledger', path: '.graphyard/producers.json', role: 'producer', idleGraceMs: 5 * 60_000 };
 
-const ledgerFile = (root: string) => resolve(root, producerLedgerSpec.path);
 export async function readProducerLedger(root: string): Promise<ProducerLedger> {
-  const file = ledgerFile(root);
-  try { await privateFile(file); return producerLedgerSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
-  catch (error: any) { if (error.code !== 'ENOENT') throw error; return { version: 1, producers: [] }; }
+  const client = await loopStateClient(root);
+  await migrateLoopFile(client, 'producers', resolve(root, producerLedgerSpec.path), value => producerLedgerSchema.parse(value).producers);
+  const producers = (await client.read('producers')).map(record => producerRecordSchema.parse(record));
+  return ledgerSnapshot({ version: 1, producers }, producers);
 }
-export const saveProducerLedger = async (root: string, ledger: ProducerLedger) => atomicPrivateWrite(ledgerFile(root), producerLedgerSchema.parse({ ...ledger, producers: boundSessionLedger(ledger.producers, producerLedgerSpec) }));
+export const saveProducerLedger = async (root: string, ledger: ProducerLedger) => saveLedger(await loopStateClient(root), 'producers', ledger, retainSessionRecords(ledger.producers));
 
 /** A finished session that submitted nothing for a proof is given this long to finish submitting before it is recorded as failed. */
 export const producerIdleGraceMs = producerLedgerSpec.idleGraceMs;
@@ -390,8 +388,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const id = randomUUID();
   const agentName = sessionAgentName(profile, { id, requestId: request.id, attempt: prior.length + 1 });
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Producer agent ${agentName} is already visible in Herdr`);
-  // The ledger's room is local state, judged before any session exists (see launchReview).
-  assertSessionLedgerRoom(ledger.producers, producerLedgerSpec, `${binding.key} ${binding.group} proofs of ${binding.sha.slice(0, 12)}`, { state: 'pending', requestedAt: new Date().toISOString(), key: binding.key, sha: binding.sha, requestId: request.id });
+
   const credential = await readProducerCredential(root, profile.credentialFile);
   // A closed question answers in seconds what a session takes most of an hour to; the session is
   // launched only for the proofs no confident answer decided.

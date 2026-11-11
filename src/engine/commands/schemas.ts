@@ -33,6 +33,10 @@ const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.st
 export const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() })
     .superRefine((data, ctx) => { const refusal = data.criteria.length ? filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria) : null; if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+  priority: z.union([
+    z.object({ priority: z.number().int().min(0).max(3), reason: z.string().trim().min(1).max(2000) }).strict(),
+    z.object({ priority: z.number().int().min(0).max(3), source: z.literal('dashboard') }).strict(),
+  ]),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -108,4 +112,4 @@ export const pullAssignmentSchema = z.object({ host: executorName.optional(), wo
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
 /** What the master's operator-agent identity applies directly, at once, under its own name. */
-export const operatorCommands = new Set<Command>(['create', 'ready', 'unblock', 'window', 'requirements', 'rework', 'evidence']);
+export const operatorCommands = new Set<Command>(['create', 'ready', 'priority', 'unblock', 'window', 'requirements', 'rework', 'evidence']);

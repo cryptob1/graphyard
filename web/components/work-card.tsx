@@ -7,6 +7,7 @@ import { currentMergeStep } from '../../src/model/merge-ledger';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import { queuedSentence, type ActionlessCard, type QueuedBehind } from '../../src/model/actionless';
 import type { ReleaseView } from '../../src/model/release';
+import Priority from './priority';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
@@ -21,7 +22,7 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
  * threshold. On a phone the same element lays out as a card. The candidate is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, queue, release }: { item: Work; queue?: QueuedBehind; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
+export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, queue, release, onPriority, busy }: { item: Work; onPriority?: (priority: number) => void; busy?: boolean; queue?: QueuedBehind; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
   const group = given ?? groupOf(item, now, undefined, undefined, release) ?? 'shipped';
   const status = plainStatus(item, now);
   // A head waiting its merge-queue turn is moving, never overdue for that wait.
@@ -48,7 +49,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
-      {item.owner && <span className="row-owner">Owner · {item.owner}</span>}
+      <Priority item={item} disabled={busy} onChange={onPriority}/>{item.owner && <span className="row-owner">Owner · {item.owner}</span>}
       <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}

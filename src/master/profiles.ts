@@ -6,7 +6,7 @@ import { environmentKinds, runtimeAdapter, runtimeHomeVariables, runtimeKinds, t
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
-import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
+import { mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
 
@@ -29,22 +29,14 @@ const safeEnvironment = z.record(
  * wrote parses here instead of failing it. The rebuilt schema keeps its own type — a ZodObject
  * stays one, shape included — so readers of the schema see exactly what they saw. A key a version
  * declared and later retired is not unknown: schemas keep dropping those on purpose (master
- * config's mergeQueue, GY-1264). A schema marked with `keepStrict` is a closed selection and stays
- * as it was.
+ * config's mergeQueue, GY-1264).
  */
 export function forwardTolerant<T extends z.ZodTypeAny>(schema: T): T {
   return tolerateSchema(schema, new Map()) as T;
 }
 
-const keptStrict = new WeakSet<object>();
-/** Marks `schema` as a closed selection `forwardTolerant` leaves strict: a key it does not declare is refused, not kept. */
-export function keepStrict<T extends z.ZodTypeAny>(schema: T): T {
-  keptStrict.add(schema);
-  return schema;
-}
-
 function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
-  if (!schema || typeof schema !== 'object' || !(schema as any)._zod?.def || keptStrict.has(schema)) return schema;
+  if (!schema || typeof schema !== 'object' || !(schema as any)._zod?.def) return schema;
   if (seen.has(schema)) return seen.get(schema);
   const def = (schema as any)._zod.def;
   let rebuilt: unknown;
@@ -335,18 +327,10 @@ export const masterRunSchema = z.object({
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
-  // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
-  // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
-  // A closed selection: only the narrow roles choose a runtime, so a key naming any other role is refused.
-  runtimes: keepStrict(narrowRoleRuntimeSchema).optional(),
+  runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
-  research: z.unknown().optional(), decomposition: z.unknown().optional(), // research and splitting, retired by GY-2875; parsed so an older master.json loads
-  doctor: z.unknown().optional(), // the pipeline doctor, retired by GY-2873; parsed so an older master.json loads
-  // Retired diagnostician settings remain readable without validating their old shape.
-  diagnostician: z.unknown().optional(),
-  mergeWriter: mergeWriterSettingsSchema.optional(), // the control-plane merge executor's deploy key and re-trial bound (GY-1524)
-  candidates: candidateSettingsSchema.optional(), // unused since GY-1983; parsed so an older master.json loads
-}).strict();
+  mergeWriter: mergeWriterSettingsSchema.optional(),
+}).passthrough().transform(({ research, decomposition, doctor, diagnostician, candidates, awaitReviewers, awaitReviewersMinutes, ...kept }) => kept);
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
@@ -380,27 +364,12 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // Legacy private server, retained only until its existing panes have drained.
   herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
-  autoMerge: z.unknown().optional(), // Retired: every passing candidate merges.
-  // Retired (GY-2874): no review round is capped; an existing master.json still loads.
-  reviewRoundCap: z.unknown().optional(),
   workers: z.array(workerProfileSchema).max(100).default([]),
-  reviewer: z.unknown().optional(), // Retired reviewer App binding; old configs still load.
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
   producers: z.array(producerProfileSchema).max(20).default([]),
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // Retired queue settings load for compatibility and drop on the next write.
-  mergeQueue: z.object({
-    batchSize: z.unknown().optional(),
-    optimistic: z.unknown().optional(),
-    parallelTips: z.unknown().optional(),
-    ciConcurrency: z.unknown().optional(),
-    rerunFailedChecks: z.unknown().optional(),
-    optimisticExclude: z.unknown().optional(),
-  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, rerunFailedChecks: _reruns, ...kept }) => kept).optional(),
-  // The browser profile the retired master browser flows used (GY-3003) is no longer declared:
-  // forwardTolerant keeps it in a master.json an older CLI wrote, and no reader consumes it.
   // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   // GY-1856: credential locations beside the operator config home that every confined session of
@@ -412,18 +381,14 @@ export const masterConfigSchema = forwardTolerant(z.object({
   confinement: z.object({
     maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
   }).strict().optional(),
-  // Retired (GY-2874): the approver identity; an existing master.json still loads.
-  approver: z.unknown().optional(),
   // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
   upstream: z.object({
     url: z.string().min(1).max(500),
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
   }).strict().optional(),
-  /** Retired (GY-2877): the system invariants' thresholds; a master.json written before keeps parsing. */
-  invariants: z.unknown().optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
-}).strict()).transform(({ autoMerge: _autoMerge, ...kept }) => kept);
+}).passthrough()).transform(({ autoMerge, reviewRoundCap, reviewer, approver, invariants, browser, mergeQueue, ...kept }) => kept);
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** Sessions `run.reviewerProfile`'s profile runs at unset concurrency (GY-1072); other reviewer profiles keep one. */
 export const automaticReviewerConcurrency = 4;
@@ -448,12 +413,12 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
  * whatever master.json still records, so the loop applies no rework itself; its reviewer answers in control-plane mode
  * (GY-1978), which needs a profile, not an App. Autonomous configs pass unchanged.
  */
-export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T {
+export function withSupervision<T extends { supervision?: Supervision; operatorAgent?: unknown }>(config: T): T {
   if (config.supervision !== 'supervised') return config;
-  const { reviewer: _reviewer, operatorAgent: _operatorAgent, ...kept } = config;
+  const { operatorAgent: _operatorAgent, ...kept } = config;
   return kept as T;
 }
-export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
 
 /** The master config's githubAppId on an install that registered no GitHub App (GY-1413); since GY-2010 none binds one. */
 export const APP_PENDING = 0;

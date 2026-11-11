@@ -5,6 +5,7 @@ import { Refusal, demand, type Principal } from '../model.js';
 import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule } from './routes.js';
 import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
+import { loopStateRoutes } from './routes/loop-state.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
@@ -31,7 +32,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes]
 export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes,
+  loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {

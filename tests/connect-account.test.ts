@@ -132,7 +132,6 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
     accounts: [{ name: 'claude-q', runtime: 'claude', model: 'claude-default', credential: { host: HOST, home: '/tmp/claude-q' }, enabled: true, maxSessions: null }],
     roles: [
       { name: 'worker', accounts: ['claude-q'], concurrency: 2 },
-      { name: 'approver', accounts: ['claude-q'], concurrency: 1 },
     ],
     reason: 'fixture: the fleet before the first connect',
   });
@@ -152,7 +151,7 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
   const cheapName = cheapReports[0].detail.split(' ')[0];
   const document = await ok('agent-registry/document', operator);
   const roleOrder = (name: string) => document.roles.find((role: { name: string }) => role.name === name)?.accounts as string[] | undefined;
-  assert.deepEqual(roleOrder('approver'), ['claude-q'], 'the retired approver role gains no account');
+  assert.equal(roleOrder('approver'), undefined, 'no retired approver role is created');
   assert.deepEqual(roleOrder('producer'), [cheapName], 'a cheap account joins the unit producer');
   assert.ok(!roleOrder('worker')?.includes(cheapName), 'a cheap OpenCode account stays out of worker (GY-1746): only Pi is tried first, every other runtime counts as strong');
   assert.deepEqual((await connectViews()).find(entry => entry.provider === cheap.id)?.placement, ['producer'], 'the card states the cheap account joined producer');
