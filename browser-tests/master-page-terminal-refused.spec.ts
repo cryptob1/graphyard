@@ -36,6 +36,7 @@ test('e2e:master-page-terminal-refused — when the terminal cannot start, the M
         }
       };
     });
+    await page.goto(`${url}/#master`);
     await page.reload();
     await expect(page.getByRole('status')).toContainText('Not available: sign in, and check the session still has a pane.');
     const afterRefusal = connections;
