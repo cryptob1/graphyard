@@ -1,0 +1,13 @@
+{
+  "id": "readme-short-contract",
+  "title": "README stays one short page embedding the walkthrough",
+  "description": "Run the unchanged README-and-walkthrough contract test against the candidate checkout: README under 600 words, the walkthrough embedded, and docs/ holding only the walkthrough.",
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "Check the short README contract",
+    "run": "node --import tsx --test tests/readme-and-walkthrough-only.test.ts",
+    "timeoutSeconds": 60
+  }]
+}
