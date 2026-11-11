@@ -24,3 +24,5 @@ It installs Graphyard and prints a Setup link: open it and connect accounts for 
 
 - `graphyard guide TOPIC` and `graphyard master guide` print the procedures agents follow; `graphyard --help` lists every command.
 - [Re-render the walkthrough](docs/walkthrough.md) · [Contributing](AGENTS.md) · [Apache 2.0](LICENSE)
+
+Operators and maintainers can change priority (P0–P3) on a work row or item page. Changes record who changed it and why in History; the next dispatch uses the new priority. Existing P4 items retain P4 until changed. `graphyard priority GY-N 0|1|2|3 REASON` and `graphyard master priority GY-N 0|1|2|3 REASON` require an audit reason.

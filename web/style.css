@@ -309,3 +309,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* GY-3211: the live terminal keeps its 120 columns and scrolls sideways on a narrow screen. */
 .terminal-host{overflow-x:auto;max-width:100%}
 .watching{margin-bottom:var(--space-4)}
+
+/* A compact priority picker beside the item title, sized independently of form fields. */
+.priority-control{display:inline-flex;align-self:flex-start}
+.priority-control select{width:auto;min-height:32px;padding:4px 8px;font-size:var(--type-tiny)}

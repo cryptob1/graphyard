@@ -18,7 +18,7 @@ import { authorizeOperatorCommand } from './shared.js';
 import type { Ctx } from './types.js';
 
 /** The commands whose work only a gate observes later: a submitted item is woken after any other. */
-const noWake = new Set<Command>(['heartbeat', 'release', 'claim', 'workspace']);
+const noWake = new Set<Command>(['heartbeat', 'release', 'claim', 'workspace', 'priority']);
 
 /**
  * Run one command: validate it, prepare what must happen outside the transaction, then in one
@@ -59,28 +59,29 @@ export async function runCommand(engine: Engine, actor: Principal, command: Comm
       const work = c.work;
       entry.screen?.(c);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
-      await renewalGrace(engine, db, work, now);
+      // Priority edits preserve the assignment and gates; the next loop evaluates their new order.
+      if (command !== 'priority') await renewalGrace(engine, db, work, now);
       if (actor.role === 'operator-agent') {
-        authorizeOperatorCommand(actor, command, data, work, engine.repository);
+        authorizeOperatorCommand(actor, command, c.data, work, engine.repository);
         entry.operator?.(c);
       }
       // A delivered item accepts only what its command names (the post-deployment smoke fact, ending a session handle).
       const delivered = entry.delivered?.(c) ?? false;
-      preserveAssignment(work);
+      if (command !== 'priority') preserveAssignment(work);
       demand(delivered || work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       await entry.run?.(c);
       // Delivery is an immutable snapshot. A post-deployment fact may append its audit/revision
       // metadata, but stale inputs must not re-evaluate it.
-      if (!delivered) engine.evaluate(work, all, now);
+      if (!delivered && command !== 'priority') engine.evaluate(work, all, now);
       // A delivered item's gates are an immutable snapshot; its queue is settled without re-evaluating the delivery.
-      else settleDelivered(work, all, now);
+      else if (delivered) settleDelivered(work, all, now);
       await recordDispatch(db, work, now);
-      await save(db, work, actor.id, command, now, actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null } : data);
+      await save(db, work, actor.id, command, now, actor.role === 'operator-agent' && command !== 'priority' ? { before, intent: c.data, reason: c.data.reason ?? null } : c.data);
       if (work.submission && !delivered && !noWake.has(command)) await wakeJob(db, work.id);
       return work;
     }, {
       store: work => command === 'heartbeat' ? compactHeartbeatReceipt(work) : work,
-      replay: async work => { if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, work, engine.repository); },
+      replay: async work => { if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, command === 'priority' && data.source === 'dashboard' ? { ...data, reason: 'Dashboard priority change' } : data, work, engine.repository); },
     });
   // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
   // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.

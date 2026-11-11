@@ -1,4 +1,5 @@
 import { isClosed, type Work } from '../../src/model';
+import { mayChangePriority } from '../components/priority';
 import WorkCard from '../components/work-card';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
@@ -25,7 +26,7 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * ones the control plane's production observation reports unserved — none where production serves
  * the newest merge, and none claimed where nothing observes production.
  */
-export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly }: Dashboard) {
+export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
@@ -50,7 +51,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
   const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
-  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release}/>;
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
@@ -73,14 +74,14 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {section('moving')}
       {section('up-next')}
       {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
-        <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span><small>no clock runs</small></summary>
+        <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span></summary>
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
         <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, now, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
-        <button type="button" className="text-button push" onClick={() => setView('shipped')}>See what shipped →</button>
+        <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
     </>}
   </>;
