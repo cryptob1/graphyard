@@ -18,9 +18,11 @@ export const criterionSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text
   .superRefine((criterion, context) => { const refusal = postMergeProofRefusal(criterion); if (refusal) context.addIssue({ code: 'custom', message: refusal, path: ['proofs'] }); })
   // A live-install observation is accepted only when declared post-deploy (GY-1660), on every path a criterion is written by.
   .superRefine((criterion, context) => { const refusal = postDeployCriterionRefusal([criterion]); if (refusal) context.addIssue({ code: 'custom', message: refusal, path: ['proofs'] }); });
-/** An item's criteria, on every path they are written by: at least one must be a criterion a head can show before merge (GY-1685). */
-export const criteriaSchema = (max: number) => z.array(criterionSchema).min(1).max(max)
-  .superRefine((criteria, context) => { const refusal = postDeployOnlyRefusal(criteria); if (refusal) context.addIssue({ code: 'custom', message: refusal }); });
+/** Filing and storage admit empty drafts; specified work retains every criterion validation. */
+export const draftCriteriaSchema = (max: number) => z.array(criterionSchema).max(max)
+  .superRefine((criteria, context) => { const refusal = criteria.length ? postDeployOnlyRefusal(criteria) : null; if (refusal) context.addIssue({ code: 'custom', message: refusal }); });
+/** Requirements must include at least one criterion a head can show before merge (GY-1685). */
+export const criteriaSchema = (max: number) => draftCriteriaSchema(max).min(1);
 export const policySchema = z.object({
   checks: z.array(z.string().min(1).max(200)).min(1).max(30).default(['test', 'typecheck']),
   /** Retired (GY-2876): every item follows the one review rule; kept so stored policies parse. */
@@ -31,6 +33,3 @@ export const policySchema = z.object({
   deploySmoke: z.boolean().optional(),
 }).strict();
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
-
-/** Only filing and storage admit a draft; requirements keep criteriaSchema. */
-export const draftCriteriaSchema = (max: number) => z.union([z.array(criterionSchema).max(0), criteriaSchema(max)]);
