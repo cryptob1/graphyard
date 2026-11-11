@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
 import { sessionSummary, transcriptRun, type SessionHandle } from '../../src/model/sessions';
+import { handleEpoch } from '../../src/model/session-launch-window';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
 import { diagnose, obligationLedger, proofPreview } from '../../src/coordination';
@@ -79,7 +80,7 @@ function HumanChecksPanel({ item, token }: { item: Work; token: string }) {
  */
 function WorkerRunsPanel({ item, token }: { item: Work; token: string }) {
   const runs = (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && transcriptRun(handle.transcript))
-    .sort((a, b) => (a.epoch ?? 0) - (b.epoch ?? 0) || a.startedAt.localeCompare(b.startedAt));
+    .sort((a, b) => (handleEpoch(a) || 0) - (handleEpoch(b) || 0) || a.startedAt.localeCompare(b.startedAt));
   if (!runs.length) return null;
   return <section className="panel" aria-label="Worker runs"><h2>Worker runs</h2>{runs.map(handle => <WorkerRunLog key={handle.id} item={item} handle={handle} token={token}/>)}</section>;
 }
@@ -101,11 +102,11 @@ function WorkerRunLog({ item, handle, token }: { item: Work; handle: SessionHand
     }
     setError(''); setLog({ account, lines });
   };
-  const state = handle.state === 'running' ? 'running' : handle.outcome ? `ended: ${shortShas(handle.outcome)}` : 'ended';
+  const epoch = handleEpoch(handle) || '?', state = handle.state === 'running' ? 'running' : handle.outcome ? `ended: ${shortShas(handle.outcome)}` : 'ended';
   return <details className="worker-run" data-run={transcriptRun(handle.transcript)} onToggle={event => { if (event.currentTarget.open) void read(); }}>
-    <summary>Attempt {handle.epoch ?? '?'} · {handle.principal} · {handle.runtime}{log?.account ? ` on ${log.account}` : ''} · {state}</summary>
+    <summary>Attempt {epoch} · {handle.principal} · {handle.runtime}{log?.account ? ` on ${log.account}` : ''} · {state}</summary>
     {error ? <p className="amber">{error}</p> : !log ? <p className="muted">Reading the log…</p> : log.lines.length
-      ? <pre className="run-log" aria-label={`Log of attempt ${handle.epoch ?? '?'}`}>{log.lines.map(line => `${line.at.slice(11, 19)} ${line.stream} ${line.text}`).join('\n')}</pre>
+      ? <pre className="run-log" aria-label={`Log of attempt ${epoch}`}>{log.lines.map(line => `${line.at.slice(11, 19)} ${line.stream} ${line.text}`).join('\n')}</pre>
       : <p className="muted">The run has printed nothing yet.</p>}
   </details>;
 }
