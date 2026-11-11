@@ -384,7 +384,8 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const started = await startHeadlessWorker({ name: profile.agentName, work: work.key, subject: `${work.key}: ${work.title}`, epoch: prepared.epoch, principal: profile.principal, account: launch.account ?? null,
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
-        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), settle: settleReservation });
+        supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run),
+        settle: async ({ output }) => { await stoppedOnLimit(output).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
       if (started.ended) { await settleEarlyExit(started.ended); await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`); }
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
     } catch (error) {
@@ -399,20 +400,26 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     }
   }
   /**
-   * A run that ended within its startup observation has ended its process, and its supervisor has
-   * released its lease unless it completed. One that stopped on its provider's limit notice keeps its
-   * work on its branch and records the handoff and the account hold on the item, and one whose agent
-   * is not logged in moves on: both refuse this account so the same dispatch starts the next one.
-   * One that exited 0 simply finished early; any other early exit fails the launch.
+   * A run that stopped on its provider's limit notice, at once or later in its run: its process has
+   * ended and its supervisor released its lease, so its work is kept on its branch and the handoff
+   * and the account hold are recorded on the item, where the next attempt's brief reads them.
+   */
+  async function stoppedOnLimit(output: string) {
+    const notice = detectRuntimeExhaustion(output, launch.kind!, Date.now());
+    if (!notice) return null;
+    const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
+    await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,
+      reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
+    return notice;
+  }
+  /**
+   * A run that ended within its startup observation: one stopped on its limit notice, or whose agent
+   * is not logged in, refuses this account so the same dispatch starts the next one. One that exited
+   * 0 simply finished early; any other early exit fails the launch.
    */
   async function settleEarlyExit({ output, ok }: { output: string; ok: boolean }) {
-    const notice = detectRuntimeExhaustion(output, launch.kind!, Date.now());
-    if (notice) {
-      const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
-      await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,
-        reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
-      throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true);
-    }
+    const notice = await stoppedOnLimit(output);
+    if (notice) throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true);
     if (ok) return;
     const loggedOut = detectLoggedOut(output);
     if (loggedOut) throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once: ${loggedOut}`, true);
