@@ -5,8 +5,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../session-watch.js';
-import { resumeExitWindowMs, resumeLaunchVariable } from '../master/session-resume.js';
+import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise } from '../session-watch.js';
 import { attributeConflicts, hasConflictMarkers, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
@@ -171,9 +170,6 @@ export const workspaceCommands = defineCommands([
       const watchToken = await context.individualToken();
       process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
       process.env.GRAPHYARD_CLI = await context.activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
-      const foreground = !!(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND);
-      // The worker runs in its own systemd scope, so its whole process tree is signalled at once.
-      const scoped = foreground && process.platform === 'linux' ? systemdContainment(args[separator + 1], args.slice(separator + 2)) : null;
       // `complete` ends the lease, so the renewal after a submission is refused by design: say
       // so before the supervisor stops the session, so the stop reads as the end of the attempt
       // rather than as a lost assignment.
@@ -184,12 +180,9 @@ export const workspaceCommands = defineCommands([
           throw error;
         }
       };
+      // The agent leads its own process group inside the headless run's own scope (GY-3259), and its output goes to the run log.
       process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
-          detached: !foreground,
-          ...(scoped ? { containment: scoped } : {}),
-          // A resume launch that exits at once (its session gone) keeps the lease for the fresh relaunch (GY-2971).
-          ...(process.env[resumeLaunchVariable] === '1' ? { earlyExitKeepsLeaseMs: resumeExitWindowMs } : {}),
-          // A headless worker's output goes to its run log (GY-3259).
+          detached: true,
           ...(process.env.GRAPHYARD_RUN_LOG ? { log: process.env.GRAPHYARD_RUN_LOG } : {}),
         });
     },

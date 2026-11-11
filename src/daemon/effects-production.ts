@@ -15,15 +15,14 @@ import { runDispatchTick } from '../dispatch/tick.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
 import { agentToken } from '../master/autonomy.js';
-import { listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson } from '../master/herdr.js';
+import { listHerdrAgents, closeHerdrPane, observeHerdrAgents } from '../master/herdr.js';
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { checkoutTrustRefusals } from '../harness.js';
 import { inspectWorkerCredentials } from '../master/config.js';
 import { dispatchWork } from '../master/dispatch.js';
 import { removeAttemptWorktree, worktreesDirectory } from '../master/worktrees.js';
 import { stopOrphansOfRemovedWorktrees } from '../session-processes.js';
-import { releasedSince, profileAccount, recordObservedExhaustion } from '../master/environments.js';
-import { sessionAccount } from '../master/launch-account.js';
+import { recordObservedExhaustion } from '../master/environments.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
@@ -103,34 +102,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     closeSession: pane => closeHerdrPane(pane, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    // The loop's one stall re-prompt (GY-2943), delivered to the session's pane as its runtime accepts prompts.
-    promptSession: async (session, text) => { const target = session.pane ?? session.agentName; if (!target) throw new Error(`the session has neither a pane nor a runtime name to prompt`); await herdrJson(['agent', 'prompt', target, text], run); },
-    // GY-2959: the reject key that answers a blocked session's own permission prompt, as the launcher answers a consent prompt.
-    sessionKeys: async (session, keys) => { const target = session.pane ?? session.agentName; if (!target) throw new Error(`the session has neither a pane nor a runtime name to send keys to`); await herdrJson(['agent', 'send-keys', target, ...keys], run); },
     sessionScreen: session => session.pane || session.agentName ? readSessionScreen(session.pane ?? session.agentName!, run) : null,
-    // GY-2943: the stalled attempt ends through the capacity record — `interrupted` when its pane
-    // showed no provider limit notice, `quota` with the notice's reset when it did, so the account
-    // the notice spent is held here (and rides every selection) before the item is dispatchable again.
-    endStall: async (item, session, stall) => {
-      const config = current();
-      const profile = config.workers.find(candidate => candidate.principal === session.principal);
-      const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
-      const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
-      // GY-3100: a notice the session printed before an operator released the account is already applied.
-      const charged = account ?? profileAccount(name);
-      if (stall.notice && !await releasedSince(config, charged, session.updatedAt)) await recordObservedExhaustion(config, charged, { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
-      const space = item.workspaces?.find(entry => entry.epoch === epoch);
-      const partialWork = space && space.host === config.hostId
-        ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped: ${stall.reason}`, run)
-        : { state: 'not-applicable' as const, detail: 'the stalled attempt has no registered worktree on this host to keep work from' };
-      await mutate(`work/${item.id}/capacity`, {
-        event: 'exhausted', role: 'worker', epoch, ...(stall.notice ? {} : { cause: 'interrupted' }),
-        profile: name, account, runtime: session.runtime,
-        reason: `${stall.reason}${stall.notice ? ` on its provider's limit notice: ${stall.notice.reason}` : ''}`.slice(0, 500),
-        resetsAt: stall.notice?.resetsAt ?? null,
-        partialWork,
-      }, randomUUID());
-    },
     // GY-2953: a lease a supervisor's time bound or a worker's silence ended without a submission
     // still holds the attempt's work in its worktree. Before the cleanup removes that tree, the
     // uncommitted rest is committed on the attempt's own branch and the capacity record that ends

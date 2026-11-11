@@ -18,7 +18,7 @@ export { mergeProtocolSkew } from './master/status.js';
 export { sessionHarnessPlan, sessionHarnessFile, prepareSessionHarness, startMaster, humanOnlyDecisions, masterOperatorCapabilities, autonomyPlan, masterHarness, emptySourceStarts, workerHarnessPlan, branchRestoration, blockerCommands, unrunnableRemedies, installWorkerHarness, type SessionRole, type SessionHarnessInput, type UnrunnableRemedy } from './master/harness.js';
 export { assertClaimDeadline, describeOverlap, assertDispatchable, dispatchWork, herdrAttach, autonomousSession, destructivePromptGuidance, externalDirectoryPromptGuidance, workerPrompt, workerLaunchTimeoutMs, releaseWorkerLaunch, renewWorkerLaunch, launchLeaseKeepAlive, launchRenewalMs, prepareWorkerLaunch, type DispatchOptions, type LeaseRenewer } from './master/dispatch.js';
 export { sessionAccount, holdRepeatedLimitAccount, repeatedLimitAccount, repeatedLimitWindowMs, repeatedLimitLaunches, sessionSelectionKey, type SessionIdentity } from './master/launch-account.js';
-export { dispatchReservationDirectory, DispatchReservedError, dispatchReserved, watchSupervisorRunning, finishedAgentStates, agentAssignment, reclaimableAgent } from './master/dispatch-reservation.js';
+export { dispatchReservationDirectory, DispatchReservedError, dispatchReserved } from './master/dispatch-reservation.js';
 // GitHub merges: the guarded merge is gone; the merge writer's record delivers.
 export { setupAutonomy, agentToken, intentInput, attestationExercise, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
 export { restartMasterLoop } from './master/loop-restart.js';

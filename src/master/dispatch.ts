@@ -99,7 +99,7 @@ export type LeaseRenewer = (root: string, key: string, epoch: number, profileNam
 export const launchRenewalMs = 30_000;
 /**
  * The launch's own heartbeat (GY-1287). Between the claim and the watch supervisor's first
- * heartbeat the launch writes the worker's rules, mints its credential, opens its pane and waits
+ * heartbeat the launch writes the worker's rules, reads its credential, starts its run and waits
  * for its runtime; on a busy host that took longer than the 120 s lease, which lapsed under a
  * launch nothing had gone wrong with: the supervisor then met "Lease missing, expired, or
  * superseded", the launch failed, and the lapse stood as a lease-loss escalation. The launch
@@ -383,7 +383,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // a worker never reaches the operator's keyring, and no Herdr pane is opened for it.
       const started = await startHeadlessWorker({ name: profile.agentName, work: work.key, subject: `${work.key}: ${work.title}`, epoch: prepared.epoch, principal: profile.principal, account: launch.account ?? null,
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
-        environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
+        environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
         supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), settle: settleReservation });
       if (started.ended) { await settleEarlyExit(started.ended); await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`); }
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
