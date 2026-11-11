@@ -6,7 +6,6 @@ import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
 import { shortShas } from '../candidate';
-import LiveTerminal from '../components/live-terminal';
 
 /**
  * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
@@ -90,11 +89,10 @@ function Health({ row, now }: { row: WorkerRow; now: number }) {
     data-reconciled={row.reconciled ?? undefined} title={row.outcome ? shortShas(row.outcome) : undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
 }
 
-function Attach({ row, watch }: { row: WorkerRow; watch?(row: WorkerRow): void }) {
+function Attach({ row }: { row: WorkerRow }) {
   if (row.state === 'running' && !row.leftOn) {
     if (!row.local) return <span className="muted">no attach command recorded</span>;
     return <span className="attach">
-      {row.pane && watch ? <button type="button" className="text-button" onClick={() => watch(row)}>Watch</button> : null}
       <CopyButton text={row.local} label="Copy local"/>
       {row.remote ? <CopyButton text={row.remote} label="Copy remote"/> : <span className="muted">no remote form</span>}
     </span>;
@@ -117,9 +115,9 @@ function since(row: WorkerRow, now: number) {
   return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
 }
 
-function Row({ row, item, now, release, setSelected, watch }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void; watch?(row: WorkerRow): void }) {
+function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row} watch={watch}/></th>
+    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now, release)}</td>
@@ -129,11 +127,11 @@ function Row({ row, item, now, release, setSelected, watch }: { row: WorkerRow; 
 }
 
 const columns = ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health'];
-function Table({ rows, label, work, now, release, setSelected, watch }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; setSelected(id: string | null): void; watch?(row: WorkerRow): void }) {
+function Table({ rows, label, work, now, release, setSelected }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   const byId = new Map(work.map(item => [item.id, item]));
   return <table className="sessions-table" aria-label={label}>
     <thead><tr>{columns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
-    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} setSelected={setSelected} watch={watch}/>)}</tbody>
+    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} setSelected={setSelected}/>)}</tbody>
   </table>;
 }
 
@@ -190,10 +188,8 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
  * open now — the agent, its role in plain words, the item it works on, what it is doing, since
  * when, and its health — with the sessions that ended and the per-account summary folded below.
  */
-export default function WorkersPage({ work, observedAt, setSelected, status, token = '' }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status']; token?: string }) {
+export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
-  // The session whose live terminal is open below the heading (GY-3211), read-only.
-  const [watching, setWatching] = useState<WorkerRow | null>(null);
   const release = releaseView(status);
   const view = workersView(work, new Date(now), undefined, release);
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
@@ -201,9 +197,7 @@ export default function WorkersPage({ work, observedAt, setSelected, status, tok
   const open = view.running.length - stale;
   return <>
     <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
-    {watching ? <div className="watching"><div className="page-heading"><h2>Watching {watching.agentName ?? watching.principal} · {watching.key}</h2><button type="button" onClick={() => setWatching(null)}>Close</button></div>
-      <LiveTerminal key={watching.pane!} token={token} pane={watching.pane!} label={`Terminal of ${watching.agentName ?? watching.principal}`}/></div> : null}
-    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected} watch={setWatching}/> : <p className="muted">No agent session is open.</p>}
+    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <ProjectMemorySection memory={status?.projectMemory}/>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>

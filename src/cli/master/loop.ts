@@ -67,8 +67,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     }, 15_000);
     connects?.unref?.();
     stopping.signal.addEventListener('abort', () => clearInterval(connects));
-    // GY-3241: and streams the Master page's terminal for a server (a compose container) that has no Herdr of its own.
-    if (!values.once && current().url) bridgeTerminals(current().url!, masterToken, stopping.signal, undefined, terminalSessionReader(current));
+    // GY-3241: and streams the Master page's terminal for a server (a compose container) that has no Herdr of its own,
+    // and the headless worker run logs this host holds for the item page (GY-3259).
+    if (!values.once && current().url) bridgeTerminals(current().url!, masterToken, stopping.signal, undefined, terminalSessionReader(current), root);
     const result = await daemonRun;
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
     if (result.stopped) exit.stopped();

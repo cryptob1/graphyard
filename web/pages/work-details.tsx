@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
-import { sessionSummary } from '../../src/model/sessions';
+import { sessionSummary, transcriptRun, type SessionHandle } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
 import { diagnose, obligationLedger, proofPreview } from '../../src/coordination';
@@ -71,6 +71,43 @@ function HumanChecksPanel({ item, token }: { item: Work; token: string }) {
       {check.answer && <p>{check.answer.note} <small className="muted">{check.answer.by}</small></p>}
       {check.answer?.photo && <ProductScreenshot item={item} name={check.answer.photo} token={token}/>}</div>)}
   </section>;
+}
+/**
+ * The item's worker runs by attempt (GY-3259) — earlier accounts, failed runs and the one running
+ * now — each opening its log: what the worker printed, stdout and stderr, read from the host that
+ * ran it through the item's run-log endpoint.
+ */
+function WorkerRunsPanel({ item, token }: { item: Work; token: string }) {
+  const runs = (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && transcriptRun(handle.transcript))
+    .sort((a, b) => (a.epoch ?? 0) - (b.epoch ?? 0) || a.startedAt.localeCompare(b.startedAt));
+  if (!runs.length) return null;
+  return <section className="panel" aria-label="Worker runs"><h2>Worker runs</h2>{runs.map(handle => <WorkerRunLog key={handle.id} item={item} handle={handle} token={token}/>)}</section>;
+}
+type RunLogChunk = { run: { account: string | null; kind: string }; lines: { at: string; stream: string; text: string }[]; cursor: number; ended: boolean };
+function WorkerRunLog({ item, handle, token }: { item: Work; handle: SessionHandle; token: string }) {
+  const [log, setLog] = useState<{ account: string | null; lines: RunLogChunk['lines'] } | null>(null), [error, setError] = useState('');
+  const read = async () => {
+    const lines: RunLogChunk['lines'] = [];
+    let cursor = 0, account: string | null = null;
+    // Chunk by chunk to the end, bounded: a page never pulls an unbounded log.
+    for (let chunks = 0; chunks < 32; chunks++) {
+      const response = await fetch(`/api/work/${encodeURIComponent(item.id)}/runs/${transcriptRun(handle.transcript)}/log?cursor=${cursor}`, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) return setError(body.error ?? `The log could not be read (${response.status})`);
+      const chunk = body as RunLogChunk;
+      account = chunk.run.account; lines.push(...chunk.lines);
+      if (chunk.cursor === cursor || !chunk.lines.length) break;
+      cursor = chunk.cursor;
+    }
+    setError(''); setLog({ account, lines });
+  };
+  const state = handle.state === 'running' ? 'running' : handle.outcome ? `ended: ${shortShas(handle.outcome)}` : 'ended';
+  return <details className="worker-run" data-run={transcriptRun(handle.transcript)} onToggle={event => { if (event.currentTarget.open) void read(); }}>
+    <summary>Attempt {handle.epoch ?? '?'} · {handle.principal} · {handle.runtime}{log?.account ? ` on ${log.account}` : ''} · {state}</summary>
+    {error ? <p className="amber">{error}</p> : !log ? <p className="muted">Reading the log…</p> : log.lines.length
+      ? <pre className="run-log" aria-label={`Log of attempt ${handle.epoch ?? '?'}`}>{log.lines.map(line => `${line.at.slice(11, 19)} ${line.stream} ${line.text}`).join('\n')}</pre>
+      : <p className="muted">The run has printed nothing yet.</p>}
+  </details>;
 }
 /** One screenshot of the product review: a link to an image hosted elsewhere, or the uploaded image the control plane keeps, read with the session's token. Keyed by the review's head and time, so a fresh verdict reusing a name mounts afresh and reads its own image. */
 function ProductScreenshot({ item, name, token }: { item: Work; name: string; token: string }) {
@@ -234,6 +271,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {item.preview && <PreviewPanel preview={item.preview}/>}
     <ProductReviewPanel item={item} token={token}/>
     <HumanChecksPanel item={item} token={token}/>
+    <WorkerRunsPanel item={item} token={token}/>
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}

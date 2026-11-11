@@ -16,6 +16,8 @@ import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
+import { hostRunLog } from '../terminal.js';
+import { runTranscript } from '../../model/sessions.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -117,6 +119,18 @@ export const workRoutes = defineRoutes('work', [
       res.writeHead(200, { 'Content-Type': shot.mediaType, 'Content-Length': shot.bytes.length, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
       res.end(shot.bytes);
       return Sent;
+    },
+  },
+  // A headless worker run's log (GY-3259): any reader of the item reads a bounded chunk from `cursor`,
+  // fetched from the host that runs it through the loop's bridge, for a run one of the item's sessions names.
+  {
+    method: 'GET', path: /^\/api\/work\/([^/]+)\/runs\/([0-9a-f-]{36})\/log$/,
+    async handle({ services, url }, [id, run]) {
+      const named = await services.engine.store.pool.query("SELECT 1 FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'sessions' @> $2::jsonb", [decodeURIComponent(id), JSON.stringify([{ transcript: runTranscript(run) }])]);
+      demand(named.rowCount, 'No such run on this item', 404);
+      const log = await hostRunLog(run, Math.max(0, Number(url.searchParams.get('cursor')) || 0)).catch((error: Error & { status?: number }) => demand(false, error.message, error.status ?? 503));
+      demand(log, 'The host no longer holds this run', 404);
+      return log;
     },
   },
   // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the

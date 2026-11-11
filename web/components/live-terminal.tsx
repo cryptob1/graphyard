@@ -25,12 +25,12 @@ const loadTerminal = () => loading ??= new Promise((done, fail) => {
 });
 
 /**
- * A Herdr pane's live terminal (GY-3211), over the control plane's /api/terminal WebSocket: the
- * master's pane when PANE is absent, else that agent session's. The server decides who may type —
+ * The master pane's live terminal (GY-3211), over the control plane's /api/terminal WebSocket; workers
+ * run headless and show their run log on the item page instead (GY-3259). The server decides who may type —
  * the operator or an invited maintainer, on the master's pane — and says so in its first message; everyone else
  * watches. Unmounting closes the socket, which detaches without stopping the pane.
  */
-export default function LiveTerminal({ token, pane, label }: { token: string; pane?: string; label: string }) {
+export default function LiveTerminal({ token, label }: { token: string; label: string }) {
   const host = useRef<HTMLDivElement>(null);
   const section = useRef<HTMLElement>(null);
   const sendKey = useRef<(key: string) => void>(() => {});
@@ -52,7 +52,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       sendKey.current = key => { input(key); terminal.focus(); };
       const fit = () => {
         if (!host.current || !section.current) return;
-        if (!pane) section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 12}px)`;
+        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 12}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
         const cols = Math.max(10, Math.min(500, Math.floor((host.current.clientWidth - 16) / (screen.width / terminal.cols))));
@@ -64,7 +64,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
         if (!live) return;
         writable = false;
         let opened = false, refused = false;
-        const query = new URLSearchParams({ ...(pane ? { pane } : {}), cols: String(terminal.cols), rows: String(terminal.rows) });
+        const query = new URLSearchParams({ cols: String(terminal.cols), rows: String(terminal.rows) });
         socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/terminal?${query}`, ['graphyard', token]);
         socket.binaryType = 'arraybuffer';
         socket.onopen = () => { opened = true; };
@@ -128,18 +128,18 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       };
     }, () => { if (live) { setReason('xterm.js did not load. Reload to try again.'); setState('refused'); } });
     return () => { live = false; stop(); };
-  }, [token, pane]);
+  }, [token]);
   return <section ref={section} className="live-terminal" aria-label={label} data-terminal={state}>
     <div className="terminal-info" role="status">
-      {!pane && session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
+      {session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
       <span>{state === 'connecting' ? 'Connecting…' : state === 'reconnecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'read-only: only the operator and maintainers can type into the master' : `refused: ${reason}`}</span>
       {session?.state === 'absent' && <span>The loop relaunches the master on its own.</span>}
       {reason && state !== 'refused' && <span>{reason}</span>}
     </div>
     <div ref={host} className="terminal-host"/>
-    {!pane && <div className="terminal-keys" role="group" aria-label="Terminal keys">
+    <div className="terminal-keys" role="group" aria-label="Terminal keys">
       {([['Esc', '\x1b'], ['Tab', '\t'], ['Ctrl-C', '\x03'], ['←', '\x1b[D'], ['↓', '\x1b[B'], ['↑', '\x1b[A'], ['→', '\x1b[C'], ['Enter', '\r']] as const).map(([name, key]) =>
         <button type="button" key={name} disabled={state !== 'control' || !session?.pane} onPointerDown={event => event.preventDefault()} onClick={() => sendKey.current(key)}>{name}</button>)}
-    </div>}
+    </div>
   </section>;
 }
