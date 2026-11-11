@@ -8,10 +8,10 @@ import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { runtimeAdapters } from '../src/master/runtimes.js';
-import { accountLaunch, dispatchWork, launchCommandLimit, loadMasterConfig, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
+import { accountLaunch, dispatchWork, loadMasterConfig, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { environmentBlocked, environmentBlocker, environmentFailure, grantWorkerPaths, runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError, workerPaths, writablePaths, type SandboxExec } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 
@@ -119,15 +119,14 @@ async function dispatchFixture() {
 test('integration:unwritable-workspace-fails-launch — a sandbox that denies the git admin directory fails the launch naming that path, before any session starts, and releases the claim', async () => {
   const fixture = await dispatchFixture();
   try {
-    const herdrCalls: string[][] = [], sandboxCalls: string[][] = [], released: number[] = [];
-    const herdr = (_command: string, args: string[]) => { herdrCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} }); };
+    const sandboxCalls: string[][] = [], released: number[] = [], worker = recordedRuns();
     const prepare = async () => ({ epoch: 3, path: fixture.worktree, base: 'c'.repeat(40) });
     const release = async (_root: string, _key: string, epoch: number) => { released.push(epoch); };
     // The sandbox denies the admin directory even though the launch grants it.
     const denying: SandboxExec = (command, args, options) => (sandboxCalls.push([command, ...args]), codexLikeSandbox([])(command, args.map(arg => arg.replace(`"${fixture.gitDir}"="write"`, `"${fixture.gitDir}"="read"`)), options));
-    await assert.rejects(dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: denying, probe: fixture.probe }),
+    await assert.rejects(dispatchWork(fixture.main, fixture.item, fixture.profile, { allWork: [fixture.item], prepare, release, headless: worker.exec, sandbox: denying, probe: fixture.probe }),
       (error: any) => { assert.ok(error instanceof WorkerSandboxError, error.message); assert.equal(error.path, fixture.gitDir); assert.match(error.message, new RegExp(`codex sandbox cannot write ${fixture.gitDir.replaceAll('/', '\\/')} .*Read-only file system`)); return true; });
-    assert.equal(herdrCalls.length, 0, 'no tab and no session: the worker is never reported started');
+    assert.equal(worker.runs.length, 0, 'no run: the worker is never reported started');
     assert.deepEqual(released, [3], 'the claim is released like any failed launch');
     // The probe ran in the sandbox the launch built: every grant of the launch is in its policy.
     const policy = sandboxCalls[0][sandboxCalls[0].indexOf('-c') + 1];
@@ -135,15 +134,13 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
     assert.ok(policy.includes(`"${fixture.commonDir}"="write"`), 'the common Git directory is granted for the packed-refs lock (GY-2977)');
     assert.equal(sandboxCalls[0][sandboxCalls[0].indexOf('-C') + 1], fixture.worktree, 'the probe runs in the worktree the session starts in');
 
-    // The same launch in a sandbox that honours the grant starts, and the typed line carries it.
+    // The same launch in a sandbox that honours the grant starts, and its run carries the grant.
     sandboxCalls.length = 0;
-    const started = await dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: codexLikeSandbox(sandboxCalls), probe: fixture.probe });
+    const started = await dispatchWork(fixture.main, fixture.item, fixture.profile, { allWork: [fixture.item], prepare, release, headless: worker.exec, sandbox: codexLikeSandbox(sandboxCalls), probe: fixture.probe });
     assert.deepEqual(started.sandbox?.verified, writablePaths(workerPaths(fixture.worktree)));
-    const typed = herdrCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3];
-    assert.ok(Buffer.byteLength(typed) <= launchCommandLimit);
-    const launched = expandTypedCommand(typed);
-    assert.equal(launched.kind, 'codex');
-    assert.ok(addedDirectories(launched.args, fixture.worktree).includes(fixture.gitDir), `the session is started with the admin directory granted: ${launched.args.join(' ')}`);
+    const [run] = worker.runs;
+    assert.equal(run!.runtime, 'codex');
+    assert.ok(addedDirectories(run!.args.slice(6), fixture.worktree).includes(fixture.gitDir), `the session is started with the admin directory granted: ${run!.args.join(' ')}`);
 
     // Without the grant (the launcher before GY-134), the same Codex rule refuses the admin directory.
     assert.throws(() => verifyWorkerSandbox({ kind: 'codex', args: ['--sandbox', 'workspace-write', '--add-dir', fixture.commonDir] }, fixture.worktree, writablePaths(workerPaths(fixture.worktree)), codexLikeSandbox([])),
@@ -186,8 +183,7 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
   const path = process.env.PATH;
   process.env.PATH = `${bin}${delimiter}${path}`;
   try {
-    const herdrCalls: string[][] = [], probes: string[][] = [], released: number[] = [];
-    const herdr = (_command: string, args: string[]) => { herdrCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); };
+    const probes: string[][] = [], released: number[] = [], worker = recordedRuns();
     const prepare = async () => ({ epoch: 3, path: fixture.worktree, base: 'c'.repeat(40) });
     const release = async (_root: string, _key: string, epoch: number) => { released.push(epoch); };
     // The confinement refuses the mount point codex's sandbox creates, exactly as on vishrog.
@@ -196,7 +192,7 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
       probes.push([command, ...args]);
       throw Object.assign(new Error(`Command failed: ${command}`), { status: 1, stdout: '', stderr: `bwrap: Can't create file ${refused}: Read-only file system\n` });
     };
-    await assert.rejects(dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: refusing, coordinatorRoot: fixture.main, probe: fixture.probe }),
+    await assert.rejects(dispatchWork(fixture.main, fixture.item, fixture.profile, { allWork: [fixture.item], prepare, release, headless: worker.exec, sandbox: refusing, coordinatorRoot: fixture.main, probe: fixture.probe }),
       (error: any) => {
         assert.ok(error instanceof WorkerSandboxError, error.message);
         assert.equal(error.path, refused, 'the launch names the path the sandbox could not start on');
@@ -204,7 +200,7 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
         assert.match(error.message, /the codex sandbox cannot write .*inside the coordinator confinement .*Read-only file system/);
         return true;
       });
-    assert.equal(herdrCalls.length, 0, 'no tab and no session: the worker is never reported started');
+    assert.equal(worker.runs.length, 0, 'no run: the worker is never reported started');
     assert.deepEqual(released, [3], 'the claim is released like any failed launch');
     // The probe ran behind the coordinator confinement: bubblewrap, the checkout read-only, then the codex sandbox.
     const [command, ...args] = probes[0];
