@@ -1,5 +1,7 @@
 import { pendingHeadless, launchLegacyReview } from './helpers/pending-review.js';
-import { test } from 'node:test';
+import { saveProducerLedger } from '../src/producer.js';
+import { saveReviewLedger } from '../src/reviewer.js';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -7,7 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { acknowledgeLaunch, acknowledgementMs, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { guideText } from '../src/guide.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile } from '../src/reviewer.js';
@@ -287,7 +289,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // A session that did the work and failed: sustained activity, then done without evidence.
     const ledger = await readProducerLedger(root);
     ledger.producers = ledger.producers.filter(entry => entry.state !== 'failed');
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), ledger);
+    await saveProducerLedger(root, ledger);
     await launch();
     prompts.length = 0;
     record = await scenario('working', '', 10_000);
@@ -308,7 +310,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // A session gone from Herdr before it was ever acknowledged never started either; its words are unreadable.
     const gone = await readProducerLedger(root);
     gone.producers = gone.producers.filter(entry => entry.state !== 'failed');
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), gone);
+    await saveProducerLedger(root, gone);
     await launch();
     record = await scenario('gone', '', 10_000);
     record = await scenario('gone', '', 10_000 + producerIdleGraceMs);
@@ -338,7 +340,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     assert.ok(slowMs > producerIdleGraceMs && slowMs > reviewIdleGraceMs, 'the case is above both graces');
     const slowLedger = await readProducerLedger(root);
     slowLedger.producers = slowLedger.producers.filter(entry => entry.state !== 'failed');
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), slowLedger);
+    await saveProducerLedger(root, slowLedger);
     await launch();
     prompts.length = 0;
     const slowly = async (status: string, screen: string, offsetMs: number) => {
@@ -377,7 +379,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // session is settled an interval after that, not when the grace ends.
     const slowReviews = await readReviewLedger(root);
     slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
-    await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
+    await saveReviewLedger(root, slowReviews);
     reviewerName = (await launchLegacyReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) })).agentName;
     reviewPrompts.length = 0;
     const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: reviewerName, pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
@@ -392,7 +394,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
     // An acknowledged reviewer session that stops without a verdict is still settled by the grace.
     const acknowledgedReviews = await readReviewLedger(root);
     acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
-    await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
+    await saveReviewLedger(root, acknowledgedReviews);
     reviewerName = (await launchLegacyReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), probe: fleet('reviewer', 'claude'), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) })).agentName;
     reviewRecord = await slowReview('working', '', 5_000);
     reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);

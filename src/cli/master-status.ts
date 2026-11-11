@@ -127,7 +127,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   let placeholder = false;
   try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
-  const backedOff = backedOffProfiles(await readDispatchCursor(root, master, () => {}).catch(() => ({ profileBackoff: {} })), now)
+  const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.

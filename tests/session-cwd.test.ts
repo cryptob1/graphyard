@@ -4,7 +4,7 @@ import { pendingHeadless } from './helpers/pending-review.js';
 // the pane's `--cwd`, the launch files' checkout and the runtime's recorded working folder must be
 // the session's own managed checkout (or its assigned worktree, or the loop's scratch checkout for
 // the sessions that have none), never the coordinator checkout.
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';

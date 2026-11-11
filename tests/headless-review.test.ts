@@ -1,7 +1,8 @@
 import { AgentRegistry } from '../src/agent-registry.js';
 import { proposedRuntimes } from '../src/model/registry.js';
 import { headlessInventory } from '../src/session-inventory.js';
-import { after, before, test } from 'node:test';
+import { after, before } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';

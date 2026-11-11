@@ -1,5 +1,5 @@
 import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm, stat } from 'node:fs/promises';

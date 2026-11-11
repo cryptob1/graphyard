@@ -15,7 +15,7 @@ import { launchReview, reconcileReviews, updateReviewLedger, type ReviewRecord }
 import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from '../project-memory.js';
 import { agentToken } from '../master/autonomy.js';
 import { launchProducer, reconcileProducers, type ProducerRecord } from '../producer.js';
-import { type DispatchCursor, observationWakeIntervalMs, type RepairListener, repairLine, writeDispatchCursor } from './cursor.js';
+import { type DispatchCursor, observationWakeIntervalMs, writeDispatchCursor } from './cursor.js';
 import { watchInstantExit } from './launch-failover.js';
 import { type SessionClosure, closureHandle, herdrSessionListing } from './session-sweep.js';
 import { type PostMergeOutcome, unknownParent, postFollowUpItem } from './post-merge.js';
@@ -95,11 +95,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
-  const log = deps.log ?? (line => console.error(line));
-  // A repair is logged once per path: the same over-long string would otherwise be reported on
-  // every tick that persists it, when one line naming the path is what a reader needs.
-  const repaired = new Set<string>();
-  const onRepair: RepairListener = repair => { if (repaired.has(repair.path)) return; repaired.add(repair.path); log(repairLine('persisting', repair)); };
   // The coordinator mutation every handle, closure and wake is recorded through: the loop's own (effects-production.ts).
   const mutate = deps.mutate;
   // An answered request's observation is woken at most once a minute per item (GY-1429): a prioritized
@@ -156,6 +151,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.(), {}),
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
-    persist: cursor => writeDispatchCursor(current(), cursor, onRepair),
+    persist: cursor => writeDispatchCursor(current(), cursor),
   };
 }

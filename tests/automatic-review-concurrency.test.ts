@@ -1,5 +1,5 @@
 import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { chmod, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -148,11 +148,10 @@ test('unit:settled-reviewer-releases-name — a settled reviewer\'s pane Herdr k
     host.refuseClose.set(pane, Infinity);
     const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 501, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: record => record.key === 'GY-501' ? verdict : null });
-    const ledgerFile = join(host.root, '.graphyard/reviews.json');
     const passes: { changed: number; ledger: string }[] = [];
     for (let pass = 0; pass < settledCloseAttempts + 4; pass++) {
       const result = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: () => null });
-      passes.push({ changed: result.changed, ledger: await readFile(ledgerFile, 'utf8') });
+      passes.push({ changed: result.changed, ledger: JSON.stringify(await readReviewLedger(host.root)) });
     }
     // The settlement's own close, then the sweep's bounded retries, and nothing after.
     assert.deepEqual(host.closes.filter(entry => entry === pane).length, 1 + settledCloseAttempts);
