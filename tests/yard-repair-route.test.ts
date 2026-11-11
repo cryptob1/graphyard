@@ -21,6 +21,7 @@ import type { Work } from '../src/model.js';
 // GY-3102: a yard-repair item takes its own route past a broken pipeline.
 
 const item = (key: string, extra: Record<string, unknown> = {}) => ({
+  criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }],
   key, id: key, title: key, type: 'feature', priority: 2, createdAt: '2026-01-01T00:00:00Z', stageEnteredAt: '2026-01-01T00:00:00Z', ...extra,
 }) as unknown as Work;
 
