@@ -1,0 +1,15 @@
+{
+  "id": "affected-after-back-merge",
+  "title": "A candidate that back-merged main builds only the packages its own changes affect",
+  "description": "In a pnpm + turbo workspace with packages pm and sites, a candidate that changes only pm and has back-merged a main commit touching sites (already on the trial base) builds pm and its dependent, never sites, and the trial log lists each selected package with its reason (changed, depends on another, or a root trigger). Fetches pnpm and turbo from the registry on the first run.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a back-merged candidate's trial builds only pm and its dependents and logs why each was selected",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/affected-after-back-merge.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
