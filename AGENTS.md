@@ -26,5 +26,5 @@ Never weaken requirements, and never use an operator/producer token for
 implementation or proof. Act without asking, and record blockers with the CLI.
 Submit with `complete GY-N EPOCH --head SHA`; make `complete` your last action.
 For any procedure, run `node $GRAPHYARD_CLI guide TOPIC`
-(topics: claim, sync, complete, park, blocked, review, proof, upgrade, master).
+(topics: claim, sync, complete, park, blocked, review, proof, upgrade, master, setup, publishing).
 <!-- /graphyard -->

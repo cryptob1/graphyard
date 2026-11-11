@@ -5,9 +5,11 @@
 // topic prints.
 
 /**
- * One topic per procedure, in the order the AGENTS.md block lists them. The text is the
- * moved procedure — from the block the AGENTS.md renderer used to write, and from the brief
- * sentences that restated it — never new prose.
+ * One topic per procedure, in the order the AGENTS.md block lists them: the agent
+ * procedures first, then the two human-facing topics (setup, publishing) the README
+ * landing page summarizes. The text is the moved procedure — from the block the
+ * AGENTS.md renderer used to write, from the brief sentences that restated it, and
+ * from the README sections GY-3262 folded into guides — never new prose.
  */
 export const guideTopics = {
   claim: `Check dependencies, blockers, current owner, and lease epoch. Use \`handoff GY-N\` to obtain the workspace and launch command for this machine.
@@ -40,7 +42,30 @@ A managed repository's install, build, tests and serve run under the Node major 
 
 A dedicated master coordinator keeps cycling: run master status and act on what it names, until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip.
 
+Operators and maintainers change an item's priority (P0–P3) on a work row or item page, or with \`graphyard priority GY-N 0|1|2|3 REASON\` from the checkout and \`graphyard master priority GY-N 0|1|2|3 REASON\` on the control plane host; both require an audit reason. Changes record who changed it and why in History; the next dispatch uses the new priority. Existing P4 items retain P4 until changed.
+
 To set Graphyard up or find what its setup is missing, follow the setup steps in Graphyard's README: \`doctor\` prints one PASS or FAIL line per prerequisite under \`setupFromZero\`, and each FAIL line names the checklist step that fixes it.`,
+  setup: `Graphyard runs on a Linux host. Check each prerequisite; \`npx @cryptob1/graphyard doctor\` in the repository's checkout checks credentials, agent logins, confinement, the kernel and services in one pass, and each failed check prints its fix.
+
+- Linux 7.0+ with Landlock ABI 9+ enabled: \`uname -r\` (doctor checks the ABI).
+- Node.js 24+ and npm: \`node --version && npm --version\`.
+- Git, and a durable checkout with an SSH origin: \`git --version && git rev-parse --show-toplevel && git remote -v\`.
+- Docker Engine usable by your user: \`docker version\` — merge trials need it even with \`--local\`.
+- Docker Compose plugin: \`docker compose version\`.
+- GitHub CLI signed in with repo scope and admin access: \`gh auth status && gh repo view OWNER/NAME --json viewerPermission\`.
+- Bubblewrap (worker confinement): \`bwrap --version\`; install it with \`sudo apt install bubblewrap\` or \`sudo pacman -S bubblewrap\`.
+- Python 3 (Landlock probe): \`python3 --version\`.
+- Herdr: \`herdr --version\` (\`up\` installs it if absent).
+- systemd user manager: \`systemctl --user status\`.
+
+Sign in with \`gh auth login --scopes repo\`. No GitHub App is needed: \`up\` registers the merge writer's deploy key with the gh login, and it alone pushes. Where the organization disallows deploy keys, pipe a fine-grained token (Contents read/write on the one repository) to \`--merge-token-stdin\` instead. Preview \`up\`'s checks with \`npx @cryptob1/graphyard install --repo OWNER/NAME --plan\` (\`--provider local\` for local mode).`,
+  publishing: `When a verified commit deploys, Graphyard pushes its \`vYYYY.M.D-<sha12>\` tag. GitHub Actions then publishes \`@cryptob1/graphyard\` with npm OIDC provenance, and both GHCR images (\`graphyard\`, \`graphyard-trial\`) with \`GITHUB_TOKEN\`; the host holds no publish token. Publishing runs apart from merge and deploy, and \`graphyard master status\` shows npm's latest version.
+
+One-time owner setup:
+
+1. From your npm login, publish a \`@cryptob1/graphyard\` placeholder \`0.0.0\` with \`npm publish --access public\`.
+2. In npm package settings, add a **Trusted Publisher**: GitHub Actions, **cryptob1/graphyard**, workflow **publish.yml**.
+3. In each GHCR package (**graphyard**, **graphyard-trial**), grant **cryptob1/graphyard** Actions write access.`,
 } as const;
 
 export type GuideTopic = keyof typeof guideTopics;
