@@ -1,3 +1,4 @@
+import { loopState } from './tables/loop-state.js';
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
 import { humanSignInSessions, teamMembers } from './tables/human-sign-in.js';
@@ -18,7 +19,7 @@ import { registryRefusalTables } from './tables/registry-refusals.js';
  * appears after every table it references. A feature adds its tables to one module here.
  */
 export const tables: readonly TableDefinition[] = [
-  ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
+  loopState, ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
   ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers,
 ];
