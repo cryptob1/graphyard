@@ -5,8 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
-import { emptyRegistry, registryRoles, proposedConcurrency, proposedRuntimeRoles, chooseSession, type AgentRegistry as Registry } from '../src/model/registry.js';
-import { roleSchema, selectionRequestSchema } from '../src/model-boundary/registry.js';
+import { emptyRegistry, unobservedQuota, registryRoles, proposedConcurrency, proposedRuntimeRoles, chooseSession, type AgentRegistry as Registry } from '../src/model/registry.js';
+import { accountSchema, modelSchema, runtimeSchema, roleSchema, selectionRequestSchema } from '../src/model-boundary/registry.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { masterConfigSchema, forwardTolerant } from '../src/master/profiles.js';
 import { loadStoredMasterConfig, saveMasterSettings } from '../src/master/config.js';
@@ -24,7 +24,8 @@ const admin = { id: 'fixture-admin', role: 'admin' as const };
 test('e2e:retired-roles-dropped — legacy registry migrates once on a successful CLI mutation, with audit and live reservations retained', async t => {
   const store = await withDatabase('retired-roles'); await store.init(); t.after(() => store.close());
   const api = new AgentRegistry(store), now = new Date().toISOString();
-  const legacy = { ...emptyRegistry(), roles: ['worker', 'reviewer', 'producer', 'master', ...retired].map(name => ({ name, accounts: [], concurrency: 1 })),
+  const legacy = { ...emptyRegistry(), runtimes: [runtimeSchema.parse({ name: 'claude', launch: { kind: 'claude' } })], models: [modelSchema.parse({ name: 'default' })],
+    accounts: [{ ...accountSchema.parse({ name: 'legacy', runtime: 'claude', model: 'default', credential: { host: 'fixture' }, maxSessions: 1 }), quota: { ...unobservedQuota, loggedIn: true } }], roles: ['worker', 'reviewer', 'producer', 'master', ...retired].map(name => ({ name, accounts: ['legacy'], concurrency: 1 })),
     sessions: [{ id: 'old-live', role: 'approver', account: 'legacy', runtime: 'claude', model: 'default', host: 'fixture', work: null, principal: null,
       selectedAt: now, selectedBy: 'old-master', reason: 'historical', skipped: [], endedAt: null, endReason: null }] } as unknown as Registry;
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,'agent-registry.apply',$2)", [admin.id, JSON.stringify({ registry: legacy, change: {} })]);
@@ -53,6 +54,7 @@ test('e2e:retired-roles-dropped — legacy registry migrates once on a successfu
   assert.deepEqual(first.attention, [`Removed retired roles: ${retired.join(', ')}`]);
   assert.deepEqual((await readRegistry(store.pool)).sessions, legacy.sessions, 'migration does not free live retired slots');
   assert.deepEqual((await readRegistry(store.pool)).roles.map(role => role.name), [...registryRoles]);
+  assert.match(chooseSession(await readRegistry(store.pool), { role: 'worker', host: 'fixture' }, Date.now()).reason, /legacy is at its session limit/);
   assert.deepEqual((await command()).attention, []);
   assert.ok(!(await api.view(admin)).attention.some(line => line.includes('Removed retired roles')));
   const history = await api.history(admin);
