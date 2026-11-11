@@ -24,7 +24,7 @@ const admin = { id: 'fixture-admin', role: 'admin' as const };
 test('e2e:retired-roles-dropped — legacy registry migrates once on a successful CLI mutation, with audit and live reservations retained', async t => {
   const store = await withDatabase('retired-roles'); await store.init(); t.after(() => store.close());
   const api = new AgentRegistry(store), now = new Date().toISOString();
-  const legacy = { ...emptyRegistry(), roles: [...registryRoles, ...retired].map(name => ({ name, accounts: [], concurrency: 1 })),
+  const legacy = { ...emptyRegistry(), roles: ['worker', 'reviewer', 'producer', 'master', ...retired].map(name => ({ name, accounts: [], concurrency: 1 })),
     sessions: [{ id: 'old-live', role: 'approver', account: 'legacy', runtime: 'claude', model: 'default', host: 'fixture', work: null, principal: null,
       selectedAt: now, selectedBy: 'old-master', reason: 'historical', skipped: [], endedAt: null, endReason: null }] } as unknown as Registry;
   await store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,'agent-registry.apply',$2)", [admin.id, JSON.stringify({ registry: legacy, change: {} })]);
@@ -32,6 +32,9 @@ test('e2e:retired-roles-dropped — legacy registry migrates once on a successfu
   assert.deepEqual(registryRoles, ['worker', 'reviewer', 'producer', 'master']);
   assert.deepEqual(Object.keys(proposedConcurrency), [...registryRoles]);
   assert.ok(Object.values(proposedRuntimeRoles).flat().every(role => registryRoles.includes(role!)));
+  const pi = await import('../integrations/pi/index.js');
+  for (const role of [...retired, 'research', 'decomposition', 'triage']) assert.deepEqual(pi.graphyardTools(role), []);
+  assert.deepEqual(pi.graphyardTools('producer').map(tool => tool.name), ['graphyard_submit_evidence']);
   const payloads = await import('../src/runner/payloads.js'), settings = await import('../src/master/merge-writer-settings.js');
   assert.equal('diagnosticianSettings' in payloads, false); assert.equal('candidateSettingsSchema' in settings, false);
   assert.deepEqual((await api.view(admin)).roles.map(role => role.role), [...registryRoles]);
