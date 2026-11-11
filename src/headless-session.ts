@@ -1,4 +1,4 @@
-// Concern: headless reviews and spec checks. A reviewer or spec checker no longer needs a Herdr pane,
+// Concern: headless reviews. A reviewer no longer needs a Herdr pane,
 // a TUI start wait or a CLI call to post: its runtime runs once, non-interactively, as one child
 // process in the session's checkout, under the same coordinator confinement and credential mask a
 // pane session gets, and answers with one JSON object on its output. The launcher posts that
@@ -222,9 +222,9 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
 
 export const headlessRunsDirectory = (root: string) => resolve(root, '.graphyard', 'headless-runs');
 const sessionFile = 'session.json';
-export type HeadlessRoute = 'review' | 'spec-check';
+export type HeadlessRoute = 'review';
 const sessionRecordSchema = z.object({ name: z.string().min(1).max(200), work: z.string().min(1).max(200), subject: z.string().min(1).max(200), kind: z.string().min(1).max(40),
-  route: z.enum(['review', 'spec-check']), context: z.record(z.string(), z.string()), startedAt: z.string().max(40) });
+  route: z.enum(['review']), context: z.record(z.string(), z.string()), startedAt: z.string().max(40) });
 export type HeadlessSessionRecord = z.infer<typeof sessionRecordSchema>;
 /**
  * How a restarted loop finishes a route's run: posts what it printed (a throw refuses it) and then

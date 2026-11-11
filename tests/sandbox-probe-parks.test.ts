@@ -10,7 +10,6 @@ import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from 
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 
 import { releaseWorkerLaunch, accountStartFailurePath } from '../src/master/dispatch.js';
 import { runCycle } from '../src/daemon/cycle.js';
@@ -44,8 +43,7 @@ async function dispatchFixture() {
   const item = { id: 'id-GY-7', key: 'GY-7', title: 'GY-7', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
-    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
-    specCheck: readySpecCheck(new Date().toISOString()) } as unknown as Work;
+     } as unknown as Work;
   return { ...fixture, profile, item, cleanup: async () => { await rm(fixture.root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
 

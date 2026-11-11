@@ -23,7 +23,7 @@ export interface RegisteredRun {
   name: string;
   role: RunRole;
   work: string;
-  /** The ledger record id or spec-check launch the run answers. */
+  /** The ledger record id the run answers. */
   subject: string;
   /** The runtime the inventory names for it; `pi` unless the run says otherwise (a headless review's own runtime). */
   agent?: string;

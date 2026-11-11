@@ -38,7 +38,7 @@ test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough medi
   const max = Number(html.match(/id="scrub"[^>]*max="(\d+)"/)?.[1]);
   assert.ok(Math.abs(max - seconds) < 1, `the rendered video is the walkthrough's ${max} s`);
   const chapters = html.match(/const chapters = (\[.*\]);/)?.[1] ?? '';
-  for (const scene of ['Roles', 'Decide', 'Loop', 'Spec check', 'Build', 'Review', 'Merge trial', 'Deploy', 'Revert', 'Failures']) assert.ok(chapters.includes(`'${scene}'`), `a scene shows ${scene}`);
+  for (const scene of ['Roles', 'Decide', 'Loop', 'Ready', 'Build', 'Review', 'Merge trial', 'Deploy', 'Revert', 'Failures']) assert.ok(chapters.includes(`'${scene}'`), `a scene shows ${scene}`);
   const captions = html.slice(html.indexOf('const captions'), html.indexOf('const capEl')).toLowerCase();
-  for (const said of ['the human keeps three decisions', 'the master (ai) decides', 'the loop (plain code)', 'a worker builds', 'spec check', 'independent review', 'trials the head on the latest main', 'deploys main', 'reverts the merge automatically', 'any failure goes to the master']) assert.ok(captions.includes(said), `the captions say: ${said}`);
+  for (const said of ['the human keeps three decisions', 'the master (ai) decides', 'the loop (plain code)', 'a worker builds', 'independent review', 'trials the head on the latest main', 'deploys main', 'reverts the merge automatically', 'any failure goes to the master']) assert.ok(captions.includes(said), `the captions say: ${said}`);
 });

@@ -15,7 +15,6 @@ import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/rep
 import { createSchema } from '../src/model-boundary/work.js';
 import { dispatchSort } from '../src/model/coordination.js';
 import { mergeQueue } from '../src/model/merge-queue.js';
-import { needsSpecCheck, specCheckRefusal } from '../src/model/spec-check.js';
 import type { Work } from '../src/model.js';
 
 // GY-3102: a yard-repair item takes its own route past a broken pipeline.
@@ -28,13 +27,6 @@ const item = (key: string, extra: Record<string, unknown> = {}) => ({
 test('unit:yard-repair-route create accepts yardRepair', () => {
   const parsed = createSchema.parse({ title: 'Fix', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], yardRepair: true });
   assert.equal(parsed.yardRepair, true);
-});
-
-test('unit:yard-repair-route skips the spec-check hold', () => {
-  assert.equal(needsSpecCheck(item('GY-1')), true);
-  assert.ok(specCheckRefusal(item('GY-1')));
-  assert.equal(needsSpecCheck(item('GY-2', { yardRepair: true })), false);
-  assert.equal(specCheckRefusal(item('GY-2', { yardRepair: true })), null);
 });
 
 test('unit:yard-repair-route sorts first in dispatchSort', () => {

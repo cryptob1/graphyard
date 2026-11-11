@@ -126,8 +126,6 @@ export interface DaemonEffects {
   checkoutTrust?: () => Promise<CheckoutTrustRefusal[]>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
   setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
-  /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */
-  launchSpecCheck?: (work: Work) => Promise<{ pane?: string | null; launch: string; settled?: Promise<string | null> } | void>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */
   composeServer?: () => ComposeServer | null | Promise<ComposeServer | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */

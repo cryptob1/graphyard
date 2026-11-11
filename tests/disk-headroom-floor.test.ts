@@ -13,7 +13,6 @@ import { processPidNamespace, processStartTicks } from '../src/tmp-reclaim.js';
 import type { MergePorts } from '../src/merge-writer/executor.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 
 // GY-3122: below the free-space floor the loop reclaims only its own leftovers, and while still below starts no trial or worker.
 
@@ -32,7 +31,7 @@ const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
   policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 60_000),
   ready: true, epoch: 0, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
-  specCheck: readySpecCheck(new Date().toISOString()),
+
   observation: null, blocker: null, violations: [], sessions: [], gates: gates(['ready']), stage: 'ready', ...fields,
 }) as unknown as Work;
 

@@ -1,0 +1,14 @@
+{
+  "id": "feature-skips-spec-check",
+  "title": "Released features dispatch straight to workers",
+  "description": "The next loop cycle dispatches new features and separate legacy pending-launch and first-gaps items without a spec checker, preserving lease and submission holds and freeing legacy reviewer capacity.",
+  "tags": ["daemon", "dispatch"],
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "released and legacy feature dispatch",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/feature-skips-spec-check.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

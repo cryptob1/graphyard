@@ -17,7 +17,6 @@ import { proposedRuntimes } from '../src/model/registry.js';
 import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { liveRun } from '../src/runner/registry.js';
 import { server } from '../src/server.js';
-import { launchSpecCheck } from '../src/spec-check.js';
 import { Store } from '../src/store.js';
 
 // GY-3218: an account whose agent reports it is not logged in is held, and the launch moves to
@@ -66,9 +65,7 @@ const { appendFileSync, existsSync } = require('node:fs');
 const home = process.env.CLAUDE_CONFIG_DIR ?? '';
 if (existsSync(home + '/lapsed')) { console.error(${JSON.stringify(message)}); process.exit(1); }
 appendFileSync(${JSON.stringify(join(scratch, 'answered'))}, home + '\\n');
-console.log(process.argv.at(-1).includes('Graphyard spec checker')
-  ? '{"verdict": "ready", "paraphrase": "Move export to settings; AC-1 proves it.", "gaps": []}'
-  : '{"verdict": "APPROVE", "body": "Reviewed head ${head} against base ${base}. AC-1 met: feature.ts sets the flag.", "findings": []}');
+console.log('{"verdict": "APPROVE", "body": "Reviewed head ${head} against base ${base}. AC-1 met: feature.ts sets the flag.", "findings": []}');
 `, { mode: 0o755 });
   previousPath = process.env.PATH;
   process.env.PATH = `${bin}${delimiter}${previousPath}`;
@@ -85,7 +82,6 @@ after(async () => {
   for (const directory of [root, scratch]) if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-const stored = async (id: string) => (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0].document as Work;
 const insert = async (work: Work) => { await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]); return work; };
 function reviewItem(key: string): Work {
   const candidate = { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' };
@@ -96,12 +92,6 @@ function reviewItem(key: string): Work {
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'],
     observation: { source: 'control-plane', at: now(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false,
       files: ['feature.ts'], scopeFiles: [{ path: 'feature.ts', status: 'added', sha: head, additions: 1, deletions: 0, binary: false }], baseTip: base, baseTipContained: true } } as unknown as Work;
-}
-function specItem(key: string): Work {
-  return { id: randomUUID(), key, title: 'Export from settings', description: 'Read README.md and move export to settings.', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Export works', proofs: ['e2e:export'] }], policy: { checks: ['test'], review: true },
-    stage: 'ready', revision: 1, policyRevision: 1, createdAt: now(), updatedAt: now(), stageEnteredAt: now(), ready: true, epoch: 0, lease: null,
-    workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [] } as unknown as Work;
 }
 /** git really runs; Herdr is a refusal, so a pane would fail the launch. */
 const run = (command: string, args: string[], options?: { cwd?: string }) => {
@@ -119,12 +109,11 @@ const reviewed = async (id: string) => {
   return assert.fail('timed out waiting for the review run to end');
 };
 
-test('e2e:unauthenticated-account-held — a spec check and a review whose agent exits not logged in hold that account under its message, answer on the next account in the same launch, and stay off the held one until it is cleared', async () => {
-  // The spec check starts on the role's first account, whose agent exits 1 not logged in.
-  const spec = await insert(specItem('GY-9301'));
-  const check = await launchSpecCheck(root, spec, 'reviewer-claude', [], now(), { run, headless: spawnHeadless });
-  assert.equal(await check.settled, null, 'the same launch posted its report from the next account');
-  assert.equal((await stored(spec.id)).specCheck!.verdict, 'ready');
+test('e2e:unauthenticated-account-held — reviews whose agent exits not logged in hold that account under its message, answer on the next account in the same launch, and stay off the held one until it is cleared', async () => {
+  // The review starts on the role's first account, whose agent exits 1 not logged in.
+  const spec = await insert(reviewItem('GY-9301'));
+  const check = await launchReview(root, spec, 'reviewer-claude', [], now(), { run, headless: spawnHeadless, requestId: 'held-request-0' });
+  assert.equal((await reviewed(check.review)).verdict?.state, 'APPROVED');
   assert.deepEqual(await answered(), [working], 'the answer came from the working account');
   const held = await account('lapsed-account');
   assert.equal(held.eligible, false);

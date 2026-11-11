@@ -6,8 +6,6 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { databaseUrl } from './helpers/postgres.js';
 import { Store } from '../src/store.js';
 import type { Work } from '../src/model.js';
-import type { AgentRegistry, FleetSession } from '../src/model/registry.js';
-import { settleSessions } from '../src/model/registry-sessions.js';
 
 const H = 'a'.repeat(40), B = 'b'.repeat(40), M = 'c'.repeat(40);
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -45,32 +43,30 @@ test('integration:review-bearer-restart — original launch bearers survive a re
   try {
     store = new Store(database); await store.init();
     const firstPid = await start();
-    const ordinary = item('GY-1'), delivered = item('GY-2'), spec = item('GY-3');
+    const ordinary = item('GY-1'), delivered = item('GY-2'), unclaimed = item('GY-3');
+    const retiredToken = fresh();
+    Object.assign(unclaimed, { specCheckLaunch: { id: 'retired-launch', reviewer: 'checker', tokenHash: hash(retiredToken), expiresAt: expiresAt(), policyRevision: 1 } });
     delivered.stage = 'done'; delivered.delivery = { mergeSha: M, mergedAt: now(), authorizationRevision: 1 }; delivered.postMergeReview = 'owed';
-    for (const work of [ordinary, delivered, spec]) await put(work);
-    const ordinaryToken = fresh(), deliveredToken = fresh(), specToken = fresh();
+    for (const work of [ordinary, delivered, unclaimed]) await put(work);
+    const ordinaryToken = fresh(), deliveredToken = fresh();
     assert.equal((await post('restart-test-master', `${ordinary.id}/review-launch`, launch(ordinaryToken))).status, 200);
     assert.equal((await post('restart-test-master', `${delivered.id}/review-launch`, launch(deliveredToken, { head: M, postMerge: true }))).status, 200);
-    assert.equal((await post('restart-test-master', `${spec.id}/spec-check-launch`, { reviewer: 'checker', tokenHash: hash(specToken), expiresAt: expiresAt(), policyRevision: 1 })).status, 200);
     await stop(); assert.notEqual(await start(), firstPid, 'HTTP server is a new OS process using the same real Postgres');
+    assert.equal((await post(retiredToken, `${ordinary.id}/review-verdict`, verdict(retiredToken))).status, 401, 'legacy checker bearers no longer authenticate');
     assert.equal((await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(ordinaryToken, M))).status, 409, 'restart recovered authentication; the wrong head still fails');
     assert.equal((await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(fresh()))).status, 403, 'body token must match');
     assert.equal((await post(ordinaryToken, `${delivered.id}/review-verdict`, verdict(ordinaryToken, M))).status, 403, 'a bearer cannot post to a different launch');
     assert.equal((await post('restart-test-worker', `${ordinary.id}/review-launch`, launch(fresh()))).status, 403, 'workers cannot issue trusted launch credentials');
-    assert.equal((await post(specToken, `${spec.id}/spec-check`, { token: fresh(), verdict: 'ready', paraphrase: 'Build the feature.' })).status, 403);
-    assert.equal((await post(ordinaryToken, `${spec.id}/claim`, {})).status, 403, 'review token grants no worker authority');
+    assert.equal((await post(ordinaryToken, `${unclaimed.id}/claim`, {})).status, 403, 'review token grants no worker authority');
     const approved = await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(ordinaryToken));
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal((await post(deliveredToken, `${delivered.id}/review-verdict`, verdict(deliveredToken, M))).status, 200);
-    const revised = await read(spec); revised.policyRevision = 2; await put(revised);
-    assert.equal((await post(specToken, `${spec.id}/spec-check`, { token: specToken, verdict: 'ready', paraphrase: 'Build the feature.', gaps: [] })).status, 200);
-    assert.equal((await read(spec)).specCheck!.policyRevision, 1, 'the check keeps the launch revision, never the newer requirements');
     assert.equal((await read(delivered)).postMergeReview, 'reviewed');
     assert.equal((await read(delivered)).stage, 'done', 'a delivered item is never reopened');
     assert.deepEqual((await read(ordinary)).observation!.reviews.map(r => [r.reviewer, r.sha, r.state]), [['reviewer', H, 'APPROVED']]);
     assert.equal((await store.pool.query("SELECT count(*) FROM events WHERE work_id=$1 AND kind='review.verdict'", [ordinary.id])).rows[0].count, '1');
     await stop(); await start();
-    for (const [work, token] of [[ordinary, ordinaryToken], [delivered, deliveredToken], [spec, specToken]] as const)
+    for (const [work, token] of [[ordinary, ordinaryToken], [delivered, deliveredToken]] as const)
       assert.equal((await post(token, `${work.id}/review-verdict`, verdict(token))).status, 401, 'spent tokens stay spent after another restart');
 
     // Expiry, replacement and revocation are authoritative launch facts, not a process cache.
@@ -86,24 +82,6 @@ test('integration:review-bearer-restart — original launch bearers survive a re
       if (kind === 'implemented' || kind === 'requested') {
         assert.ok(stored.reviewLaunch!.refused);
         assert.equal((await post(token, `${work.id}/review-verdict`, verdict(token))).status, 401, 'refusal revokes the bearer immediately');
-      }
-    }
-    for (const kind of ['expired', 'replaced', 'revoked'] as const) {
-      const work = item(`GY-spec-${kind}`); await put(work); const token = fresh();
-      const registration = { reviewer: 'checker', tokenHash: hash(token), expiresAt: kind === 'expired' ? new Date(Date.now() - 1000).toISOString() : expiresAt(), policyRevision: 1 };
-      assert.equal((await post('restart-test-master', `${work.id}/spec-check-launch`, registration)).status, 200);
-      if (kind === 'replaced') assert.equal((await post('restart-test-master', `${work.id}/spec-check-launch`, { ...registration, tokenHash: hash(fresh()) })).status, 200);
-      if (kind === 'revoked') { const revoked = await read(work); revoked.specCheckLaunch = null; await put(revoked); }
-      await stop(); await start();
-      assert.equal((await post(token, `${work.id}/spec-check`, { token, verdict: 'ready', paraphrase: 'Build the feature.' })).status, 401, `spec check ${kind}`);
-      const unusable = await read(work);
-      assert.equal(unusable.specCheck, undefined, 'a missing verdict supplies no readiness or approval');
-      if (kind === 'expired' || kind === 'revoked') {
-        const session = { id: kind, role: 'reviewer', work: work.key, selectedAt: new Date(Date.now() - 30 * 60_000).toISOString(), endedAt: null } as FleetSession;
-        const registry = { sessions: [session] } as AgentRegistry;
-        assert.equal(settleSessions(registry, [unusable], now()).length, 1, 'normal reconciliation releases an unusable checker');
-        assert.ok(session.endedAt);
-        assert.equal((await read(work)).specCheck, undefined, 'releasing capacity never manufactures a verdict');
       }
     }
     assert.equal((await post(fresh(), `${ordinary.id}/review-verdict`, verdict(fresh()))).status, 401);

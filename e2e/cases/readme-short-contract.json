@@ -1,13 +1,13 @@
 {
   "id": "readme-short-contract",
-  "title": "README stays one short page embedding the walkthrough",
-  "description": "Run the unchanged README-and-walkthrough contract test against the candidate checkout: README under 600 words, the walkthrough embedded, and docs/ holding only the walkthrough.",
+  "title": "README keeps every landing contract together",
+  "description": "Run the unchanged README contract tests against the candidate checkout in one invocation: the 250-word landing page with exactly Why Graphyard, Quick start and Learn more, docs/ holding only the walkthrough media, onboarding commands the installed CLI help advertises, and the guide topics carrying the full setup and publishing details.",
   "target": "any",
   "required": true,
   "steps": [{
     "kind": "command",
-    "name": "Check the short README contract",
-    "run": "node --import tsx --test tests/readme-and-walkthrough-only.test.ts",
-    "timeoutSeconds": 60
+    "name": "Check every README contract together",
+    "run": "node --import tsx --test tests/readme-landing.test.ts tests/readme-and-walkthrough-only.test.ts tests/readme-onboarding-commands.test.ts tests/readme-guide-details.test.ts",
+    "timeoutSeconds": 180
   }]
 }

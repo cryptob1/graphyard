@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { spawnHeadless, startHeadlessSession } from '../src/headless-session.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-for (const sandbox of [false, true]) test(`e2e:headless-pinned-binary — spec checks and reviews execute the runtime pin${sandbox ? ' inside the sandbox' : ''}, never the host shim`, async () => {
+for (const sandbox of [false, true]) test(`e2e:headless-pinned-binary — reviews execute the runtime pin${sandbox ? ' inside the sandbox' : ''}, never the host shim`, async () => {
   // The sandbox hides /tmp: keep both installations on the repository's visible filesystem.
   const parent = join(process.cwd(), '.graphyard');
   await mkdir(parent, { recursive: true });
@@ -25,7 +25,7 @@ for (const sandbox of [false, true]) test(`e2e:headless-pinned-binary — spec c
   const previousPath = process.env.PATH;
   process.env.PATH = `${shims}:/usr/bin:/bin`;
   try {
-    for (const route of ['spec-check', 'review'] as const) {
+    for (const route of ['review'] as const) {
       for (const kind of ['cursor', 'pi']) {
         const binary = kind === 'cursor' ? 'cursor-agent' : kind;
         assert.equal(execFileSync('/bin/sh', ['-c', `command -v ${binary}`], { encoding: 'utf8' }).trim(), join(shims, binary));
