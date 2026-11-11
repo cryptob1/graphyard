@@ -78,7 +78,7 @@ test('unit:setup-checks-consistent — a reachable plane with no credential is r
     assert.ok(!/GitHub App|reviewer App|GRAPHYARD_RELEASE_TOKEN|reviewpolicy|github-setup/.test(`${check.step} ${check.detail}`), check.detail);
   }
   const readiness = (first: string) => ({ next: 'Set GRAPHYARD_URL and GRAPHYARD_TOKEN …', items: [{ id: 'repository', status: first === 'repository' ? 'missing' : 'ready' }, { id: 'server', status: 'missing' }] });
-  assert.match(setupNext(readiness('server'), checks), /^FAIL control-plane: reachable, credential missing: .*\(fix: README setup step 2/);
+  assert.match(setupNext(readiness('server'), checks), /^FAIL control-plane: reachable, credential missing: .*\(fix: run graphyard up/);
   assert.equal(setupNext(readiness('repository'), checks), 'Set GRAPHYARD_URL and GRAPHYARD_TOKEN …', 'an earlier step keeps its own recovery');
 });
 

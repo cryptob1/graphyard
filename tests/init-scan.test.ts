@@ -379,7 +379,7 @@ test('CLI init --scan applies nothing without --apply, and --scan --apply applie
     assert.equal(byId['github-app'], undefined, 'doctor asks for no GitHub App: the deploy key is the install\'s only remote credential (GY-2010)');
     assert.ok(status.readiness.items.every((item: any) => item.status === 'ready' || typeof item.recovery === 'string'));
     // While the control plane itself fails, next names the setup-from-zero step that installs it (GY-1412).
-    assert.match(status.next, /^FAIL control-plane: not reachable: .*\(fix: README setup step 2/);
+    assert.match(status.next, /^FAIL control-plane: not reachable: .*\(fix: run graphyard up/);
     const preview = JSON.parse(await runCli(root, ['doctor', '--profile', 'preview-validation'], env));
     assert.equal(preview.readiness.items.find((item: any) => item.id === 'runner-registration'), undefined, 'the retired validation runner needs no registration');
     assert.equal(preview.readiness.items.find((item: any) => item.id === 'e2e-suite').status, 'missing');

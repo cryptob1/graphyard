@@ -175,7 +175,7 @@ export const localAdapter: ProviderAdapter = {
     const major = Number(process.versions.node.split('.')[0]);
     const items: PreflightItem[] = [
       { name: 'Node.js', ok: major >= MINIMUM_NODE_MAJOR, detail: `Node ${process.versions.node}`, fix: `Install Node ${MINIMUM_NODE_MAJOR} or newer (nodejs.org, or nvm install ${MINIMUM_NODE_MAJOR}), then rerun the installer with it` },
-      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine for merge trials', 'Start Docker Engine for private-root merge trials, then rerun the installer'),
+      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine for merge trials', 'Install Docker Engine: https://docs.docker.com/engine/install/; run sudo systemctl start docker for private-root merge trials, then rerun the installer'),
     ];
     try {
       const binaries = await postgresBinaries();

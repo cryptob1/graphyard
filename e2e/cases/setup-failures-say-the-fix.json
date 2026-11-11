@@ -1,0 +1,13 @@
+{
+  "id": "setup-failures-say-the-fix",
+  "title": "Setup failures print the fix and README lists prerequisite checks",
+  "description": "Doctor checks a fixture checkout on a host reporting missing bubblewrap and Landlock ABI 8. Its failure lines name the bubblewrap install command and Linux 7.0 / ABI 9 requirement. README lists prerequisite check commands, and no source refers to nonexistent README setup steps.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "setup failure remedies",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/setup-failures-say-the-fix.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
