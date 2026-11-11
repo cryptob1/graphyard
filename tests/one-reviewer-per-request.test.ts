@@ -1,9 +1,8 @@
-import { after, before, test } from 'node:test';
+import { after, before } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { withDatabase } from './helpers/postgres.js';
@@ -62,9 +61,9 @@ async function reviewerMaster() {
   // runtime starts the ledger on disk is read, so the test sees what a reconciler would see then.
   const log = { tabs: [] as string[], started: [] as { pane: string; recorded: ReviewRecord[] }[] };
   let panes = 0;
-  const run = (_command: string, args: string[]) => {
+  const run = async (_command: string, args: string[]) => {
     if (args[0] === 'pane' && args[1] === 'run') {
-      const ledger = JSON.parse(readFileSync(join(root, '.graphyard/reviews.json'), 'utf8'));
+      const ledger = await readReviewLedger(root);
       log.started.push({ pane: args[2], recorded: ledger.reviews });
     }
     if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${++panes}`; log.tabs.push(pane); return JSON.stringify({ result: { root_pane: { pane_id: pane, tab_id: `tab-${panes}` } } }); }

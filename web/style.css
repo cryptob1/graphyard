@@ -306,6 +306,13 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 @media(max-width:650px){table.agents-table,table.agents-table tbody,table.agents-table tr,table.agents-table th,table.agents-table td{display:block;width:100%}table.agents-table thead{display:none}table.agents-table tr{border:1px solid var(--border);border-radius:6px;margin-bottom:10px}table.agents-table tr[hidden]{display:none}table.agents-table th,table.agents-table td{border:0;white-space:normal;min-width:0}table.agents-table td[data-label]::before{content:attr(data-label) ": ";color:var(--text-2)}.plan-header-content{flex-direction:column;align-items:flex-start;gap:6px}}
 .project-memory{margin-top:var(--space-4)}.project-memory .memory-content{display:grid;gap:var(--space-3);margin-top:var(--space-2)}.project-memory .memory-block h3{font-size:var(--type-small);color:var(--text-2);margin:0 0 var(--space-1)}.project-memory .memory-list{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:var(--type-small)}
 
-/* GY-3211: the live terminal keeps its 120 columns and scrolls sideways on a narrow screen. */
-.terminal-host{overflow-x:auto;max-width:100%}
+/* The Master terminal uses the rest of the viewport, including on a phone. */
+.master-heading h1{font-size:20px;margin:12px 0 8px}
+.live-terminal{display:flex;flex-direction:column;min-width:0;min-height:0;gap:8px;height:65dvh}
+.terminal-info{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;color:var(--text-2);flex-shrink:0;overflow-wrap:anywhere}
+.terminal-session{color:var(--text)}
+.terminal-host{flex:1;min-height:0;min-width:0;overflow:hidden;background:#000}
+.terminal-host .xterm{height:100%}
+.terminal-keys{display:none;flex-shrink:0;gap:3px}
+@media(max-width:650px){.terminal-keys{display:flex}.terminal-keys button{flex:1;min-width:0;padding:12px 2px;font-size:11px}.terminal-info{font-size:11px}.master-heading h1{margin:8px 0 4px}}
 .watching{margin-bottom:var(--space-4)}

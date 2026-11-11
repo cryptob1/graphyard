@@ -35,4 +35,7 @@ await engine.execute(coordinator, 'session', item.id, { id: 'worker-1', kind: 'i
 // The dashboard is served from ./dist, as an install serves it.
 process.chdir(site);
 http.listen(0, '127.0.0.1', () => process.send!({ url: `http://127.0.0.1:${(http.address() as { port: number }).port}` }));
-process.on('message', () => { http.close(() => { void store.close().finally(() => process.exit(0)); }); http.closeAllConnections(); });
+const sockets = new Set<import('node:stream').Duplex>();
+http.on('upgrade', (req, socket) => { if (req.url?.startsWith('/api/terminal?')) { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); } });
+process.on('message', (message) => { if (message === 'drop-terminals') { for (const socket of sockets) socket.destroy(); return; }
+ http.close(() => { void store.close().finally(() => process.exit(0)); }); http.closeAllConnections(); });

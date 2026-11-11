@@ -63,7 +63,7 @@ test('unit:pi-graphyard-tools the extension registers typed Graphyard tools whos
   await assert.rejects(submit.execute('call-3', { ...evidence, result: 'fail' }), /already recorded proof unit:pi-graphyard-tools/);
 
   // A role session gets only its own tool.
-  assert.deepEqual([...load('decomposition').tools.keys()], ['graphyard_decompose']);
+  assert.deepEqual([...load('decomposition').tools.keys()], []);
   assert.deepEqual([...load('producer').tools.keys()], ['graphyard_submit_evidence']);
 });
 

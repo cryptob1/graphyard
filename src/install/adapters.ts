@@ -305,8 +305,8 @@ export const composeAdapter: ProviderAdapter = {
   provider: 'compose',
   async preflight(ctx) {
     const items = [
-      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine', 'Install Docker Engine and start its daemon, then rerun the installer'),
-      await tool(ctx, ctx.transport, 'docker', ['compose', 'version', '--short'], 'Docker Compose', 'Install the Docker Compose plugin (docker compose version), then rerun the installer'),
+      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine', 'Install Docker Engine: https://docs.docker.com/engine/install/; run sudo systemctl start docker, then rerun the installer'),
+      await tool(ctx, ctx.transport, 'docker', ['compose', 'version', '--short'], 'Docker Compose', 'Install the Docker Compose plugin: https://docs.docker.com/compose/install/linux/; check docker compose version, then rerun the installer'),
     ];
     if (items.every(item => item.ok)) items.push(await composePort(ctx));
     return items;

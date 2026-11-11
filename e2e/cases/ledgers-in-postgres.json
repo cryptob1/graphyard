@@ -1,0 +1,8 @@
+{
+  "id": "ledgers-in-postgres",
+  "title": "Review and producer ledgers and dispatch progress survive in Postgres",
+  "description": "A fixture loop imports existing ledger and cursor files through the control-plane API, removes them after commit, resumes attempts and dispatch, and launches beyond 200 records. Concurrent writes, restart, replay after interruption, and coordinator authorization use real Postgres.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Postgres ledger migration and continued dispatch", "run": "node --import tsx tests/helpers/run-tests.ts tests/ledgers-in-postgres.test.ts", "timeoutSeconds": 600 }]
+}

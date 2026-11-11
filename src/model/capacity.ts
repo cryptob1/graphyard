@@ -5,10 +5,8 @@ import type { partialWorkSchema, exhaustionReportSchema, capacityAccountSchema }
 
 /** Roles launched into session slots. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
-/** Headless registry roles that spend the same accounts (GY-1705); no item waits on them. */
-export const headlessQuotaRoles = ['doctor', 'diagnostician'] as const;
-/** Every role that can exhaust provider quota (GY-898, GY-1705). */
-export const quotaRoles = [...capacityRoles, 'master', ...headlessQuotaRoles] as const;
+/** Every active role can exhaust provider quota. */
+export const quotaRoles = [...capacityRoles, 'master'] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
@@ -168,49 +166,6 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || freeModelNotice.test(text) || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: limitSignalReset(text, parseResetTime(text, now), now) };
-}
-
-/** Headless run event for limit detection (GY-1705); only string errors are limit text. */
-export type LimitRunEvent = { kind: string; error?: string | boolean | null; text?: string };
-export function runTimeoutLimit(events: readonly LimitRunEvent[], detail: string, now: number): ExhaustionSignal | null {
-  const texts: string[] = [];
-  for (const event of events) {
-    if ((event.kind === 'retry' || event.kind === 'message') && typeof event.error === 'string') texts.push(event.error);
-    if (event.kind === 'stderr' && event.text) texts.push(event.text);
-  }
-  if (detail) texts.push(detail);
-  for (const text of texts) { const signal = providerLimit(text, now); if (signal) return signal; }
-  return null;
-}
-/**
- * GY-1705: last reason + earliest reset for the round wait; hold every named account whose own
- * attempt printed a limit (a later null-account Pi fallback must not clear a registry primary).
- */
-export function headlessTimeoutLimitCharge(
-  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[]; account?: string | null }[],
-  now: number,
-): { limit: ExhaustionSignal; account: string | null; holds: { account: string; limit: ExhaustionSignal }[] } | null {
-  const started = attempts.filter(a => a.result !== 'spawn' && a.result !== 'cancelled');
-  if (!started.length || !started.every(a => a.result === 'timeout')) return null;
-  const holds: { account: string; limit: ExhaustionSignal }[] = [], signals: ExhaustionSignal[] = [];
-  for (const a of started) {
-    const signal = runTimeoutLimit(a.events ?? [], a.detail, now);
-    if (!signal) continue;
-    signals.push(signal);
-    if (a.account) holds.push({ account: a.account, limit: signal });
-  }
-  if (!signals.length) return null;
-  return {
-    limit: { reason: signals.at(-1)!.reason, resetsAt: signals.map(e => e.resetsAt).filter((at): at is string => !!at).sort()[0] ?? null },
-    account: holds.at(-1)?.account ?? null, holds,
-  };
-}
-/** All-timeout round with any readable limit (delegates to the charge helper). */
-export function headlessTimeoutLimit(
-  attempts: readonly { result: string; detail: string; events?: readonly LimitRunEvent[] | readonly { kind: string; error?: string | null; text?: string }[] }[],
-  now: number,
-): ExhaustionSignal | null {
-  return headlessTimeoutLimitCharge(attempts, now)?.limit ?? null;
 }
 
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */

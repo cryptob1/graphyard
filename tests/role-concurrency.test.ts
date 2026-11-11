@@ -1,5 +1,6 @@
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { after, before, test } from 'node:test';
+import { after, before } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm, writeFile } from 'node:fs/promises';

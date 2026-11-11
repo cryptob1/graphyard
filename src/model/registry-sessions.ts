@@ -225,7 +225,7 @@ export interface SessionRefusal { account: null; reason: string; skipped: Sessio
  * is refused only when no account in the registry can serve it.
  */
 export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
-  const role = registry.roles.find(entry => entry.name === request.role);
+  const role = registry.roles.find(entry => entry.name === request.role && fleetRoles.includes(entry.name));
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
   const running = liveSessions(registry).filter(session => session.role === role.name && (role.name !== 'master' || (session.group ?? null) === (request.group ?? null)));
@@ -301,6 +301,7 @@ export interface FleetView {
  * each role with the account its next action would run on, or what stops it.
  */
 export function fleetView(registry: AgentRegistry, now: number, host: string | null = null): FleetView {
+  registry = { ...registry, roles: registry.roles.filter(role => fleetRoles.includes(role.name)) };
   const live = liveSessions(registry);
   const accounts: FleetAccountView[] = registry.accounts.map(account => {
     const model = registry.models.find(entry => entry.name === account.model);

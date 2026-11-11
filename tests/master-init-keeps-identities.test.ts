@@ -36,7 +36,7 @@ async function applyAutonomyIdentities(root: string, credentials: string, extra:
     approver: { id: 'graphyard-approver-project', credentialFile: join(credentials, 'masters', 'approver.token') }, ...extra }));
 }
 
-test('unit:master-init-keeps-identities — a master init rerun keeps the operator-agent and approver identities byte-equal while updating the fields init owns', async () => {
+test('unit:master-init-keeps-identities — a master init rerun keeps the operator-agent identity byte-equal while updating the fields init owns', async () => {
   const root = await repository(); const credentials = await temporaryDirectory('master-init-credentials');
   try {
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, hostId: 'machine-a' }, coordinatorStatus() as typeof fetch);
@@ -52,7 +52,7 @@ test('unit:master-init-keeps-identities — a master init rerun keeps the operat
     const after = JSON.parse(await readFile(config(root), 'utf8'));
     const kept = await loadStoredMasterConfig(root);
     assert.equal(JSON.stringify(after.operatorAgent), JSON.stringify(before.operatorAgent), 'the operator-agent identity survives byte-equal');
-    assert.equal(JSON.stringify(after.approver), JSON.stringify(before.approver), 'the approver identity survives byte-equal');
+    assert.equal(after.approver, undefined, 'the retired identity is removed');
     assert.equal(after.supervision, 'autonomous', 'autonomy itself survives');
     // init still owns its own fields: each is written from the rerun's inputs, not left stale.
     assert.equal(kept.baseBranch, 'develop');
@@ -86,9 +86,9 @@ test('unit:master-init-keeps-unowned-fields — every previous field init does n
     const after = JSON.parse(await readFile(config(root), 'utf8'));
     for (const field of Object.keys(unowned)) assert.deepEqual(after[field], before[field], `${field} survives the re-init unchanged`);
     assert.deepEqual(after.operatorAgent, before.operatorAgent, 'the operator-agent identity survives beside them');
-    assert.deepEqual(after.approver, before.approver, 'the approver identity survives beside them');
+    assert.equal(after.approver, undefined, 'the retired identity is removed');
     // The kept config still loads and validates with every field in place.
     const kept = await loadStoredMasterConfig(root);
-    assert.equal(kept.operatorLogin, 'vish'); assert.equal(kept.reviewRoundCap, 3); assert.equal(kept.upstream?.url, 'https://upstream.example');
+    assert.equal(kept.operatorLogin, 'vish'); assert.equal(kept.reviewRoundCap, undefined); assert.equal(kept.upstream?.url, 'https://upstream.example');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });

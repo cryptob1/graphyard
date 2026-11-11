@@ -1,4 +1,5 @@
-import { test } from 'node:test';
+import { saveProducerLedger } from '../src/producer.js';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -6,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
-import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { lostRun, producerIdleGraceMs, readProducerLedger, reconcileProducers, sessionRetry, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
@@ -85,7 +86,7 @@ test('unit:killed-runs-not-counted — two producer runs ended with exit 143 set
 
     // Two runs killed with exit 143 (a supervisor restart stopping them), settled by reconciliation.
     await mkdir(join(root, '.graphyard'), { recursive: true });
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), { version: 1, producers: [headlessRecord(unit.id, 1, { run: killed(143) }), headlessRecord(unit.id, 2, { run: killed(143) })] });
+    await saveProducerLedger(root, { ...await readProducerLedger(root), producers: [headlessRecord(unit.id, 1, { run: killed(143) }), headlessRecord(unit.id, 2, { run: killed(143) })] });
     await reconcileProducers(root, config, [item], [], { now: () => new Date(clock) });
     const settled = await reconcileProducers(root, config, [item], [], { now: () => new Date(clock + producerIdleGraceMs) });
     assert.deepEqual(settled.producers.map(record => record.state), ['failed', 'failed']);
@@ -105,7 +106,7 @@ test('unit:killed-runs-not-counted — two producer runs ended with exit 143 set
     assert.deepEqual(log.filter(entry => entry.includes(':unit:')), ['producer:GY-421:unit:producer-a'], JSON.stringify(tick.waiting));
 
     // Exit 137 (SIGKILL) and a launcher that is gone (a restart with no process left to record the end) are lost too.
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), { version: 1, producers: [headlessRecord(unit.id, 3, { run: killed(137) }), headlessRecord(unit.id, 4, { launcherPid: 999_999 })] });
+    await saveProducerLedger(root, { ...await readProducerLedger(root), producers: [headlessRecord(unit.id, 3, { run: killed(137) }), headlessRecord(unit.id, 4, { launcherPid: 999_999 })] });
     await reconcileProducers(root, config, [item], [], { now: () => new Date(clock), alive: () => false });
     const more = (await reconcileProducers(root, config, [item], [], { now: () => new Date(clock + producerIdleGraceMs), alive: () => false })).producers;
     assert.deepEqual(more.map(lostRun), [true, true], JSON.stringify(more.map(record => record.resolution)));
@@ -113,7 +114,7 @@ test('unit:killed-runs-not-counted — two producer runs ended with exit 143 set
 
     // Only runs that ended on their own without evidence, or ran past their timeout, count.
     const ended = { ...killed(143), result: { ok: false as const, reason: 'no-payload' as const, detail: 'the run ended without a submit_evidence call' } };
-    await atomicPrivateWrite(join(root, '.graphyard/producers.json'), { version: 1, producers: [headlessRecord(unit.id, 5, { run: ended }), headlessRecord(unit.id, 6, { launcherPid: process.pid, expiresAt: iso(-1) })] });
+    await saveProducerLedger(root, { ...await readProducerLedger(root), producers: [headlessRecord(unit.id, 5, { run: ended }), headlessRecord(unit.id, 6, { launcherPid: process.pid, expiresAt: iso(-1) })] });
     await reconcileProducers(root, config, [item], [], { now: () => new Date(clock) });
     const counted = (await reconcileProducers(root, config, [item], [], { now: () => new Date(clock + producerIdleGraceMs) })).producers;
     assert.deepEqual(counted.map(record => record.state), ['failed', 'expired']);

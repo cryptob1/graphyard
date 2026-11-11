@@ -1,29 +1,16 @@
-import { assertOutsideWorktrees } from '../private-file.js';
-import { randomUUID } from 'node:crypto';
-import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
+import { loopStateClient, migrateLoopFile } from '../loop-state.js';
 import { basename, dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { readEnvironmentLog, type EnvironmentLog } from '../master/environments.js';
 import { type MasterConfig } from '../master/profiles.js';
 import { reviewVerdictReminderMs } from '../reviewer.js';
 import { requestAttemptLimit } from '../producer.js';
-/**
- * Every string the cursor holds is bounded where it is composed, never only checked at persist
- * time (GY-120): a reason the dispatcher composed and then could not persist failed the whole
- * tick, and with it every launch for every item, until the string happened to change. The caps
- * nest — a stored failure reason leaves room for the wait sentence that wraps it, and that
- * sentence is bounded again before it becomes a tick reason — so a reason at its cap still
- * yields a valid tick. `bounded` marks every cut with an ellipsis rather than hiding it.
- */
+/** Keep status summaries readable; persisted strings have no length cap. */
 export const launchWaitLimit = 50;
 export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
 export const ellipsis = '…';
 export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
-/**
- * The closure failures a tick stores, as the sentences the cursor holds. The sentence wraps a
- * reason already bounded below the cap, and is bounded again so a reason at its own cap cannot
- * push the stored string past `cursorTextLimit` and refuse the whole tick's persist.
- */
+/** The latest closure failures shown in status. */
 export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
   failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
@@ -31,8 +18,8 @@ export interface DispatchWait { kind: 'review' | 'producer'; work: string; reque
 /** The highest refusal count a stored failure may carry: the ceiling the probes are clamped to and the schema enforces, kept one constant so they cannot drift apart. */
 export const dispatchAttemptCeiling = 1000;
 export const dispatchFailureSchema = z.object({
-  kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40),
-  attempts: z.number().int().min(1).max(dispatchAttemptCeiling), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
+  kind: z.enum(['review', 'producer']), work: z.string().min(1), sha: z.string().min(1),
+  attempts: z.number().int().min(1).max(dispatchAttemptCeiling), reason: z.string(), at: z.string(), nextAt: z.string(),
 }).strict();
 export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
 /**
@@ -41,13 +28,13 @@ export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
  * item naming the request and every attempt.
  */
 export const abandonedRequestSchema = z.object({
-  kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40), at: z.string(),
-  reason: z.string().max(cursorTextLimit), attempts: z.array(z.string().max(cursorTextLimit)).max(30),
+  kind: z.enum(['review', 'producer']), work: z.string().min(1), sha: z.string().min(1), at: z.string(),
+  reason: z.string(), attempts: z.array(z.string()).max(30),
   /** Producer only (GY-496): the proof group and proofs the request stood for, which the attention and the rework name. */
-  group: z.string().min(1).max(40).optional(), proofs: z.array(z.string().min(1).max(200)).max(50).optional(),
+  group: z.string().min(1).optional(), proofs: z.array(z.string().min(1)).max(50).optional(),
 }).strict();
-const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
-export const profileBackoffSchema = z.object({ role: z.enum(['reviewer', 'producer']), profile: z.string().min(1).max(200), path: z.string().max(cursorTextLimit), cause: z.string().max(cursorTextLimit),
+const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string() }).strict();
+export const profileBackoffSchema = z.object({ role: z.enum(['reviewer', 'producer']), profile: z.string().min(1), path: z.string(), cause: z.string(),
   failures: z.number().int().min(1).max(dispatchAttemptCeiling), at: z.string(), until: z.string().nullable() }).strict();
 /** GY-3235: how many launches in a row must fail the same sandbox probe before a profile is skipped, and for how long. */
 export const probeBackoffFailures = 2, probeBackoffMs = 30 * 60_000;
@@ -59,8 +46,8 @@ export const backedOffProfiles = (cursor: Pick<DispatchCursor, 'profileBackoff'>
  * and the request and item it was composed for, so `master status` attributes the failure to a
  * request rather than to the dispatcher as a whole.
  */
-export const tickFailureSchema = z.object({ at: z.string(), reason: z.string().max(cursorTextLimit),
-  field: z.string().max(200).optional(), kind: z.enum(['review', 'producer']).optional(), request: z.string().max(64).optional(), work: z.string().max(40).optional() }).strict();
+export const tickFailureSchema = z.object({ at: z.string(), reason: z.string(),
+  field: z.string().optional(), kind: z.enum(['review', 'producer']).optional(), request: z.string().optional(), work: z.string().optional() }).strict();
 export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
@@ -80,13 +67,13 @@ export const dispatchCursorSchema = z.object({
    */
   lastTick: z.object({ at: z.string(), launched: z.number().int().min(0), refused: z.number().int().min(0), waiting: z.number().int().min(0), settled: z.number().int().min(0),
     /** Session records this tick closed against the runtime, and the closures it could not write back. */
-    closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
-    reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
+    closed: z.number().int().min(0).default(0), closeFailures: z.array(z.string()).max(20).default([]),
+    reasons: z.array(z.string()).max(20).default([]),
     /** Each request the tick left waiting, by request id, with why (GY-710): what `master status` ages against the request's own time. */
-    waits: z.array(z.object({ kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), requestId: z.string().min(1).max(64), sha: z.string().min(1).max(40),
-      reason: z.string().max(cursorTextLimit), group: z.string().max(40).optional(),
+    waits: z.array(z.object({ kind: z.enum(['review', 'producer']), work: z.string().min(1), requestId: z.string().min(1), sha: z.string().min(1),
+      reason: z.string(), group: z.string().optional(),
       /** When the reviewer's verdict on the request settled (GY-1429): a request already answered waits from then, not from its request. */
-      answeredAt: z.string().max(40).optional() }).strict()).max(launchWaitLimit).default([]),
+      answeredAt: z.string().optional() }).strict()).max(launchWaitLimit).default([]),
     /** Retired (GY-2876): the tick's step and call timings; a cursor written before still parses. */
     timings: z.unknown().optional() }).strict().nullable().default(null),
   /**
@@ -139,8 +126,6 @@ export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGra
 export const observationWakeIntervalMs = 60_000;
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
-/** How many missing session handles the cursor remembers between ticks; a file, not a database. */
-export const sessionMissLimit = 500;
 /**
  * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
  * interval later, never faster than the first step and never slower than the interval. The read
@@ -156,59 +141,25 @@ export function dispatchCursorPath(config: MasterConfig) {
   const file = config.credentialFile;
   return resolve(dirname(file), `${basename(file).replace(/\.token$/, '')}.dispatch.json`);
 }
-/**
- * A cursor that fails its own schema is repaired, not fatal (GY-120): a string past its cap is
- * truncated in place, ellipsis-marked like every other bound, and the repair is reported with
- * the path that failed, so a defect of this class degrades one reason string rather than every
- * launch. Anything else the schema refuses is still refused, naming its path.
- */
-export interface CursorRepair { path: string; detail: string }
-export type RepairListener = (repair: CursorRepair) => void;
-/** A schema path as `master status` and the loop log name it: `lastTick.reasons[1]`, `failures.<request>.reason`. */
+/** A schema path for a failed dispatch persistence operation. */
 export const cursorPath = (path: readonly PropertyKey[]) => path.reduce<string>((text, segment) => typeof segment === 'number' ? `${text}[${segment}]` : text ? `${text}.${String(segment)}` : String(segment), '');
-export function repairDispatchCursor(value: unknown, onRepair?: RepairListener): DispatchCursor {
-  for (let pass = 0; ; pass++) {
-    const parsed = dispatchCursorSchema.safeParse(value);
-    if (parsed.success) return parsed.data;
-    const first = parsed.error.issues[0];
-    const oversized = parsed.error.issues.filter(issue => issue.code === 'too_big' && (issue as { origin?: string }).origin === 'string' && typeof (issue as { maximum?: unknown }).maximum === 'number');
-    if (!oversized.length || pass >= 3) throw new Error(`Master dispatch cursor is invalid at ${cursorPath(first.path)}: ${first.message}`);
-    for (const issue of oversized) {
-      const holder = issue.path.slice(0, -1).reduce<any>((node, segment) => node?.[segment as string | number], value), key = issue.path.at(-1) as string | number;
-      const limit = (issue as { maximum: number }).maximum;
-      if (typeof holder?.[key] !== 'string') throw new Error(`Master dispatch cursor is invalid at ${cursorPath(issue.path)}: ${issue.message}`);
-      const length = holder[key].length;
-      holder[key] = bounded(holder[key], limit);
-      onRepair?.({ path: cursorPath(issue.path), detail: `${length} characters exceeded its cap of ${limit} and it was truncated` });
-    }
-  }
+export async function readDispatchCursor(root: string, config: MasterConfig): Promise<DispatchCursor> {
+  const client = await loopStateClient(config);
+  await migrateLoopFile(client, 'dispatch', dispatchCursorPath(config), value => {
+    const { botReviewers: _retired, ...stored } = value as Record<string, unknown>;
+    const cursor = dispatchCursorSchema.parse(stored);
+    if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository');
+    return [cursor];
+  });
+  const stored = (await client.read('dispatch'))[0];
+  const cursor = stored ? dispatchCursorSchema.parse(stored) : emptyDispatchCursor(config);
+  if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository');
+  const log: EnvironmentLog = await readEnvironmentLog(config);
+  return Object.keys(log.environments).length || log.skipped.length ? { ...cursor, accounts: { environments: log.environments, skipped: log.skipped } } : cursor;
 }
-/** The loop's own line for a repair, written once per path (see `dispatchEffects`). */
-export const repairLine = (stage: 'loading' | 'persisting', repair: CursorRepair) => `[graphyard-dispatch] repaired the dispatch cursor while ${stage} it: ${repair.path} — ${repair.detail}`;
-export async function readDispatchCursor(root: string, config: MasterConfig, onRepair: RepairListener = repair => console.error(repairLine('loading', repair))): Promise<DispatchCursor> {
-  const file = dispatchCursorPath(config);
-  await assertOutsideWorktrees(root, dirname(file), 'Master dispatch cursor directory');
-  let raw: string;
-  const withAccounts = async (cursor: DispatchCursor): Promise<DispatchCursor> => {
-    const log: EnvironmentLog = await readEnvironmentLog(config);
-    return Object.keys(log.environments).length || log.skipped.length ? { ...cursor, accounts: { environments: log.environments, skipped: log.skipped } } : cursor;
-  };
-  try { raw = await readFile(file, 'utf8'); }
-  catch (error: any) { if (error.code === 'ENOENT') return withAccounts(emptyDispatchCursor(config)); throw error; }
-  const stored = JSON.parse(raw) as { botReviewers?: unknown };
-  // The bot-review wait is retired (GY-3007): a cursor an older loop wrote still loads, its state dropped on read.
-  delete stored?.botReviewers;
-  const cursor = repairDispatchCursor(stored, onRepair);
-  if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository; remove it before running the loop');
-  return withAccounts(cursor);
-}
-export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor, onRepair?: RepairListener) {
-  const file = dispatchCursorPath(config), temporary = `${file}.${randomUUID()}.tmp`;
+export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor) {
   const { accounts: _accounts, ...persisted } = cursor;
-  // The repair truncates the live cursor's own strings (the nested objects are shared), so a
-  // string repaired once is not composed past its cap again by the tick that reads it back.
-  await writeFile(temporary, JSON.stringify(repairDispatchCursor(persisted, onRepair), null, 2), { mode: 0o600, flag: 'wx' });
-  await rename(temporary, file); await chmod(file, 0o600);
+  await (await loopStateClient(config)).write('dispatch', [dispatchCursorSchema.parse(persisted)]);
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** What a tick failure records about state it could not persist, for `master status` and the attention it raises. */
@@ -216,7 +167,7 @@ export interface PersistFailure { field: string | null; kind?: 'review' | 'produ
 /**
  * A persist that failed, attributed. A schema refusal names the path it refused; the request and
  * item that path was composed for come from the cursor (a recorded refusal) or from the tick's
- * own wait list (a tick reason). Anything else — the file, the disk — is the write's own message.
+ * own wait list (a tick reason). Anything else is the storage request's own message.
  */
 export function attributePersistFailure(error: unknown, cursor: DispatchCursor, reasons: Pick<DispatchWait, 'kind' | 'requestId' | 'work'>[]): Error & { persistFailure: PersistFailure } {
   const issue = (error as { issues?: { path: PropertyKey[]; message: string }[] })?.issues?.[0];

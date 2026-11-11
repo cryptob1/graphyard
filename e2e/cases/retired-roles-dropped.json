@@ -1,0 +1,8 @@
+{
+  "id": "retired-roles-dropped",
+  "title": "Four active roles and retired settings removed",
+  "description": "Legacy registry migration, config round trips and ordinary worker blocker delivery to the master preserve audit, independent gates and future settings.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Exercise retired roles and settings", "run": "node --import tsx tests/helpers/run-tests.ts tests/retired-roles-dropped.test.ts", "timeoutSeconds": 180 }]
+}

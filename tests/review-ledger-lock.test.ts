@@ -1,8 +1,8 @@
-import { test } from 'node:test';
+import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
@@ -112,14 +112,13 @@ test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock locatio
       try {
         await onHost(join(readOnlyHome, 'graphyard'), async () => {
           const ledger = await readReviewLedger(root);
-          // The ledger itself unwritable (the whole checkout read-only): the pass still completes, returns the
-          // reconciled records and says they were left unsaved.
+          // A read-only checkout no longer prevents saving a reconciled ledger.
           await updateReviewLedger(root, current => { current.reviews = ledger.reviews.map(record => ({ ...record, state: 'pending', verdict: undefined, closedAt: undefined })); }, { environment: { GRAPHYARD_DATA_HOME: dataHome } });
           await chmod(join(root, '.graphyard'), 0o500);
           try {
             const unsaved = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict() });
             assert.equal(unsaved.reviews[0]!.verdict?.state, 'APPROVED');
-            assert.match((unsaved as { unsaved?: string }).unsaved ?? '', /review ledger .*cannot be written \(EACCES/);
+            assert.equal((await readReviewLedger(root)).reviews[0]!.verdict?.state, 'APPROVED');
           } finally { await chmod(join(root, '.graphyard'), 0o700); }
         });
       } finally { await chmod(readOnlyHome, 0o700); await rm(readOnlyHome, { recursive: true, force: true }); }
@@ -138,7 +137,7 @@ test('unit:review-ledger-lock-writable-root — the ledger lock is taken under t
     assert.equal(held.length, 1);
     assert.match(held[0]!, new RegExp(`^${dataHome}/review-ledger/[0-9a-f]{12}\\.lock$`));
     assert.equal(existsSync(join(root, '.graphyard', 'reviews.json.lock')), false);
-    assert.ok(existsSync(join(root, '.graphyard', 'reviews.json')), 'the ledger is still written in the checkout');
+    assert.equal(existsSync(join(root, '.graphyard', 'reviews.json')), false, 'the ledger lives in Postgres');
     assert.deepEqual(await lockFiles(), [], 'released on completion');
     // Another checkout on the same host keeps its own lock.
     const other = await temporaryDirectory('ledger-lock-other');
@@ -171,6 +170,6 @@ test('unit:review-ledger-lock-writable-root — the ledger lock is taken under t
     await writeFile(lock, `999999999 ${Date.now()}`, { mode: 0o600 });
     assert.equal(await updateReviewLedger(root, () => 'dead broken', { environment, waitMs: 150 }), 'dead broken');
     assert.deepEqual(await lockFiles(), []);
-    assert.equal(await readFile(join(root, '.graphyard', 'reviews.json'), 'utf8').then(text => JSON.parse(text).version), 1);
+    assert.equal((await readReviewLedger(root)).version, 1);
   } finally { await rm(dataHome, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });
