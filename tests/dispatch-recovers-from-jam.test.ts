@@ -110,8 +110,8 @@ test('unit:dispatch-recovers-from-jam — the launcher gate names every ended-se
   const held = health(jamAgents());
   assert.deepEqual(held.map(entry => entry.healthy), profiles.map(() => false), 'no profile can take work while its ended session still holds its name');
   const refusal = `no worker profile can take GY-894: ${held.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ')}`;
-  assert.match(refusal, /^no worker profile can take GY-894: worker-0 \(Herdr agent graphyard-worker-0 is working\)/);
-  for (const entry of profiles) assert.match(refusal, new RegExp(`${entry.name} \\(Herdr agent ${entry.agentName} is working\\)`));
+  assert.match(refusal, /^no worker profile can take GY-894: worker-0 \(graphyard-worker-0 is running a worker\)/);
+  for (const entry of profiles) assert.match(refusal, new RegExp(`${entry.name} \\(${entry.agentName} is running a worker\\)`));
 
   // The recovery: the same gate, once the ended sessions' names have left Herdr.
   const freed = health([]);

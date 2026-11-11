@@ -3,7 +3,7 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 ## Tests
 
 - `tests/dispatch-collision.test.ts`, `tests/dispatch-overlap.test.ts`: dispatch.
-- `tests/headless-workers.test.ts`: headless worker runs per runtime kind, same-dispatch limit handoff, run logs; `e2e:headless-workers`.
+- `tests/headless-workers.test.ts`: headless workers, limit handoff, run logs.
 - `tests/launch-prompt-delivery.test.ts`, `tests/project-memory.test.ts`: session requests.
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
 - `tests/reviewer-session-release.test.ts`, `tests/review-verdict.test.ts`: control-plane review launch/settlement without App credentials.
@@ -17,12 +17,12 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads loop state; tests inject preparers, probes and a headless exec (`tests/helpers/headless-runs.ts`), never panes. `master restart` uses `systemctl --user restart` for the install unit (ExecStart: `master run`) when up, stopping or restart-queued; never a second loop.
+`node bin/graphyard.mjs master status` reads loop state; tests inject preparers, probes and `tests/helpers/headless-runs.ts`. `master restart` uses `systemctl --user restart` for the install unit (ExecStart: `master run`) when up, stopping or restart-queued; never a second loop.
 
 ## Invariants
 
 - Session requests are the first message on the runtime's command line, never pasted.
-- A failed launch releases its claim; a worker's run log and record outlive its run.
+- A failed launch releases its claim; run logs outlive runs.
 - Prompts are pure functions: inputs adding nothing leave requests byte-identical.
 - Workers never receive trusted evidence-producer credentials.
 - Control-plane rework appends BLOCKING findings (else body), bounded by `reworkBriefMax`.
