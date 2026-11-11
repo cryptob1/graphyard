@@ -59,14 +59,14 @@ test('unit:fresh-worktree-settings-warning — the launcher names Claude Code\'s
   // the rules named, and no key is sent into the dialog.
   for (const status of ['blocked', 'idle']) {
     const blocked = pane(warningScreen, status);
-    await assert.rejects(awaitRuntimeStart('w1V:p27J', 'claude', 'GY=/w/t; claude', blocked.run, { ...blocked.bounds, holdConsent: true }),
+    await assert.rejects(awaitRuntimeStart('w1V:p27J', 'claude', 'GY=/w/t; claude', blocked.run, blocked.bounds),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'blocked' && /settings warning/.test(error.message) && /Bash\(git push \* :\*\*\)/.test(error.message), status);
     assert.equal(blocked.calls.some(call => call[1] === 'send-keys'), false, status);
   }
   const directory = await temporaryDirectory('settings-warning');
   try {
     const launched = pane(warningScreen, 'blocked');
-    await assert.rejects(startAgentSession('graphyard-claude-1', 'claude', 'w1V:p27J', ['--permission-mode', 'bypassPermissions'], 'Implement GY-159', launched.run, { directory, ...launched.bounds, holdConsent: true }),
+    await assert.rejects(startAgentSession('graphyard-claude-1', 'claude', 'w1V:p27J', ['--permission-mode', 'bypassPermissions'], 'Implement GY-159', launched.run, { directory, ...launched.bounds }),
       (error: unknown) => error instanceof SessionStartError && error.startCase === 'blocked');
     assert.equal(launched.calls.some(call => call[1] === 'send-keys'), false);
   } finally { await rm(directory, { recursive: true, force: true }); }

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import { readProfileLaunchRecords } from '../src/master/dispatch.js';
 import type { FleetClient } from '../src/fleet.js';
-import { expandTypedCommand } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { sensitiveRules } from '../src/model-boundary/risk-class.js';
@@ -104,25 +104,6 @@ test('unit:worker-preference-by-risk — every sensitive rule has a surface that
   assert.ok(!entrySensitive('docs/Dockerfile'), 'the rules are anchored at the repository root');
 });
 
-/** A Herdr world on which every runtime comes up: the pane shows the runtime ready and the agent is found. */
-function world() {
-  const kinds: string[] = [];
-  let now = Date.now();
-  const json = (result: unknown) => JSON.stringify({ result });
-  return { kinds, bounds: () => ({ clock: () => now, wait: (ms: number) => { now += ms; } }), run: (_command: string, args: string[]): string => {
-    if (args[0] === 'tab' && args[1] === 'create') return json({ root_pane: { pane_id: 'w1V:pP1', tab_id: 'w1V:tP1' } });
-    if (args[0] === 'pane' && args[1] === 'run') { kinds.push(expandTypedCommand(args[3]).kind); return ''; }
-    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
-    const kind = kinds.at(-1);
-    if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [{ argv: [kind] }] } });
-    if (args[0] === 'pane' && args[1] === 'read') return `${kind === 'claude' ? 'Claude Code' : kind} ready\n`;
-    if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } });
-    if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, name: args[3] } });
-    return json({});
-  } };
-}
-
 test('unit:dispatch-hands-planned-files — a real dispatch hands the item to the preference, so the paths it names decide: a normal change in the high lane goes to Pi and a sensitive change in the low lane to a strong account, and the selection record names the preference it used', async () => {
   const holder = await temporaryDirectory('preference-dispatch'), root = join(holder, 'repository'), credentials = join(holder, 'credentials');
   await mkdir(root); await mkdir(credentials, { mode: 0o700 });
@@ -165,10 +146,10 @@ test('unit:dispatch-hands-planned-files — a real dispatch hands the item to th
     };
     let claims = 0;
     const prepare = async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) });
-    const herdr = world();
-    const dispatched = await dispatchWork(root, work, profile, [], herdr.run, [work], prepare, async () => {}, 5_000, at, { start: herdr.bounds(), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
+    const runs = recordedRuns();
+    const dispatched = await dispatchWork(root, work, profile, { allWork: [work], prepare, release: async () => {}, observedAt: at, headless: runs.exec, probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
     const record = (await readProfileLaunchRecords(root, [profile]))[profile.name];
-    return { dispatched, kinds: herdr.kinds, requests, record };
+    return { dispatched, kinds: runs.kinds(), requests, record };
   };
 
   // A high-lane item whose named files are all normal: the preference the dispatch hands the registry is fast, and Pi takes it.
