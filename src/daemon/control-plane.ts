@@ -1,6 +1,6 @@
-// Concern: GY-3199, GY-3233 — the control plane's own faults, as the loop sees them. The deploy
+// Concern: GY-3199, GY-3233, GY-3249 — the control plane's own faults, as the loop sees them. The deploy
 // watch keeps .graphyard/control-plane.json; this step reads it each cycle, and the cycle hands it
-// the steps that ran past their timeout. A fault belongs to Graphyard, not to the managed
+// the steps that ran past their timeout; the merge writer hands it trial-host faults. A fault belongs to Graphyard, not to the managed
 // repository: it is filed once to the configured upstream install (`upstream` in master.json),
 // into this install only when it manages Graphyard itself, and otherwise raised as one attention
 // line — never filed again per cycle. Once a day it reports the staleness the record shows.
@@ -44,7 +44,19 @@ export function stepStallItem(step: string, repository: string) {
     reason: 'Filed by the master loop from a stalled cycle step (GY-3233)',
   };
 }
-export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem>;
+/** GY-3249: the bug item a merge trial that cannot fetch from an external host files upstream: one per host. */
+export function trialHostFaultItem(host: string, repository: string) {
+  return {
+    title: `Merge trials cannot fetch from ${host}`.slice(0, 200),
+    type: 'bug' as const,
+    priority: 1,
+    description: `A merge trial on the install for ${repository} failed fetching from ${host}, rerun included, so the trial host's network does not reach a host a normal build needs. The head was neither refused nor reworked and stays queued; the trial record carries the step's output. Find why the trial container cannot reach ${host} and fix it.`,
+    dependencies: [],
+    criteria: [{ id: 'AC-1', text: `A merge trial's build fetches from ${host}; a new test pins the cause and fails without the fix`, proofs: ['unit:trial-host-reachable'] }],
+    reason: 'Filed by the master loop from a trial-host fault (GY-3249)',
+  };
+}
+export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem> | ReturnType<typeof trialHostFaultItem>;
 
 /** Production upstream filer: POSTs the item to the upstream install as its credential's principal, idempotent on the fault's key. */
 export function upstreamFiler(upstream: NonNullable<MasterConfig['upstream']>, fetcher: typeof fetch = fetch) {
@@ -77,6 +89,10 @@ async function reportFault(cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'l
     note('done', `Filed ${filed?.key ?? 'an item'}${upstream ? ' to the upstream install' : ''}: ${fault}`);
   } catch (error) { note('failed', `Graphyard fault: ${fault}. Could not file it${upstream ? ' to the upstream install' : ''}: ${message(error)}`); }
 }
+
+/** GY-3249: a merge trial that could not fetch from `host` is reported once per host, like any Graphyard fault. */
+export const reportTrialHostFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>, host: string) =>
+  reportFault(cycle, `trial-host-fault:${host}`, trialHostFaultItem(host, cycle.config.repository), `merge trials cannot fetch from ${host}, a host a normal build needs`);
 
 /**
  * The control plane's own faults, read beside the cycle: a stuck upgrade from the record, the

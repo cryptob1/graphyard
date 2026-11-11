@@ -1,0 +1,14 @@
+{
+  "id": "trial-network-fault-not-red",
+  "title": "A merge trial step that fails fetching from an external host is a trial-host fault reported upstream, not a red head",
+  "description": "A fixture head whose build fetches from an unresolvable host goes through the real merge writer and control plane: the build step reruns once, then the trial records a trial-host fault naming the host, the head is neither refused nor reworked, and for a non-Graphyard install the fault is filed once to the upstream install, or raised as one attention line, never into the managed repository.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "A network fetch failure reruns once, then is a trial-host fault reported upstream",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-network-fault-not-red.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

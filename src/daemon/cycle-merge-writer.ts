@@ -12,7 +12,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost } from '../merge-writer/trial.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
@@ -25,6 +25,7 @@ import { graphyardVerifiedRef } from '../release.js';
 import { publishVerified, type PublishOutcome } from '../publish-verified.js';
 import { installDirectory } from '../install/secrets.js';
 import { message, storeAction, type DaemonState } from './state.js';
+import { reportTrialHostFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
 
@@ -854,6 +855,10 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads' trials passed (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head yields its turn and is tried after every other queued head`);
+          } else if (trialHostFaultHost(error)) {
+            // GY-3249: the trial host could not reach a host the build needs: no verdict on the head, reported upstream once per host.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            await reportTrialHostFault(cycle, trialHostFaultHost(error)!);
           } else if (error instanceof TrialCancelledError) action('failed', `Merge of ${itemKey} head ${head} stopped: its trial was cancelled because ${error.reason}; the head is not refused to rework and, while it is still queued, is trialled again on the current base`);
           else action('failed', keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
             : `Merge of ${itemKey} head ${head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);

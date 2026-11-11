@@ -93,7 +93,7 @@ test('e2e:control-plane-fault-upstream — without upstream, each fault raises o
 });
 
 test('e2e:control-plane-fault-upstream — the master prompt and guide master state the upstream rule', () => {
-  assert.match(masterPrompt(config()), /A Graphyard fault .* goes upstream: the loop files it to master\.json's upstream or raises it in master status; never file or work around it in owner\/game\./);
+  assert.match(masterPrompt(config()), /A Graphyard fault .* goes to master\.json's upstream or master status; never file it in owner\/game or change owner\/game to work around it\./);
   assert.doesNotMatch(masterPrompt({ ...config(), repository: 'cryptob1/graphyard' }), /A Graphyard fault/, 'Graphyard\'s own install manages the repository its faults belong to');
   assert.match(guideTopics.master, /A Graphyard fault .* files it once to the upstream install .*never file it as work in the managed repository/);
 });
