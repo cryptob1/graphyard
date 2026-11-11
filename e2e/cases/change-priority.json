@@ -1,0 +1,12 @@
+{
+  "id": "change-priority",
+  "title": "The owner changes priority from a work row and item page",
+  "description": "A signed-in operator changes P3 to P0 on the served row and changes it again on the item page, with synchronized values and attributed audit reasons. Existing P4 is retained. Authenticated operator, maintainer and master calls succeed; worker and viewer calls fail. The next one-worker dispatch selects the later-created promoted item without changing gates or forcing a claim.",
+  "tags": ["dashboard", "priority"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "authenticated priority changes and next dispatch", "run": "node --import tsx tests/helpers/run-tests.ts tests/change-priority.test.ts", "timeoutSeconds": 240 },
+    { "kind": "command", "name": "change priority from both dashboard controls", "run": "npm run test:browser -- browser-tests/change-priority.spec.ts", "timeoutSeconds": 240 }
+  ]
+}

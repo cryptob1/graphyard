@@ -281,7 +281,7 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   // The home page keeps search and a way to every shipped item; the board view and the timings toggle
   // were removed by GY-161 (every moving row carries its time, and the groups replace the columns).
   const page = home();
-  for (const control of ['aria-label="Search work"', 'See what shipped']) assert.ok(page.includes(control), control);
+  for (const control of ['aria-label="Search work"', 'Shipped →']) assert.ok(page.includes(control), control);
   const shipped = markup(createElement(ShippedPage, dashboard()));
   for (const key of ['GY-18', 'GY-19', 'GY-9']) assert.ok(shipped.includes(key), key);
   // Every page in the registry stays reachable for an admin while its feature is unknown or configured.

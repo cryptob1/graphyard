@@ -4,6 +4,11 @@ import { defineCommands, workMutation } from './registry.js';
 /** Operator decisions about one work item: requirements, release, unblock and rework. */
 export const policyCommands = defineCommands([
   {
+    name: 'priority', scope: 'work',
+    help: ['  priority GY-N 0|1|2|3 REASON  Change priority with an audit reason'],
+    run: async (context, work) => context.print(await workMutation(context, work)('priority', { priority: Number(context.args[0]), reason: context.args.slice(1).join(' ') })),
+  },
+  {
     name: 'requirements',
     scope: 'work',
     help: [

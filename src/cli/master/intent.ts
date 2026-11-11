@@ -34,6 +34,10 @@ export async function derivedIntent(id: 'create' | 'requirements', args: string[
 /** The master's own intent, applied at once with its operator-agent identity. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation } = session;
+  if (id === 'priority') {
+    if (!args[0] || !/^[0-3]$/.test(args[1] ?? '') || !args.slice(2).join(' ').trim()) throw new Error('Use master priority GY-N 0|1|2|3 REASON');
+    return print(await masterMutation(`work/${encodeURIComponent(args[0])}/priority`, { priority: Number(args[1]), reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
+  }
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, forPerson: master.forPerson, token: () => agentToken(root, master, 'operatorAgent') }));
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);
