@@ -1,10 +1,11 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig } from '../src/master.js';
-import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, vanishedSettledSession } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, reviewIdleGraceMs, vanishedSettledSession } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';

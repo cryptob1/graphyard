@@ -1,3 +1,4 @@
+import { launchReview } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -10,7 +11,7 @@ import { runDispatchTick } from '../src/dispatch/tick.js';
 import { unknownParent } from '../src/dispatch/post-merge.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { owedPostMergeReviews, postMergeRequestId, postMergeRefusalProbeMs } from '../src/model/post-merge-review.js';
-import { launchReview, readReviewLedger, reviewerCredentialDirectory, saveReviewerProfile } from '../src/reviewer.js';
+import { readReviewLedger, reviewerCredentialDirectory, saveReviewerProfile } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

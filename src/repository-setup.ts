@@ -93,7 +93,7 @@ Never weaken requirements, and never use an operator/producer token for
 implementation or proof. Act without asking, and record blockers with the CLI.
 Submit with \`complete GY-N EPOCH --head SHA\`; make \`complete\` your last action.
 For any procedure, run \`node $GRAPHYARD_CLI guide TOPIC\`
-(topics: claim, sync, complete, park, blocked, review, proof, upgrade, master, setup, publishing).
+(topics: claim, sync, complete, park, blocked, review, proof, upgrade, master, setup, publishing, runtimes).
 ${end}`;
   return starts ? existing.slice(0, existing.indexOf(start)) + section + existing.slice(existing.indexOf(end) + end.length) : `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}\n${section}\n`;
 }

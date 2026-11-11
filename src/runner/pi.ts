@@ -167,7 +167,8 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /**
  * The detached launch: a shell that leads the run's session, runs Pi with its output in the run's
  * directory, and records Pi's exit there — `spawn` when the command cannot be found. The shell
- * handles TERM, INT and HUP so that a stop sent to the run's group still records Pi's exit. The
+ * never interpolates configured argv into shell code: the executable and arguments are positional
+ * parameters, invoked literally through "$0" "$@" without a PTY. It handles TERM, INT and HUP so that a stop sent to the run's group still records Pi's exit. The
  * `confinement` words wrap Pi alone, never the shell: the run's directory lies under the
  * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */

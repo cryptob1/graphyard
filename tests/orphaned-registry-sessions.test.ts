@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview, pendingHeadless } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -11,7 +12,7 @@ import { chooseSession, emptyRegistry, proposedRuntimes, type FleetSession } fro
 import { exactApproval } from '../src/model/review.js';
 import type { FleetClient } from '../src/fleet.js';
 import { loadMasterConfig, masterConfigSchema, workerProfileSchema, type MasterConfig } from '../src/master.js';
-import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
@@ -326,7 +327,7 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
       }
       return host.run(command, args);
     };
-    const real = daemonEffects(host.root, config, { snapshot, run, mutate: async () => ({}) });
+    const real = daemonEffects(host.root, config, { snapshot, run, headless: pendingHeadless, mutate: async () => ({}) });
     const state = emptyDaemonState(config);
     state.cycle = postMerge ? 2175 : 2183;
     const cycle = async () => {

@@ -1,3 +1,6 @@
+import type { HeadlessExec } from '../src/headless-session.js';
+import { clearRuns } from '../src/runner/registry.js';
+import { launchReview } from './helpers/pending-review.js';
 import { after, before } from 'node:test';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
@@ -13,7 +16,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
-import { launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick, type DispatchTick } from '../src/dispatch/tick.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
@@ -69,8 +72,14 @@ async function reviewerMaster() {
     if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${++panes}`; log.tabs.push(pane); return JSON.stringify({ result: { root_pane: { pane_id: pane, tab_id: `tab-${panes}` } } }); }
     return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
+  const headless: HeadlessExec = (_command, _args, options) => {
+    const entry = { pane: options.run, recorded: [] as ReviewRecord[] };
+    log.tabs.push(options.run); log.started.push(entry);
+    void readReviewLedger(root).then(ledger => { entry.recorded = ledger.reviews; });
+    return new Promise(() => {});
+  };
   const registerLaunch = async () => ({ launch: 'fixture-launch' });
-  return { root, credentials, run, registerLaunch, log, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
+  return { root, credentials, run, headless, registerLaunch, log, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 
 type Launcher = 'cycle' | 'dispatcher';
@@ -97,6 +106,7 @@ function deferred<T = void>() { let resolve!: (value: T) => void; const promise 
  */
 async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (typeof interleavings)[number]) {
   await updateReviewLedger(master.root, current => { current.reviews = []; });
+  clearRuns();
   master.log.tabs.length = 0; master.log.started.length = 0;
   // Both ticks launch their configured reviewer profile; the dispatcher's is wired to the second
   // one, as the incident's two sessions ran two runtimes.
@@ -117,7 +127,7 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // launcher there keeps its record `launching` while the second one is let in.
   const registerLaunch = (who: Launcher) => async () => { minting[who].resolve(); if (order.at === 'launching' && order.first === who) await settled[other(who)].promise; return master.registerLaunch(); };
   const launch = (who: Launcher, profile: string) => (work: Work, dispatch: { id: string }, herdr: { name?: string }[], observedAt: string) => door[who].promise
-    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, probe: fleet, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
+    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, headless: master.headless, probe: fleet, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
     .then(result => { outcomes[who] = { launched: true }; settled[who].resolve(); return result; }, error => { outcomes[who] = { launched: false, error: error.message }; settled[who].resolve(); throw error; });
   // A dispatch tick, launching through the real launcher with WHO's profile.
   const effects = (who: Launcher): DispatchEffects => ({
@@ -147,7 +157,7 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
   assert.equal(tick.status, 'fulfilled', seen);
   // Neither tick fails for the race: it launched, or it stood down for the session that did.
   assert.equal(dispatched.status, 'fulfilled', `${seen} ${dispatched.status === 'rejected' ? (dispatched.reason as Error).message : ''}`);
-  assert.equal(master.log.tabs.length, 1, `one Herdr tab for one request, got ${master.log.tabs.length} — ${seen}`);
+  assert.equal(master.log.tabs.length, 1, `one headless run for one request, got ${master.log.tabs.length} — ${seen}`);
   assert.equal(master.log.started.length, 1, `one runtime started — ${seen}`);
   const launched = (['cycle', 'dispatcher'] as const).filter(who => outcomes[who]?.launched);
   assert.equal(launched.length, 1, `one launcher launched — ${seen}`);
@@ -160,7 +170,7 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
   const ledger = await readReviewLedger(master.root);
   assert.equal(ledger.reviews.length, 1, `one record for one session — ${seen}`);
   const [record] = ledger.reviews;
-  assert.deepEqual([record.requestId, record.state, record.pane, record.launching, record.attempt], [request.id, 'pending', master.log.tabs[0], undefined, 1], seen);
+  assert.deepEqual([record.requestId, record.state, record.pane, record.launching, record.attempt], [request.id, 'pending', null, undefined, 1], seen);
   assert.equal(record.profile, winner === 'cycle' ? 'claude-reviewer' : 'second-reviewer', seen);
   // Each tick reports what it did: the winner's its launch, the other's none.
   const ticks = { cycle: (tick as PromiseFulfilledResult<DispatchTick>).value, dispatcher: (dispatched as PromiseFulfilledResult<DispatchTick>).value };
@@ -184,19 +194,19 @@ test('unit:one-reviewer-per-request — the cycle step and the dispatcher launch
     const { item, request, agents } = last;
 
     // `master review`, the third launcher, is refused for the same request while the session is pending.
-    await assert.rejects(reviewCommand(master.root, ['GY-114', 'second-reviewer'], { work: [item], now: new Date().toISOString() }, agents, { run: master.run, registerLaunch: master.registerLaunch }), /already pending on c1fffff/);
+    await assert.rejects(reviewCommand(master.root, ['GY-114', 'second-reviewer'], { work: [item], now: new Date().toISOString() }, agents, { run: master.run, headless: master.headless, registerLaunch: master.registerLaunch }), /already pending on c1fffff/);
     assert.equal(master.log.tabs.length, 1);
 
     // A Herdr session serving the request refuses a launch even when the ledger has no pending
     // record for it — here the settled record whose pane Herdr could not close.
     await updateReviewLedger(master.root, current => { current.reviews = current.reviews.map(entry => ({ ...entry, state: 'failed' as const, closeFailure: 'Herdr could not close pane' })); });
-    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: record.agentName }], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: request.id }),
+    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: record.agentName }], new Date().toISOString(), { run: master.run, headless: master.headless, registerLaunch: master.registerLaunch, requestId: request.id }),
       new RegExp(`Reviewer session ${record.agentName} is already visible in Herdr for GY-114 review request ${request.id}`));
     // So does a session a multi-session profile named for the request, with no record at all.
     await updateReviewLedger(master.root, current => { current.reviews = []; });
     await saveReviewerProfile(master.root, { name: 'many-reviewer', agentName: 'review-many', kind: 'claude', concurrency: 3 });
     const derived = sessionAgentName({ agentName: 'review-many', concurrency: 3 }, { id: request.id, requestId: request.id, attempt: 2 });
-    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: derived }], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: request.id }),
+    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: derived }], new Date().toISOString(), { run: master.run, headless: master.headless, registerLaunch: master.registerLaunch, requestId: request.id }),
       new RegExp(`Reviewer session ${derived} is already visible in Herdr`));
     assert.equal(master.log.tabs.length, 1, 'no refused launch created a tab');
 

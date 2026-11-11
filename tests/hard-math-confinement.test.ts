@@ -141,12 +141,16 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
     throw new Error(`Unexpected fixture HTTP request: ${url}`);
   });
   const typed: string[] = [];
-  let reviewDirectory = '';
   let readinessPolls = 0;
+  // The headless reviewer's model call: the real confined argv probes the boundary, then holds.
+  let reviewLaunch: { command: string; args: string[]; cwd: string } | null = null;
+  const headless: import('../src/headless-session.js').HeadlessExec = (command, args, options) => {
+    reviewLaunch = { command, args, cwd: options.cwd };
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('fixture review stopped')), { once: true }));
+  };
   const run = (command: string, args: string[]) => {
     if (command !== 'herdr') return execFileSync(command, args, { encoding: 'utf8' });
     if (args[0] === 'tab' && args[1] === 'create') {
-      reviewDirectory = args.find(word => word.startsWith('GH_CONFIG_DIR='))?.slice('GH_CONFIG_DIR='.length) ?? reviewDirectory;
       return JSON.stringify({ result: { root_pane: { pane_id: 'fixture-pane', tab_id: 'fixture-tab' } } });
     }
     if (args[0] === 'pane' && args[1] === 'run') {
@@ -171,7 +175,7 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
     return startedAtOnce(args) ?? JSON.stringify({ result: {} });
   };
   const snapshot = () => Promise.resolve({ work: [item], now: new Date().toISOString() });
-  const effects = daemonEffects(root, config, { coordinatorRoot: root, snapshot, run, mutate: async () => ({}) });
+  const effects = daemonEffects(root, config, { coordinatorRoot: root, snapshot, run, headless, mutate: async () => ({}) });
   const argv1 = process.argv[1];
   process.argv[1] = resolve('benchmarks/hard-math/runner.ts');
   try {
@@ -188,16 +192,20 @@ else throw new Error('Unexpected fixture CLI call: ' + command);
       Object.assign(review.autoDispatch!.review!, { sha: head, baseSha: head });
       const tick = await effects.dispatchTick!({ work: [review], now: new Date().toISOString() }) as import('../src/dispatch/tick.js').DispatchTick;
       assert.equal(tick.launched.length, 1, JSON.stringify(tick));
-      assert.ok(readinessPolls >= 2, 'review readiness must wait for pi after the wrapper');
-      const binding = join(reviewDirectory, 'review-binding.json');
+      const record = (await readReviewLedger(root)).reviews[0];
+      assert.equal(record.state, 'pending');
+      assert.equal(record.pane, null, 'reviews run headless, never in a Herdr pane');
+      const binding = join(record.sessionDirectory, 'review-binding.json');
       assert.ok(JSON.parse(await readFile(binding, 'utf8')).verdictToken);
-      assert.equal((await readReviewLedger(root)).reviews[0].state, 'pending');
-      probe(typed.at(-1)!, binding, [worker, producer, config.credentialFile, oracleFile, sourceCredential]);
+      // The launcher posts the answer: the child reads its checkout but no role credential.
+      const launched = reviewLaunch as { command: string; args: string[]; cwd: string } | null;
+      assert.ok(launched, 'the review started a headless child');
+      probe([launched.command, ...launched.args], launched.cwd, [worker, producer, config.credentialFile, oracleFile, sourceCredential]);
     });
   } finally { process.argv[1] = argv1; }
 
-  function probe(command: string, own: string, hidden: string[]) {
-    const words = expandTypedCommand(command).words;
+  function probe(command: string | string[], own: string, hidden: string[]) {
+    const words = typeof command === 'string' ? expandTypedCommand(command).words : command;
     const start = words.findIndex(word => word.endsWith('/bwrap') || word === 'bwrap');
     assert.ok(start >= 0, 'actual dispatch must carry confinement with non-CLI argv');
     const end = words.indexOf('--', start);

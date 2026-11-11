@@ -35,6 +35,10 @@ export const checkoutGitDirectory = (root: string): string => {
 export const checkoutGitProblem = (root: string): string | null => { const resolved = resolveCheckoutGitDirectory(root); return 'problem' in resolved ? resolved.problem : null; };
 const resolveCheckoutGitDirectory = (root: string): { directory: string } | { problem: string } => {
   const checkout = resolve(root), gitPath = join(checkout, '.git');
+  // A checkout that is not a directory can never name a Git directory: refusing it here, before any
+  // host namespace probe, keeps the refusal deterministic on every host — a launch around a missing
+  // checkout is a configuration refusal, never a spawn whose confinement fails after the fact.
+  if (!isDirectoryPath(checkout)) return { problem: `its checkout at ${checkout} does not exist, so it is not a git repository` };
   try { if (statSync(gitPath).isDirectory()) return { directory: gitPath }; } catch { return { directory: gitPath }; }
   const admin = gitPointerAdminDirectory(checkout);
   if (!admin) return { problem: `its .git at ${gitPath} is a file but not a readable "gitdir: <path>" pointer` };

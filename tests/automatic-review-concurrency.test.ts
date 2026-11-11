@@ -1,10 +1,11 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { chmod, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, sessionAgentName, withReviewerDefaults } from '../src/master.js';
-import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
+import { heldNameAttention, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { selectReviewerProfile } from '../src/dispatch/launch-failover.js';

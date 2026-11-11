@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,7 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
-import { launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
+import { readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, verdictIngestGraceMs } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';

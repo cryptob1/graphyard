@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './pending-review.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../../src/model.js';
 import { reconcileAutoDispatch } from '../../src/model-boundary/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
-import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
+import { reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/dispatch/effects.js';
 import { startedAtOnce } from './launch-shell.js';
 import { temporaryDirectory } from './temp-dirs.js';

@@ -1,3 +1,4 @@
+import { launchReview } from './helpers/pending-review.js';
 import { after, before } from 'node:test';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
@@ -17,7 +18,7 @@ import { ledgerTables } from '../src/store/schema.js';
 import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { saveReviewerProfile } from '../src/reviewer.js';
 import { atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';

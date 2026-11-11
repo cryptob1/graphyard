@@ -1,3 +1,4 @@
+import { pendingHeadless } from './helpers/pending-review.js';
 import { after, before } from 'node:test';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
@@ -13,7 +14,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { reviewBindingFile, type ReviewPostBinding } from '../src/review-post.js';
-import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { setupMaster } from '../src/master.js';
 import { WorkerSandboxError } from '../src/worker-sandbox.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
@@ -68,7 +69,7 @@ test(`e2e:codex-reviewer-git-write — ${layout}: a codex reviewer launched for 
 
     const probed: string[][] = [], calls: string[][] = [];
     const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
-    await launchReview(root, work, 'reviewer-codex', [], now, { probe: registryFixture(hostname(), ['codex'], ['reviewer']).probe, run: herdr, headless: null,
+    await launchReview(root, work, 'reviewer-codex', [], now, { probe: registryFixture(hostname(), ['codex'], ['reviewer']).probe, run: herdr, headless: pendingHeadless,
       // The probe runs for real behind the coordinator confinement; only the codex binary, absent here, is left out of it (it runs unsandboxed inside that boundary).
       sandbox: (command, args, options) => {
         assert.match(command, /bwrap$/, 'the reviewer probe runs behind the served repository\'s confinement');
@@ -82,8 +83,9 @@ test(`e2e:codex-reviewer-git-write — ${layout}: a codex reviewer launched for 
     assert.ok(probed[0].includes(join(repo, '.git')), 'the served repository\'s .git is a probed, writable path');
 
     // The session it started posts its verdict with its own launch token, and the control plane records it.
-    const tab = calls.find(args => args[0] === 'tab' && args[1] === 'create')!;
-    const binding = JSON.parse(await readFile(join(tab.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
+    assert.equal(calls.some(args => args[0] === 'tab'), false);
+    const record = (await readReviewLedger(root)).reviews.find(record => record.key === work.key)!;
+    const binding = JSON.parse(await readFile(join(record.sessionDirectory, reviewBindingFile), 'utf8')) as ReviewPostBinding;
     const response = await fetch(`${url}/api/work/${work.id}/review-verdict`, { method: 'POST', headers: { Authorization: `Bearer ${binding.verdictToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
       body: JSON.stringify({ event: 'APPROVE', body: 'AC-1 met.\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none', sha: head, token: binding.verdictToken }) });
     assert.equal(response.status, 200, await response.text());

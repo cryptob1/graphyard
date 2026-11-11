@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { after, before } from 'node:test';
 import { test } from './helpers/loop-state.js';
@@ -16,7 +17,7 @@ import { isProfileSession, loadMasterConfig, reviewerProfileSchema, sessionAgent
 import type { FleetClient } from '../src/fleet.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, launchGraceMs, liveSessions, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
-import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';

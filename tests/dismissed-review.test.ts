@@ -1,3 +1,4 @@
+import { pendingHeadless } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -138,7 +139,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     // `master review GY-84 claude-reviewer` answers that same request as its next attempt, rather
     // than recording a session the control plane's request knows nothing about.
     assert.equal(liveReviewRequest(item)!.id, request.id);
-    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { run, registerLaunch, probe: reviewerProbe(config.hostId) });
+    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { headless: pendingHeadless, run, registerLaunch, probe: reviewerProbe(config.hostId) });
     assert.equal(forced.requestId, request.id);
     const ledger = (await readReviewLedger(root)).reviews;
     assert.equal(ledger.length, sessionRetryLimit + 1, 'every earlier session is retained in the ledger');
@@ -151,7 +152,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     assert.equal(liveReviewRequest(work()), null);
     // `master review` is exactly this command, on the snapshot it reads, and it refuses the same way it always did.
     const cli = await readFile(new URL('../src/cli/master/fleet.ts', import.meta.url), 'utf8');
-    assert.match(cli, /if \(id === 'review'\) \{\n\s+const snapshot = await masterApi\('work-snapshot'\);\n\s+return print\(await reviewCommand\(root, args, snapshot, await listHerdrAgents\(\)\)\);/);
+    assert.match(cli, /if \(id === 'review'\) \{\n\s+const snapshot = await masterApi\('work-snapshot'\);\n\s+return print\(await reviewCommand\(root, args, snapshot, sessionAgents\(headlessInventory\(\)\)\)\);/);
     await assert.rejects(reviewCommand(root, [], { work: [item], now: new Date().toISOString() }, []), /Use master review GY-N/);
     await assert.rejects(reviewCommand(root, ['GY-9999'], { work: [item], now: new Date().toISOString() }, []), /Unknown work item GY-9999/);
   } finally { await cleanup(); }

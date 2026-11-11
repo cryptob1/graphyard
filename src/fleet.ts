@@ -204,7 +204,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
     const observation = observations.find(entry => entry.account === account.name);
-    if (!runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
+    if (role === 'reviewer' || !runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
     // Concurrent launches that read the registry before the first result is folded share one smoke

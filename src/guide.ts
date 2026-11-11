@@ -6,7 +6,7 @@
 
 /**
  * One topic per procedure, in the order the AGENTS.md block lists them: the agent
- * procedures first, then the two human-facing topics (setup, publishing) the README
+ * procedures first, then the human-facing topics (setup, publishing, runtimes) the README
  * landing page summarizes. The text is the moved procedure — from the block the
  * AGENTS.md renderer used to write, from the brief sentences that restated it, and
  * from the README sections GY-3262 folded into guides — never new prose.
@@ -66,6 +66,11 @@ One-time owner setup:
 1. From your npm login, publish a \`@cryptob1/graphyard\` placeholder \`0.0.0\` with \`npm publish --access public\`.
 2. In npm package settings, add a **Trusted Publisher**: GitHub Actions, **cryptob1/graphyard**, workflow **publish.yml**.
 3. In each GHCR package (**graphyard**, **graphyard-trial**), grant **cryptob1/graphyard** Actions write access.`,
+  runtimes: `Reviews run headlessly on the host master loop, under the account's home, tool policy and confinement. Claude, Codex, Cursor, Pi, OpenCode and Muse have built-in one-task forms; other runtimes need \`launch.headlessArgs\` (\`graphyard master registry runtime set NAME --headless-arg=ARG … --reason REASON\`). It replaces \`launch.args\`, holds exactly one \`{request}\`, and must exit after one answer; arguments pass literally, without a shell. A runtime without one is refused and the next account is tried:
+
+\`\`\`json
+{"name":"custom","launch":{"kind":"kilo","headlessArgs":["ONE_TASK_SUBCOMMAND","--prompt","{request}"]}}
+\`\`\``,
 } as const;
 
 export type GuideTopic = keyof typeof guideTopics;

@@ -347,7 +347,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     // A normal-risk control-plane head merges on its trial (model/gates.ts, GY-1525): its review comes after the merge.
     if (reviewedAfterMerge(item)) wait('review', item, review, postMergeWaitReason);
     else if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
-    else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
@@ -398,7 +397,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   /** The product reviewer's launch: the same session machinery as a code review, with the product prompt and a product launch registration. */
   const dispatchProductReview = async (item: Work, request: DispatchRequest) => {
     if (!session('review', item, request, reviews)) { /* settled, or waiting to relaunch */ }
-    else if (!herdr) wait('review', item, request, 'Herdr session inventory is unavailable');
     // The review ledger starts one session per head: a code review still under way on this head is
     // answered first, and the product review launches once it settles — its verdict, or the rework
     // that replaces the head, settles this request beside it. There is no other wait: the trial a
@@ -523,7 +521,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     for (const item of owed) {
       const request = postMergeRequest(item);
       if (!session('review', item, request, reviews)) continue;
-      if (!herdr) { wait('review', item, request, 'Herdr session inventory is unavailable'); continue; }
       if (spent('review')) { wait('review', item, request, capacityWait('review')); continue; }
       // A post-merge request the attempt limit stranded is probed again one hour after its last
       // refusal (GY-2075): nothing else recovers it — the item is delivered, so no pre-merge

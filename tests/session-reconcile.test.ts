@@ -1,3 +1,4 @@
+import { launchLegacyReview as launchReview } from './helpers/pending-review.js';
 import { test } from './helpers/loop-state.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -6,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, reconcileProducers, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
 import { paneAlreadyGone } from '../src/request-settlement.js';
 import type { Observation, Work } from '../src/model.js';

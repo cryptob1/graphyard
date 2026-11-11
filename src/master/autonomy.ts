@@ -1,3 +1,4 @@
+import { insideMasterConfinement } from './confinement.js';
 // Concern: the master's own identity and its commands — onboarding it, and applying intent with it at once.
 import { randomUUID, randomBytes } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
@@ -110,6 +111,11 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
 export async function registeredReview<T>(config: MasterConfig, args: string[], snapshot: { work: Work[] }, mutate: (path: string, body: unknown) => Promise<unknown>, launch: () => Promise<T>) {
   const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
   const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  if (insideMasterConfinement() && work?.candidate) {
+    const request = liveReviewRequest(work);
+    if (!request) throw new Error(`${work.key} has no pending control-plane review request; host dispatch launches reviews when its review gate requests one`);
+    return { work: work.key, requestId: request.id, queued: true, recorded: 'The durable review request is queued for the host master loop.' };
+  }
   if (!work?.candidate || !profile) return launch();
   const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;
   // A reviewer another launch registered for this request is not this call's to close: the control plane refuses to register over

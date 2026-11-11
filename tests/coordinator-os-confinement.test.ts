@@ -632,52 +632,63 @@ test('unit:allocated-checkout-re-exposed — a reviewer or producer launched fro
 });
 
 test('unit:unconfined-launch-refused — a launch that cannot apply the confinement is refused with the reason named, never started unconfined', async () => {
-  const confined = { kind: 'claude', args: [] as string[], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt' };
-  // No mount namespace without Linux, without bubblewrap, or on a host that refuses the namespaces.
-  const darwin = await coordinatorConfinementRefusal({ ...confined, platform: 'darwin' });
-  assert.ok(darwin !== null, 'darwin platform must be refused');
-  assert.match(darwin!, /never starts a session unconfined/, 'refusal message includes confinement requirement');
-  assert.match(darwin!, /darwin/, 'refusal message identifies platform');
+  const base = await temporaryDirectory('unconfined-launch-refused');
+  try {
+    const checkout = join(base, 'coordinator');
+    mkdirSync(join(checkout, '.git'), { recursive: true });
+    const confined = { kind: 'claude', args: [] as string[], coordinatorRoot: checkout, sessionDirectory: join(checkout, 'wt') };
+    // A checkout root that does not exist is refused before any host probe — even on a host where the
+    // namespaces work — so no launch ever waits for its confinement to fail after the spawn.
+    const missing = await coordinatorConfinementRefusal({ ...confined, coordinatorRoot: join(base, 'missing'), platform: 'linux', bwrap: 'bwrap', mountNamespaceWorks: true });
+    assert.ok(missing !== null, 'a missing checkout root must be refused');
+    assert.match(missing!, /not a git repository/, 'refusal message names the missing repository');
+    assert.match(missing!, /never starts a session unconfined/, 'refusal message includes confinement requirement');
+    // No mount namespace without Linux, without bubblewrap, or on a host that refuses the namespaces.
+    const darwin = await coordinatorConfinementRefusal({ ...confined, platform: 'darwin' });
+    assert.ok(darwin !== null, 'darwin platform must be refused');
+    assert.match(darwin!, /never starts a session unconfined/, 'refusal message includes confinement requirement');
+    assert.match(darwin!, /darwin/, 'refusal message identifies platform');
 
-  const noBwrap = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: null });
-  assert.ok(noBwrap !== null, 'missing bubblewrap must be refused');
-  assert.match(noBwrap!, /bubblewrap/, 'refusal message mentions bubblewrap');
-  assert.match(noBwrap!, /not installed/, 'refusal message says bubblewrap is not installed');
+    const noBwrap = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: null });
+    assert.ok(noBwrap !== null, 'missing bubblewrap must be refused');
+    assert.match(noBwrap!, /bubblewrap/, 'refusal message mentions bubblewrap');
+    assert.match(noBwrap!, /not installed/, 'refusal message says bubblewrap is not installed');
 
-  // With bubblewrap present but the namespaces refused, the refusal names the namespaces: the
-  // bwrap-missing reason above is only reached when bubblewrap itself is absent.
-  const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: '/usr/bin/bwrap', mountNamespaceWorks: false });
-  assert.ok(refusedNamespaces !== null, 'refused mount namespaces must be refused');
-  assert.match(refusedNamespaces!, /namespaces/, 'refusal message mentions namespaces');
-  assert.match(refusedNamespaces!, /refuses/, 'refusal message indicates the host refuses namespaces');
+    // With bubblewrap present but the namespaces refused, the refusal names the namespaces: the
+    // bwrap-missing reason above is only reached when bubblewrap itself is absent.
+    const refusedNamespaces = await coordinatorConfinementRefusal({ ...confined, platform: 'linux', bwrap: '/usr/bin/bwrap', mountNamespaceWorks: false });
+    assert.ok(refusedNamespaces !== null, 'refused mount namespaces must be refused');
+    assert.match(refusedNamespaces!, /namespaces/, 'refusal message mentions namespaces');
+    assert.match(refusedNamespaces!, /refuses/, 'refusal message indicates the host refuses namespaces');
 
-  // The builder carries the same refusal: it never returns an unconfined launch.
-  await assert.rejects(() => coordinatorConfinement({ ...confined, platform: 'darwin', mountNamespaceWorks: true }), /never starts a session unconfined/);
+    // The builder carries the same refusal: it never returns an unconfined launch.
+    await assert.rejects(() => coordinatorConfinement({ ...confined, platform: 'darwin', mountNamespaceWorks: true }), /never starts a session unconfined/);
 
-  // A runtime with a workspace-write sandbox of its own needs neither Linux nor bubblewrap.
-  const sandboxedCodex = await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: '/coordinator', sessionDirectory: '/coordinator/wt', platform: 'darwin' });
-  assert.match(sandboxedCodex!, /needs Linux/, 'codex also needs the outer filesystem and socket boundary');
+    // A runtime with a workspace-write sandbox of its own needs neither Linux nor bubblewrap.
+    const sandboxedCodex = await coordinatorConfinementRefusal({ kind: 'codex', args: ['--sandbox', 'workspace-write'], coordinatorRoot: checkout, sessionDirectory: join(checkout, 'wt'), platform: 'darwin' });
+    assert.match(sandboxedCodex!, /needs Linux/, 'codex also needs the outer filesystem and socket boundary');
 
-  // A worker profile that would turn its runtime's own confinement off is still refused at the launch (GY-857).
-  const claudeBypass = workerConfinementRefusal({ kind: 'claude', agentArgs: ['--dangerously-skip-permissions'] });
-  assert.ok(claudeBypass !== null, 'claude with --dangerously-skip-permissions must be refused');
-  assert.match(claudeBypass!, /--dangerously-skip-permissions/, 'refusal message names the flag');
-  assert.match(claudeBypass!, /confinement/, 'refusal message explains it disables confinement');
+    // A worker profile that would turn its runtime's own confinement off is still refused at the launch (GY-857).
+    const claudeBypass = workerConfinementRefusal({ kind: 'claude', agentArgs: ['--dangerously-skip-permissions'] });
+    assert.ok(claudeBypass !== null, 'claude with --dangerously-skip-permissions must be refused');
+    assert.match(claudeBypass!, /--dangerously-skip-permissions/, 'refusal message names the flag');
+    assert.match(claudeBypass!, /confinement/, 'refusal message explains it disables confinement');
 
-  const codexUnsandboxed = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'] });
-  assert.ok(codexUnsandboxed !== null, 'codex without workspace-write sandbox must be refused');
-  assert.match(codexUnsandboxed!, /workspace-write/, 'refusal message identifies correct sandbox mode');
-  assert.match(codexUnsandboxed!, /danger-full-access/, 'refusal message names the incorrect setting');
+    const codexUnsandboxed = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'] });
+    assert.ok(codexUnsandboxed !== null, 'codex without workspace-write sandbox must be refused');
+    assert.match(codexUnsandboxed!, /workspace-write/, 'refusal message identifies correct sandbox mode');
+    assert.match(codexUnsandboxed!, /danger-full-access/, 'refusal message names the incorrect setting');
 
-  const claudeSafe = workerConfinementRefusal({ kind: 'claude', agentArgs: [] });
-  assert.equal(claudeSafe, null, 'claude with no flags is allowed');
+    const claudeSafe = workerConfinementRefusal({ kind: 'claude', agentArgs: [] });
+    assert.equal(claudeSafe, null, 'claude with no flags is allowed');
 
-  const codexSafe = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] });
-  assert.equal(codexSafe, null, 'codex with workspace-write is allowed');
+    const codexSafe = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] });
+    assert.equal(codexSafe, null, 'codex with workspace-write is allowed');
 
-  // GY-2959: the opencode worker's confinement is the repository-tree permission its launch derives
-  // from the checkout it serves, so the profile itself carries no external-directory requirement.
-  assert.equal(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: {} }), null, 'opencode launches on the repository-tree grant its launch derives');
+    // GY-2959: the opencode worker's confinement is the repository-tree permission its launch derives
+    // from the checkout it serves, so the profile itself carries no external-directory requirement.
+    assert.equal(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: {} }), null, 'opencode launches on the repository-tree grant its launch derives');
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test('unit:launcher-knows-its-checkout — the launcher derives its coordinator checkout from either of its entries, and refuses a launch it cannot confine', () => {

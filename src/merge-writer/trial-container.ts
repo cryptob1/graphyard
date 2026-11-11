@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkoutGitDirectory } from '../master/checkout-git.js';
+import { checkoutGitDirectory, checkoutGitProblem } from '../master/checkout-git.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
@@ -152,9 +152,10 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
 export const trialContainerBoundary = (writable: readonly (string | null)[], dependencies: readonly string[], deadline: number, load: TrialLoad) =>
   (network?: string) => trialContainerWords(writable, dependencies, undefined, network, deadline, load);
 
-/** Dependencies referenced by a linked checkout and its shared install. */
+/** Dependencies referenced by a linked checkout and its shared install: the checkout's Git directory when it resolves — a root that names none contributes nothing. */
 export function trialContainerDependencies(root: string): string[] {
-  return [...new Set([checkoutGitDirectory(root), join(root, 'node_modules'), harnessModules].filter(existsSync))];
+  const checkout = checkoutGitProblem(root) === null ? checkoutGitDirectory(root) : null;
+  return [...new Set([checkout, join(root, 'node_modules'), harnessModules].filter((path): path is string => !!path && existsSync(path)))];
 }
 
 /** Only trusted orchestration receives Docker access; candidate commands receive a private root. */

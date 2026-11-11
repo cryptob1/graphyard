@@ -1,3 +1,4 @@
+import { pendingHeadless } from './helpers/pending-review.js';
 // GY-866: no session Graphyard launches starts where the master starts. Every role's launch is
 // built here the way the loop builds it — the real launch functions against a stubbed Herdr — and
 // the pane's `--cwd`, the launch files' checkout and the runtime's recorded working folder must be
@@ -111,7 +112,7 @@ const obtainsCode = (start: string, worktree: string, commit: string, coordinato
   return existsSync(join(worktree, 'src', 'loop.ts'));
 };
 
-test('unit:session-cwd-own-checkout — a reviewer session opens its pane and starts its runtime in its own managed checkout, never in the coordinator checkout', async () => {
+test('unit:session-cwd-own-checkout — a reviewer session starts its headless runtime in its own managed checkout, never in the coordinator checkout', async () => {
   const fixture = await installed();
   try {
     const { root, head, cleanup } = fixture;
@@ -119,12 +120,13 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
     try {
       const stub = herdr();
       await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'], environment: { CLAUDE_CONFIG_DIR: home } });
-      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, registerLaunch, requestId: 'review-request', probe: registryFixture((await loadMasterConfig(root)).hostId!, ['claude'], ['reviewer'], 4, home).probe });
-      assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the review');
-      const pane = paneCwd(stub.tabs[0]);
-      assert.ok(pane, 'the reviewer pane is created with an explicit --cwd');
+      let runtimeDirectory = '';
+      const launched = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { headless: (command, args, options) => { runtimeDirectory = options.cwd; return pendingHeadless(command, args, options); }, run: stub.run, registerLaunch, requestId: 'review-request', probe: registryFixture((await loadMasterConfig(root)).hostId!, ['claude'], ['reviewer'], 4, home).probe });
+      const pane = runtimeDirectory;
+      assert.ok(pane, 'the headless reviewer has an explicit cwd');
+      assert.deepEqual(stub.tabs, [], 'no pane is opened');
       assert.ok(outsideCoordinator(pane!, root), `the reviewer pane opens outside the coordinator checkout, not ${pane}`);
-      const sessionCheckout = checkoutOfStem(stub.typed[0].stem);
+      const sessionCheckout = launched.checkout;
       assert.ok(sessionCheckout, 'the launch files are written in a checkout of their own');
       assert.ok(outsideCoordinator(sessionCheckout!, root), 'the launch files live outside the coordinator checkout');
       assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the session checkout is');

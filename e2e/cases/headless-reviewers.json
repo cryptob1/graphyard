@@ -1,0 +1,9 @@
+{
+  "id": "headless-reviewers",
+  "title": "Every reviewer runtime runs headless",
+  "description": "Real dispatch, registry reservations and verdict posting across all 23 runtime kinds, with one-task stub executables, same-dispatch account failover and host confinement.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [{ "kind": "command", "name": "headless reviewer runtime matrix", "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-reviewers.test.ts tests/headless-review.test.ts", "timeoutSeconds": 600 }]
+}
