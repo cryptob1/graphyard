@@ -1,7 +1,7 @@
 {
   "id": "early-worker-exit-recovery",
   "title": "Early worker exits become actionable launch failures",
-  "description": "Runs the real cycle, registry selection, supervised failing runtime and temporary Postgres control plane; checks production preparation renewal and reporter-before-close ordering, diagnostics, masking, cooldown, fallback, master wake deduplication and useful recovery.",
+  "description": "Runs the real cycle, registry selection, a headless worker run that exits at once and a temporary Postgres control plane; checks diagnostics, masking, cooldown, routing around, master wake deduplication, the third-failure hold and recovery.",
   "target": "any",
   "required": true,
   "steps": [

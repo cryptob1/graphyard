@@ -14,7 +14,8 @@ import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { assertOutsideWorktrees, autonomousSession, dispatchWork, selectAccount, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
-import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.js';
 import { readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
@@ -376,16 +377,16 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     // Worker: launched under watch with only user settings plus its own file.
     const credential = await token('worker');
     const profile: WorkerProfile = { name: 'claude-worker', principal: 'graphyard-claude-1', agentName: 'engineering-claude-1', mode: 'launch', kind: 'claude', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
-    const calls: string[][] = [];
-    await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] }), profile, [], herdr(calls), undefined,
-      async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), async () => {}, 5_000, undefined, { probe: fleet() });
+    const worker = recordedRuns();
+    await dispatchWork(root, work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] }), profile,
+      { prepare: async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40), branch: 'graphyard/gy-69-4' }), release: async () => {}, headless: worker.exec, probe: fleet() });
     const workerFile = sessionHarnessFile(root, 'worker', 'claude-worker');
-    const run = calls.find(call => call[0] === 'pane' && call[1] === 'run')!;
-    // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
-    // GY-121: both are read from the files in the worktree that the short typed line references.
-    assert.match(typedRuntime(run[3]), new RegExp(` -- claude --permission-mode bypassPermissions --session-id [0-9a-f-]{36} --setting-sources user --settings ${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --append-system-prompt-file "\\$GY\\.role" "\\$\\(cat "\\$GY\\.request"\\)"$`));
-    const typedWorker = expandTypedCommand(run[3]);
-    assert.equal(roleOf(typedWorker.args), launchAuthorization.replace(/\s+/g, ' ')); assert.match(typedWorker.args.at(-1)!, /^Implement GY-69: /);
+    const [run] = worker.runs;
+    // GY-93: the one-task run loads only user settings plus its own file; its request opens with the
+    // launch authorization a role file would carry, then the work itself (GY-3259).
+    assert.equal(run!.runtime, 'claude');
+    assert.deepEqual(run!.args.slice(run!.args.indexOf('--setting-sources'), run!.args.indexOf('--setting-sources') + 4), ['--setting-sources', 'user', '--settings', workerFile]);
+    assert.ok(run!.request.includes(launchAuthorization.replace(/\s+/g, ' ')), 'the launch authorization leads the request'); assert.match(run!.request, /Implement GY-69: /);
     const workerSettings = JSON.parse(await readFile(workerFile, 'utf8'));
     assert.ok(workerSettings.permissions.allow.includes('Bash(git push origin graphyard/gy-69-4)'));
     assert.equal(denied(workerSettings.permissions.deny, 'git push origin graphyard/gy-69-4'), false, 'the only deny rules the worker loads cannot block its push');

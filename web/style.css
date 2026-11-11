@@ -176,6 +176,7 @@ img.mark{width:26px;height:26px}
 .panel h2{display:flex;align-items:baseline;gap:10px;margin:0;font-size:var(--type-item);font-weight:600}.panel h2 small{font-size:var(--type-small);font-weight:400;color:var(--text-2)}
 .left-list{margin:0;padding-left:18px;font-size:var(--type-body);line-height:1.7;color:var(--text)}
 .left-step h3{margin:0 0 var(--space-2);font-size:var(--type-body);font-weight:600}.left-step h3 small{font-weight:400}.left-step+.left-step{margin-top:var(--space-3)}
+.run-log{max-height:28rem;overflow:auto;margin:var(--space-2) 0 0;padding:var(--space-3);background:var(--bg);border-radius:var(--radius-lg);font-size:var(--type-small);white-space:pre-wrap;word-break:break-word}
 .panel .later-steps{margin:0}.panel .later-steps .left-step{margin-top:var(--space-3)}
 .criterion-full summary{cursor:pointer;list-style:none}.criterion-full summary::-webkit-details-marker{display:none}.criterion-full[open] summary .criterion-text{display:none}.criterion-full p{margin:6px 0 0;font-size:var(--type-small);color:var(--text)}
 .criterion-mark{display:inline-block;width:1.2em;color:var(--needs-you)}.criterion-met .criterion-mark{color:var(--shipped)}
@@ -315,7 +316,6 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 .terminal-host .xterm{height:100%}
 .terminal-keys{display:none;flex-shrink:0;gap:3px}
 @media(max-width:650px){.terminal-keys{display:flex}.terminal-keys button{flex:1;min-width:0;padding:12px 2px;font-size:11px}.terminal-info{font-size:11px}.master-heading h1{margin:8px 0 4px}}
-.watching{margin-bottom:var(--space-4)}
 
 /* A compact priority picker beside the item title, sized independently of form fields. */
 .priority-control{display:inline-flex;align-self:flex-start}

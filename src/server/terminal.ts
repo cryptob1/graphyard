@@ -1,4 +1,5 @@
-// Concern: the live terminal the dashboard's Master page and Workers page show (GY-3211) — a WebSocket bridged to Herdr's terminal session stream.
+// Concern: the live terminal the dashboard's Master page shows (GY-3211) — a WebSocket bridged to Herdr's terminal session stream —
+// and the host bridge that also serves headless worker run logs to the item page (GY-3259).
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -53,27 +54,47 @@ type StreamRequest = TerminalRequest;
  * On a compose install the server container has no herdr: the loop, running on the host beside
  * Herdr, connects to /api/terminal-host (GY-3241) and runs each stream for the server. One host at a time.
  */
-let host: { socket: Duplex; streams: Map<string, Handlers> } | null = null;
+let host: { socket: Duplex; streams: Map<string, Handlers>; answers: Map<string, (log: unknown) => void> } | null = null;
 const hostUpgrade = async (services: Services, req: IncomingMessage, socket: Duplex) => {
   const [protocol, token = ''] = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(part => part.trim());
   let actor: Principal;
   try { actor = await authenticate(services, `Bearer ${token}`, services.repository); } catch { return refuse(socket, 401, 'Unauthorized'); }
   if (actor.role !== 'coordinator') return refuse(socket, 403, 'Forbidden');
   accept(req, socket, protocol);
-  const mine = { socket, streams: new Map<string, Handlers>() };
+  const mine = { socket, streams: new Map<string, Handlers>(), answers: new Map<string, (log: unknown) => void>() };
   host?.socket.destroy(); host = mine;
-  const gone = () => { if (host === mine) host = null; for (const [id, handlers] of mine.streams) { mine.streams.delete(id); handlers.exit('the host supervisor disconnected'); } };
+  const gone = () => { if (host === mine) host = null; for (const [id, handlers] of mine.streams) { mine.streams.delete(id); handlers.exit('the host supervisor disconnected'); } for (const answer of mine.answers.values()) answer(null); mine.answers.clear(); };
   readFrames(socket, (opcode, payload) => {
     if (opcode === 8) return void socket.end(frame(8));
     if (opcode === 9) socket.write(frame(10, payload));
     if (opcode !== 1) return;
     let message: any; try { message = JSON.parse(payload.toString('utf8')); } catch { return; }
+    const answer = mine.answers.get(String(message.id));
+    if (answer && 'log' in message) { mine.answers.delete(String(message.id)); answer(message.log); }
     const handlers = mine.streams.get(String(message.id));
     if (typeof message.line === 'string') handlers?.line(message.line);
     if (typeof message.exit === 'string') { mine.streams.delete(String(message.id)); handlers?.exit(message.exit); }
   });
   socket.on('close', gone).on('error', gone);
 };
+
+/** How long the item page waits on the host for one log chunk. */
+export const hostLogTimeoutMs = 10_000;
+/**
+ * One bounded chunk of a headless worker run's log, read by the loop on the host where the run
+ * lives (GY-3259): the server never reads a host path. Null when the run is unknown there; a throw
+ * when no host supervisor is connected or it does not answer in time.
+ */
+export function hostRunLog(run: string, cursor: number): Promise<unknown> {
+  const bridge = host;
+  if (!bridge?.socket.writable) return Promise.reject(Object.assign(new Error('The host supervisor is not connected, so run logs cannot be read right now'), { status: 503 }));
+  const id = randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { bridge.answers.delete(id); reject(Object.assign(new Error('The host supervisor did not answer the run log read in time'), { status: 504 })); }, hostLogTimeoutMs);
+    bridge.answers.set(id, log => { clearTimeout(timer); resolve(log); });
+    bridge.socket.write(text({ id, type: 'log', run, cursor }));
+  });
+}
 
 const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest, handlers: Handlers): Stream => {
   const id = randomUUID();
@@ -84,13 +105,12 @@ const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest,
 };
 
 /**
- * `GET /api/terminal?pane=PANE&cols=C&rows=R` upgraded to a WebSocket. A browser cannot set an
+ * `GET /api/terminal?cols=C&rows=R` upgraded to a WebSocket. A browser cannot set an
  * Authorization header on a WebSocket, so the dashboard's token rides as the second subprotocol
  * (`graphyard, TOKEN`); a request without a valid one is refused before the upgrade. The pane is
- * the master's, as the loop last named it, unless PANE names a running session an item records:
- * only panes Graphyard launched for this install are ever attached, never a host shell. A human
- * admin on the master's pane gets Herdr's writable `terminal session control` stream, every other
- * session its read-only `observe` stream. Frames go out as binary messages of ANSI bytes; the page
+ * always the master's, as the loop last named it (GY-3259: workers run headless, and their output
+ * is the item page's run log). A human admin gets Herdr's writable `terminal session control`
+ * stream, anyone else its read-only `observe` stream. Frames go out as binary messages of ANSI bytes; the page
  * sends `{type:'input',data}` and `{type:'resize',cols,rows}`. Each typed line is recorded in
  * history under the human who typed it. Closing the page releases the stream; the pane runs on.
  * These are the streams Herdr documents for bridges: unlike `herdr terminal attach TERMINAL_ID`,
@@ -104,11 +124,8 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const [protocol, token = ''] = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(part => part.trim());
   let actor: Principal;
   try { actor = await authenticate(services, `Bearer ${token}`, services.repository); } catch { return refuse(socket, 401, 'Unauthorized'); }
-  const panes = loopPanesRegistry(services.engine).latest, master = panes?.master ?? null;
-  const pane = url.searchParams.get('pane') || master;
-  const followsMaster = !url.searchParams.get('pane');
-  if (!followsMaster && pane !== master && !(await services.engine.store.pool.query('SELECT 1 FROM work_items WHERE document->\'sessions\' @> $1::jsonb LIMIT 1', [JSON.stringify([{ pane, state: 'running' }])])).rowCount) return refuse(socket, 404, 'Not Found');
-  const control = (followsMaster || pane === master) && canTypeIntoMasterPane(actor);
+  const panes = loopPanesRegistry(services.engine).latest, pane = panes?.master ?? null;
+  const control = canTypeIntoMasterPane(actor);
   const size = (name: string, fallback: number) => String(Math.min(500, Math.max(10, Number(url.searchParams.get(name)) || fallback)));
   accept(req, socket, protocol);
 
@@ -136,7 +153,7 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
     // A stream that ends before showing anything is a refusal the page words with its cause, not a detach.
     exit: reason => { if (!framed && socket.writable) socket.write(text({ refused: reason })); close(); },
   };
-  const request = { control, pane, cols, rows, master: followsMaster };
+  const request = { control, pane, cols, rows, master: true };
   const herdr = host ? bridgedStream(host, request, handlers) : terminalStream(request, handlers, async () => {
     const config = await loadMasterConfig(process.cwd()).catch(() => null);
     if (config) return terminalSessionReader(() => config)();

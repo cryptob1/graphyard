@@ -1,0 +1,12 @@
+{
+  "id": "headless-workers",
+  "title": "Workers run headless; Herdr is only the master's window",
+  "description": "Real dispatch, CLI claim, worktree and watch across all 23 runtime kinds with one-task stub executables that commit and complete under their own lease, same-dispatch account handoff on a limit exit, retained redacted run logs served through the host bridge, and the item page listing runs by attempt. No Herdr call is made for workers.",
+  "tags": ["dispatch", "workers"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "headless worker runtime matrix and handoff", "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-workers.test.ts", "timeoutSeconds": 600 },
+    { "kind": "command", "name": "worker run logs on the item page", "run": "npm run test:browser -- browser-tests/headless-workers.spec.ts", "timeoutSeconds": 240 }
+  ]
+}

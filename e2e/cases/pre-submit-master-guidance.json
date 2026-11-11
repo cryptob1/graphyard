@@ -1,14 +1,14 @@
 {
   "id": "pre-submit-master-guidance",
   "title": "Applied master guidance reaches retries before their first submission",
-  "description": "Creates real work in Postgres, applies master guidance before a first submission and captures canonical fresh and resumed runtime requests. Also checks that submitted rework carries current findings and suppresses reasons answered by a later submission.",
+  "description": "Creates real work in Postgres, applies master guidance before a first submission and captures the next attempts' headless worker requests on two accounts.",
   "target": "any",
   "required": false,
   "steps": [
     {
       "kind": "command",
       "name": "pre-submit guidance and submitted rework launch requests",
-      "run": "node --import tsx tests/helpers/run-tests.ts tests/session-resume.test.ts",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/pre-submit-master-guidance.test.ts",
       "timeoutSeconds": 600
     }
   ]

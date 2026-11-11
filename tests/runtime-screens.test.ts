@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { appendFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import type { HeadlessExec } from '../src/headless-session.js';
 import { fileURLToPath } from 'node:url';
 import { accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords } from '../src/master/dispatch.js';
 import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, observeStart, SessionStartError, setupMaster, type HerdrAgent, type WorkerProfile } from '../src/master.js';
@@ -11,7 +13,6 @@ const opencodeScreen = runtimeAdapter('opencode')!.screen!;
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
-import { expandTypedCommand } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-25 `clock` is the ScreenPane's virtual start clock, advanced only by wait() and handed via bounds(); Date.now()/new Date() stamp the credential expiry and the dispatch observedAt.
 
@@ -89,30 +90,17 @@ test('unit:opencode-start-recognized — the start check matches OpenCode 1.18\'
     (error: unknown) => error instanceof SessionStartError && error.startCase === 'never started' && error.message.includes('(command still echoing)'));
 });
 
-/** A worker pane that draws the echoed launch line while an opencode runtime is up, and starts any other runtime at once. */
-class FallbackPane {
-  calls: string[][] = [];
-  now = clock;
-  typed: string | null = null;
-  renamed: string | null = null;
-  kinds: string[] = [];
-  /** Runtimes that start at once instead of never coming up. */
-  constructor(private healthy: Set<string> = new Set()) {}
-  wait = (ms: number) => { this.now += ms; };
-  bounds() { return { clock: () => this.now, wait: this.wait }; }
-  run = (_command: string, args: string[]): string => {
-    this.calls.push(args);
-    const json = (result: unknown) => JSON.stringify({ result });
-    if (args[0] === 'tab' && args[1] === 'create') return json({ root_pane: { pane_id: 'w1V:pF1', tab_id: 'w1V:tF1' } });
-    if (args[0] === 'pane' && args[1] === 'run') { this.kinds.push(expandTypedCommand(args[3]).kind); this.typed = args[3]; return ''; }
-    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
-    const kind = this.kinds.at(-1);
-    if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'read') return this.healthy.has(kind) ? `${kind === 'claude' ? 'Claude Code' : 'Ask anything…'} ready\n` : `vish@host ~/code/project ❯ ${this.typed}\n`;
-    if (args[0] === 'agent' && args[1] === 'get') return this.healthy.has(kind) ? json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
-    if (args[0] === 'agent' && args[1] === 'rename') { this.renamed = args[3]; return json({ agent: { agent: kind, name: args[3] } }); }
-    return json({});
+/** Headless worker runs (GY-3259): a runtime outside `healthy` exits at once saying it is not logged in; a healthy one runs on. */
+function fallbackRuns(healthy: Set<string>) {
+  const kinds: string[] = [];
+  const exec: HeadlessExec = async (_command, args, options) => {
+    const kind = basename(args[args.indexOf('--') + 1] ?? '');
+    kinds.push(kind);
+    if (healthy.has(kind)) return '';
+    appendFileSync(join(options.run, 'log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), stream: 'stderr', text: 'Not logged in · Please run /login' })}\n`);
+    throw new Error('exited with code 1');
   };
+  return { kinds, exec };
 }
 
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
@@ -174,7 +162,7 @@ function workerRegistry(host: string): FleetProbe {
   return { registry: client, quota: false, cacheMs: 0 };
 }
 
-test('unit:start-failure-fallback-visible — a launch whose preferred account\'s runtime never starts falls back to the profile\'s next account and the dispatch record and master status name both; three consecutive failures raise one attention item naming the account and runtime', async () => {
+test('unit:start-failure-fallback-visible — a launch whose preferred account\'s run exits at once falls back to the profile\'s next account and the dispatch record and master status name both; three consecutive failures raise one attention item naming the account and runtime', async () => {
   const { root, master, profile, cleanup } = await installed();
   try {
     await clearAccountStartFailures(master, 'opencode-a');
@@ -182,8 +170,8 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     const prepare = async () => ({ epoch: ++claims, path: join(root, `assigned-${claims}`), base: 'c'.repeat(40) });
     const release = async () => {};
     const dispatch = async (healthy: Set<string>) => {
-      const pane = new FallbackPane(healthy);
-      return { dispatched: await dispatchWork(root, item, profile, [], pane.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: pane.bounds(), probe: workerRegistry(master.hostId!) }), pane };
+      const pane = fallbackRuns(healthy);
+      return { dispatched: await dispatchWork(root, item, profile, { allWork: [item], prepare, release, headless: pane.exec, probe: workerRegistry(master.hostId!) }), pane };
     };
 
     // The preferred account's runtime never comes up; the launch falls forward to the Claude account
@@ -192,7 +180,7 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     assert.deepEqual(pane.kinds, ['opencode', 'claude'], 'the fallback launches the next account\'s runtime');
     assert.deepEqual(claims, 2, 'the fallback claims afresh, after the failed launch released its claim');
     assert.equal(dispatched.account!.environment, 'claude-b');
-    assert.ok(dispatched.fallback!.note.startsWith('opencode-a failed to start: the opencode runtime never started within 5 s in pane w1V:pF1 (command still echoing)'), dispatched.fallback!.note);
+    assert.ok(dispatched.fallback!.note.startsWith('opencode-a failed to start: the opencode worker exited at once: Not logged in'), dispatched.fallback!.note);
     assert.ok(dispatched.fallback!.note.endsWith('; launched on claude-b'), dispatched.fallback!.note);
     assert.deepEqual(dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['opencode-a', 'opencode']]);
 
@@ -223,8 +211,8 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
 
     // A profile whose every account failed to start says so instead of dying on the last one alone.
     const lone: WorkerProfile = { ...profile, name: 'opencode-only', accounts: ['opencode-a'] };
-    const failing = new FallbackPane(new Set());
-    await assert.rejects(dispatchWork(root, item, lone, [], failing.run, [item], prepare, release, 5_000, new Date().toISOString(), { start: failing.bounds(), probe: workerRegistry(master.hostId!) }),
+    const failing = fallbackRuns(new Set());
+    await assert.rejects(dispatchWork(root, item, lone, { allWork: [item], prepare, release, headless: failing.exec, probe: workerRegistry(master.hostId!) }),
       (error: unknown) => error instanceof Error && error.message.startsWith('opencode-a failed to start: ')
         && error.message.endsWith('; launched on no named account; no further account of profile opencode-only to fall back to'));
   } finally { await cleanup(); }
@@ -261,9 +249,9 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     const managed: WorkerProfile = { ...profile, name: 'registry-worker', accounts: undefined }, probe: FleetProbe = { registry: client };
     let claims = 0;
     const prepare = async () => ({ epoch: ++claims, path: join(root, `assigned-${claims}`), base: 'c'.repeat(40) });
-    const pane = new FallbackPane(new Set(['claude']));
-    await assert.rejects(dispatchWork(root, item, managed, [], pane.run, [item], prepare, async () => {}, 5_000, new Date().toISOString(), { start: pane.bounds(), probe }),
-      (error: unknown) => error instanceof Error && error.message.startsWith('opencode-a failed to start: the opencode runtime never started within 5 s')
+    const pane = fallbackRuns(new Set(['claude']));
+    await assert.rejects(dispatchWork(root, item, managed, { allWork: [item], prepare, release: async () => {}, headless: pane.exec, probe }),
+      (error: unknown) => error instanceof Error && error.message.startsWith('opencode-a failed to start: the opencode worker exited at once')
         && error.message.endsWith('; the agent registry chose opencode-a again, so no further account of the worker role to fall back to'));
     assert.deepEqual(pane.kinds, ['opencode'], 'the runtime that never started is launched once, not again and again');
     assert.equal(claims, 1, 'nothing is claimed for the repeated choice');
@@ -275,41 +263,3 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
   } finally { await cleanup(); }
 });
 
-test('integration:runtime-launch-real-progress — an external trust refusal closes its pane and releases the exact claimed epoch and registry capacity', async () => {
-  const { root, master, profile, cleanup } = await installed();
-  try {
-    const host = master.hostId ?? 'unknown-host';
-    const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
-      runtimes: proposedRuntimes.filter(runtime => runtime.name === 'opencode'),
-      models: [{ name: 'glm', id: 'zai-coding-plan/glm-5' }],
-      accounts: [{ name: 'opencode-a', runtime: 'opencode', model: 'glm', credential: { host, home: null } }],
-      roles: [{ name: 'worker', accounts: ['opencode-a'], concurrency: 1 }], reason: 'fixture',
-    }, { actor: 'operator', at }).registry;
-    const ended: string[] = [], released: number[] = [];
-    const session: FleetSession = { id: 'trust-session', role: 'worker', account: 'opencode-a', runtime: 'opencode', model: 'glm', host, work: item.key,
-      principal: profile.principal, selectedAt: at, selectedBy: 'master', reason: 'fixture', skipped: [], endedAt: null, endReason: null };
-    const client: FleetClient = {
-      document: async () => registry,
-      select: async () => ({ selected: true, reason: 'fixture', skipped: [], session, account: registry.accounts[0], runtime: registry.runtimes[0], model: registry.models[0], revision: registry.revision }),
-      end: async (_id, reason) => { ended.push(reason); session.endedAt = new Date().toISOString(); session.endReason = reason; },
-    };
-    const pane = new FallbackPane();
-    const probe: FleetProbe = { registry: client, quota: false, cacheMs: 0 };
-    const run = (program: string, args: string[]) => args[0] === 'pane' && args[1] === 'read'
-      ? 'mise ERROR config files in /home/operator are not trusted.\nTrust them? [y/N]' : pane.run(program, args);
-    let claims = 0;
-    await assert.rejects(dispatchWork(root, item, { ...profile, accounts: undefined }, [], run, [item],
-      async () => { claims++; return { epoch: 7, path: join(root, 'assigned-7'), base: 'c'.repeat(40) }; },
-      async (_root, _key, epoch) => { released.push(epoch); }, 5000, new Date().toISOString(),
-      { start: pane.bounds(), probe }),
-    /mise stopped the launch before the agent started/);
-    assert.equal(claims, 1, 'no attempt-lifetime retry loop');
-    assert.deepEqual(released, [7], 'release the claimed epoch only');
-    assert.equal(ended.length, 1, 'the registry concurrency slot is returned once');
-    assert.ok(session.endedAt);
-    assert.match(ended[0], /mise.*installed runtime PATH/);
-    assert.ok(pane.calls.some(args => args[0] === 'pane' && args[1] === 'close'), 'the failed pane closes');
-    assert.equal(pane.renamed, null, 'the named shell was never adopted');
-    assert.equal(pane.now, clock, 'external trust refuses immediately');
-  } finally { await cleanup(); }
-});

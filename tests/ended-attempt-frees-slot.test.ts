@@ -30,19 +30,17 @@ test('unit:ended-attempt-frees-slot — a submitted attempt ends the session: th
     signal: (signal: NodeJS.Signals) => { signals.push(signal); killed = true; },
     empty: () => killed,
   };
-  // Herdr lists the session while the runtime runs; the name is gone once it is dead.
-  const visible = () => !killed;
   const started = performance.now();
   const code = await supervise(child.command, child.args, 2,
     async () => { renewals++; return renewals < 3 ? renewal() : submittedRefusal(); },
     { containment, detached: false, intervalMs: 20, graceMs: 25,
-      session: { visible, surrender: async cause => { surrendered.push(cause); } } });
+      session: { surrender: async cause => { surrendered.push(cause); } } });
   const elapsed = performance.now() - started;
 
   assert.equal(code, 1, 'the supervisor stopped the worker whose attempt the server ended');
   assert.ok(renewals >= 3, `the supervisor renewed until the server refused the submitted attempt (${renewals} renewals)`);
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'], 'the session runtime is terminated through its containment scope, without a human or the master sending keys');
-  assert.equal(visible(), false, 'the Herdr agent name is gone once the runtime is dead, so the worker profile slot is free');
+  assert.equal(killed, true, 'the runtime is dead, so its run ends and the worker profile slot is free');
   assert.ok(elapsed < leaseMs, `the slot freed at ${Math.round(elapsed)} ms, inside one ${leaseMs} ms lease period and one liveness interval`);
   assert.deepEqual(surrendered, [], 'the server already ended the submitted attempt, so the supervisor records no surrender for an epoch whose lease is gone');
   // Nothing is renewed again once the attempt has ended.

@@ -2,6 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,16 +10,17 @@ import { withDatabase } from './helpers/postgres.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { daemonEffects, type DaemonEffects } from '../src/daemon/effects.js';
-import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
-import { runCycle } from '../src/daemon/cycle.js';
-import { masterConfigSchema, workerPrompt, observedExhaustions, selectAccount, recordEnvironmentLog, selectionKey, type MasterConfig } from '../src/master.js';
+import { atomicPrivateWrite } from '../src/master/config.js';
+import { dispatchWork } from '../src/master/dispatch.js';
+import type { HeadlessExec } from '../src/headless-session.js';
+import { masterConfigSchema, observedExhaustions, type MasterConfig } from '../src/master.js';
 import { accountHeldForRole } from '../src/model/capacity.js';
 import { proposedRuntimes } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// Exercise the real limit-stop effect, capacity transaction and successor handoff with real Git.
+// Exercise the real limit-stop preservation, capacity transaction and successor handoff with real Git,
+// through the headless worker dispatch (GY-3259): the run stops on its limit and the same dispatch moves on.
 const HOST = 'loop-host';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
@@ -83,17 +85,13 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
     }
 
     const filed = await ok(operator, 'POST', 'work', { title: `Keep ${shape} work`, type: 'chore', criteria: [{ id: 'AC-1', text: 'Work is kept', proofs: ['e2e:worker-credit-handoff'] }] }) as Work;
-    await ok(operator, 'POST', `work/${filed.id}/ready`, {});
-    await ok(workerA, 'POST', `work/${filed.id}/claim`, {});
-    const session = { id: 'worker-a:1', kind: 'implementation', principal: workerA.id, epoch: 1, runtime: 'claude', host: HOST, pane: 'pane-credit', agentName: 'agent-credit', subject: filed.title, state: 'running' };
-    await ok(workerA, 'POST', `work/${filed.id}/session`, session);
-    await ok(workerA, 'POST', `work/${filed.id}/workspace`, { epoch: 1, host: HOST, path: worktree, branch });
+    const ready = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;
 
+    const secrets = await temporaryDirectory(`credit-secrets-${shape}`);
     const config = masterConfigSchema.parse({
-      version: 1, url, credentialFile: join(root, 'coordinator.token'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
+      version: 1, url, credentialFile: join(secrets, 'coordinator.token'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
       repository: 'owner/credit-work', baseBranch: 'main', githubAppId: 1234, hostId: HOST, masterAgentName: 'graphyard-master-credit',
-      workers: [{ name: 'builder', principal: workerB.id, agentName: 'agent-builder', mode: 'launch', kind: 'claude', credentialFile: join(root, 'builder.token'), accounts: ['claude-c', 'claude-d'] }],
-      environments: [{ name: 'claude-c', kind: 'claude', home: join(root, 'claude-c') }, { name: 'claude-d', kind: 'claude', home: join(root, 'claude-d') }],
+      workers: [{ name: 'builder', principal: workerA.id, agentName: 'agent-builder', mode: 'launch', kind: 'claude', credentialFile: join(secrets, 'builder.token'), accounts: ['claude-c', 'claude-d'] }],
     }) as MasterConfig;
     for (const name of ['claude-c', 'claude-d']) {
       await mkdir(join(root, name));
@@ -102,45 +100,33 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
     // GY-3030: the control-plane registry is the only authority for accounts and their exhaustion, so
     // the executor's two accounts are this control plane's registry, read with the coordinator token.
     await writeFile(config.credentialFile, token(coordinator), { mode: 0o600 });
+    await writeFile(config.workers[0]!.credentialFile!, token(workerA), { mode: 0o600 });
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    await atomicPrivateWrite(join(root, '.graphyard', 'master.json'), config);
     await ok(operator, 'POST', 'agent-registry/apply', {
       runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'default', id: null }],
       accounts: ['claude-c', 'claude-d'].map(name => ({ name, runtime: 'claude', model: 'default', credential: { host: HOST, home: join(root, name) } })),
       roles: [{ name: 'worker', accounts: ['claude-c', 'claude-d'], concurrency: 4 }], reason: 'The executor\'s two accounts',
     });
-    config.workers.push({ ...config.workers[0]!, name: 'spent-builder', principal: workerA.id });
-    await recordEnvironmentLog(config, [], [], { key: selectionKey('worker', 'spent-builder'), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: filed.key });
     const clock = Date.now();
-    const snapshot = async () => {
-      const response = await ok(coordinator, 'GET', 'work-snapshot');
-      return { work: response.work as Work[], now: new Date(clock).toISOString() };
+    // The first attempt's run stops at once on its provider's limit notice; the second runs on.
+    const runs: { args: string[]; account?: string }[] = [];
+    const exec: HeadlessExec = async (_command, args, options) => {
+      runs.push({ args, account: options.env.CLAUDE_CONFIG_DIR });
+      if (runs.length > 1) return '';
+      appendFileSync(join(options.run, 'log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), stream: 'stderr', text: "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model." })}\n`);
+      throw new Error('exited with code 1');
     };
-    const mutate = (path: string, data: unknown) => ok(coordinator, 'POST', path, data);
-    const real = daemonEffects(root, config, { snapshot, mutate });
-    const herdr = [{ name: 'agent-credit', pane_id: 'pane-credit', agent_status: 'idle' }];
-    const closed: string[] = [], handoffs: string[] = [], accounts: (string | undefined)[] = [];
-    const effects: DaemonEffects = {
-      ...real,
-      agents: () => herdr as any, herdr: () => ({ agents: herdr as any, available: true }),
-      // GY-3030: the cycle reads its session inventory (session-inventory.ts) before Herdr alone; this stub's Herdr is that inventory.
-      inventory: async () => ({ available: true, sessions: herdr.map(agent => ({ name: agent.name, runtime: null, state: agent.agent_status, pane: agent.pane_id, workspace: null })) }),
-      credentials: async () => ({ builder: { available: true, reason: null } }),
-      closeSession: pane => { closed.push(pane); },
-      promptSession: async () => { assert.fail('the limit stop needs no re-prompt'); },
-      sessionScreen: () => "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
-      dispatch: async (work, profile) => {
-        const chosen = await selectAccount(config, 'worker', profile, { quota: false, now: () => clock, cacheMs: 0, work: work.key });
-        accounts.push(chosen.account?.name);
-        const next = await ok(workerB, 'POST', `work/${work.id}/claim`, {}) as Work;
-        handoffs.push(workerPrompt({ cliPath: config.cliPath }, next, { principal: workerB.id }, next.epoch));
-        return { pane: null, epoch: next.epoch };
-      },
-      dispatchTick: async () => {}, sweepCheckouts: async () => {}, masterSession: undefined, mergeWriter: null,
-      persist: async () => {}, removeWorktree: undefined,
+    // Each attempt claims under the worker's own identity; the first works in the tree prepared above, the second in its own.
+    const prepare = async () => {
+      const claimed = await ok(workerA, 'POST', `work/${filed.id}/claim`, {}) as Work;
+      const path = claimed.epoch === 1 ? worktree : join(root, 'attempt-2'), at = claimed.epoch === 1 ? branch : 'graphyard/attempt-2';
+      if (claimed.epoch !== 1) git(['worktree', 'add', '-q', '-b', at, path, base], root);
+      const registered = await ok(workerA, 'POST', `work/${filed.id}/workspace`, { epoch: claimed.epoch, host: HOST, path, branch: at }) as Work;
+      return { epoch: claimed.epoch, path, base, branch: at, work: registered };
     };
-    const state: DaemonState = emptyDaemonState(config);
-    await runCycle(config, state, effects, () => clock);
-    // The next snapshot sees the released lease and dispatches the replacement.
-    await runCycle(config, state, effects, () => clock);
+    const launched = await dispatchWork(root, ready, config.workers[0]!, { allWork: [ready], observedAt: new Date(clock).toISOString(), headless: exec, prepare, release: async () => {},
+      probe: { quota: false, now: () => clock, cacheMs: 0 } as never, capacity: event => ok(coordinator, 'POST', `work/${filed.id}/capacity`, event) });
     const after = await reload(filed.id);
     const partial = after.capacity?.exhaustions[0]?.partialWork;
     const saved = git(['rev-parse', 'HEAD'], worktree);
@@ -154,15 +140,15 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
       assert.equal(git(['show', `${saved}:finding.txt`], root), 'unfinished finding');
       assert.equal(git(['show', `${saved}:untracked.txt`], root), 'new finding');
     } else assert.equal(saved, committed, 'clean trees keep their existing HEAD without a synthetic commit');
-    assert.deepEqual(accounts, ['claude-d'], JSON.stringify(state.actions));
+    assert.equal(launched.account?.environment, 'claude-d', 'the successor runs on the next account in the same dispatch');
+    assert.deepEqual(runs.map(run => run.account), [join(root, 'claude-c'), join(root, 'claude-d')]);
     assert.equal(accountHeldForRole(await observedExhaustions(config, clock), 'claude-c', clock), true);
     assert.equal(after.epoch, 2);
-    assert.equal(after.lease?.owner, workerB.id);
-    assert.deepEqual(closed, ['pane-credit']);
-    assert.equal(handoffs.length, 1);
-    assert.ok(handoffs[0]!.includes(`its work is kept as commit ${saved}`));
-    assert.ok(handoffs[0]!.includes('git log and git show'));
-    assert.ok(handoffs[0]!.includes('cherry-pick or git merge instead of redoing it'));
+    assert.equal(after.lease?.owner, workerA.id);
+    const handoff = runs[1]!.args.at(-1)!;
+    assert.ok(handoff.includes(`its work is kept as commit ${saved}`));
+    assert.ok(handoff.includes('git log and git show'));
+    assert.ok(handoff.includes('cherry-pick or git merge instead of redoing it'));
     // Removing the ended tree leaves the named branch/commit available to the successor.
     git(['worktree', 'remove', worktree], root);
     assert.equal(git(['rev-parse', branch], root), saved);

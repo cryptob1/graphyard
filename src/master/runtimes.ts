@@ -1,7 +1,6 @@
 // Concern: one adapter record per agent runtime kind — everything Graphyard knows of a runtime, in one place (GY-3034).
-import { copyFile, mkdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { asksNothing, trustAgyFolder, trustClaudeFolder, trustCodexFolder, verifyClaudeTrust, verifyCodexTrust, type LaunchRecipe } from '../harness.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
@@ -19,9 +18,7 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
  * - `recipe`: the no-approval startup contract (harness.ts `launchPlan`), with folder trust.
  * - `request`/`role`: where the session's first request and role file go on its command line (launch.ts).
  * - `screen`: the runtime's own start screen, so a slow start is told from a dead one.
- * - `firstRun`: screens a fresh account home stops on before it takes any request; a session showing one is stuck, whatever Herdr reports.
  * - `endedStates`: what its session listing calls an ended session, beyond the shared set.
- * - `resume`: how a session is named at launch and resumed by that name, and how its transcript follows a new worktree.
  * - `limitNotices`: the provider-authored usage-limit notices it prints; `zonelessUtcResets` when those name a UTC wall clock with no zone.
  * - `home`: the login-home variable an account home is set on, and the runtime's own default home: the environment kinds.
  * - `usage`: reads an account home's login and provider quota; `sharedPlan` when its accounts share a Z.AI plan.
@@ -34,9 +31,7 @@ export interface RuntimeAdapter {
   request?: (reference: string) => string;
   role?: (reference: string) => string;
   screen?: RegExp;
-  firstRun?: readonly RegExp[];
   endedStates?: readonly string[];
-  resume?: { fresh: (id: string) => string[]; resume: (id: string) => string[]; carry?: (environment: Record<string, string>, session: string, from: string, to: string) => Promise<void> };
   limitNotices?: readonly RegExp[];
   zonelessUtcResets?: boolean;
   home?: { variable: string; default: (home: string) => string };
@@ -59,17 +54,6 @@ const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly
 /** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
 const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
 
-/**
- * Claude Code keeps a session's transcript under the directory it ran in, so a resume from the next
- * attempt's worktree finds it only once it is copied there. Best effort: a resume that cannot find
- * it exits at start and the attempt launches fresh.
- */
-async function carryClaudeTranscript(environment: Record<string, string>, session: string, from: string, to: string) {
-  const projects = resolve(environment.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR ?? resolve(homedir(), '.claude'), 'projects');
-  const folder = (path: string) => resolve(projects, path.replace(/[^A-Za-z0-9]/g, '-'), `${session}.jsonl`);
-  const target = folder(to);
-  await mkdir(dirname(target), { recursive: true }).then(() => copyFile(folder(from), target)).catch(() => {});
-}
 /** Cursor keeps its login in cli-config.json and exposes no quota. */
 async function cursorAccount(environment: ProbedHome): Promise<AccountReading> {
   const info = (await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo;
@@ -87,10 +71,7 @@ const builtInAdapters = {
     request: reference => reference,
     // Only Claude Code, which leaves AGENTS.md out under a role file, loads the launch authorization from a file.
     role: reference => `--append-system-prompt-file ${reference}`,
-    firstRun: [/Choose the text style/, /Security notes/, /Use Claude Code.s terminal setup\?/, /Select login method/],
     screen: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-    // Claude Code takes the id it will use (`--session-id`) and resumes it (`--resume`).
-    resume: { fresh: id => ['--session-id', id], resume: id => ['--resume', id], carry: carryClaudeTranscript },
     limitNotices: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
     home: { variable: 'CLAUDE_CONFIG_DIR', default: home => resolve(home, '.claude') },
     usage: (environment, probe, { now }) => claudeAccount(environment, probe, now),
@@ -188,8 +169,6 @@ export const environmentKinds = runtimeKinds.filter(kind => 'home' in builtInAda
 const adapters = new Map<string, RuntimeAdapter>(Object.entries(builtInAdapters).map(([kind, adapter]) => [kind, { kind, ...adapter } as RuntimeAdapter]));
 /** The adapter for `kind`, or undefined for a kind Graphyard knows nothing of. */
 /** The remedy for a session stuck on its runtime's first-run screen, or null when the screen is not one. */
-export const firstRunStuck = (kind: string | null | undefined, screen: string | null): string | null =>
-  screen && runtimeAdapter(kind)?.firstRun?.some(pattern => pattern.test(screen)) ? `stuck on ${kind} first-run setup: open the pane and finish setup, or run ${kind} once interactively in that account home` : null;
 export const runtimeAdapter = (kind: string | null | undefined): RuntimeAdapter | undefined => kind ? adapters.get(kind) : undefined;
 /** Every adapter, built-in and registered. */
 export const runtimeAdapters = (): RuntimeAdapter[] => [...adapters.values()];

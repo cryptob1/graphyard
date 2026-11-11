@@ -13,7 +13,7 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import {
   masterConfigSchema, observedExhaustions, recordObservedExhaustion,
-  reclaimableAgent, selectAccount, type HerdrAgent, type MasterConfig, type WorkerProfile,
+  selectAccount, type HerdrAgent, type MasterConfig,
 } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { proposedRuntimes } from '../src/model/registry.js';
@@ -108,8 +108,6 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   const selected = await selectAccount(config, 'worker', config.workers[0], { quota: false, now: () => now, cacheMs: 0, work: 'GY-1708' });
   assert.equal(selected.account?.name, 'env-b', 'selection fails over to the next account; the held one is never re-selected');
 
-  const profile = config.workers[0] as WorkerProfile;
-  const finished: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'done' };
   const filed = await ok(operator, 'POST', 'work', {
     title: 'bounds', type: 'chore',
     criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds', 'e2e:fixture'] }],
@@ -127,10 +125,10 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   assert.equal(after.lease, null);
   const ledger = workerAttemptLedger(after, 1);
   assert.deepEqual(ledger, { exhaustions: 1, attempts: 1, released: 1, open: 0, preservedCommit: null }, 'the spent epoch is counted once');
-  assert.equal(reclaimableAgent(profile, finished, [after], now), true);
 
   // Dispatch after the hold: the spent account stays held; the profile is free for the redispatch.
-  const herdr = { agents: [finished] as HerdrAgent[] };
+  // The ended attempt's headless run is gone, so nothing holds the profile's name (GY-3259).
+  const herdr = { agents: [] as HerdrAgent[] };
   const state: DaemonState = emptyDaemonState(config);
   const dispatches: string[] = [];
   const effects: DaemonEffects = {
@@ -158,7 +156,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
     persist: async () => {},
   };
   const health = profileHealth(config.workers, { builder: { available: true, reason: null } }, herdr.agents, state, now, [after]);
-  assert.equal(health[0].busy, false, 'finished agent with no live lease is not busy: the bound is free for redispatch');
+  assert.equal(health[0].busy, false, 'no live run holds the profile: the bound is free for redispatch');
   await runCycle(config, state, effects, () => now);
   assert.deepEqual(dispatches, ['env-b'], 'one redispatch on the free account; the held account never launches a second session');
   const redispatched = await reload(claimed.id);

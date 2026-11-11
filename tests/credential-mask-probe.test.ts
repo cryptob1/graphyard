@@ -115,10 +115,10 @@ test('unit:tests/credential-mask-probe.test.ts — a worker dispatch whose sandb
       policy: { checks: [], review: true }, stage: 'ready', epoch: 0, ready: true, lease: null, blocker: null, workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
     const registry = registryFixture(config.hostId!, ['claude']);
     const released: (string | undefined)[] = [];
-    await assert.rejects(dispatchWork(f.root, item, profile, [], async () => { throw new Error('No runtime should start'); }, [item],
-      async () => ({ epoch: 1, path: f.worktree, base: f.git('rev-parse', 'HEAD'), branch: 'graphyard/gy-1-1' }),
-      async (_root, _key, _epoch, _profile, blocker) => { released.push(blocker); }, 1, now,
-      { probe: registry.probe, maskProbe: probeReading([leaked]), coordinatorRoot: f.root }),
+    await assert.rejects(dispatchWork(f.root, item, profile, { allWork: [item], observedAt: now, headless: async () => { throw new Error('No runtime should start'); },
+      prepare: async () => ({ epoch: 1, path: f.worktree, base: f.git('rev-parse', 'HEAD'), branch: 'graphyard/gy-1-1' }),
+      release: async (_root, _key, _epoch, _profile, blocker) => { released.push(blocker); },
+      probe: registry.probe, maskProbe: probeReading([leaked]), coordinatorRoot: f.root }),
     (error: unknown) => error instanceof CredentialMaskError && error.path === leaked);
     assert.equal(released.length, 1, 'the claim is released once');
     assert.ok(released[0]?.includes(leaked) && released[0].startsWith('Host, not the item:'), `one blocker names the path: ${released[0]}`);

@@ -1,7 +1,7 @@
 // Concern: `graphyard master` operations subcommands — status, the confined master's restart request, dispatch, recover.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { dispatchWork, listHerdrAgents, readWorkerCredential } from '../../master.js';
+import { dispatchWork, readWorkerCredential } from '../../master.js';
 import { atomicPrivateWrite } from '../../private-file.js';
 import { loopRestartRequestPath } from '../../daemon/run.js';
 import { masterStatusReport } from '../master-status.js';
@@ -48,7 +48,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
       const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
       if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
     }
-    return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now));
+    return print(await dispatchWork(root, work, profile, { allWork: snapshot.work, observedAt: snapshot.now }));
   }
   // GY-1529: repin the coordinator the loop runs from (previous known-good, or --to SHA), restart its unit, record the move.
   if (id === 'recover') {

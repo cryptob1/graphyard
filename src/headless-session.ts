@@ -1,4 +1,4 @@
-// Concern: headless reviews. A reviewer no longer needs a Herdr pane,
+// Concern: headless sessions — reviews, and since GY-3259 workers (at the end of this file). A reviewer no longer needs a Herdr pane,
 // a TUI start wait or a CLI call to post: its runtime runs once, non-interactively, as one child
 // process in the session's checkout, under the same coordinator confinement and credential mask a
 // pane session gets, and answers with one JSON object on its output. The launcher posts that
@@ -9,7 +9,7 @@
 // the next loop adopts it from that directory and posts its answer.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
@@ -111,6 +111,12 @@ export function awaitHeadlessRun(directory: string, options: { signal?: AbortSig
 export const defaultHeadlessExec = (): HeadlessExec => underTestRunner() ? async () => { throw new Error('A test must supply a headless model executable; the host runtime is never used by tests'); } : spawnHeadless;
 /** A live child may return from dispatch after this startup observation; early failures move accounts first. */
 export const headlessStartupMs = 1000;
+/**
+ * A worker run's startup observation (GY-3259): its supervisor checks its assignment with the
+ * control plane before the runtime starts, so a run that stops at once on its provider's limit
+ * notice has ended well inside this, and the dispatch moves to the next account before it returns.
+ */
+export const workerStartupMs = 10_000;
 
 /**
  * The last JSON object the run printed that `schema` accepts. Runtimes print prose or a code fence
@@ -163,23 +169,30 @@ export interface HeadlessSession<T> {
 export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'args' | 'environment' | 'contract' | 'credentialMask' | 'role'>;
 
 /**
+ * The run's confined launch on one account: refused when its runtime has no one-task contract, its
+ * folder cannot be trusted or it cannot be confined, exactly as a pane session is. `ownGitHubCredential`
+ * is false for a worker, which reaches no keyring at all (GY-1523).
+ */
+async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, directory: string, coordinatorRoot: string | undefined, ownGitHubCredential: boolean) {
+  headlessArgs(on.kind, on.args, prompt, on.contract);
+  assertLaunchable(on.kind, on.contract ? { ...on.contract, args: on.contract.headlessArgs ?? on.contract.args } : null);
+  const trust = await launchRecipe(on.kind)?.trust?.(directory, on.environment, on.args);
+  const confinement = await sessionConfinement(on.kind, on.args, { directory, cwd: directory, environment: on.environment, ...(ownGitHubCredential ? { ownGitHubCredential: true } : { secretsBus: null }), credentialMask: on.credentialMask }, coordinatorRoot);
+  if (trust) await launchRecipe(on.kind)?.verify?.(trust);
+  const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(on.kind, on.args) : on.args;
+  // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
+  const carried = withAutonomyContract(false, { request: prompt, role: on.role });
+  return { kind: on.kind, contract: on.contract, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
+}
+
+/**
  * Start a headless session: refused before anything runs when the runtime has no launch contract,
  * its folder cannot be trusted, or it cannot be confined — exactly as a pane session is. The run is
  * then listed under its session name while it lasts, so slots and supervision see it as a working
  * session; `settled` is its posted answer, or the reason no answer was accepted.
  */
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
-  const prepare = async (on: HeadlessAccountLaunch) => {
-    headlessArgs(on.kind, on.args, input.prompt, on.contract);
-    assertLaunchable(on.kind, on.contract ? { ...on.contract, args: on.contract.headlessArgs ?? on.contract.args } : null);
-    const trust = await launchRecipe(on.kind)?.trust?.(input.directory, on.environment, on.args);
-    const confinement = await sessionConfinement(on.kind, on.args, { directory: input.directory, cwd: input.directory, environment: on.environment, ownGitHubCredential: true, credentialMask: on.credentialMask }, input.coordinatorRoot);
-    if (trust) await launchRecipe(on.kind)?.verify?.(trust);
-    const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(on.kind, on.args) : on.args;
-    // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
-    const carried = withAutonomyContract(false, { request: input.prompt, role: on.role });
-    return { kind: on.kind, contract: on.contract, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
-  };
+  const prepare = (on: HeadlessAccountLaunch) => prepareHeadlessRun(on, input.prompt, input.directory, input.coordinatorRoot, true);
   const prepareAccount = async (initial: HeadlessAccountLaunch) => {
     let on = initial;
     for (;;) {
@@ -291,4 +304,118 @@ export function adoptHeadlessSessions(root: string, adopters: Record<HeadlessRou
       });
     return [{ name: session.name, role: 'reviewer' as const, work: session.work, subject: session.subject, directory, live: !!meta && runAlive(meta), settled }];
   });
+}
+
+// ---- Workers (GY-3259) -----------------------------------------------------------------------------
+
+/**
+ * Where a worker's runs live: in the loop's own installation state, never in the worktree the
+ * worker writes, and kept after the run ends so its log stays readable through every handoff.
+ */
+export const workerRunsDirectory = (root: string) => resolve(root, '.graphyard', 'worker-runs');
+const runLogName = 'log.jsonl';
+const workerRecordSchema = z.object({ id: z.string().uuid(), name: z.string().min(1).max(200), work: z.string().min(1).max(200), epoch: z.number().int().positive(),
+  principal: z.string().min(1).max(200), account: z.string().max(200).nullable(), kind: z.string().min(1).max(40), subject: z.string().min(1).max(300), startedAt: z.string().max(40) });
+export type HeadlessWorkerRecord = z.infer<typeof workerRecordSchema>;
+
+export interface HeadlessWorker extends HeadlessAccountLaunch {
+  /** The profile's agent name the run is listed under while it lasts, beside the role's other sessions. */
+  name: string; work: string; subject: string; epoch: number; principal: string; account: string | null;
+  /** The worktree the attempt was assigned; `supervisor` the `graphyard watch KEY EPOCH --` words that hold its lease. */
+  directory: string; supervisor: string[]; coordinatorRoot?: string; prompt: string;
+  root: string; exec: HeadlessExec;
+  /** The run's hard bound, the configured attempt ceiling; the loop's attempt bound stops a run without progress first. */
+  timeoutMs: number;
+  /** How long the start is watched; `workerStartupMs` by default. */
+  startupMs?: number;
+  /** Hears a run that outlived its startup observation end, with what it printed, once its process has ended. */
+  settle?: (ended: { output: string; ok: boolean }) => Promise<unknown>;
+}
+
+/**
+ * Start one worker run: its runtime's one-task form under `graphyard watch`, which claims nothing
+ * itself but heartbeats the lease the launcher claimed under the worker's own identity, stops the
+ * runtime the moment that lease is lost and releases it when the runtime exits without `complete`.
+ * The run is watched for `workerStartupMs`; one that ended in that time is returned with what it
+ * printed and whether it exited 0, so the launcher can move a spent account on before it returns. Otherwise it is listed as
+ * a live session until it ends, and its log and record stay on disk after.
+ */
+export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: string; ended: { output: string; ok: boolean } | null }> {
+  const launch = await prepareHeadlessRun(input, input.prompt, input.directory, input.coordinatorRoot, false);
+  const id = randomUUID(), directory = resolve(workerRunsDirectory(input.root), id);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const record: HeadlessWorkerRecord = { id, name: input.name, work: input.work, epoch: input.epoch, principal: input.principal, account: input.account, kind: launch.kind, subject: input.subject.slice(0, 300), startedAt: new Date().toISOString() };
+  writeFileSync(join(directory, sessionFile), JSON.stringify(record), { mode: 0o600 });
+  const env = runEnvironment(process.env, { ...launch.environment, GRAPHYARD_RUN_LOG: join(directory, runLogName) });
+  const argv = [...input.supervisor, ...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, launch.request, launch.contract)];
+  const stop = new AbortController(), detached = new AbortController();
+  const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
+  const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), input.startupMs ?? workerStartupMs).unref())]);
+  const printed = () => runLogTail(input.root, id) ?? '';
+  if (ended) return { id, ended: { ...ended, output: printed() } };
+  void watchWorker(record, directory, running, stop, detached).then(async () => detached.signal.aborted ? undefined : input.settle?.({ output: printed(), ok: await running.then(() => true, () => false) })).catch(() => {});
+  return { id, ended: null };
+}
+
+/** Lists the run as a live worker session until it ends; stopping the loop detaches it, and the next loop adopts it. */
+function watchWorker(record: HeadlessWorkerRecord, directory: string, running: Promise<unknown>, stop: AbortController, detached: AbortController) {
+  registerRun({ name: record.name, role: 'worker', work: record.work, subject: record.subject, agent: record.kind, run: {
+    id: record.id, directory, events: [], onEvent: () => () => {}, cancel: reason => stop.abort(reason), detach: () => detached.abort(),
+    result: () => running.then(payload => ({ ok: true as const, tool: 'complete', payload, payloads: [payload] }), error => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: String(error?.message ?? error) }, payloads: [] })),
+  } }, true);
+  return running.catch(() => {}).then(() => {
+    const ended = runRecord(record.kind, { events: [] }, null, record.startedAt, new Date().toISOString());
+    if (!detached.signal.aborted) endRun(record.name, ended);
+    return ended;
+  });
+}
+
+/** Every worker run a stopped loop left running, adopted and listed again until it ends (GY-3113's restart adoption). */
+export function adoptHeadlessWorkers(root: string): AdoptedRun[] {
+  let names: string[];
+  try { names = readdirSync(workerRunsDirectory(root)); } catch { return []; }
+  return names.flatMap(name => {
+    const directory = join(workerRunsDirectory(root), name), record = readWorkerRecord(directory), meta = readRunMeta(directory);
+    if (!record || !meta || readText(runFiles(directory).exit) !== null || !runAlive(meta) || liveRun(record.name)) return [];
+    const stop = new AbortController(), detached = new AbortController();
+    const settled = watchWorker(record, directory, awaitHeadlessRun(directory, { signal: stop.signal, detached: detached.signal }), stop, detached);
+    return [{ name: record.name, role: 'worker' as const, work: record.work, subject: record.subject, directory, live: true, settled }];
+  });
+}
+const readWorkerRecord = (directory: string) => { try { return workerRecordSchema.parse(JSON.parse(readFileSync(join(directory, sessionFile), 'utf8'))); } catch { return null; } };
+
+/** The last of what a worker run printed, as text: what its limit notice, login refusal or crash is read from. Null for a run this installation does not hold. */
+export function runLogTail(root: string, id: string, bytes = 4000): string | null {
+  if (!z.string().uuid().safeParse(id).success || !existsSync(join(workerRunsDirectory(root), id))) return null;
+  const size = logSize(root, id);
+  return parseLog(readLogBytes(root, id, Math.max(0, size - 4 * bytes), 4 * bytes)).map(line => line.text).join('\n').slice(-bytes);
+}
+const logFile = (root: string, id: string) => join(workerRunsDirectory(root), id, runLogName);
+const logSize = (root: string, id: string) => { try { return statSync(logFile(root, id)).size; } catch { return 0; } };
+/** Up to `length` bytes of a run's log from `from`, read without loading the rest. */
+function readLogBytes(root: string, id: string, from: number, length: number): Buffer {
+  let fd: number;
+  try { fd = openSync(logFile(root, id), 'r'); } catch { return Buffer.alloc(0); }
+  try { const buffer = Buffer.alloc(length); return buffer.subarray(0, readSync(fd, buffer, 0, length, from)); } finally { closeSync(fd); }
+}
+/** The whole JSON lines of a log chunk; a line cut at the chunk's start is not one. */
+const parseLog = (bytes: Buffer) => bytes.toString('utf8').split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line) as RunLogLine]; } catch { return []; } });
+
+/** The most a log read returns at once. */
+export const runLogChunkBytes = 64 * 1024;
+export interface RunLogLine { at: string; stream: 'stdout' | 'stderr'; text: string }
+/**
+ * One bounded chunk of a worker run's log from byte `cursor`, whole lines only, with the run's
+ * record and whether it has ended; null for a run this installation does not hold. The lines were
+ * redacted as they were written.
+ */
+export function readRunLog(root: string, id: string, cursor = 0): { run: HeadlessWorkerRecord; lines: RunLogLine[]; cursor: number; ended: boolean } | null {
+  if (!z.string().uuid().safeParse(id).success) return null;
+  const directory = join(workerRunsDirectory(root), id), run = readWorkerRecord(directory);
+  if (!run) return null;
+  const exited = readText(runFiles(directory).exit) !== null, size = logSize(root, id);
+  const from = Math.max(0, Math.min(cursor, size)), chunk = readLogBytes(root, id, from, runLogChunkBytes);
+  // Whole lines only: a chunk ends after its last newline, unless one line alone is longer than a chunk.
+  const whole = chunk.lastIndexOf(10) + 1 || (chunk.length === runLogChunkBytes ? chunk.length : 0);
+  return { run, lines: parseLog(chunk.subarray(0, whole)), cursor: from + whole, ended: exited && from + whole >= size };
 }

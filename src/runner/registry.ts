@@ -18,7 +18,7 @@ import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, 
  * detached from the process that started it, so a restart leaves it running; the restarted process
  * adopts every run still live there (`adoptRuns`), keeps waiting on it, and applies its result once.
  */
-export type RunRole = 'producer' | 'reviewer';
+export type RunRole = 'producer' | 'reviewer' | 'worker';
 export interface RegisteredRun {
   name: string;
   role: RunRole;

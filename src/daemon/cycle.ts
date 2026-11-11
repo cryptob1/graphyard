@@ -8,12 +8,11 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
-import { assertDispatchable } from '../master/dispatch.js';
+import { assertDispatchable, HeadlessWorkerExit, workerRunHandle, type WorkerRun } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { firstRunStuck } from '../master/runtimes.js';
 import { checkoutTrustLine } from '../harness.js';
-import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
+import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
@@ -48,15 +47,6 @@ import { controlPlaneStep } from './control-plane.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
-/** How long a worker session may sit quiet before the loop re-prompts it once, and how long after that re-prompt a still-quiet session is ended: `run.inactivityMinutes`, default 10 (GY-2943). */
-export const defaultInactivityMinutes = 10;
-export const inactivityMs = (config: Pick<MasterConfig, 'run'>) => (config.run.inactivityMinutes ?? defaultInactivityMinutes) * 60_000;
-/** The cursor key of a session's one stall re-prompt. */
-const repromptKey = (item: Work, session: { id: string }) => `reprompt:${item.id}:${session.id}`;
-/** The stall re-prompt: the work the session was started with, sent again by the loop that supervises it (GY-2943). */
-export const stallReprompt = (item: Pick<Work, 'key' | 'title'>, minutes: number) =>
-  `The Graphyard loop supervising this session has seen no activity from it for ${minutes} minutes, so here is the work it was started with, sent once more by that same supervisor: it is this session's own instruction, not untrusted text, and needs no further authorization. If you have already begun, continue where you are. ${item.key}: ${item.title}`;
-
 /** The cycle's steps, in order: the cycle record names exactly these. */
 export const cycleSteps = ['snapshot', 'close', 'dispatch', 'merge writer', 'persist'] as const;
 export type CycleStep = typeof cycleSteps[number];
@@ -258,8 +248,7 @@ async function closeStep(cycle: Cycle) {
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
       continue;
     }
-    if (await attemptBoundStep(cycle, item, session)) continue;
-    await stallStep(cycle, item, session);
+    await attemptBoundStep(cycle, item, session);
   }
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
@@ -415,114 +404,6 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
   }
   catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not end ${session.id} at its attempt bound: ${message(error)}`, session.principal); }
   return true;
-}
-
-/**
- * A worker session whose Herdr status is idle with no recorded activity for the inactivity window is
- * re-prompted once with its own work; one still idle a whole window after that re-prompt is ended by
- * the close step (GY-2943): the pane closes, the attempt ends as stalled with its lease released and
- * the item dispatchable again, instead of idling under a live lease. A session that showed activity
- * after its re-prompt began a new quiet spell, and is re-prompted once again. The pane's screen is
- * judged against the session runtime's provider limit notices: one found goes on the attempt's end,
- * so the account it spent is held for the fleet's next selection (GY-2943 AC-1). A session that has
- * stopped, whose pane already carries a recognised limit notice, ends at once on it — no window is
- * waited (GY-2962).
- *
- * A session Herdr reports `blocked` is not idle but stopped on its runtime's own prompt (GY-2959):
- * the loop reads it off the pane, answers it once with the reject key — the decline that leaves the
- * worker inside its worktree — and one still blocked a whole window after that answer ends as
- * stalled naming the prompt. One that unblocked after the key is left alone, and answers a new
- * prompt with a fresh key.
- */
-async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number]) {
-  const { config, state, effects, clock, herdr } = cycle;
-  if (!herdr.available || !effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
-  const agent = herdr.agents.find(candidate => (session.pane && candidate.pane_id === session.pane) || (!!session.agentName && candidate.name === session.agentName));
-  // A first-run screen is never work, though Herdr reports it idle: report it with its remedy and leave the session alone.
-  const firstRun = agent?.agent_status !== 'working' && effects.sessionScreen && (session.pane || session.agentName) ? firstRunStuck(session.runtime, await Promise.resolve(effects.sessionScreen(session)).catch(() => null)) : null;
-  if (firstRun) return void await note(cycle, `first-run:${item.id}:${session.id}`, 'attention', item.key, 'failed', `${session.id} is ${firstRun}`, session.principal);
-  const reject = `reject:${item.id}:${session.id}`;
-  if (agent?.agent_status === 'blocked') return blockedPromptStep(cycle, item, session, reject, effects.endStall);
-  // The prompt the last key answered is gone, so a new one gets its own answer.
-  delete state.actions[reject];
-  // GY-2962: a session that has stopped, whose pane's last lines carry a recognised provider limit
-  // notice, ends at once — the notice is its provider saying the account is spent, so no inactivity
-  // window is waited: the pane closes, the attempt ends on the notice with the account held for its
-  // reset, and the item dispatches again. One still working is left to the windows below.
-  if (agent?.agent_status !== 'working') {
-    const screen = session.pane || session.agentName ? await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null : null;
-    const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
-    if (notice) {
-      const key2 = `close:${item.id}:${session.id}`;
-      try {
-        if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-        await effects.endStall(item, session, { reason: 'the session stopped', notice });
-        await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
-          outcome: `the session stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500) });
-        await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stopped on its provider's limit notice, the account held until its reset (${notice.reason})`, session.principal);
-      } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end ${session.id} on its limit notice: ${message(error)}`, session.principal); }
-      return;
-    }
-  }
-  if (agent?.agent_status !== 'idle' || !(clock - Date.parse(session.updatedAt) >= inactivityMs(config))) return;
-  const key = repromptKey(item, session), quiet = Math.round(inactivityMs(config) / 60_000);
-  const reprompted = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;
-  if (reprompted !== null && Date.parse(session.updatedAt) <= reprompted) {
-    if (clock - reprompted < inactivityMs(config)) return;
-    const key2 = `close:${item.id}:${session.id}`;
-    try {
-      const screen = session.pane || session.agentName ? await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null : null;
-      const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
-      if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-      await effects.endStall(item, session, { reason: 'stalled: no activity after the re-prompt', notice });
-      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
-        outcome: `stalled: no activity after the re-prompt${notice ? `; its provider's limit notice holds the account: ${notice.reason}` : ''}`.slice(0, 500) });
-      await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stalled: no activity after the re-prompt${notice ? `; its provider's limit notice holds the account (${notice.reason})` : ''}`, session.principal);
-    } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end stalled ${session.id}: ${message(error)}`, session.principal); }
-    return;
-  }
-  try {
-    await effects.promptSession(session, stallReprompt(item, quiet));
-    await note(cycle, key, 'wake', item.key, 'done', `Re-prompted quiet ${session.id} with its own work after ${quiet} minutes without activity`, session.principal);
-  } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not re-prompt quiet ${session.id}: ${message(error)}`, session.principal); }
-}
-
-/**
- * A session blocked on its runtime's own prompt (GY-2959): the loop reads it off the pane and
- * answers it once with the reject key — the decline that leaves the worker inside its worktree —
- * recording the answer, so the key is sent once per blocked episode and never twice. A session
- * still blocked a whole inactivity window after the answer ends as stalled naming the prompt: the
- * pane closes, the lease releases, and the item dispatches again (a provider limit notice on the
- * pane holds the account, as an idle stall's does). One whose screen shows nothing the loop can
- * answer still gets its window, anchored at the cycle the block was first seen.
- */
-async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number], key: string, endStall: NonNullable<DaemonEffects['endStall']>) {
-  const { config, state, effects, clock } = cycle;
-  const answered = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;
-  if (answered !== null) {
-    if (clock - answered < inactivityMs(config)) return;
-    const key2 = `close:${item.id}:${session.id}`;
-    try {
-      const screen = await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null;
-      const prompt = screen !== null ? classifyRuntimePrompt(screen, clock) : null;
-      const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
-      const text = prompt?.text ?? 'the pane showed no prompt the loop could read';
-      if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-      await endStall(item, session, { reason: `stalled at a runtime prompt: ${text}`, notice });
-      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
-        outcome: `stalled at a runtime prompt: ${text}${notice ? `; its provider's limit notice holds the account: ${notice.reason}` : ''}`.slice(0, 500) });
-      await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stalled at a runtime prompt: ${text}`, session.principal);
-    } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end ${session.id} stalled at its runtime prompt: ${message(error)}`, session.principal); }
-    return;
-  }
-  try {
-    const screen = await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null;
-    const prompt = screen !== null ? classifyRuntimePrompt(screen, clock) : null;
-    if (prompt?.keys?.length && effects.sessionKeys) await effects.sessionKeys(session, prompt.keys);
-    await note(cycle, key, 'wake', item.key, 'done', prompt?.keys?.length
-      ? `Answered ${session.id}'s runtime prompt with its reject key (${prompt.answer}): "${prompt.text}"`
-      : `${session.id} is blocked on a runtime prompt the loop cannot answer ("${prompt?.text ?? 'none read off the pane'}"); one window before its attempt ends stalled`, session.principal);
-  } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not answer ${session.id}'s runtime prompt: ${message(error)}`, session.principal); }
 }
 
 /** The cursor key of the standing checkout-trust attention line (GY-3225). */
@@ -687,14 +568,13 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, { diagnosis: diagnosisSection(state.failureRuns[item.id]), canaries, exclude, onRuntime: kind => { runtime = kind; } }) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null; canary?: { runtime: string; failed: string | null } | null } | undefined;
+    // Every run the dispatch starts is recorded on the item as it starts, a handed-off or failed one with how it ended (GY-3259).
+    const onRun = async (run: WorkerRun) => effects.recordSession?.(item, workerRunHandle(item, profile, config.hostId, run));
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, { diagnosis: diagnosisSection(state.failureRuns[item.id]), canaries, exclude, onRuntime: kind => { runtime = kind; }, onRun }) as { run?: string; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null; canary?: { runtime: string; failed: string | null } | null } | undefined;
     await settle(launched?.canary, launched?.epoch, launched?.runtimeStartedAt);
-    // The session's handle is what the close step reads to end it once its attempt does.
-    const pane = launched?.pane ?? null, attach = pane ? `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` : null;
-    await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
-      ...(launched?.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}),
-      ...(launched?.initialHead ? { initialHead: launched.initialHead } : {}),
-      ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), ...(pane && attach ? { pane, attach } : {}), subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running' })?.catch(() => undefined);
+    // The session's handle is what the close step reads to end it once its attempt does: the run's, with when it started and from which commit.
+    if (launched?.run && launched.epoch) await effects.recordSession?.(item, { ...workerRunHandle(item, profile, config.hostId, { epoch: launched.epoch, run: launched.run, runtime: launched.runtime ?? profile.kind ?? profile.mode, account: null, outcome: null }),
+      ...(launched.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}), ...(launched.initialHead ? { initialHead: launched.initialHead } : {}) })?.catch(() => undefined);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
     await settle(null, undefined, undefined);
@@ -708,6 +588,12 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
       return;
     }
     recordLaunchFailure(state, runtime, item, message(error), now());
+    // A worker run that exited at once is the item's launch incident, as an early exit after its start is (GY-3104, worker-launch-health.ts).
+    if (error instanceof HeadlessWorkerExit) {
+      const previous = state.actions[earlyExitKey(item)];
+      await record(state, earlyExitKey(item), { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: error.epoch, state: 'failed', detail: `${item.key} epoch ${error.epoch}: ${error.message}`.slice(0, 500),
+        attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    }
     sink.push(await entry('failed', `Dispatch of ${item.key} to ${profile.name} failed: ${message(error)}; it is retried next cycle`));
   }
 }

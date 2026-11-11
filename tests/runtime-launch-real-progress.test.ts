@@ -21,7 +21,7 @@ test('integration:runtime-launch-real-progress — named idle/working shells and
     assert.equal((await observeStart('pane', 'codex', 'codex', run)).state, holder === 'shell' ? 'absent' : 'blocked');
     let now = 0;
     await assert.rejects(awaitRuntimeStart('pane', 'codex', 'codex', run, {
-      timeoutMs: 1000, ceilingMs: 2000, pollMs: 100, clock: () => now, wait: ms => { now += ms; }, holdConsent: true,
+      timeoutMs: 1000, ceilingMs: 2000, pollMs: 100, clock: () => now, wait: ms => { now += ms; },
     }), (error: unknown) => error instanceof SessionStartError && error.startCase === (holder === 'shell' ? 'never started' : 'blocked'));
     assert.ok(now <= 1000, 'refused at the existing start bound, never the attempt lifetime');
   }

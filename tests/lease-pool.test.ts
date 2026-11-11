@@ -205,7 +205,7 @@ test('unit:server-fault-keeps-lease — the supervisor keeps renewing through a 
     if (calls > 1 && elapsed < leaseMs + 700) throw fault();
     if (calls > 1) renewedAfterDeadline = true;
     return { updatedAt: new Date().toISOString(), lease: { epoch: 1, expiresAt: new Date(Date.now() + leaseMs).toISOString() } };
-  }, { intervalMs: 100, retryMs: 50, retryMaxMs: 150, safetyMarginMs: 300, graceMs: 50, session: { visible: () => null, unconsented: () => null } });
+  }, { intervalMs: 100, retryMs: 50, retryMaxMs: 150, safetyMarginMs: 300, graceMs: 50, session: {} });
   let settled = false; void supervising.then(() => { settled = true; }, () => { settled = true; });
   const until = performance.now() + 10_000;
   while (!renewedAfterDeadline && !settled && performance.now() < until) await delay(20);

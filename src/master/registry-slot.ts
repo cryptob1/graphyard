@@ -42,8 +42,9 @@ export function orphanedRegistrySessions(registry: AgentRegistry, host: string |
       const handle = item.sessions?.find(handle => handle.kind === 'implementation' && handle.state === 'finished'
         && handle.principal === session.principal && handleEpoch(handle) === item.submission!.epoch
         && Date.parse(handle.endedAt ?? handle.updatedAt) >= Date.parse(session.selectedAt));
-      if (handle?.pane && !panes.has(handle.pane)) orphans.push({ id: session.id, role: session.role, work: session.work,
-        pane: handle.pane, agentName: handle.agentName, completedImplementation: true });
+      // A headless worker's handle has no pane (GY-3259): once it finished, nothing backs its session.
+      if (handle && !(handle.pane && panes.has(handle.pane))) orphans.push({ id: session.id, role: session.role, work: session.work,
+        pane: handle.pane ?? null, agentName: handle.agentName, completedImplementation: true });
       continue;
     }
     if (session.role !== 'reviewer' && session.role !== 'producer') continue;

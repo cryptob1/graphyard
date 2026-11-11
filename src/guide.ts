@@ -66,7 +66,7 @@ One-time owner setup:
 1. From your npm login, publish a \`@cryptob1/graphyard\` placeholder \`0.0.0\` with \`npm publish --access public\`.
 2. In npm package settings, add a **Trusted Publisher**: GitHub Actions, **cryptob1/graphyard**, workflow **publish.yml**.
 3. In each GHCR package (**graphyard**, **graphyard-trial**), grant **cryptob1/graphyard** Actions write access.`,
-  runtimes: `Reviews run headlessly on the host master loop, under the account's home, tool policy and confinement. Claude, Codex, Cursor, Pi, OpenCode and Muse have built-in one-task forms; other runtimes need \`launch.headlessArgs\` (\`graphyard master registry runtime set NAME --headless-arg=ARG … --reason REASON\`). It replaces \`launch.args\`, holds exactly one \`{request}\`, and must exit after one answer; arguments pass literally, without a shell. A runtime without one is refused and the next account is tried:
+  runtimes: `Workers and reviews run headlessly on the host master loop, under the account's home, tool policy and confinement; a worker's stdout and stderr are kept, credentials masked, and shown by attempt on its item page. Claude, Codex, Cursor, Pi, OpenCode and Muse have built-in one-task forms; other runtimes need \`launch.headlessArgs\` (\`graphyard master registry runtime set NAME --headless-arg=ARG … --reason REASON\`). It replaces \`launch.args\`, holds exactly one \`{request}\`, and must exit after one task; arguments pass literally, without a shell. A runtime without one is refused and the next account is tried:
 
 \`\`\`json
 {"name":"custom","launch":{"kind":"kilo","headlessArgs":["ONE_TASK_SUBCOMMAND","--prompt","{request}"]}}

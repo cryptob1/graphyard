@@ -1,12 +1,12 @@
 // Concern: `graphyard watch`'s worker supervision — the systemd scope a session runs in, process-tree
-// signalling, lease renewal through control-plane restarts, consent-prompt probing and surrender.
+// signalling, lease renewal through control-plane restarts, the headless run log and surrender.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
+import type { Readable } from 'node:stream';
+import { maskSecrets } from './redaction.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
-import { herdrCall } from './master/herdr.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -98,112 +98,16 @@ export function signalTrackedProcesses(rootPid: number, supervisedPids: Map<numb
 }
 
 /**
- * What a supervisor watches besides its lease: the session it was launched in.
- *
- * A supervisor exists to run one agent under one lease. When the agent is gone the supervisor has
- * nothing left to supervise, and a heartbeat it keeps sending is worse than no heartbeat at all —
- * it keeps the item owned by a worker that cannot act, so nothing lapses and no replacement is
- * dispatched. `visible` reports Herdr's view of this session and `surrender` ends the attempt on
- * the record before the supervisor exits.
+ * How a supervisor ends its attempt when its agent is gone. A supervisor exists to run one agent
+ * under one lease; a heartbeat it keeps sending after the agent is gone keeps the item owned by a
+ * worker that cannot act, so `surrender` ends the attempt on the record before the supervisor exits.
  */
 export interface SupervisedSession {
-  /** Herdr's view of this session: `true` still reported, `false` gone, `null` not observable. */
-  visible?: () => boolean | null;
   /** Records the cause on the assignment and releases the lease. */
   surrender?: (cause: string) => Promise<void>;
-  /** Why the session's slot must be given back because it never took its request, or null (GY-130, consentHoldProbe). */
-  unconsented?: () => string | null;
-}
-
-/** How long a delivered request may take to be visibly accepted, inside the probe's own 10-second command bound. */
-export const consentRequestAcceptMs = 8_000;
-/**
- * The launcher's consent hold on this supervisor's session (GY-130): the record it leaves beside
- * the launch files in the worktree when the runtime stopped on a first-run prompt outside its
- * allow-list. While the prompt is on the pane's screen the session has not read its request; a
- * prompt a human answered clears the hold, and one still showing past the hold's `releaseAt`
- * answers the cause the supervisor surrenders the assignment for instead of renewing it again. A
- * runtime without a request contract, whose request is pasted after it starts, is sent it here
- * once its prompt clears (the hold's `request`). A different dialog that replaces the held one is
- * a new prompt: the hold is rewritten for it with a fresh bound, and one on the launcher's
- * allow-list is answered once with its least-privilege option, as the launcher would have. A
- * session Herdr has not taken the name of (the hold's `named: false`) is renamed on every check
- * until Herdr reports it under that name, and its hold is never cleared before: the master finds a
- * worker only by its profile's agent name, and would otherwise count the profile free and the held
- * worker's supervisor orphaned.
- */
-export function consentHoldProbe(checkout: string = process.cwd(), env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => string = (command, args, options) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, ...(options?.env ? { env: options.env } : {}) })), now: () => number = Date.now): () => string | null {
-  return () => {
-    const hold = readConsentHolds(checkout)[0];
-    if (!hold) return null;
-    const pane = env.HERDR_PANE_ID ?? hold.pane;
-    let named = hold.named !== false;
-    if (!named) {
-      try {
-        herdrCall(run, ['agent', 'rename', pane, hold.agentName]);
-        const parsed = JSON.parse(herdrCall(run, ['agent', 'get', pane])), agent = (parsed?.result ?? parsed)?.agent ?? (parsed?.result ?? parsed);
-        named = agent?.name === hold.agentName;
-      } catch { named = false; }
-      if (named) {
-        const { path: _path, named: _named, ...kept } = hold;
-        writeConsentHold(hold.path.slice(0, -consentHoldSuffix.length), kept);
-      }
-    }
-    let screen: string | null = null;
-    try { screen = herdrCall(run, ['pane', 'read', pane, '--source', 'recent-unwrapped', '--lines', '40']); } catch { screen = null; }
-    const verdict = consentHoldVerdict(hold, screen, now());
-    if (verdict === 'changed') {
-      const prompt = detectConsentPrompt(screen)!, stem = hold.path.slice(0, -consentHoldSuffix.length);
-      let answer: ConsentAnswer | undefined;
-      if (prompt.rule && prompt.keys) {
-        try {
-          herdrCall(run, ['pane', 'send-keys', pane, ...prompt.keys]);
-          answer = { rule: prompt.rule.id, kind: prompt.kind, prompt: prompt.text, answer: prompt.rule.answer, keys: prompt.keys, at: new Date(now()).toISOString() };
-        } catch { /* unanswered, it stays held for a human */ }
-      }
-      writeConsentHold(stem, { ...reclassifyConsentHold(hold, prompt, now(), answer), ...(named ? { named: undefined } : {}) });
-      return null;
-    }
-    if (verdict === 'cleared') {
-      // Unnamed, the session stays held — the request undelivered — until a rename takes, and past
-      // the bound gives the slot back rather than run where the master cannot see it.
-      if (!named) return now() >= Date.parse(hold.releaseAt) ? `its session never took its request: the ${hold.kind} consent prompt was answered, but Herdr did not take the session's name ${hold.agentName} by the hold bound (${hold.releaseAt})` : null;
-      // A runtime prompted after it starts was never sent its request while the dialog was up: it
-      // is delivered now, and the hold stays until the runtime visibly accepts it, so a failed
-      // delivery is tried again on the next check and, past the bound, gives the slot back.
-      if (hold.request) {
-        try {
-          herdrCall(run, ['agent', 'prompt', pane, readFileSync(hold.request, 'utf8'), '--wait', '--until', 'working', '--until', 'blocked', '--timeout', String(consentRequestAcceptMs)]);
-        } catch (error) {
-          return now() >= Date.parse(hold.releaseAt) ? `its session never took its request: the ${hold.kind} consent prompt was answered, but the request could not be delivered by the hold bound (${hold.releaseAt}): ${error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : String(error)}` : null;
-        }
-      }
-      clearConsentHold(hold.path);
-    }
-    return verdict === 'release' ? `its session never took its request: it waited on a ${hold.kind} consent prompt outside the launcher's allow-list from ${hold.since} past the hold bound (${hold.releaseAt}) — "${hold.prompt}"` : null;
-  };
 }
 
 const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as { code?: string }).code === 'EPERM'; } };
-
-/**
- * Whether Herdr still reports the pane this supervisor was launched in.
- *
- * Herdr puts the pane id in the session's own environment, so the identity is exact rather than
- * inferred from a working directory an agent may leave. A query that fails answers `null`: an
- * unreachable Herdr is a signal that could not be collected, never an absence.
- */
-export function herdrSessionProbe(env: NodeJS.ProcessEnv = process.env, run: (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => string = (command, args, options) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, ...(options?.env ? { env: options.env } : {}) }))): () => boolean | null {
-  const pane = env.HERDR_PANE_ID;
-  if (env.HERDR_ENV !== '1' || !pane) return () => null;
-  return () => {
-    try {
-      const parsed = JSON.parse(herdrCall(run, ['agent', 'list']));
-      const agents = (parsed?.result ?? parsed)?.agents;
-      return Array.isArray(agents) ? agents.some((agent: { pane_id?: string }) => agent?.pane_id === pane) : null;
-    } catch { return null; }
-  };
-}
 
 async function postAssignment(url: string, token: string, path: string, body: unknown) {
   const response = await fetch(`${url.replace(/\/+$/, '')}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
@@ -334,7 +238,7 @@ export function restartTolerantApi(api: ControlPlaneApi, until: () => number, op
 export const setupLine = (subject: string, epoch: number) => `graphyard: starting supervision of ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession;
-  /** GY-2971: an agent that exits within this many ms of its spawn leaves the lease to its launcher, which relaunches the same attempt fresh. */ earlyExitKeepsLeaseMs?: number } = {}) {
+  /** GY-3259: the headless run log the agent's output is appended to, one redacted JSON line per output line with its time and stream. */ log?: string } = {}) {
   let deadline = 0, granted = 0, attempts = 0;
   /** One renewal attempt, sequenced: a beat the supervisor already gave up on never moves the deadline. */
   const heartbeatAttempt = () => {
@@ -428,13 +332,11 @@ export async function supervise(command: string, args: string[], epoch: number, 
   const detached = options.detached ?? platform !== 'win32';
   if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
   const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
-  const sessionVisible = options.session?.visible ?? herdrSessionProbe();
   const surrender = options.session?.surrender ?? assignmentSurrender(epoch);
-  const unconsented = options.session?.unconsented ?? consentHoldProbe();
   return new Promise<number>((resolve, reject) => {
     let child: ReturnType<typeof spawn> | undefined;
     let stopping = false, pending = false, prelaunchInterrupted = false, finished = false;
-    let sessionSeen = false, scopeSeen = false;
+    let scopeSeen = false;
     const supervisedPids = new Map<number, string>();
     let expiry: ReturnType<typeof setTimeout>;
     let timer: ReturnType<typeof setInterval>;
@@ -478,8 +380,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
      *
      * The child's own exit event is the ordinary path; this is the check that does not depend on
      * it, because a supervisor that never receives it is exactly the failure this answers. An
-     * absence counts only once presence was observed: a scope that has not activated yet, or a
-     * session Herdr has not registered yet, must never read as a session that has ended.
+     * absence counts only once presence was observed: a scope that has not activated yet must never
+     * read as a session that has ended.
      */
     const orphaned = (): string | null => {
       if (!child?.pid) return null;
@@ -490,12 +392,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
         if (empty === false) scopeSeen = true;
         else if (empty === true && scopeSeen) return 'the worker containment scope holds no process, so the agent has exited';
       }
-      const visible = sessionVisible();
-      if (visible === true) sessionSeen = true;
-      else if (visible === false && sessionSeen) return 'Herdr no longer reports this agent session';
-      // A session still held on a consent prompt past its bound holds a slot it never used: the
-      // lease is not renewed for it again, the assignment is released, and the item is dispatchable.
-      return unconsented();
+      return null;
     };
     // The lease outlives several of these checks, so an orphaned supervisor is found, surrenders
     // its assignment and stops well inside one lease period.
@@ -519,7 +416,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
     void (async () => {
       try {
         if (prelaunchInterrupted) { finish(null, 1); return; }
-        child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
+        child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: options.log ? ['ignore', 'pipe', 'pipe'] : 'inherit', detached, env });
+        if (options.log) for (const stream of ['stdout', 'stderr'] as const) runLogLines(child[stream]!, stream, options.log);
         // Never learn the fallback root from a later /proc snapshot: after this
         // child exits its numeric PID can identify an unrelated replacement.
         // Cache the kernel identity immediately after spawn, or leave fallback
@@ -528,16 +426,14 @@ export async function supervise(command: string, args: string[], epoch: number, 
           captureTrackedRoot(child.pid, supervisedPids, processRecord(child.pid));
         }
         child.on('error', error => { console.error(error.message); stop(1); });
-        const spawnedAt = performance.now(), releases = () => performance.now() - spawnedAt >= (options.earlyExitKeepsLeaseMs ?? 0);
-        child.on('exit', (code, signal) => { if (releases()) endedOnItsOwn(`the agent process exited (${signal ?? `code ${code}`}) while its lease was live`); stop(code ?? 1); });
+        child.on('exit', (code, signal) => { endedOnItsOwn(`the agent process exited (${signal ?? `code ${code}`}) while its lease was live`); stop(code ?? 1); });
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;
           const surrenderOrphaned = async (cause: string) => {
             clearInterval(timer);
-            const release = releases();
-            console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. ${release ? 'Releasing the lease and stopping' : 'Leaving the lease to its launcher and stopping'}.`);
-            if (release) await surrenderAssignment(cause);
+            console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. Releasing the lease and stopping.`);
+            await surrenderAssignment(cause);
             stop(1);
           };
           try {
@@ -555,6 +451,15 @@ export async function supervise(command: string, args: string[], epoch: number, 
       } catch (error) { finish(error); }
     })();
   });
+}
+
+/** Appends each line STREAM prints to the run log FILE as `{at, stream, text}`, credentials masked before anything is written. */
+export function runLogLines(output: Readable, stream: 'stdout' | 'stderr', file: string) {
+  let pending = '';
+  const write = (text: string) => { try { appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), stream, text: maskSecrets(text) })}\n`, { mode: 0o600 }); } catch { /* a full disk never stops the agent */ } };
+  output.setEncoding('utf8');
+  output.on('data', (chunk: string) => { const lines = (pending + chunk).split('\n'); pending = lines.pop()!; lines.forEach(write); });
+  output.on('end', () => { if (pending) write(pending); });
 }
 
 /**

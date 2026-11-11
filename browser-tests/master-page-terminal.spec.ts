@@ -20,7 +20,7 @@ const handshake = (url: string, token?: string) => new Promise<number>((done, fa
   call.on('error', fail); call.end();
 });
 
-test('e2e:master-page-terminal — the operator types into the master pane live; others watch read-only; a worker pane opens from Workers; closing detaches', async ({ browser }) => {
+test('e2e:master-page-terminal — the operator types into the master pane live; others watch read-only; closing detaches; workers offer no terminal', async ({ browser }) => {
   const database = await signInDatabase();
   const site = await mkdtemp(join(tmpdir(), 'graphyard-master-terminal-'));
   const log = join(site, 'herdr.log');
@@ -71,15 +71,9 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await expect.poll(async () => (await calls()).some(entry => entry.pane === 'w1:master' && entry.command?.type === 'terminal.release'), settled).toBe(true);
     expect((await calls()).some(entry => entry.args?.[0] === 'pane' && entry.args?.[1] === 'close')).toBe(false);
 
-    // A worker's pane opens from the Workers page, read-only even for the operator.
-    await operator.getByRole('row', { name: /work-claude/ }).getByRole('button', { name: 'Watch', exact: true }).click();
-    await expect(rows(operator)).toContainText('screen of w1:worker', settled);
-    await expect(operator.locator('.terminal-session')).toHaveCount(0);
-    await expect(operator.getByRole('status')).not.toContainText('unknown');
-    await expect(operator.getByRole('status')).toContainText('read-only', settled);
-    expect((await calls()).some(entry => entry.args?.slice(0, 4).join(' ') === 'terminal session observe w1:worker')).toBe(true);
-    await operator.getByRole('button', { name: 'Close', exact: true }).click();
-    await expect.poll(async () => (await calls()).some(entry => entry.pane === 'w1:worker' && entry.detached), settled).toBe(true);
+    // GY-3259: terminal attachment is the master's alone; a worker's output is its item's run log.
+    await expect(operator.getByRole('row', { name: /work-claude/ })).toBeVisible(settled);
+    await expect(operator.getByRole('button', { name: 'Watch', exact: true })).toHaveCount(0);
     await operator.close();
   } finally {
     const ended = once(child, 'exit'); child.send('stop'); await ended;

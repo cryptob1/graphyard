@@ -8,7 +8,6 @@ import { assertLaunchable, launchPlan } from '../src/harness.js';
 import { launchDelivery } from '../src/master/launch.js';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { runtimeAdapter } from '../src/master/runtimes.js';
-import { freshLaunch, resumePlan } from '../src/master/session-resume.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -158,17 +157,15 @@ test('unit:runner-pi-events cancel stops the run and resolves it as cancelled; t
   } finally { await cleanup(); }
 });
 
-// GY-3034 AC-1, proof unit:pi-runner: pi launches, resumes and reports usage through its runtime
+// GY-3034 AC-1, proof unit:pi-runner: pi launches and reports usage through its runtime
 // adapter (src/master/runtimes.ts), and its headless run takes the request on its command line.
-test('unit:pi-runner — pi launches, resumes and reports usage through its adapter', async () => {
+test('unit:pi-runner — pi launches and reports usage through its adapter', async () => {
   const adapter = runtimeAdapter('pi')!;
   assert.doesNotThrow(() => assertLaunchable('pi'), 'pi launches on its adapter recipe, with no registry contract');
   const plan = launchPlan('pi');
   assert.equal(plan.applied, true);
   assert.deepEqual(plan.args, [], 'pi has no approval flag to add');
   assert.equal(launchDelivery('pi'), 'request', 'its first request is on its command line, never pasted');
-  assert.deepEqual(freshLaunch('pi', null), { resume: false, session: null, args: [], why: null }, 'pi has no resume form, so each attempt launches fresh');
-  assert.equal(resumePlan({ epoch: 1, runtime: 'pi', account: 'pi-a', session: 's' }, { kind: 'pi', account: 'pi-a' }).resume, false);
   assert.ok(piArgs('Implement GY-1', { model: defaultPiModel }).includes('Implement GY-1'), 'the headless run takes the request as an argument');
 
   const at = Date.parse('2026-10-15T01:10:00Z');

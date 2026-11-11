@@ -106,11 +106,11 @@ test('unit:trust-prompt-screen-fails-launch — an agy session whose screen show
     && /the agy runtime stopped at a workspace-trust prompt in pane w1V:pA1/.test(error.message) && error.message.includes('"Do you trust the contents of this project?')
     && error.screen.startsWith('Do you trust the contents of this project?');
   // A worker, which is held for a human on any other prompt, is failed on this one rather than holding its lease.
-  await assert.rejects(awaitRuntimeStart('w1V:pA1', 'agy', 'GY=/s; agy', run, { ...bounds, holdConsent: true }), failsNamingIt);
+  await assert.rejects(awaitRuntimeStart('w1V:pA1', 'agy', 'GY=/s; agy', run, bounds), failsNamingIt);
   await assert.rejects(awaitRuntimeStart('w1V:pA1', 'agy', 'GY=/s; agy', run, bounds), failsNamingIt);
   // The whole launch fails the same way, with nothing typed into the dialog.
   const directory = await temporaryDirectory('agy-fail'), home = await temporaryDirectory('agy-fail-home');
-  await assert.rejects(startAgentSession('eng-agy', 'agy', 'w1V:pA1', launchPlan('agy').args, 'Implement GY-1152', run, { directory, cwd: directory, environment: { HOME: home }, holdConsent: true, ...bounds }), failsNamingIt);
+  await assert.rejects(startAgentSession('eng-agy', 'agy', 'w1V:pA1', launchPlan('agy').args, 'Implement GY-1152', run, { directory, cwd: directory, environment: { HOME: home }, ...bounds }), failsNamingIt);
   assert.deepEqual(keys, [], 'the trust prompt is never answered by the launcher');
 });
 
