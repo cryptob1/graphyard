@@ -94,6 +94,12 @@ export interface GateRecord {
    */
   gateRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
+  /**
+   * GY-3264: the latest diagnostic run's failures, per check: the exact commit it tested and the
+   * trial's own bounded failing-step text (null when the trial supplied none), kept here because
+   * the trial's scratch is gone once it settles. Optional only for records an older loop wrote.
+   */
+  diagnosticFailures?: Record<string, DiagnosticFailure>;
   /** Each preview case's last daily run and verdict, by case (GY-3193). Optional only for records an older loop wrote. */
   previewCases?: Record<string, PreviewCaseRun>;
   /**
@@ -377,18 +383,31 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   }
 }
 
-/** The diagnostics' run: the full suite and the whole catalog on the commit, their failures, the catalog's duration and the preview cases' runs. */
-export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number; previewCases?: PreviewCaseRun[] }>;
+/** One diagnostic failure as the record keeps it (GY-3264). */
+export interface DiagnosticFailure { commit: string; detail: string | null; at: string }
+
+/**
+ * The diagnostics' run: the full suite and the whole catalog on the commit, their failures, the
+ * catalog's duration, the preview cases' runs and, per failing check, the trial's failing-step text.
+ */
+export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number; previewCases?: PreviewCaseRun[]; details?: Record<string, string> }>;
 
 /** The scheduled diagnostics, when due: each failure files an item; nothing here touches the gate. */
 export async function runDiagnostics(ports: Pick<GatePorts, 'now' | 'file'> & { diagnose: DiagnosePort }, record: GateRecord): Promise<string[] | null> {
   const verified = record.verified;
   if (!verified || (record.diagnosticsAt && ports.now() - Date.parse(record.diagnosticsAt) < diagnosticsIntervalMs)) return null;
-  const { failed: checks, catalogMs, previewCases = [] } = await ports.diagnose(verified);
+  const { failed: checks, catalogMs, previewCases = [], details = {} } = await ports.diagnose(verified);
   const at = new Date(ports.now()).toISOString();
   // A preview case that failed or was not covered reaches an owner like any failing check.
   const failed = [...new Set([...checks, ...previewCases.filter(run => run.verdict !== 'passed').map(run => `e2e:${run.case}`)])];
-  for (const check of failed) await fileFailure(ports, record, at, { key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`, description: `The scheduled full run against the verified commit ${verified.slice(0, 12)} failed ${check}. It never blocks a gate or a merge; fix it at its cause.` });
+  // GY-3264: each failure's commit and failing step are recorded before filing, so a check filed
+  // before — whose item is reused, never re-filed — still has its newest detail readable in status.
+  record.diagnosticFailures = Object.fromEntries(failed.map(check => [check, { commit: verified, detail: details[check]?.slice(0, 1000) ?? null, at }]));
+  for (const check of failed) {
+    const detail = record.diagnosticFailures[check]!.detail;
+    await fileFailure(ports, record, at, { key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`,
+      description: `The scheduled full run against the verified commit ${verified} failed ${check}${detail ? `: ${detail}` : ''}. It never blocks a gate or a merge; fix it at its cause.` });
+  }
   record.catalogMs = catalogMs;
   record.diagnosticsAt = at;
   if (previewCases.length) record.previewCases = Object.fromEntries(previewCases.map(run => [run.case, run]));
@@ -412,6 +431,8 @@ export function gateSummary(record: GateRecord | null) {
     held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()),
     // GY-3193: each preview case's last daily run and verdict; `not covered` when it did not run.
     previewCases: Object.values(record.previewCases ?? {}).map(run => ({ ...run, commit: run.commit.slice(0, 12) })),
+    // GY-3264: the latest diagnostic failures with the exact commit, failing step and the item that owns each.
+    diagnosticFailures: Object.entries(record.diagnosticFailures ?? {}).map(([check, failure]) => ({ check, ...failure, item: record.filed?.[`diagnostic:${check}`]?.item ?? null })),
     // GY-3147: the filing failures that never aborted a run, newest last.
     notes: record.notes ?? [] };
 }

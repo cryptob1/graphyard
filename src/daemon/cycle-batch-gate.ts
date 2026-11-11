@@ -17,16 +17,22 @@ import { message, storeAction } from './state.js';
 const gateKey = gateTrialKey;
 const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(Boolean);
 
-/** What one trial run of `checks` on `commit` failed, as gate check ids; the trial is bounded by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142). */
-async function trialChecks(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]> {
+/**
+ * What one trial run of `checks` on `commit` failed, as gate check ids, with each failing case's
+ * failing-step text as the trial supplied it (GY-3264); the trial is bounded by `timeoutMs`, the
+ * gate's own clock, never the merge-trial deadline (GY-3142).
+ */
+async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<{ failed: string[]; details: Record<string, string> }> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
   const run = await reads.trial(commit, tests, { key: gateKey, criteria: cases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: cases }] as Work['criteria'] : [] }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
   const failed = [...(run.build === 'fail' ? ['build'] : []),
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
-  return failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected')));
+  const details = Object.fromEntries((run.e2e ?? []).filter(entry => entry.failingStep).map(entry => [entry.proof, entry.failingStep!]));
+  return { failed: failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected'))), details };
 }
+const trialChecks = async (...args: Parameters<typeof trialFailures>) => (await trialFailures(...args)).failed;
 
 /** The pinning-test proof a gate filing binds, named from its check: `known-red:test:tests/a-b.test.ts` → `unit:a-b-pinned`. */
 export const pinningProof = (key: string) =>
@@ -85,11 +91,11 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     diagnose: async commit => {
       const suite = await trialChecks(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
       const held = await catalog(commit), cases = held.map(id => `e2e:${id}`), started = reads.now();
-      const failed = cases.length ? await trialChecks(reads, commit, cases, [], gateLimitMs) : [], catalogMs = reads.now() - started;
+      const { failed, details } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs) : { failed: [], details: {} }, catalogMs = reads.now() - started;
       const previews = reads.gate?.previews;
       const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
         : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
-      return { failed: [...new Set([...suite, ...failed])], catalogMs, previewCases };
+      return { failed: [...new Set([...suite, ...failed])], catalogMs, previewCases, details };
     },
   };
 }
@@ -113,7 +119,7 @@ function mergeGateRecord(file: string, merge: (latest: GateRecord | null) => Gat
 }
 
 /** What a gate's write keeps of the diagnostics' own fields (GY-3147, GY-3193): they recorded them meanwhile. */
-const diagnosticFields = (latest: GateRecord | null, current: GateRecord) => ({ releaseTagged: latest?.releaseTagged ?? current.releaseTagged, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, previewCases: latest?.previewCases ?? current.previewCases, ...mergeFilings(latest, current) });
+const diagnosticFields = (latest: GateRecord | null, current: GateRecord) => ({ releaseTagged: latest?.releaseTagged ?? current.releaseTagged, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, diagnosticFailures: latest?.diagnosticFailures ?? current.diagnosticFailures, previewCases: latest?.previewCases ?? current.previewCases, ...mergeFilings(latest, current) });
 
 /** The commit served at rollout, which becomes the first verified commit: the deploy record's when it names this repository, else main's tip. */
 async function rolloutCommit(root: string, repository: string, reads: MergeWriterReads) {
@@ -211,7 +217,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         if (failed) {
           // Re-read so the diagnostics' fields never overwrite what a gate recorded meanwhile; the
           // filings of both writers merge (GY-3147).
-          await mergeGateRecord(file, latest => ({ ...(latest ?? fresh), catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt, previewCases: fresh.previewCases, ...mergeFilings(latest, fresh) }));
+          await mergeGateRecord(file, latest => ({ ...(latest ?? fresh), catalogMs: fresh.catalogMs, diagnosticsAt: fresh.diagnosticsAt, diagnosticFailures: fresh.diagnosticFailures, previewCases: fresh.previewCases, ...mergeFilings(latest, fresh) }));
           note('batch-gate:diagnostics', 'done', `Diagnostics on ${fresh.verified?.slice(0, 12)}: ${failed.length} failure(s) filed`);
         }
       } catch (error) { note('batch-gate:diagnostics', 'failed', `The diagnostics failed and run again next cycle: ${message(error)}`); }

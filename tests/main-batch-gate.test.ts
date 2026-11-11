@@ -725,3 +725,52 @@ test('unit:gate-results-saved-before-filing — every check result is on the gat
     assert.equal(readGateRecord(file2)!.results[verified]!['test:tests/a.test.ts'], true, 'the probe verdict was saved before the filing failed, so the crash lost nothing');
   }
 });
+
+test('e2e:diagnostic-failure-details — a scheduled diagnostic through batchGatePorts files the proof, the exact tested commit and the trial\'s failing step; the gate record keeps the latest details across a reload, a repeated failure keeps its item and shows its newer commit and step in master status, and a record without details still reads (GY-3264)', async () => {
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const steps: Record<string, string> = { 'e2e:hard-math-smoke': 'step 2 solve the fixture: expected 42, received 41' };
+  const filed: { key: string; description: string }[] = [];
+  const base: MergeWriterReads = { ...reads('/unused').value,
+    git: async args => args[0] === 'ls-tree' ? 'hard-math-smoke.json\nsmoke.json\nother.json' : '',
+    trial: async (_commit, _files, trialItem) => {
+      const proofs = trialItem.criteria.flatMap(criterion => criterion.proofs);
+      return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {},
+        e2e: proofs.map(proof => proof === 'e2e:smoke' ? { proof, case: 'smoke', executed: 1, failed: 0 }
+          : { proof, case: proof.slice(4), executed: 1, failed: 1, ...(steps[proof] ? { failingStep: steps[proof] } : {}) }) } as unknown as MergeTrialRun;
+    },
+    createWork: async (input, key) => { filed.push({ key, description: input.description }); return { key: `GY-${3262 + filed.length}` }; } };
+  let clock = Date.parse('2026-11-10T00:00:00Z');
+  const ports = { ...batchGatePorts({ ...base, git: base.git! }, []), now: () => clock };
+  const file = gateRecordPath(await temporaryDirectory('diagnostic-details'));
+
+  // The first run files each failure with its proof, the exact commit and the trial's own failing step; none is invented.
+  const first = sha(1);
+  await writeGateRecord(file, bootstrapGate(repository, first));
+  const record = readGateRecord(file)!;
+  assert.deepEqual((await runDiagnostics(ports, record))!.sort(), ['e2e:hard-math-smoke', 'e2e:other']);
+  const hardMath = filed.find(entry => entry.key === 'diagnostic:e2e:hard-math-smoke')!;
+  assert.match(hardMath.description, new RegExp(`verified commit ${first} failed e2e:hard-math-smoke: step 2 solve the fixture: expected 42, received 41\\.`));
+  assert.match(filed.find(entry => entry.key === 'diagnostic:e2e:other')!.description, new RegExp(`${first} failed e2e:other\\. It never blocks`), 'no detail, no invented cause');
+  await writeGateRecord(file, record);
+  assert.deepEqual(readGateRecord(file)!.diagnosticFailures!['e2e:hard-math-smoke'], { commit: first, detail: steps['e2e:hard-math-smoke'], at: new Date(clock).toISOString() });
+  assert.equal(readGateRecord(file)!.diagnosticFailures!['e2e:other']!.detail, null);
+
+  // A day later the same case fails on a newer commit with a newer step: its item is reused, and the newer detail survives a reload.
+  clock += diagnosticsIntervalMs;
+  const second = sha(2);
+  steps['e2e:hard-math-smoke'] = 'step 3 check the answer: the run timed out after 600 seconds';
+  const reloaded = readGateRecord(file)!;
+  reloaded.verified = second;
+  await runDiagnostics(ports, reloaded);
+  assert.equal(filed.length, 2, 'an already-filed key files no duplicate');
+  await writeGateRecord(file, reloaded);
+  const status = gateSummary(readGateRecord(file))!.diagnosticFailures.find(failure => failure.check === 'e2e:hard-math-smoke');
+  assert.deepEqual(status, { check: 'e2e:hard-math-smoke', commit: second, detail: steps['e2e:hard-math-smoke'], at: new Date(clock).toISOString(), item: 'GY-3263' },
+    'master status batchGate names the newer commit, its failing step and the existing item');
+
+  // A record an older loop wrote, with no details, still reads.
+  const older = bootstrapGate(repository, first);
+  delete older.diagnosticFailures;
+  await writeGateRecord(file, older);
+  assert.deepEqual(gateSummary(readGateRecord(file))!.diagnosticFailures, []);
+});

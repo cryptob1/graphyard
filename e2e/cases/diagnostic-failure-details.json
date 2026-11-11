@@ -1,0 +1,15 @@
+{
+  "id": "diagnostic-failure-details",
+  "title": "A scheduled diagnostic keeps the failing step it saw",
+  "description": "Runs the real batchGatePorts diagnose path into runDiagnostics with a trial result whose failed e2e case names its failing step: the filed item's description carries the proof, the exact tested commit and that step, the gate record keeps the latest details across a reload, a repeated failure reuses its item and master status batchGate shows its newer commit and step.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "diagnostic failure details reach the filing, the gate record and master status",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:diagnostic-failure-details tests/main-batch-gate.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
