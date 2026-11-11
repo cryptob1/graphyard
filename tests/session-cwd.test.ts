@@ -19,6 +19,7 @@ import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import { workFixture } from './helpers/work-fixture.js';
 
@@ -173,20 +174,18 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:session-cwd-own-checkout — a worker session opens its pane in its assigned worktree, never in the coordinator checkout', async () => {
+test('unit:session-cwd-own-checkout — a worker run starts in its assigned worktree, never in the coordinator checkout', async () => {
   const fixture = await installed();
   try {
     const { root, cleanup } = fixture;
-    const stub = herdr();
+    const worker = recordedRuns();
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await fixture.token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
     const assigned = await temporaryDirectory('session-cwd-worktree');
     try {
-      await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: registryFixture((await loadMasterConfig(root)).hostId!, ['opencode']).probe });
-      assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the worker');
-      const pane = paneCwd(stub.tabs[0]);
-      assert.ok(pane, 'the worker pane is created with an explicit --cwd');
-      assert.equal(resolve(pane!), resolve(assigned), 'the worker pane opens in its assigned worktree');
-      assert.ok(outsideCoordinator(pane!, root), 'the assigned worktree is outside the coordinator checkout');
+      await dispatchWork(root, ready(), profile, { allWork: [ready()], prepare: async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), release: async () => {}, headless: worker.exec, probe: registryFixture((await loadMasterConfig(root)).hostId!, ['opencode']).probe });
+      assert.equal(worker.runs.length, 1, 'one headless run is started for the worker');
+      assert.equal(resolve(worker.runs[0]!.cwd), resolve(assigned), 'the worker runs in its assigned worktree');
+      assert.ok(outsideCoordinator(worker.runs[0]!.cwd, root), 'the assigned worktree is outside the coordinator checkout');
     } finally { await rm(assigned, { recursive: true, force: true }); }
     await cleanup();
   } finally { await fixture.cleanup(); }
