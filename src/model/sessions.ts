@@ -87,6 +87,9 @@ function bounded(handles: SessionHandle[], recorded: SessionHandle): SessionHand
   return kept.length <= sessionHandleCeiling ? kept : kept.slice(kept.length - sessionHandleCeiling);
 }
 
+/** A headless worker run's transcript reference on its session handle (GY-3259): the run id the item's run-log endpoint reads, never a host path. */
+export const runTranscript = (run: string) => `run:${run}`;
+export const transcriptRun = (transcript: string | null | undefined) => /^run:([0-9a-f-]{36})$/.exec(transcript ?? '')?.[1] ?? null;
 /**
  * The command or link that attaches to this session: the one its launcher recorded while it runs,
  * and otherwise — for a session that has finished, or one whose runtime offers nothing to attach

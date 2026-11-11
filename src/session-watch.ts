@@ -2,7 +2,9 @@
 // signalling, lease renewal through control-plane restarts, consent-prompt probing and surrender.
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
+import type { Readable } from 'node:stream';
+import { maskSecrets } from './redaction.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
@@ -334,7 +336,8 @@ export function restartTolerantApi(api: ControlPlaneApi, until: () => number, op
 export const setupLine = (subject: string, epoch: number) => `graphyard: starting supervision of ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession;
-  /** GY-2971: an agent that exits within this many ms of its spawn leaves the lease to its launcher, which relaunches the same attempt fresh. */ earlyExitKeepsLeaseMs?: number } = {}) {
+  /** GY-2971: an agent that exits within this many ms of its spawn leaves the lease to its launcher, which relaunches the same attempt fresh. */ earlyExitKeepsLeaseMs?: number;
+  /** GY-3259: the headless run log the agent's output is appended to, one redacted JSON line per output line with its time and stream. */ log?: string } = {}) {
   let deadline = 0, granted = 0, attempts = 0;
   /** One renewal attempt, sequenced: a beat the supervisor already gave up on never moves the deadline. */
   const heartbeatAttempt = () => {
@@ -519,7 +522,8 @@ export async function supervise(command: string, args: string[], epoch: number, 
     void (async () => {
       try {
         if (prelaunchInterrupted) { finish(null, 1); return; }
-        child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
+        child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: options.log ? ['ignore', 'pipe', 'pipe'] : 'inherit', detached, env });
+        if (options.log) for (const stream of ['stdout', 'stderr'] as const) runLogLines(child[stream]!, stream, options.log);
         // Never learn the fallback root from a later /proc snapshot: after this
         // child exits its numeric PID can identify an unrelated replacement.
         // Cache the kernel identity immediately after spawn, or leave fallback
@@ -555,6 +559,15 @@ export async function supervise(command: string, args: string[], epoch: number, 
       } catch (error) { finish(error); }
     })();
   });
+}
+
+/** Appends each line STREAM prints to the run log FILE as `{at, stream, text}`, credentials masked before anything is written. */
+export function runLogLines(output: Readable, stream: 'stdout' | 'stderr', file: string) {
+  let pending = '';
+  const write = (text: string) => { try { appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), stream, text: maskSecrets(text) })}\n`, { mode: 0o600 }); } catch { /* a full disk never stops the agent */ } };
+  output.setEncoding('utf8');
+  output.on('data', (chunk: string) => { const lines = (pending + chunk).split('\n'); pending = lines.pop()!; lines.forEach(write); });
+  output.on('end', () => { if (pending) write(pending); });
 }
 
 /**

@@ -35,6 +35,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
+import { liveRuns } from '../runner/registry.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
@@ -97,7 +98,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     sessionHistory: deps.sessionHistory,
     inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).catch(() => []),
-    herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
+    // Headless workers (GY-3259) are listed beside Herdr's panes under their profile's agent name, working while their run lasts.
+    herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: [...runtime.agents, ...liveRuns().filter(entry => entry.role === 'worker').map(entry => ({ name: entry.name, agent: entry.agent, agent_status: 'working' }))], available: runtime.available }; },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     closeSession: pane => closeHerdrPane(pane, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
@@ -193,7 +195,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const directory = installDirectory(installIdFor(current().repository));
       return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
     },
-    dispatch: (work, profile, agents, snapshot, launch) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run), coordinatorRoot: deps.coordinatorRoot, ...launch }),
+    dispatch: (work, profile, _agents, snapshot, launch) => dispatchWork(root, work, profile, { allWork: snapshot.work, observedAt: snapshot.now, coordinatorRoot: deps.coordinatorRoot, headless: deps.headless, capacity: event => mutate(`work/${work.id}/capacity`, event, randomUUID()), ...launch }),
     registry: () => fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'),
     // GY-3225: the checkout's folder-trust refusals (an untrusted checkout carrying repository
     // Claude configuration), read from the registry document and this host's account configs.

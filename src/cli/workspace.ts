@@ -189,6 +189,8 @@ export const workspaceCommands = defineCommands([
           ...(scoped ? { containment: scoped } : {}),
           // A resume launch that exits at once (its session gone) keeps the lease for the fresh relaunch (GY-2971).
           ...(process.env[resumeLaunchVariable] === '1' ? { earlyExitKeepsLeaseMs: resumeExitWindowMs } : {}),
+          // A headless worker's output goes to its run log (GY-3259).
+          ...(process.env.GRAPHYARD_RUN_LOG ? { log: process.env.GRAPHYARD_RUN_LOG } : {}),
         });
     },
   },
