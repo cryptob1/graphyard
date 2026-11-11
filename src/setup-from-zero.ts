@@ -15,16 +15,16 @@ import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { landlockRefusal } from './landlock.js';
 
 /**
- * The prerequisites the README's setup steps depend on that `graphyard doctor` can check from this
- * machine (GY-1352). Each is a named pass/fail line naming the checklist step that fixes it, so an
+ * The prerequisites that `graphyard doctor` can check from this machine (GY-1352).
+ * Each is a named pass/fail line naming the command that fixes it, so an
  * agent setting Graphyard up from nothing reads the next step off doctor's output instead of guessing.
  */
 export const setupSteps = {
-  install: 'README setup step 2 (install with graphyard up)',
-  environments: 'README setup step 3 (connect agent accounts)',
-  sandbox: 'README setup step 1 (install bubblewrap for the worker sandbox)',
+  install: 'run graphyard up from this checkout',
+  environments: 'run graphyard up and connect agent accounts at the Setup link it prints',
+  sandbox: 'install bubblewrap: sudo apt install bubblewrap (Debian/Ubuntu) or sudo pacman -S bubblewrap (Arch)',
   kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9',
-  loopCode: 'rerun graphyard up --agent from this checkout (README setup step 2, start the master)',
+  loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
 } as const;

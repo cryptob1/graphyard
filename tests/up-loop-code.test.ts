@@ -547,7 +547,7 @@ test('unit:doctor-loop-code-setup-line — setupFromZero carries the loop-code l
   assert.equal(failing?.status, 'fail');
   assert.match(failing.detail, new RegExp(`${quote(MASTER_UNIT_PATH)} starts the CLI in ${quote(OLD_CHECKOUT)}`), 'the line names the loop unit and its old checkout');
   assert.match(failing.detail, /rerun graphyard up --repo acme\/shop --agent from this checkout/, 'the rerun that fixes it is named');
-  assert.equal(failing.step, 'rerun graphyard up --agent from this checkout (README setup step 2, start the master)');
+  assert.equal(failing.step, 'rerun graphyard up --agent from this checkout');
   assert.match(setupLine(failing), /^FAIL loop-code: .* \(fix: .+\)$/);
 
   assert.equal((await checks(cleanReading())).find(check => check.id === 'loop-code')?.status, 'pass', 'units on this checkout pass');
