@@ -385,7 +385,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
         supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run) });
-      if (started.ended !== null) await settleEarlyExit(started.ended);
+      if (started.ended) await settleEarlyExit(started.ended);
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
     } catch (error) {
       await keepAlive?.stop();
@@ -400,11 +400,12 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   }
   /**
    * A run that ended within its startup observation has ended its process, and its supervisor has
-   * released its lease. One that stopped on its provider's limit notice keeps its work on its branch
-   * and records the handoff and the account hold on the item, and one whose agent is not logged in
-   * moves on: both refuse this account so the same dispatch starts the next one. Any other early exit fails the launch.
+   * released its lease unless it completed. One that stopped on its provider's limit notice keeps its
+   * work on its branch and records the handoff and the account hold on the item, and one whose agent
+   * is not logged in moves on: both refuse this account so the same dispatch starts the next one.
+   * One that exited 0 simply finished early; any other early exit fails the launch.
    */
-  async function settleEarlyExit(output: string) {
+  async function settleEarlyExit({ output, ok }: { output: string; ok: boolean }) {
     const notice = detectRuntimeExhaustion(output, launch.kind!, Date.now());
     if (notice) {
       const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
@@ -412,6 +413,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
       throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true);
     }
+    if (ok) return;
     const loggedOut = detectLoggedOut(output);
     if (loggedOut) throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once: ${loggedOut}`, true);
     throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once${output.trim() ? `: ${output.trim().slice(-300)}` : ' without output'}`, false);

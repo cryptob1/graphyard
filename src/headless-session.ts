@@ -333,10 +333,10 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
  * itself but heartbeats the lease the launcher claimed under the worker's own identity, stops the
  * runtime the moment that lease is lost and releases it when the runtime exits without `complete`.
  * The run is watched for `workerStartupMs`; one that ended in that time is returned with what it
- * printed, so the launcher can move a spent account on before it returns. Otherwise it is listed as
+ * printed and whether it exited 0, so the launcher can move a spent account on before it returns. Otherwise it is listed as
  * a live session until it ends, and its log and record stay on disk after.
  */
-export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: string; ended: string | null }> {
+export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: string; ended: { output: string; ok: boolean } | null }> {
   const launch = await prepareHeadlessRun(input, input.prompt, input.directory, input.coordinatorRoot, false);
   const id = randomUUID(), directory = resolve(workerRunsDirectory(input.root), id);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -346,8 +346,8 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const argv = [...input.supervisor, ...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, launch.request, launch.contract)];
   const stop = new AbortController(), detached = new AbortController();
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
-  const ended = await Promise.race([running.then(() => true, () => true), new Promise<false>(done => setTimeout(() => done(false), workerStartupMs).unref())]);
-  if (ended) return { id, ended: readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '' };
+  const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), workerStartupMs).unref())]);
+  if (ended) return { id, ended: { ...ended, output: readRunLog(input.root, id)?.lines.map(line => line.text).join('\n') ?? '' } };
   watchWorker(record, directory, running, stop, detached);
   return { id, ended: null };
 }

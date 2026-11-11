@@ -146,7 +146,7 @@ async function submitted(id: string, epoch: number) {
   assert.fail(`${id} epoch ${epoch} was never submitted by its worker: ${JSON.stringify((await stored(id)).lease)}`);
 }
 const started = async (name: string) => JSON.parse(await readFile(join(homes.get(name)!, 'started.json'), 'utf8'));
-const runLog = async (work: Work, run: string, principal: Principal | null = reader) => api(principal, 'GET', `work/${work.key}/runs/${run}/log`);
+const runLog = async (work: Work, run: string) => api(reader, 'GET', `work/${work.key}/runs/${run}/log`);
 async function recordRun(work: Work, epoch: number, run: string) {
   // The loop records the dispatched session's handle with its run; here, as the coordinator would.
   const recorded = await api(coordinator, 'POST', `work/${work.id}/session`, { id: `${worker.id}:${epoch}`, kind: 'implementation', principal: worker.id, runtime: 'stub', host: hostId, agentName: 'eng-a', transcript: runTranscript(run), subject: work.key, state: 'running' });
@@ -212,8 +212,9 @@ test('e2e:headless-workers — a limit exit hands the item to the next account w
   assert.equal(done.status, 200);
   assert.equal(done.body.run.account, 'successor');
   assert.ok(done.body.lines.some((line: any) => line.stream === 'stdout' && /^submitted [0-9a-f]{40} 200$/.test(line.text)));
-  // Access is the item's readers': unauthenticated is refused, and another item's path never reaches a run it does not name.
-  assert.equal((await runLog(work, launched.run, null)).status, 401);
+  // Access is the item's readers': a remote request without a credential is refused, and another item's path never reaches a run it does not name.
+  for (const headers of [{ 'X-Forwarded-For': '203.0.113.9' }, { Authorization: `Bearer not-a-token-${'y'.repeat(32)}` }])
+    assert.equal((await fetch(`${url}/api/work/${work.key}/runs/${launched.run}/log`, { headers })).status, 401, 'a remote reader without this repository\'s credential is refused');
   const other = await readyItem('GY-9651');
   assert.equal((await runLog(other, launched.run)).status, 404);
   assert.equal(existsSync(herdrCalls), false);
