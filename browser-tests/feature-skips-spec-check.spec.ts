@@ -1,8 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 
-// GY-2992: a feature item shows its spec check — the paraphrase, the gaps and the verdict — on its
-// dashboard panel, exactly what the e2e:spec-check-shown case proves against a served head.
+// Stored legacy reports have no dashboard panel after retirement.
 
 const now = '2026-01-01T00:00:00Z';
 const work = [
@@ -29,7 +28,7 @@ async function fixture(page: Page) {
   });
 }
 
-test('integration:spec-check-shown — a feature item shows its spec check: the paraphrase, the gaps and the verdict', async ({ page }) => {
+test('integration:feature-skips-spec-check — legacy feature reports have no dashboard panel', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await fixture(page);
   await page.goto('/?sign-in');
@@ -39,16 +38,10 @@ test('integration:spec-check-shown — a feature item shows its spec check: the 
 
   await page.getByRole('button', { name: /Export flow.*GY-20/ }).click();
   const panel = page.locator('section[aria-label="Spec check"]');
-  await expect(panel.getByRole('heading', { name: /Spec check/ })).toContainText('Gaps');
-  await expect(panel).toContainText('The change moves the export flow behind the settings screen');
-  await expect(panel).toContainText('AC-1 does not say which of the two export buttons the flow starts from');
-  await expect(panel).toContainText('spec-checker');
-  await expect(panel).toContainText('the re-check after master requirements');
-  await expect(panel).toContainText('the item dispatches with this report attached for the worker');
-  await expect(panel).not.toContainText('held at ready');
+  await expect(panel).toHaveCount(0);
 });
 
-test('integration:spec-check-shown — a bug owes no spec check and shows no panel', async ({ page }) => {
+test('integration:feature-skips-spec-check — bugs show no obsolete panel', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await fixture(page);
   await page.goto('/?sign-in');

@@ -1,14 +1,14 @@
 {
   "id": "headless-review",
-  "title": "Reviews and spec checks run headless",
-  "description": "A review request or spec check runs the reviewer's runtime once as a child process with no Herdr pane; its JSON answer is posted under the reviewer identity, and a malformed answer is retried.",
+  "title": "Reviews run headless",
+  "description": "A review request runs the reviewer's runtime once as a child process with no Herdr pane; its JSON answer is posted under the reviewer identity, and a malformed answer is retried.",
   "tags": ["review"],
   "target": "any",
   "required": true,
   "steps": [
     {
       "kind": "command",
-      "name": "headless review and spec-check proofs",
+      "name": "headless review proofs",
       "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-review.test.ts",
       "timeoutSeconds": 600
     }
