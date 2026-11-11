@@ -86,7 +86,7 @@ test('integration:sandbox-worktree-admin-layout — production dispatch confines
     const registry = registryFixture(config.hostId!, ['claude']);
     let probed = false;
     try {
-      await dispatchWork(root, item, profile, [], async () => { throw new Error('No runtime should start'); }, [item], undefined, undefined, 1, now, {
+      await dispatchWork(root, item, profile, { allWork: [item], observedAt: now, headless: async () => { throw new Error('No runtime should start'); },
         probe: registry.probe, sandbox: (command, args, options) => {
           assert.equal(command, 'bwrap', 'a production worker carries the served repository confinement');
           assert.ok(args.includes(join(root, '.git/worktrees/GY-1-26')), 'its own Git admin is mounted');

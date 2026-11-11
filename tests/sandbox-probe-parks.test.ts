@@ -70,9 +70,9 @@ for (const kind of ['codex', 'pi']) test(`unit:tests/sandbox-probe-parks.test.ts
       closeSession: () => {}, persist: async () => {},
       dispatch: async () => {
         launches++;
-        return dispatchWork(fixture.main, item, profile, [], async () => { throw new Error('No runtime should start'); }, [item],
-          async () => ({ epoch: 3, path: fixture.worktree, base: 'c'.repeat(40) }),
-          async (root, key, epoch, name, blocker) => {
+        return dispatchWork(fixture.main, item, profile, { allWork: [item], headless: async () => { throw new Error('No runtime should start'); },
+          prepare: async () => ({ epoch: 3, path: fixture.worktree, base: 'c'.repeat(40) }),
+          release: async (root, key, epoch, name, blocker) => {
             assert.ok(blocker);
             // Exercise the production CLI adapter using the claimed worker identity.
             await releaseWorkerLaunch(root, key, epoch, name, blocker, async (_command, args, options) => {
@@ -83,7 +83,7 @@ for (const kind of ['codex', 'pi']) test(`unit:tests/sandbox-probe-parks.test.ts
             item.epoch = 3;
             item.blocker = blocker;
             item.ready = false;
-          }, 1, new Date().toISOString(), { probe: registry.probe, sandbox: () => {
+          }, probe: registry.probe, sandbox: () => {
             throw Object.assign(new Error('probe refused'), { status: 3, stdout: `unwritable\t${fixture.gitDir}\tRead-only file system\n`, stderr: '' });
           } });
       },
