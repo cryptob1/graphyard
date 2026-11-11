@@ -206,7 +206,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
   // authorized surrounding-code reads were available. Reproduce the exact search and recover.
   const discovery = await temporaryDirectory('review-brief-path-discovery');
   await symlink(fileURLToPath(new URL('../', import.meta.url)), join(discovery, 'checkout'));
-  const pattern = 'reviewLaunch|specCheckLaunch|policyRevision';
+  const pattern = 'reviewLaunch|policyRevision';
   assert.throws(() => execFileSync('rg', ['-n', pattern,
     'checkout/src/server/routes/review.ts', 'checkout/src/model/post-merge-review.ts',
     'checkout/tests/review-verdict.test.ts', 'checkout/tests/spec-check.test.ts',
@@ -217,9 +217,9 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
     return true;
   });
   const paths = execFileSync('rg', ['--files', 'checkout/src', 'checkout/tests'], { cwd: discovery, encoding: 'utf8' }).split('\n');
-  const corrected = ['checkout/src/server/review-verdict.ts', 'checkout/tests/spec-check-before-dispatch.test.ts'];
+  const corrected = ['checkout/src/server/review-verdict.ts', 'checkout/tests/review-verdict.test.ts'];
   for (const path of corrected) assert.ok(paths.includes(path));
-  assert.match(execFileSync('rg', ['-n', pattern, ...corrected], { cwd: discovery, encoding: 'utf8' }), /reviewLaunch|specCheckLaunch|policyRevision/);
+  assert.match(execFileSync('rg', ['-n', pattern, ...corrected], { cwd: discovery, encoding: 'utf8' }), /reviewLaunch|policyRevision/);
   for (const postMerge of [false, true]) {
     const work = deliveredPrLess(postMerge ? 'GY-9011' : 'GY-9010');
     // The criterion text deliberately supplies no proof or path: only structured launch inputs do.

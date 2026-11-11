@@ -12,7 +12,6 @@ import { runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError } from '../sr
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 
 /**
  * GY-1746: Pi is a first-class worker runtime. Its launch is confined as any runtime without a
@@ -142,8 +141,7 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
   const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
     criteria: [{ id: 'AC-3', text: 'Fallback in src/master/dispatch.ts', proofs: ['unit:pi-launch-failure-falls-back'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
-    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
-    specCheck: readySpecCheck(new Date().toISOString()) } as any;
+     } as any;
 
   const dispatch = async (refusePi?: string, exitPi = false, piAccounts = ['pi-a', 'pi-b']) => {
     const at = new Date().toISOString();

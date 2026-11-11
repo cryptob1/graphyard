@@ -15,7 +15,6 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
-import { launchSpecCheck } from '../src/spec-check.js';
 import { reviewBindingFile } from '../src/review-post.js';
 import { liveRun } from '../src/runner/registry.js';
 import { headlessArgs, headlessKind, headlessRunsDirectory, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
@@ -27,7 +26,7 @@ import { loopRunAdoption } from '../src/daemon/run-adoption.js';
 import { existsSync, readdirSync } from 'node:fs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// Headless reviews and spec checks: one child run of the reviewer's runtime, no Herdr pane, its
+// Headless reviews: one child run of the reviewer's runtime, no Herdr pane, its
 // JSON answer posted through review post's own route under the launch's token and reviewer identity.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -85,12 +84,6 @@ function reviewItem(key: string): Work {
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'],
     observation: { source: 'control-plane', at: now(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false,
       files: ['feature.ts'], scopeFiles: [{ path: 'feature.ts', status: 'added', sha: head, additions: 1, deletions: 0, binary: false }], baseTip: base, baseTipContained: true } } as unknown as Work;
-}
-function specItem(key: string): Work {
-  return { id: randomUUID(), key, title: 'Export from settings', description: 'Read README.md and move export to settings.', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Export works', proofs: ['e2e:export'] }], policy: { checks: ['test'], review: true },
-    stage: 'ready', revision: 1, policyRevision: 1, createdAt: now(), updatedAt: now(), stageEnteredAt: now(), ready: true, epoch: 0, lease: null,
-    workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [] } as unknown as Work;
 }
 /** Every child command this launcher ran: git really runs, Herdr is a refusal, so a pane would fail the launch. */
 const commands: string[][] = [];
@@ -188,33 +181,6 @@ test('integration:headless-review — a malformed answer is run once more with t
   const second = await launchReview(root, await stored(silent.id), 'reviewer-claude', [], now(), { run, headless: retry.exec, requestId: 'headless-request-3' });
   assert.equal((await settled(second.review)).verdict?.reviewer, reviewer);
   assert.equal(retry.runs.length, 1);
-  assert.deepEqual(commands.filter(([command]) => command !== 'git'), [], 'no Herdr command ran');
-});
-
-test('integration:headless-review — a spec check is one headless run whose ready or gaps answer is recorded as the item\'s spec check under the reviewer identity', async () => {
-  const gaps = await insert(specItem('GY-9104'));
-  const fake = runtime(['{"verdict": "gaps", "paraphrase": "Move export to settings; AC-1 proves it.", "gaps": ["Name the export button."]}']);
-  const launched = await launchSpecCheck(root, gaps, 'reviewer-claude', [], now(), { run, headless: fake.exec });
-  assert.equal(launched.pane, null);
-  assert.equal(await launched.settled, null, 'the report was posted');
-  assert.equal(fake.runs.length, 1);
-  assert.match(fake.runs[0]!.args.at(-1)!, /"verdict": "ready" or "gaps"/);
-  assert.doesNotMatch(fake.runs[0]!.args.at(-1)!, /spec-check post --verdict/);
-  const checked = (await stored(gaps.id)).specCheck!;
-  assert.deepEqual([checked.verdict, checked.gaps, checked.reviewer], ['gaps', ['Name the export button.'], reviewer]);
-
-  const ready = await insert(specItem('GY-9105'));
-  const retried = runtime(['no answer', 'Done. {"verdict": "ready", "paraphrase": "Move export to settings; AC-1 proves it.", "gaps": []}']);
-  const second = await launchSpecCheck(root, ready, 'reviewer-claude', [], now(), { run, headless: retried.exec });
-  assert.equal(await second.settled, null);
-  assert.equal(retried.runs.length, 2, 'a malformed answer is retried');
-  assert.equal((await stored(ready.id)).specCheck!.verdict, 'ready');
-
-  // A check no answer satisfies ends with the reason, which the loop records to relaunch it.
-  const unanswered = await insert(specItem('GY-9106'));
-  const third = await launchSpecCheck(root, unanswered, 'reviewer-claude', [], now(), { run, headless: runtime(['{"verdict": "ready", "paraphrase": "x", "gaps": ["one"]}']).exec });
-  assert.match(String(await third.settled), /no answer accepted after 2 runs: Spec check not posted: a ready verdict takes no --gap/);
-  assert.equal((await stored(unanswered.id)).specCheck ?? null, null);
   assert.deepEqual(commands.filter(([command]) => command !== 'git'), [], 'no Herdr command ran');
 });
 

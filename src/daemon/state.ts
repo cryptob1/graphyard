@@ -38,10 +38,8 @@ export const daemonActionSchema = z.object({
   since: z.string().optional(),
   /** Set on an owed launch coordinate (GY-1895): the exact write to send again — the item and the launch's own handle — so a restarted loop resends it, never retiring it unsent. */
   owed: z.object({ work: z.object({ id: z.string(), key: z.string() }).strict(), handle: z.record(z.string(), z.unknown()) }).strict().optional(),
-  /** Set on a spec-check launch (GY-2992): the session's pane, which the loop closes once the report lands or the launch expires. */
+  /** The session's pane. */
   pane: z.string().max(200).optional(),
-  /** The registered spec-check launch this pane answers; absent on older cursors. */
-  specCheckLaunch: z.string().max(200).optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
@@ -272,6 +270,8 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
   // Preserve unknown cursor fields across reads and writes, including keys retired from the schema.
   const stored = JSON.parse(raw);
+  // Retired launch records must not wake the master or reserve a session on restart.
+  for (const key of Object.keys(stored.actions ?? {})) if (key.startsWith('spec-check')) delete stored.actions[key];
   for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
   delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
   const state = toleratedStateSchema().parse(stored);

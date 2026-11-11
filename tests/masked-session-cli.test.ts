@@ -5,26 +5,20 @@ import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { credentialMaskFor, coordinatorConfinement, sessionMountNamespaceWorks } from '../src/master/confinement.js';
-import { LauncherUnavailableError, loadMasterConfig, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
-import { storeAction, writeDaemonState } from '../src/daemon/state.js';
+import { LauncherUnavailableError, loadMasterConfig, setupMaster } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { emptyDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
-import { emptyDaemonState } from '../src/daemon/state.js';
-import { runCycle } from '../src/daemon/cycle.js';
-import { type DaemonEffects } from '../src/daemon/effects.js';
 import { cliUnreachableRefusal, launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
-import { launchSpecCheck } from '../src/spec-check.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2995: a self-deployed install runs its CLI from a checkout under the operator config home
 // (~/.config/graphyard/<install>/deploy/build, the launcher at bin/graphyard.mjs), and its
-// reviewer and spec-check sessions authenticate through a binding directory under it too
+// reviewer sessions authenticate through a binding directory under it too
 // (<install>/reviewers/sessions/<id>, the session's GH_CONFIG_DIR). GY-1856's credential mask
 // masked the config home wholesale and kept only runtime login homes, so every reviewer and
-// spec checker such an install launched found an empty tmpfs where its CLI and its own binding
+// reviewer such an install launched found an empty tmpfs where its CLI and its own binding
 // should be: it could never post a verdict, went idle, and the loop relaunched it. The mask now
 // keeps the launcher's deploy checkout read-only and the session's own binding directory
 // writable, and a launch whose sandbox still cannot reach the CLI its prompt names is refused
@@ -76,7 +70,7 @@ function maskedFixture(base: string) {
 test('integration:masked-session-reaches-own-cli — under the reviewer mask a session whose install runs its CLI from under the config home executes that CLI and reads its own binding, while every other credential under the config home stays unreadable', async () => {
   const base = await temporaryDirectory('masked session own cli');
   try {
-    // The session shape the reviewer and spec-check launches share: the binding directory is the
+    // The session shape the reviewer launches share: the binding directory is the
     // session's GH_CONFIG_DIR, the launcher sits in the install's deploy checkout, and the working
     // directory is a managed checkout outside the config home.
     const f = maskedFixture(base);
@@ -164,7 +158,7 @@ async function cliMaster(label: string) {
 
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 
-/** A control-plane-observed candidate: a review (bug) and a spec check (feature) are owed to it, and neither launch needs a reviewer App or GitHub. */
+/** A control-plane-observed candidate: a review is owed to it, and its launch needs a reviewer App or GitHub. */
 function planeWork(clock: number, type: 'bug' | 'feature'): Work {
   const H = sha40('c1'), B = sha40('b1');
   const candidate = { sha: H, baseSha: B, pr: 2995, branch: 'graphyard/gy-2995-1', author: 'implementer' };
@@ -181,7 +175,7 @@ function planeWork(clock: number, type: 'bug' | 'feature'): Work {
   } as unknown as Work;
 }
 
-test('integration:masked-session-missing-cli-refused — a review and a spec-check launch whose sandbox cannot reach the CLI the prompt names are refused before any session starts', async () => {
+test('integration:masked-session-missing-cli-refused — a review launch whose sandbox cannot reach the CLI the prompt names are refused before any session starts', async () => {
   const clock = 1_700_000_000_000;
   const master = await cliMaster('masked-cli-refused');
   const calls: string[][] = [];
@@ -204,19 +198,6 @@ test('integration:masked-session-missing-cli-refused — a review and a spec-che
     assert.ok(!existsSync(sessions) || readdirSync(sessions).length === 0, 'no reviewer session directory was written');
     assert.equal((await readReviewLedger(master.root)).reviews.length, 0, 'the review reservation was given back');
 
-    // The spec-check launch is refused the same way, before the control plane is asked to register it.
-    const registered: string[] = [];
-    const specCheck = planeWork(clock, 'feature');
-    await assert.rejects(
-      launchSpecCheck(master.root, specCheck, undefined, [], new Date(clock).toISOString(), { run, registerLaunch: async () => { registered.push(specCheck.key); return { launch: 'launch-1' }; } }),
-      (error: unknown) => {
-        assert.ok(error instanceof LauncherUnavailableError, 'the spec-check refusal is the same configuration fault');
-        assert.match((error as Error).message, /unavailable/);
-        return true;
-      });
-    assert.deepEqual(registered, [], 'no launch was registered with the control plane');
-    assert.ok(!existsSync(sessions) || readdirSync(sessions).length === 0, 'no spec-check session directory was written');
-    assert.deepEqual(calls, [], 'still no Herdr call was made');
   } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
 });
 
@@ -240,77 +221,4 @@ test('unit:masked-cli-refusal-waits-not-fails — the dispatcher turns the refus
       assert.deepEqual(cursor.failures, {}, 'the cursor records no failure, so no backoff or limit ever applies');
     }
   } finally { await host.cleanup(); }
-});
-
-test('unit:spec-check-cli-refusal-is-attention-not-a-loop — the loop records the refused spec-check launch as attention, launches no session, and launches again once the CLI is back', async () => {
-  const clock = Date.parse('2030-01-01T00:00:00Z');
-  const directory = await temporaryDirectory('spec-check-cli-refused');
-  const credentialFile = join(directory, 'coordinator.token'), deployCheckout = join(directory, 'acme', 'deploy', 'build');
-  const cli = join(deployCheckout, 'bin', 'graphyard.mjs');
-  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: cli,
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  const item = planeWork(clock, 'feature');
-  const state = emptyDaemonState(config);
-  let launches = 0;
-  const effects: DaemonEffects = {
-    agents: () => [],
-    credentials: async () => ({}),
-    snapshot: async () => ({ work: [item], now: new Date(clock).toISOString() }),
-    closeSession: () => {},
-    dispatch: async () => {},
-    sweepCheckouts: async () => {},
-    dispatchTick: async () => {},
-    launchSpecCheck: async () => { launches++; },
-    persist: async () => {},
-  };
-  // The deploy checkout does not exist: each cycle refuses before any session starts and keeps one attention row.
-  for (let cycle = 0; cycle < 2; cycle++) await runCycle(config, state, effects, () => clock, undefined, () => {});
-  assert.equal(launches, 0, 'no spec-check session is launched while the CLI is unreachable');
-  const row = state.actions[`spec-check-cli-refused:${item.id}`];
-  assert.ok(row, 'the loop recorded an attention row for the refused launch');
-  assert.equal(row.kind, 'attention');
-  assert.equal(row.state, 'failed');
-  assert.equal(row.work, item.key);
-  assert.match(row.detail, /is not on this host/);
-  assert.equal(row.attempts, 1, 'the standing refusal is touched, not counted again');
-  // The CLI is back: the same cycle path launches the check.
-  mkdirSync(dirname(cli), { recursive: true });
-  writeFileSync(cli, '#!/usr/bin/env node\n');
-  await runCycle(config, state, effects, () => clock, undefined, () => {});
-  assert.equal(launches, 1, 'the check launches once the CLI is reachable');
-  await rm(directory, { recursive: true, force: true });
-});
-
-test('unit:master-status-names-the-cli-refusal — master status names the refused spec-check launches while the CLI is unreachable, and nothing once it is back', async () => {
-  const clock = Date.parse('2030-01-01T00:00:00Z');
-  const base = await temporaryDirectory('spec-check-cli-status');
-  const directory = join(base, 'repo');
-  spawnSync('git', ['init', '-q', directory]);
-  const credentials = join(base, 'credentials');
-  const credentialFile = join(credentials, 'coordinator.token'), deployCheckout = join(credentials, 'acme', 'deploy', 'build');
-  const cli = join(deployCheckout, 'bin', 'graphyard.mjs');
-  await mkdir(dirname(credentialFile), { recursive: true });
-  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: cli,
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] }) as MasterConfig;
-  const item = planeWork(clock, 'feature');
-  const state = emptyDaemonState(master);
-  storeAction(state, `spec-check-cli-refused:${item.id}`, { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: 0, epoch: null,
-    detail: `${item.key}'s spec check is not launched: the CLI the prompt names (node ${cli}) is not on this host, so no session could post its verdict; restore the deploy checkout it names, or set cliPath with graphyard master setup`, at: new Date(clock).toISOString() });
-  await writeDaemonState(master, state);
-  const masterApi = async () => ({ work: [item], now: new Date(clock).toISOString() });
-  const run = async () => { throw new Error('no git in the fixture'); };
-  const refused = await masterStatusReport(directory, master, masterApi, run);
-  assert.match(refused.cliRefusal?.reason ?? '', /is not on this host/);
-  assert.match(refused.cliRefusal?.reason ?? '', /restore the deploy checkout/);
-  assert.deepEqual(refused.cliRefusal?.specChecks.map(entry => entry.work), [item.key], 'the spec checks the refusal withholds are named beside it');
-  // The CLI is back: the page names nothing.
-  mkdirSync(dirname(cli), { recursive: true });
-  writeFileSync(cli, '#!/usr/bin/env node\n');
-  const recovered = await masterStatusReport(directory, master, masterApi, run);
-  assert.equal(recovered.cliRefusal, null, 'no refusal is named once the CLI is reachable');
-  await rm(base, { recursive: true, force: true });
 });

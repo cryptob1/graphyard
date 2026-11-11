@@ -100,7 +100,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   <header>
     <span class="eyebrow">Graphyard · how it works</span>
     <h1>From a goal to production</h1>
-    <p class="lede">The human keeps goals, money and credentials. The master (AI) decides. The loop (plain code) dispatches workers, requests spec checks, review and proof, and drives the merge writer, which trials every change on the latest main.</p>
+    <p class="lede">The human keeps goals, money and credentials. The master (AI) decides. The loop (plain code) dispatches workers, requests review and proof, and drives the merge writer, which trials every change on the latest main.</p>
   </header>
 
   <section aria-labelledby="watch">
@@ -178,7 +178,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   }
 
 
-  const chapters = [[0, 'Roles'], [9, 'Decide'], [18, 'Loop'], [27, 'Spec check'], [36, 'Build'], [45, 'Review'], [54, 'Merge trial'], [63, 'Deploy'], [72, 'Revert'], [81, 'Failures']];
+  const chapters = [[0, 'Roles'], [9, 'Decide'], [18, 'Loop'], [27, 'Ready'], [36, 'Build'], [45, 'Review'], [54, 'Merge trial'], [63, 'Deploy'], [72, 'Revert'], [81, 'Failures']];
   const sceneLabel = text(stage, 32, 40, 't-scene', '', 'start');
   updaters.push(t => { let i = 0; chapters.forEach(([s], j) => { if (t >= s) i = j; }); sceneLabel.textContent = String(i + 1).padStart(2, '0') + ' · ' + chapters[i][1].toUpperCase(); });
   const ok = (s, x, y, at, out) => { const g = el('g', {}); text(g, 0, 0, 't-title ok-text', '✓ ' + s, 'start'); A(g).at(at, x, y).out(out); };
@@ -204,19 +204,19 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   text(ring, 0, 16, 't-sub', 'plain code, every cycle');
   A(ring).at(18.3, 480, 280).out(26.5);
   updaters.push(t => { const a = t * Math.PI / 2; tick.setAttribute('cx', (Math.sin(a) * 92).toFixed(1)); tick.setAttribute('cy', (-Math.cos(a) * 92).toFixed(1)); });
-  ['dispatch workers', 'spec checks', 'review', 'proof', 'merge writer', 'report failures'].forEach((w, i) => {
+  ['dispatch workers', 'release backlog', 'review', 'proof', 'merge writer', 'report failures'].forEach((w, i) => {
     const ang = -Math.PI / 2 + i * Math.PI / 3, r = 175;
     A(label(w.toUpperCase(), 't-key')).at(19 + i * 0.6, 480 + Math.cos(ang) * r, 285 + Math.sin(ang) * r * 0.85).out(26.5);
   });
 
-  // 4 · Spec check (27–36)
+  // 4 · Ready (27–36)
   A(card(200, 84, 'Board', 'feature item', 'hl', 'GY-1')).at(27.3, 160, 250).out(35.5);
   A(line([[265, 250], [345, 250]])).at(28.3, 0, 0).out(35.5);
-  A(card(240, 70, 'Spec check', 'fresh reviewer restates it')).at(28.8, 480, 250).out(35.5);
+  A(card(240, 70, 'Ready', 'released for implementation')).at(28.8, 480, 250).out(35.5);
   A(line([[605, 230], [690, 180]])).at(30.3, 0, 0).out(35.5);
   A(line([[605, 270], [690, 320]], 'bad')).at(30.6, 0, 0).out(35.5);
-  A(card(200, 56, 'Clear', 'a worker may start', 'ok')).at(31, 800, 170).out(35.5);
-  A(card(200, 56, 'Gaps', 'the master answers', 'bad')).at(31.6, 800, 330).out(35.5);
+  A(card(200, 56, 'Worker', 'starts next cycle', 'ok')).at(31, 800, 170).out(35.5);
+  A(card(200, 56, 'Held', 'dependencies unfinished', 'bad')).at(31.6, 800, 330).out(35.5);
   A(label('no one builds until the item says what done means')).at(32.8, 480, 440).out(35.5);
 
   // 5 · Build (36–45)
@@ -274,8 +274,8 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
     [0, 9, 'The human sets goals. The master (AI) decides. The loop (plain code) acts. Workers build. The merge writer is the only writer of main.'],
     [9, 13, 'The human keeps three decisions: goals and priorities, money and accounts, and credentials for people.'],
     [13, 18, 'The master decides the rest and files each goal as work items with checkable criteria and proofs.'],
-    [18, 27, 'Every cycle the loop dispatches workers and requests spec checks, independent review and proof, then drives the merge writer.'],
-    [27, 36, 'Before a feature is built, a fresh reviewer restates it. Gaps go back to the master; a clear item goes to a worker.'],
+    [18, 27, 'Every cycle the loop dispatches workers and requests independent review and proof, then drives the merge writer.'],
+    [27, 36, 'A released feature goes straight to a worker when its dependencies are done and capacity is available.'],
     [36, 45, 'A worker builds one item in its own worktree under a lease, commits, and submits the exact head. It pushes nothing.'],
     [45, 54, 'An independent reviewer judges the exact head against its criteria. Sensitive changes are approved before merge.'],
     [54, 63, 'The merge writer trials the head on the latest main, runs build, tests and proofs, and merges only when all pass.'],

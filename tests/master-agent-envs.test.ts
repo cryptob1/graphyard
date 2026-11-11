@@ -15,7 +15,6 @@ import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 import { hostname } from 'node:os';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
@@ -119,8 +118,7 @@ function work(overrides: Partial<Work> = {}) {
     stage: 'review', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [],
     candidate, submission: { epoch: 1, pr: 68 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },
-    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
-    specCheck: readySpecCheck(new Date().toISOString(), 2),
+
     ...overrides } as unknown as Work;
 }
 const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null } as any);

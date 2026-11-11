@@ -527,7 +527,7 @@ export async function sessionWritable(root: string, config: MasterConfig, direct
   return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
 }
 /**
- * GY-3235: the checkout a reviewer's, spec checker's or producer's session is confined against is
+ * GY-3235: the checkout a reviewer's or producer's session is confined against is
  * the repository it serves, as GY-3224 made worker launches — never the launcher's own CLI release
  * checkout, which on Huck's install is another repository whose confinement left the served `.git`
  * read-only to the sandbox probe. Only under the test runner, with no sandbox probe, is nothing confined.
@@ -553,7 +553,7 @@ export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 
-/** GY-2995: a review or spec-check launch whose sandbox cannot reach the CLI its prompt names starts no session; the launcher and the loop turn the refusal into configuration attention instead of relaunching. The same fault when the config names no launcher this host holds. */
+/** GY-2995: a review whose sandbox cannot reach the CLI its prompt names starts no session; the launcher and the loop turn the refusal into configuration attention instead of relaunching. The same fault when the config names no launcher this host holds. */
 export { LauncherUnavailableError } from './master/config.js';
 
 /**

@@ -21,7 +21,7 @@ import { signinClaimFromEnv } from './routes/signin.js';
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
  * one-time sign-in link opened (GY-738, `HumanSignIn` below), a live operator-agent credential,
- * then an unused durable reviewer/spec-check launch. A lease command (`method` and `pathname`)
+ * then an unused durable reviewer launch. A lease command (`method` and `pathname`)
  * authenticates on the lease pool (GY-558), so an exhausted
  * general pool cannot stop a renewal before it reaches its own connections. A tokenless `localRead`
  * request is the local viewer.

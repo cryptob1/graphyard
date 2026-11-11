@@ -1,6 +1,5 @@
 // The actionable shared-base refusals, read from the same ledger after a loop restart.
 import { createHash } from 'node:crypto';
-import { specCheckCurrent, specCheckGaps } from '../model/spec-check.js';
 import type { DaemonState } from './state.js';
 import type { DispatchCursor } from '../dispatch/cursor.js';
 import type { ServingReport } from '../deploy-watch.js';
@@ -45,8 +44,6 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   const quiet = (item: Pick<Work, 'key'>, entry: MasterCause) => repeating.has(item.key) ? { ...entry, quiet: true } : entry;
   for (const item of open) {
     if (item.blocker) causes.push(cause(subject('blocker', item.id), `${item.key}: ${item.blocker}`));
-    const gaps = specCheckGaps(item);
-    if (gaps) causes.push(cause(subject('spec-gaps', item.id), `${item.key}: spec check named gaps: ${gaps.join('; ')}; answer with master requirements ${item.key} FILE REASON`));
     const repeat = repeatedFailureCause(runs[item.id]);
     if (repeat) causes.push(cause(repeat.key, repeat.detail));
     for (const action of item.actionQueue?.actions ?? []) {
@@ -62,7 +59,6 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
     const item = open.find(item => item.key === action.work);
     const earlyExit = key.startsWith('early-exit:');
     if (!item || (!earlyExit && action.epoch !== null && action.epoch !== item.epoch)) continue;
-    if (key.startsWith('spec-check-') && specCheckCurrent(item)) continue;
     if ((action.state === 'failed' || action.state === 'indeterminate') && ['dispatch', 'review', 'proof', 'attention'].includes(action.kind)) {
       const entry = cause(subject('cursor', key), `${action.work} ${action.kind}: ${action.detail}`);
       // An unchanged crash on a new lease is the same incident; its prompt still names the exact epoch.

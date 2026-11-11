@@ -132,7 +132,7 @@ test('integration:worker-reparenting — cache publication, hardlinks and local 
 
 test('integration:worker-host-filesystem-isolation — all runtimes, terminal roles, headless roles, master and merge trials deny host creation, overwrite, rename and deletion', async () => {
   const f = await fixture();
-  for (const role of ['worker', 'reviewer', 'producer', 'approver', 'spec-checker']) {
+  for (const role of ['worker', 'reviewer', 'producer', 'approver']) {
     for (const kind of ['claude', 'cursor', 'codex', 'opencode', 'pi', 'registered']) {
       const confined = await coordinatorConfinement({ kind, args: kind === 'codex' ? ['--sandbox', 'workspace-write'] : [],
         coordinatorRoot: f.root, sessionDirectory: role === 'worker' ? f.worktree : f.root,

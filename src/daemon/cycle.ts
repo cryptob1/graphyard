@@ -16,8 +16,6 @@ import { checkoutTrustLine } from '../harness.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
-import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
-import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
 import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld } from './repeated-failure.js';
@@ -554,8 +552,7 @@ async function untrustedCheckoutRoles(cycle: Cycle): Promise<ReadonlySet<string>
 /**
  * Dispatch: fill the pipeline from backlog (GY-2991), then each claimable item to a free worker
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
- * sessions the dispatcher owes, the spec check each released feature owes before any of that
- * (GY-2992), and the master session when absent.
+ * sessions the dispatcher owes, and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
@@ -611,56 +608,6 @@ async function dispatchStep(cycle: Cycle) {
     });
     launched.push(item);
   }
-  // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
-  // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
-  // is released and unblocked and no check stands and no launch is live on the item — one session
-  // A launched checker's pane closes once a snapshot read after its launch shows no live launch on
-  // the item — its report landed or its launch expired — or the item done; the pane then leaves
-  // the record, so it closes once. The item is looked up across every owner's scope, as the
-  // actions are shared by them all.
-  // GY-2994: a checker that ended while its launch stands — its pane gone, or a BLOCKED: line on
-  // it — posted no report; it closes too, its reason is recorded for master status, and the
-  // launch below relaunches it this cycle rather than when the launch expires an hour on.
-  for (const [key, action] of Object.entries(state.actions)) {
-    if (!key.startsWith('spec-check:') || !action.pane) continue;
-    const item = snapshot.work.find(entry => entry.key === action.work && entry.stage !== 'done');
-    if (item && Date.parse(snapshot.now) < Date.parse(action.at)) continue;
-    // A stale or pre-binding action closes only its own pane; it cannot end today's launch.
-    const current = item && action.specCheckLaunch === item.specCheckLaunch?.id && !!action.specCheckLaunch;
-    const ended = current && specCheckLaunchLive(item, clock) ? await specCheckEnded(cycle, action.pane) : null;
-    if (current && specCheckLaunchLive(item, clock) && !ended) continue;
-    try {
-      await Promise.resolve(effects.closeSession(action.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-      if (ended) await record(state, specCheckEndedKey(item!), { kind: 'attention', work: item!.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
-        detail: `${item!.key}'s spec-check session (${action.pane}) ended without a report: ${ended}; it is relaunched` }, cycle.now(), effects.persist);
-      await record(state, key, { ...action, pane: undefined, at: undefined, detail: `Closed ${action.work}'s spec-check session (${action.pane}): ${ended ? `it ended without a report: ${ended}` : item ? 'its launch no longer stands' : 'the item is done'}` }, cycle.now(), effects.persist);
-    } catch (error) { await note(cycle, `close:${key}`, 'close', action.work, 'failed', `Could not close ${action.work}'s spec-check session (${action.pane}): ${message(error)}`); }
-  }
-  // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
-  // the revision judged and the last launch, so a revision's re-check, or a relaunch after a
-  // launch expired unreported, is a fresh action. One launch flies at a time: each reads Herdr and
-  // the review ledger afresh, so the reviewer profile's concurrency bounds the checkers.
-  if (effects.launchSpecCheck && !launcher.keys().some(key => key.startsWith('spec-check:'))) for (const item of open) {
-    if (!item.ready || item.blocker) continue;
-    if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
-    if (!needsSpecCheck(item) || specCheckCurrent(item) || (specCheckLaunchLive(item, clock) && !state.actions[specCheckEndedKey(item)])) continue;
-    const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
-    // Only a launch that registered ends the launching: a started one a restart cut off before its
-    // registration (resumed as indeterminate) launches again, since a launch registers before any session starts.
-    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
-    // GY-2995: a launch whose sandbox could not reach the CLI its prompt names is refused before
-    // any session starts; attention names it while the refusal stands, and no launch is retried
-    // in a loop. The check runs each cycle, so a restored CLI launches again on its own.
-    const cliRefusal = cliUnreachableRefusal(config);
-    if (cliRefusal) {
-      const refused = `spec-check-cli-refused:${item.id}`;
-      if (state.actions[refused]?.state === 'failed') touchStanding(state, refused, new Date(clock).toISOString());
-      else await record(state, refused, { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle, detail: `${item.key}'s spec check is not launched: ${cliRefusal}` }, cycle.now(), effects.persist);
-      continue;
-    }
-    launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
-    break;
-  }
   if (effects.rework) for (const item of open) {
     const rework = neededRework(item);
     if (!rework) continue;
@@ -677,34 +624,6 @@ async function dispatchStep(cycle: Cycle) {
   }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
-}
-
-/** The record of a spec-check launch whose session ended without a report (GY-2994): master status names it, and it frees the item for a relaunch. */
-export const specCheckEndedKey = (item: { id: string; specCheckLaunch?: { id: string } | null }) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
-
-/** Why a checker's session ended without posting, or null while it runs: Herdr no longer reports its pane, or its pane shows a BLOCKED: line. */
-async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null> {
-  if (cycle.herdr.available && !cycle.herdr.agents.some(agent => agent.pane_id === pane)) return `Herdr no longer reports pane ${pane}`;
-  const screen = await Promise.resolve(cycle.effects.sessionScreen?.({ pane, agentName: null })).catch(() => null) ?? '';
-  const blocked = [...screen.matchAll(/^[\s⏺●•>*-]*(BLOCKED:\s*[^\s,].*)$/gm)].at(-1); // not the prompt's own "starting BLOCKED:, naming"
-  return blocked ? blocked[1].trim().slice(0, 500) : null;
-}
-
-/** One spec check launch on the launcher (GY-2992): the effect starts the reviewer session and registers it on the item, so the next cycle launches no second. */
-async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: DaemonAction[]) {
-  const { state, effects, now } = cycle;
-  const attempts = (state.actions[key]?.attempts ?? 0) + 1;
-  const entry = (outcome: DaemonAction['state'], detail: string, pane?: string | null, specCheckLaunch?: string) => record(state, key, { kind: 'review', work: item.key, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(pane ? { pane, specCheckLaunch } : {}) }, now(), effects.persist);
-  await entry('started', `Launching ${item.key}'s spec check`);
-  try {
-    const launched = await effects.launchSpecCheck!(item);
-    sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane, launched?.launch));
-    // A headless check that ended without an accepted report frees its item for a relaunch, as an ended pane does (GY-2994).
-    if (launched?.settled) void launched.settled.then(failure => failure ? record(state, specCheckEndedKey({ id: item.id, specCheckLaunch: { id: launched.launch } }), { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
-      detail: `${item.key}'s headless spec check ended without a report: ${failure}; it is relaunched` }, now(), effects.persist) : undefined).catch(() => {});
-  } catch (error) {
-    sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
-  }
 }
 
 /**
