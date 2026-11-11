@@ -90,9 +90,10 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
       };
       const paste = async () => {
         try { terminal.paste(await navigator.clipboard.readText()); }
-        catch { setReason('Clipboard access unavailable. Use your browser’s Paste command.'); }
+        catch { setReason('Clipboard access unavailable. Use Ctrl/Cmd+V, or Shift+right-click for the browser menu.'); }
       };
       terminal.attachCustomKeyEventHandler(event => {
+        if (!navigator.clipboard) return true;
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && ['C', 'V'].includes(event.key.toUpperCase())) {
           if (event.type === 'keydown') {
             if (event.key.toUpperCase() === 'C') void navigator.clipboard.writeText(terminal.getSelection()).catch(() => setReason('Use your browser’s Copy command.'));
@@ -102,7 +103,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
         }
         return true;
       });
-      const context = (event: MouseEvent) => { event.preventDefault(); void paste(); };
+      const context = (event: MouseEvent) => { if (event.shiftKey || !navigator.clipboard) return; event.preventDefault(); void paste(); };
       host.current!.addEventListener('contextmenu', context);
       const typing = terminal.onData(input);
       const observer = new ResizeObserver(fit); observer.observe(host.current!);
