@@ -1,7 +1,7 @@
 {
   "id": "create-work-one-box",
   "title": "File a title; the master writes criteria before ordinary release and dispatch",
-  "description": "A served dashboard files a title-only draft against a real control plane and isolated Postgres. Empty drafts cannot release, claim or dispatch, and wake the master once without a spec check. Strict master requirements clear draft attention but leave ready false; the ordinary loop releases, checks the spec and dispatches. Advanced still files validated criteria.",
+  "description": "A served dashboard files a title-only draft against a real control plane and isolated Postgres. Empty drafts cannot release, claim or dispatch, and wake the master once. Strict master requirements clear draft attention but leave ready false; the ordinary loop releases and dispatches. Advanced still files validated criteria.",
   "tags": ["dashboard", "filing", "master"],
   "target": "any",
   "required": false,

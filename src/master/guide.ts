@@ -3,7 +3,7 @@
 /** The complete master operating loop; the CLI is its only home (GY-3109 removed the docs pages). */
 export const masterGuide = `# Master-agent operating mode
 
-A newly filed item may have only a title and description. “Waiting on the master: writing the criteria” means write validated criteria and proofs with \`master requirements GY-N FILE REASON\` (including an e2e proof). Requirements leave it unreleased; the ordinary loop releases it under normal capacity, priority and dependency rules, then applies spec-check and dispatch prerequisites.
+A newly filed item may have only a title and description. “Waiting on the master: writing the criteria” means write validated criteria and proofs with \`master requirements GY-N FILE REASON\` (including an e2e proof). Requirements leave it unreleased; the ordinary loop releases it under normal capacity, priority and dependency rules, then applies its dispatch prerequisites.
 
 The master is an AI coordinator, not the loop program. It files work, diagnoses failures and applies release, unblock, requirements, rework, close and attest decisions under its operator-agent identity. It never implements, reviews or proves its own work. People keep only goals and priorities, money and accounts, and credentials for people.
 

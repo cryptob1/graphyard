@@ -29,6 +29,6 @@ test('unit:readme-onboarding-commands — the Quick start is one command, and it
   assert.match(start, /worker and reviewer/);
   assert.match(start, /New work item/);
   assert.match(start, /title and optional description/);
-  assert.match(start, /master writes the criteria and proofs/);
+  assert.match(start, /master writes the criteria/);
   assert.match(start, /Advanced/);
 });

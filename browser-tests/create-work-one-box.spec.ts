@@ -82,7 +82,7 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
 
     const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator', cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository: 'owner/project', baseBranch: 'main', hostId: 'browser-host', masterAgentName: 'master-session', operatorAgent: { id: 'master', credentialFile: '/outside/master' }, workers: [{ name: 'worker', principal: 'worker', agentName: 'worker-session', mode: 'launch', kind: 'codex', credentialFile: '/outside/worker', agentArgs: [], approvals: 'auto', environment: {} }] });
     const state = emptyDaemonState(config);
-    const released: string[] = [], dispatched: string[] = [], checks: string[] = [], wakes: string[] = [];
+    const released: string[] = [], dispatched: string[] = [], wakes: string[] = [];
     let masterVisible = true;
     const handovers: string[] = [];
     const effects: DaemonEffects = {
@@ -91,12 +91,6 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
       snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
       release: async (item, reason) => { released.push(item.id); return post(`work/${item.id}/ready`, { expectedRevision: item.revision, reason }, masterToken); },
       dispatch: async item => { const claimed = await post(`work/${item.id}/claim`, {}, 'browser-worker'); dispatched.push(item.id); return { pane: 'worker-pane', epoch: claimed.epoch }; },
-      launchSpecCheck: async item => {
-        checks.push(item.id);
-        // Stand in for the independent reviewer's report, preserving the ordinary dispatch hold.
-        await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{specCheck}', $2::jsonb) WHERE id=$1", [item.id, JSON.stringify({ policyRevision: item.policyRevision, verdict: 'ready', paraphrase: 'The export change is proven through the browser', gaps: [], reviewer: 'spec-reviewer', at: new Date().toISOString() })]);
-        return { pane: 'spec-pane', launch: randomUUID() };
-      },
       masterSession: { launch: async handover => { handovers.push(handover); masterVisible = true; return { agentName: 'master-session', pane: 'master-pane', runtime: 'codex', account: null, session: null }; }, wake: async (_pane, prompt) => { wakes.push(prompt); } },
       closeSession: () => {}, persist: async () => {},
     };
@@ -104,7 +98,7 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{ready}', 'true') WHERE id=$1", [draft.id]);
     await runCycle(config, state, effects);
     await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{ready}', 'false') WHERE id=$1", [draft.id]);
-    expect(released).toEqual([]); expect(dispatched).toEqual([]); expect(checks).toEqual([]);
+    expect(released).toEqual([]); expect(dispatched).toEqual([]);
     expect(wakes).toHaveLength(1); expect(wakes[0]).toContain(`master requirements ${draft.key} FILE REASON`);
     expect(masterCauses([draft])[0].detail).toContain(waiting);
     masterVisible = false;
@@ -117,10 +111,10 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     expect((await request(`work/${draft.id}/requirements`, { ...requirements, criteria: [{ ...criteria[0], proofs: ['unit:only'] }] }, masterToken)).status).toBeGreaterThanOrEqual(400);
     draft = await post(`work/${draft.id}/requirements`, requirements, masterToken);
     expect(draft.ready).toBe(false); expect(masterCauses([draft])).toEqual([]);
+    // The release takes its response document, so the same cycle's dispatch offers the item.
     await runCycle(config, state, effects);
-    expect(released).toEqual([draft.id]); expect(checks).toEqual([draft.id]); expect(dispatched).toEqual([]);
-    await runCycle(config, state, effects);
-    expect(dispatched).toEqual([draft.id]); expect((await reload(draft.id)).lease?.owner).toBe('worker');
+    expect(released).toEqual([draft.id]); expect(dispatched).toEqual([draft.id]);
+    expect((await reload(draft.id)).lease?.owner).toBe('worker');
     await expect(page.locator('article.item-page')).not.toContainText(waiting);
 
     await page.getByRole('button', { name: '← Back' }).click();
