@@ -43,18 +43,21 @@ test('integration:review-bearer-restart — original launch bearers survive a re
   try {
     store = new Store(database); await store.init();
     const firstPid = await start();
-    const ordinary = item('GY-1'), delivered = item('GY-2'), spec = item('GY-3');
+    const ordinary = item('GY-1'), delivered = item('GY-2'), unclaimed = item('GY-3');
+    const retiredToken = fresh();
+    Object.assign(unclaimed, { specCheckLaunch: { id: 'retired-launch', reviewer: 'checker', tokenHash: hash(retiredToken), expiresAt: expiresAt(), policyRevision: 1 } });
     delivered.stage = 'done'; delivered.delivery = { mergeSha: M, mergedAt: now(), authorizationRevision: 1 }; delivered.postMergeReview = 'owed';
-    for (const work of [ordinary, delivered, spec]) await put(work);
+    for (const work of [ordinary, delivered, unclaimed]) await put(work);
     const ordinaryToken = fresh(), deliveredToken = fresh();
     assert.equal((await post('restart-test-master', `${ordinary.id}/review-launch`, launch(ordinaryToken))).status, 200);
     assert.equal((await post('restart-test-master', `${delivered.id}/review-launch`, launch(deliveredToken, { head: M, postMerge: true }))).status, 200);
     await stop(); assert.notEqual(await start(), firstPid, 'HTTP server is a new OS process using the same real Postgres');
+    assert.equal((await post(retiredToken, `${ordinary.id}/review-verdict`, verdict(retiredToken))).status, 401, 'legacy checker bearers no longer authenticate');
     assert.equal((await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(ordinaryToken, M))).status, 409, 'restart recovered authentication; the wrong head still fails');
     assert.equal((await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(fresh()))).status, 403, 'body token must match');
     assert.equal((await post(ordinaryToken, `${delivered.id}/review-verdict`, verdict(ordinaryToken, M))).status, 403, 'a bearer cannot post to a different launch');
     assert.equal((await post('restart-test-worker', `${ordinary.id}/review-launch`, launch(fresh()))).status, 403, 'workers cannot issue trusted launch credentials');
-    assert.equal((await post(ordinaryToken, `${spec.id}/claim`, {})).status, 403, 'review token grants no worker authority');
+    assert.equal((await post(ordinaryToken, `${unclaimed.id}/claim`, {})).status, 403, 'review token grants no worker authority');
     const approved = await post(ordinaryToken, `${ordinary.id}/review-verdict`, verdict(ordinaryToken));
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal((await post(deliveredToken, `${delivered.id}/review-verdict`, verdict(deliveredToken, M))).status, 200);
