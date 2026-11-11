@@ -1,0 +1,14 @@
+{
+  "id": "setup-invite",
+  "title": "Setup invites a viewer with a copyable one-time link and revokes their session",
+  "description": "The served dashboard uses real invite and revoke routes against isolated Postgres: the operator invites sam as viewer, copies the returned link, checks visible role and expiry, redeems it in a fresh browser once, and revokes the session from the retained page list. The section is hidden from the viewer and reload clears the transient list and link. teammate-invite-roles remains regression coverage.",
+  "tags": ["dashboard", "authentication"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Invite and revoke through the served Setup page",
+    "run": "npm run test:browser -- browser-tests/setup-invite.spec.ts",
+    "timeoutSeconds": 180
+  }]
+}

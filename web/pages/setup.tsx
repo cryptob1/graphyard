@@ -117,6 +117,54 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
   </>;
 }
 
+type Invitation = { principal: string; role: string; expiresAt: string };
+
+function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
+  const [invites, setInvites] = useState<Invitation[]>([]);
+  const [latest, setLatest] = useState<(Invitation & { url: string }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function revoke(name: string) {
+    setBusy(true); setError('');
+    try {
+      await api(`invites/${encodeURIComponent(name)}/revoke`, {});
+      setInvites(rows => rows.filter(row => row.principal !== name));
+      setLatest(value => value?.principal === name ? null : value);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <PageSection title="Invite someone" label="Invite someone">
+    <p>Send a one-time sign-in link. Viewers can read the yard; maintainers can also file work.</p>
+    <form onSubmit={async event => {
+      event.preventDefault();
+      const form = event.currentTarget, data = new FormData(form);
+      setBusy(true); setError('');
+      try {
+        const { principal, role, expiresAt, code } = await api('invites', { name: String(data.get('name')).trim(), role: data.get('role') });
+        const invitation = { principal, role, expiresAt };
+        setInvites(rows => [...rows, invitation]);
+        setLatest({ ...invitation, url: `${location.origin}/#sign-in=${code}` });
+        form.reset();
+      } catch (e) { setError((e as Error).message); }
+      finally { setBusy(false); }
+    }}>
+      <label>Name<input name="name" required maxLength={100} placeholder="Email or GitHub login"/></label>
+      <label htmlFor="invite-role">Role</label><select id="invite-role" name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="maintainer">Maintainer</option></select>
+      <button disabled={busy}>Invite</button>
+    </form>
+    {error && <p role="alert" className="amber">{error}</p>}
+    {latest && <div role="status">
+      <p>One-time sign-in link for {latest.principal} ({latest.role}). Link expires <time dateTime={latest.expiresAt}>{new Date(latest.expiresAt).toLocaleString()}</time>.</p>
+      <label>Sign-in link<input readOnly value={latest.url}/></label> <CopyButton text={latest.url} label="Copy"/>
+    </div>}
+    <h3>Invited from this page</h3>
+    <p className="muted">This list resets when you leave or reload Setup. Revoke ends their sessions and cancels unused links.</p>
+    {invites.length ? <ul aria-label="Invited from this page">{invites.map((invite, index) => <li key={index}>
+      <strong>{invite.principal}</strong> — {invite.role} · Link expires <time dateTime={invite.expiresAt}>{new Date(invite.expiresAt).toLocaleString()}</time> <button disabled={busy} onClick={() => void revoke(invite.principal)}>Revoke</button>
+    </li>)}</ul> : <p>No invitations from this page yet.</p>}
+  </PageSection>;
+}
+
 export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'status' | 'api' | 'setView'>) {
   // The work items, read while this page is open, so the onboarding change shows as the current step (GY-1478).
   const [work, setWork] = useState<any[] | null>(null);
@@ -127,5 +175,5 @@ export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'sta
     const timer = setInterval(read, 15_000);
     return () => { live = false; clearInterval(timer); };
   }, [api]);
-  return <SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }}/>;
+  return <><SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }}/>{status?.actor?.role === 'admin' && status.actor.sessionKind === 'human' && <InviteSomeone api={api}/>}</>;
 }

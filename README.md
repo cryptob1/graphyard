@@ -39,7 +39,7 @@ From your repository's checkout:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-It installs Graphyard and prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). Then file a goal in **New work item** with acceptance criteria and required proof names, and watch it with `npx @cryptob1/graphyard master status`. Graphyard updates itself daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates it now. Installs share your main Herdr.
+It installs Graphyard and prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). Then file a goal in **New work item** with acceptance criteria and required proof names, and watch it with `npx @cryptob1/graphyard master status`. Graphyard updates itself daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates it now. Installs share your main Herdr. In Setup, the operator can invite viewers or maintainers with a one-time sign-in link and revoke invitations made from that page.
 
 Run `npx @cryptob1/graphyard doctor` from the connected checkout to check credentials, agent logins, worker confinement, the kernel and running services; failed checks print the fix.
 
