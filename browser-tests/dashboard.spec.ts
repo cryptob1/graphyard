@@ -661,12 +661,17 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await select.focus(); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab');
     await expect(select).toBeFocused();
     expect(await outline(select)).toEqual(focusRing);
+    // The row's priority control is the next keyboard stop, before the PR link.
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('combobox', { name: 'Priority for GY-1' })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(cardLink).toBeFocused();
     expect(await outline(cardLink)).toEqual(focusRing);
     await select.focus(); await page.keyboard.press('Enter');
     const dialog = itemPage(page); await expect(dialog).toBeVisible();
     await expect(dialog.getByRole('button', { name: '← Back' })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(dialog.getByRole('combobox', { name: 'Priority for GY-1' })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(detailPrLink(page)).toBeFocused();
     expect(await outline(detailPrLink(page))).toEqual(focusRing);
