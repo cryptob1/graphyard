@@ -4,7 +4,8 @@ import { runDispatchTick } from '../../src/dispatch/tick.js';
 import { runWorkerPull } from '../../src/dispatch/worker-pull.js';
 import { masterConfigSchema } from '../../src/master.js';
 import { atomicPrivateWrite, atomicPrivateText } from '../../src/master/config.js';
-import { launchReview, reconcileReviews } from '../../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews } from '../../src/reviewer.js';
+import type { HeadlessExec } from '../../src/headless-session.js';
 import { readReviewBinding } from '../../src/review-post.js';
 import { reviewedDeliveries } from './receipt-schema.js';
 import { masterRunSchema } from '../../src/master/profiles.js';
@@ -155,32 +156,23 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
       reviewers:[{name:'fixture-reviewer',agentName:'controlled-independent-reviewer',kind:'claude',concurrency:16}],run:{worktreeRoot:join(c.directory,'review-worktrees')}});
     await mkdir(join(c.root,'.graphyard'),{recursive:true});
     await atomicPrivateWrite(join(c.root,'.graphyard/master.json'),config);
-    const cursor=emptyDispatchCursor(config),directories:string[]=[],panes=new Set<string>();
+    const cursor=emptyDispatchCursor(config);
     // Replace only the AI runtime: dispatch, session binding, launch registration and verdict ingestion are native.
-    const runtime=(_command:string,args:string[])=>{
-      if(args[0]==='tab' && args[1]==='create') {
-        directories.push(args.find(value=>value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length));
-        panes.add(`fixture-review-${directories.length}`);
-        return JSON.stringify({result:{type:'tab_created',root_pane:{pane_id:`fixture-review-${directories.length}`,tab_id:`fixture-tab-${directories.length}`},tab:{tab_id:`fixture-tab-${directories.length}`}}});
-      }
-      if(args[0]==='pane' && args[1]==='read') return 'Claude Code ready\n';
-      if(args[0]==='pane' && args[1]==='process-info') return JSON.stringify({result:{process_info:{shell_pid:100,foreground_process_group_id:200,foreground_processes:[{argv:['claude']}]}}});
-      if(args[0]==='agent' && ['get','rename'].includes(args[1])) return JSON.stringify({result:{agent:{agent:'claude',agent_status:'idle',pane_id:args[2]}}});
-      if(args[0]==='pane' && args[1]==='close') panes.delete(args[2]);
-      return JSON.stringify({result:args[0]==='pane' && args[1]==='list'?{panes:[...panes].map(pane_id=>({pane_id}))}: {}});
-    };
+    const runtime=(_command:string,args:string[])=>JSON.stringify({result:args[0]==='pane' && args[1]==='list'?{panes:[]}:{}});
     c.fixtureRuntime=runtime;
+    // The headless reviewer's model call: it holds until stopped, so this regression posts each verdict itself.
+    const headless:HeadlessExec=(_command,_args,options)=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('fixture review stopped')),{once:true}));
     const effects={snapshot:async()=>({work:await c.snapshot(),now:new Date().toISOString()}),agents:()=>[],
       credentials:async(profiles:{name:string}[])=>Object.fromEntries(profiles.map(p=>[p.name,{available:true,reason:null}])),
       reconcileReviews:async()=>reconcileReviews(c.root,config,{run:runtime,work:await c.snapshot(),agents:[]}),reconcileProducers:async()=>({producers:[]}),launchReview:async()=>{},launchProducer:async()=>{},persist:async()=>{},
-      launchPostMergeReview:(item:any,request:any,profile:any,_agents:any,at:string)=>launchReview(c.root,item,profile.name,[],at,{run:runtime,requestId:request.id,postMerge:{mergeSha:request.sha,baseTip:request.baseSha}}),
+      launchPostMergeReview:(item:any,request:any,profile:any,_agents:any,at:string)=>launchReview(c.root,item,profile.name,[],at,{run:runtime,headless,requestId:request.id,postMerge:{mergeSha:request.sha,baseTip:request.baseSha}}),
     };
     const tick=await runDispatchTick(config,cursor,effects);
     assert.deepEqual(tick.refused,[],JSON.stringify(tick.refused));
     assert.equal(tick.launched.length,c.receipt.work.length,JSON.stringify(tick));
     await c.snapshot();
     assert.equal(reviewedDeliveries(c.receipt.work),false,'a pending launched review is not approval');
-    for(const directory of directories) {
+    for(const directory of (await readReviewLedger(c.root)).reviews.filter(r=>r.state==='pending').map(r=>r.sessionDirectory)) {
       const binding=await readReviewBinding(directory);
       const work=c.receipt.work.find(w=>w.key===binding.key)!;
       assert.equal(binding.sha,work.merge);
