@@ -25,6 +25,7 @@ import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
 import { liveRun } from '../runner/registry.js';
+import { runTranscript } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
 import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
@@ -65,6 +66,8 @@ export interface DispatchOptions {
   headless?: HeadlessExec; startupMs?: number;
   /** Records a worker run that stopped at once on its provider's limit notice on the item, as the coordinator: its handoff and the account hold. Absent, the hold is the dispatch's own start failure. */
   capacity?: (event: Record<string, unknown>) => Promise<unknown>;
+  /** Hears each run this dispatch starts, and how one that ended at once ended, so its session handle names it (workerRunHandle). */
+  onRun?: (run: WorkerRun) => Promise<unknown>;
   /** Overrides the credential-mask read probe (GY-3228); tests supply one. */
   maskProbe?: MaskProbe;
   /** The prompt section a run of repeated equal failures asks for (GY-3104, daemon/repeated-failure.ts). */
@@ -222,7 +225,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     options.onRuntime?.(launch.kind ?? profile.kind ?? 'unknown');
     try {
       assertClaimDeadline(work.key, options.claimBy);
-      result = await launchWorker(root, config, work, profile, launch, prepare, release, { settleReservation: async reason => chosen.release?.(reason), sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
+      result = await launchWorker(root, config, work, profile, launch, prepare, release, { settleReservation: async reason => chosen.release?.(reason), onRun: options.onRun, sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
         renew: options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), renewIntervalMs: options.renewIntervalMs, verificationMaps: options.verificationMaps ?? readVerificationMaps, rework, cycle: observedAt,
         diagnosis: options.diagnosis ?? '', maskProbe: options.maskProbe, headless: options.headless ?? defaultHeadlessExec(), startupMs: options.startupMs, capacity: options.capacity });
     } catch (error) {
@@ -322,8 +325,8 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
 }
 
 
-interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; startupMs?: number; capacity?: DispatchOptions['capacity'] }
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, startupMs, capacity }: WorkerLaunchOptions) {
+interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; onRun?: DispatchOptions['onRun']; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; startupMs?: number; capacity?: DispatchOptions['capacity'] }
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, onRun, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, startupMs, capacity }: WorkerLaunchOptions) {
   const mergeWriter = 'control-plane' as const;
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
@@ -387,7 +390,12 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
         supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), startupMs,
         settle: async ({ output }) => { await stoppedOnLimit(output).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
-      if (started.ended) { await settleEarlyExit(started.ended); await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`); }
+      const run: WorkerRun = { epoch: prepared.epoch, run: started.id, runtime: launch.kind!, account: launch.account ?? null, outcome: null };
+      await onRun?.(run).catch(() => {});
+      if (started.ended) {
+        await settleEarlyExit(started.ended).catch(async (error: unknown) => { await onRun?.({ ...run, outcome: failureText(error) }).catch(() => {}); throw error; });
+        await settleReservation?.(`the ${launch.kind} worker run ${started.id} finished within its startup observation`);
+      }
       return { harness, dependencies: prepared.dependencies ?? null, sandbox, run: started.id, initialHead, runtimeStartedAt: new Date().toISOString(), epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
     } catch (error) {
       await keepAlive?.stop();
@@ -427,6 +435,12 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     throw new HeadlessWorkerExit(`the ${launch.kind} worker exited at once${output.trim() ? `: ${output.trim().slice(-300)}` : ' without output'}`, false, prepared.epoch);
   }
 }
+/** One headless worker run a dispatch started (GY-3259): its attempt, its durable run id, runtime and account, and how it ended when it ended at once. */
+export interface WorkerRun { epoch: number; run: string; runtime: string; account: string | null; outcome: string | null }
+/** The session handle a worker run is recorded on its item under: its transcript names the run whose log the item page reads. */
+export const workerRunHandle = (item: Pick<Work, 'key' | 'title'>, profile: Pick<WorkerProfile, 'principal' | 'agentName'>, host: string, run: WorkerRun) => ({
+  id: `${profile.principal}:${run.epoch}`, kind: 'implementation' as const, principal: profile.principal, runtime: run.runtime, host, agentName: profile.agentName, transcript: runTranscript(run.run),
+  subject: `${item.key}: ${item.title}`.slice(0, 300), state: run.outcome ? 'finished' as const : 'running' as const, ...(run.outcome ? { outcome: run.outcome.slice(0, 500) } : {}) });
 /** A worker run that ended inside its startup observation; `moveOn` refuses its account so the dispatch tries the next. */
 export class HeadlessWorkerExit extends Error { constructor(message: string, readonly moveOn: boolean, readonly epoch: number) { super(message); } }
 /**

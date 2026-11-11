@@ -4,6 +4,7 @@ import type { SessionInventory } from '../session-inventory.js';
 import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
 import type { PartialWork } from '../model/capacity.js';
+import type { WorkerRun } from '../master/dispatch.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
 import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
@@ -100,7 +101,7 @@ export interface DaemonEffects {
    * result's `canary` names the one it ran, with its start failure if any); `exclude` names the
    * accounts whose runtime backs off this item; `onRuntime` hears the runtime each launch chose.
    */
-  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void }) => Promise<unknown>;
+  dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void; onRun?: (run: WorkerRun) => Promise<unknown> }) => Promise<unknown>;
   /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
   registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
   /**

@@ -8,9 +8,9 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
-import { assertDispatchable, HeadlessWorkerExit } from '../master/dispatch.js';
+import { assertDispatchable, HeadlessWorkerExit, workerRunHandle, type WorkerRun } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
-import { endedRuntimeStates, runTranscript } from '../model/sessions.js';
+import { endedRuntimeStates } from '../model/sessions.js';
 import { checkoutTrustLine } from '../harness.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
@@ -568,15 +568,13 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, { diagnosis: diagnosisSection(state.failureRuns[item.id]), canaries, exclude, onRuntime: kind => { runtime = kind; } }) as { run?: string; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null; canary?: { runtime: string; failed: string | null } | null } | undefined;
+    // Every run the dispatch starts is recorded on the item as it starts, a handed-off or failed one with how it ended (GY-3259).
+    const onRun = async (run: WorkerRun) => effects.recordSession?.(item, workerRunHandle(item, profile, config.hostId, run));
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot, { diagnosis: diagnosisSection(state.failureRuns[item.id]), canaries, exclude, onRuntime: kind => { runtime = kind; }, onRun }) as { run?: string; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null; canary?: { runtime: string; failed: string | null } | null } | undefined;
     await settle(launched?.canary, launched?.epoch, launched?.runtimeStartedAt);
-    // The session's handle is what the close step reads to end it once its attempt does; its
-    // transcript names the headless run whose log the item page reads (GY-3259).
-    await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
-      agentName: profile.agentName, ...(launched?.run ? { transcript: runTranscript(launched.run) } : {}),
-      ...(launched?.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}),
-      ...(launched?.initialHead ? { initialHead: launched.initialHead } : {}),
-      subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running' })?.catch(() => undefined);
+    // The session's handle is what the close step reads to end it once its attempt does: the run's, with when it started and from which commit.
+    if (launched?.run && launched.epoch) await effects.recordSession?.(item, { ...workerRunHandle(item, profile, config.hostId, { epoch: launched.epoch, run: launched.run, runtime: launched.runtime ?? profile.kind ?? profile.mode, account: null, outcome: null }),
+      ...(launched.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}), ...(launched.initialHead ? { initialHead: launched.initialHead } : {}) })?.catch(() => undefined);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
     await settle(null, undefined, undefined);

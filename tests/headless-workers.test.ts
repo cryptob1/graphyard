@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,13 +11,13 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import { Engine } from '../src/engine.js';
 import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../src/master/config.js';
-import { dispatchWork, prepareWorkerLaunch, workerCommand } from '../src/master/dispatch.js';
+import { dispatchWork, prepareWorkerLaunch, workerCommand, workerRunHandle } from '../src/master/dispatch.js';
 import { runtimeKinds } from '../src/master/runtimes.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { bridgeTerminals } from '../src/master/terminal-bridge.js';
 import { spawnHeadless, workerRunsDirectory } from '../src/headless-session.js';
 import { liveRun } from '../src/runner/registry.js';
-import { runTranscript } from '../src/model/sessions.js';
+import { transcriptRun } from '../src/model/sessions.js';
 import type { Principal, Work } from '../src/model.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -135,7 +135,9 @@ async function dispatch(work: Work) {
   const config = await loadMasterConfig(root);
   return dispatchWork(root, work, config.workers[0]!, { allWork: [work], observedAt: now(), headless: spawnHeadless,
     prepare: (at, key, profile, _run, claimBy, keep, cycle) => prepareWorkerLaunch(at, key, profile, (command, args, options) => command === 'git' && args[0] === 'fetch' ? '' : workerCommand(command, args, options), claimBy, keep, cycle),
-    capacity: async event => { const result = await api(coordinator, 'POST', `work/${work.id}/capacity`, event); assert.equal(result.status, 200, JSON.stringify(result.body)); } });
+    capacity: async event => { const result = await api(coordinator, 'POST', `work/${work.id}/capacity`, event); assert.equal(result.status, 200, JSON.stringify(result.body)); },
+    // The loop records each run on the item as it starts (daemon/cycle.ts), as the coordinator.
+    onRun: async run => { const result = await api(coordinator, 'POST', `work/${work.id}/session`, workerRunHandle(work, config.workers[0]!, hostId, run)); assert.equal(result.status, 200, JSON.stringify(result.body)); } });
 }
 async function submitted(id: string, epoch: number) {
   for (let tries = 0; tries < 600; tries++) {
@@ -147,12 +149,6 @@ async function submitted(id: string, epoch: number) {
 }
 const started = async (name: string) => JSON.parse(await readFile(join(homes.get(name)!, 'started.json'), 'utf8'));
 const runLog = async (work: Work, run: string) => api(reader, 'GET', `work/${work.key}/runs/${run}/log`);
-async function recordRun(work: Work, epoch: number, run: string) {
-  // The loop records the dispatched session's handle with its run; here, as the coordinator would.
-  const recorded = await api(coordinator, 'POST', `work/${work.id}/session`, { id: `${worker.id}:${epoch}`, kind: 'implementation', principal: worker.id, runtime: 'stub', host: hostId, agentName: 'eng-a', transcript: runTranscript(run), subject: work.key, state: 'running' });
-  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
-}
-
 for (const [index, kind] of runtimeKinds.entries()) test(`e2e:headless-workers — ${kind} claims, commits and completes as one headless run`, async () => {
   await configure([{ name: kind, kind }]);
   const work = await readyItem(`GY-${9600 + index}`);
@@ -196,10 +192,13 @@ test('e2e:headless-workers — a limit exit hands the item to the next account w
   assert.ok(((await started('successor')).args as string[]).some(word => word.includes(exhaustion!.partialWork!.commit!.slice(0, 12))), 'the successor brief names the preserved commit');
   await writeFile(join(homes.get('successor')!, 'release'), '');
   await submitted(work.id, 2);
-  // Both runs' logs — the settled limit run of the prior account and the completed successor — are served, redacted, to a reader of the item.
-  const first = readdirSync(workerRunsDirectory(root)).find(id => { const run = JSON.parse(readFileSync(join(workerRunsDirectory(root), id, 'session.json'), 'utf8')); return run.work === work.key && run.epoch === 1; })!;
-  await recordRun(work, 1, first);
-  await recordRun(work, 2, launched.run);
+  // The item lists both runs by attempt — the prior account's, ended on its limit, and the successor's.
+  const sessions = (await stored(work.id)).sessions!.filter(session => session.kind === 'implementation');
+  assert.deepEqual(sessions.map(session => [session.id, session.state]), [[`${worker.id}:1`, 'finished'], [`${worker.id}:2`, 'running']]);
+  assert.match(sessions[0]!.outcome ?? '', /limit notice/);
+  const first = transcriptRun(sessions[0]!.transcript)!;
+  assert.equal(transcriptRun(sessions[1]!.transcript), launched.run);
+  // Both runs' logs — the settled limit run and the completed successor — are served, redacted, to a reader of the item.
   const spent = await runLog(work, first);
   assert.equal(spent.status, 200, JSON.stringify(spent.body));
   assert.equal(spent.body.ended, true);

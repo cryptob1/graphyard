@@ -9,7 +9,7 @@
 // the next loop adopts it from that directory and posts its answer.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
@@ -386,12 +386,20 @@ const readWorkerRecord = (directory: string) => { try { return workerRecordSchem
 
 /** The last of what a worker run printed, as text: what its limit notice, login refusal or crash is read from. Null for a run this installation does not hold. */
 export function runLogTail(root: string, id: string, bytes = 4000): string | null {
-  if (!z.string().uuid().safeParse(id).success) return null;
-  let text: string;
-  try { text = readFileSync(join(workerRunsDirectory(root), id, runLogName), 'utf8'); } catch { return existsSync(join(workerRunsDirectory(root), id)) ? '' : null; }
-  const lines = text.split('\n').filter(Boolean).flatMap(line => { try { return [(JSON.parse(line) as RunLogLine).text]; } catch { return []; } });
-  return lines.join('\n').slice(-bytes);
+  if (!z.string().uuid().safeParse(id).success || !existsSync(join(workerRunsDirectory(root), id))) return null;
+  const size = logSize(root, id);
+  return parseLog(readLogBytes(root, id, Math.max(0, size - 4 * bytes), 4 * bytes)).map(line => line.text).join('\n').slice(-bytes);
 }
+const logFile = (root: string, id: string) => join(workerRunsDirectory(root), id, runLogName);
+const logSize = (root: string, id: string) => { try { return statSync(logFile(root, id)).size; } catch { return 0; } };
+/** Up to `length` bytes of a run's log from `from`, read without loading the rest. */
+function readLogBytes(root: string, id: string, from: number, length: number): Buffer {
+  let fd: number;
+  try { fd = openSync(logFile(root, id), 'r'); } catch { return Buffer.alloc(0); }
+  try { const buffer = Buffer.alloc(length); return buffer.subarray(0, readSync(fd, buffer, 0, length, from)); } finally { closeSync(fd); }
+}
+/** The whole JSON lines of a log chunk; a line cut at the chunk's start is not one. */
+const parseLog = (bytes: Buffer) => bytes.toString('utf8').split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line) as RunLogLine]; } catch { return []; } });
 
 /** The most a log read returns at once. */
 export const runLogChunkBytes = 64 * 1024;
@@ -405,11 +413,9 @@ export function readRunLog(root: string, id: string, cursor = 0): { run: Headles
   if (!z.string().uuid().safeParse(id).success) return null;
   const directory = join(workerRunsDirectory(root), id), run = readWorkerRecord(directory);
   if (!run) return null;
-  const ended = readText(runFiles(directory).exit) !== null;
-  let bytes: Buffer;
-  try { bytes = readFileSync(join(directory, runLogName)); } catch { return { run, lines: [], cursor: 0, ended }; }
-  const from = Math.max(0, Math.min(cursor, bytes.length)), chunk = bytes.subarray(from, from + runLogChunkBytes);
-  const whole = chunk.length < runLogChunkBytes && from + chunk.length === bytes.length ? chunk.length : chunk.lastIndexOf(10) + 1 || chunk.length;
-  const lines = chunk.subarray(0, whole).toString('utf8').split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line) as RunLogLine]; } catch { return []; } });
-  return { run, lines, cursor: from + whole, ended: ended && from + whole >= bytes.length };
+  const exited = readText(runFiles(directory).exit) !== null, size = logSize(root, id);
+  const from = Math.max(0, Math.min(cursor, size)), chunk = readLogBytes(root, id, from, runLogChunkBytes);
+  // Whole lines only: a chunk ends after its last newline, unless one line alone is longer than a chunk.
+  const whole = chunk.lastIndexOf(10) + 1 || (chunk.length === runLogChunkBytes ? chunk.length : 0);
+  return { run, lines: parseLog(chunk.subarray(0, whole)), cursor: from + whole, ended: exited && from + whole >= size };
 }
