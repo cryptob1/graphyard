@@ -110,7 +110,7 @@ test('integration:hard-math-smoke — embedded daemon worker and review dispatch
   }
   const item = requested(1);
   // A small change naming one ordinary path is offered to Pi first (GY-1772), so the registry's pi account may take it.
-  Object.assign(item, { description: 'Update docs/fixture-notes.md.', criteria: [], stage: 'ready', candidate: null, submission: null, observation: null, epoch: 0, workspaces: [], autoDispatch: undefined,
+  Object.assign(item, { description: 'Update docs/fixture-notes.md.', criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], stage: 'ready', candidate: null, submission: null, observation: null, epoch: 0, workspaces: [], autoDispatch: undefined,
     });
   const cli = join(base, 'fixture-cli.mjs');
   await writeFile(cli, `const command = process.argv[2];

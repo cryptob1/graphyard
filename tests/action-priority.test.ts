@@ -19,7 +19,7 @@ const rows = (work: Work) => work.actionQueue?.actions ?? [];
 const at = '2026-09-21T12:00:00.000Z';
 const probe = (overrides: Partial<Work> = {}): Work => ({
   id: `id-${overrides.key ?? 'GY-1'}`, key: 'GY-1', title: 'Owed', type: 'feature', description: '',
-  priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
+  priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], policy: { checks: ['test'], review: true },
   ready: true, stage: 'merge', epoch: 1, revision: 1, policyRevision: 1,
   gates: [], violations: [], evidence: [], workspaces: [], agentRequests: [], sessions: [],
   lease: null, submission: null, candidate: null, observation: null, blocker: null,

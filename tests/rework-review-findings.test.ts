@@ -14,7 +14,7 @@ function item(review: { body?: string; blocking?: string[] }): Work {
   const candidate = { sha: head, baseSha: base, pr: 64, branch: 'graphyard/gy-64-1', author: 'worker' };
   return {
     id: 'gy-64', key: 'GY-64', title: 'Vehicle parking', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [], policy: { checks: ['test'], review: true }, stage: 'review', revision: 4, policyRevision: 1,
+    criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 4, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 2, lease: null, workspaces: [], candidate,
     submission: { epoch: 2, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: {

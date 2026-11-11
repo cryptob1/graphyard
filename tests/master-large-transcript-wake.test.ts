@@ -38,7 +38,7 @@ test('e2e:master-large-transcript-wake — live native process receives incident
     let now = Date.now(), broken = true, deliveries = 0, retries = 0;
     let state = emptyDaemonState(config);
     const work = [{ id: 'item', key: 'GY-1', title: 'Repair incident', stage: 'build', ready: false, epoch: 0, revision: 1, policyRevision: 1,
-      type: 'bug', criteria: [], dependencies: [], evidence: [], gates: [], workspaces: [], blocker: 'Deployment incident', createdAt: new Date(now).toISOString() }] as unknown as Work[];
+      type: 'bug', criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], blocker: 'Deployment incident', createdAt: new Date(now).toISOString() }] as unknown as Work[];
     const native = masterSessionEffects(root, () => config, async (_command, args) => {
       if (args[0] === 'agent' && args[1] === 'prompt') { deliveries++; await send({ input: args[3], partial: true }); return JSON.stringify({ result: {} }); }
       throw new Error(`Unexpected Herdr call: ${args.join(' ')}`);
@@ -111,7 +111,7 @@ for (const initialized of [false, true]) test(`integration:master-large-transcri
   let launches = 0, present = false, ended = 0;
   let child: ReturnType<typeof spawn> | undefined;
   const work = [{ id: 'item', key: 'GY-1', title: 'Ship the operator goal', priority: 1, stage: 'build', ready: false, epoch: 0, revision: 1, policyRevision: 1,
-    type: 'bug', criteria: [], dependencies: [], evidence: [], gates: [], workspaces: [], blocker: 'Delivery blocked on repair', candidate: { sha: 'candidate-head' },
+    type: 'bug', criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], blocker: 'Delivery blocked on repair', candidate: { sha: 'candidate-head' },
     humanRequest: { kind: 'goals-and-priorities', needed: 'Finish the current release', answer: 'Go ahead' }, createdAt: new Date().toISOString() }] as unknown as Work[];
   const effects: DaemonEffects = {
     snapshot: async () => ({ work, now: new Date().toISOString() }), agents: () => present ? [{ name: 'master', pane_id: 'replacement', agent_status: 'working' }] : [],

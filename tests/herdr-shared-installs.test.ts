@@ -85,7 +85,7 @@ test('two installations bind, dispatch and recover independently on one main Her
       const masterPane = await startMaster(root, 'codex', [], [], run);
       assert.ok(masterPane.pane.startsWith(`${workspace}:`));
       const credentialFile = join(credentials, 'worker.token'); await writeFile(credentialFile, token, { mode: 0o600 });
-      const work = { id: 'id-1', key: 'GY-1', type: 'chore', title: 'Dispatch in own workspace', stage: 'ready', ready: true, epoch: 0, lease: null, criteria: [], dependencies: [], workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }], evidence: [], scenarioRequirements: [], policy: { checks: [], review: false } } as unknown as Work;
+      const work = { id: 'id-1', key: 'GY-1', type: 'chore', title: 'Dispatch in own workspace', stage: 'ready', ready: true, epoch: 0, lease: null, criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }], evidence: [], scenarioRequirements: [], policy: { checks: [], review: false } } as unknown as Work;
       const launched = await dispatchWork(root, work, { name, principal: name, agentName: name, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} }, [], run, [work],
         async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 1, new Date().toISOString(), { probe: registryFixture(hostname(), ['codex']).probe });
       assert.ok(launched.pane?.startsWith(`${workspace}:`));

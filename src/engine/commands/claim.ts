@@ -23,6 +23,7 @@ export async function run(c: Ctx) {
   }
   // Eligibility against the requirements: ready, dependencies, exclusive
   // and resources are all derived from the document the new attempt will hold.
+  demand(work.criteria.length > 0, 'Waiting on the master: writing the criteria');
   demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
   // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
   await adoptFollowUpWindow(db, work);

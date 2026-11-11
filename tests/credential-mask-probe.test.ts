@@ -111,7 +111,7 @@ test('unit:tests/credential-mask-probe.test.ts — a worker dispatch whose sandb
     writeFileSync(join(f.root, '.graphyard/master.json'), JSON.stringify(config));
     const now = new Date().toISOString();
     await cycleBaseTip(f.root, config.baseBranch, now, async () => f.git('rev-parse', 'HEAD'));
-    const item = { id: 'work-1', key: 'GY-1', title: 'Bootstrap', type: 'bug', description: '', priority: 1, dependencies: [], criteria: [],
+    const item = { id: 'work-1', key: 'GY-1', title: 'Bootstrap', type: 'bug', description: '', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }],
       policy: { checks: [], review: true }, stage: 'ready', epoch: 0, ready: true, lease: null, blocker: null, workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
     const registry = registryFixture(config.hostId!, ['claude']);
     const released: (string | undefined)[] = [];

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { criteriaSchema, policySchema, resourcesSchema } from './policy.js';
+import { draftCriteriaSchema, policySchema, resourcesSchema } from './policy.js';
 import { sliceIds, stages, systemDrivenDefault } from '../model/work.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
@@ -29,7 +29,7 @@ export const createSchema = z.object({
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
   dependencies: z.array(z.string().uuid()).max(50).default([]),
-  criteria: criteriaSchema(50),
+  criteria: draftCriteriaSchema(50).default([]),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
   exclusiveResources: resourcesSchema.optional(),
   plannedFiles: z.array(z.string().trim().min(1).max(500)).max(200).optional(),

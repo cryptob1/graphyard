@@ -43,6 +43,7 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   const repeating = repeatingItems(runs);
   const quiet = (item: Pick<Work, 'key'>, entry: MasterCause) => repeating.has(item.key) ? { ...entry, quiet: true } : entry;
   for (const item of open) {
+    if (!item.criteria.length) causes.push(cause(subject('draft', item.id), `${item.key}: Waiting on the master: writing the criteria; next action master requirements ${item.key} FILE REASON`));
     if (item.blocker) causes.push(cause(subject('blocker', item.id), `${item.key}: ${item.blocker}; diagnose and repair, then master unblock ${item.key} REASON`));
     const repeat = repeatedFailureCause(runs[item.id]);
     if (repeat) causes.push(cause(repeat.key, repeat.detail));

@@ -18,7 +18,7 @@ const at = '2026-11-01T18:00:00Z', head = 'a'.repeat(40), base = 'b'.repeat(40);
 const failure = (tip = base, assertion = 'expected 1, got 0') => baseFailureReason({ tip, files: ['tests/base.test.ts'], tests: ['base works'], assertion });
 function held(reason = failure()): Work {
   return { id: 'item', key: 'GY-1', title: 'Queued delivery', stage: 'merge', ready: false, epoch: 1, revision: 1, policyRevision: 1,
-    type: 'bug', criteria: [], dependencies: [], evidence: [], gates: [], workspaces: [], createdAt: at, updatedAt: at,
+    type: 'bug', criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], createdAt: at, updatedAt: at,
     candidate: { sha: head }, submission: { epoch: 1 },
     mergeLedger: { key: 'GY-1', state: 'refused', head, baseTip: base, mergeSha: 'c'.repeat(40), risk: null,
       intentAt: at, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason }, events: 3 },
