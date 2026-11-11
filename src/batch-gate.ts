@@ -388,15 +388,16 @@ export interface DiagnosticFailure { commit: string; detail: string | null; at: 
 
 /**
  * The diagnostics' run: the full suite and the whole catalog on the commit, their failures, the
- * catalog's duration, the preview cases' runs and, per failing check, the trial's failing-step text.
+ * catalog's duration, the preview cases' runs and, per failing check, the trial's failing-step text
+ * and the last lines of its output (GY-3265), which only the filing carries.
  */
-export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number; previewCases?: PreviewCaseRun[]; details?: Record<string, string> }>;
+export type DiagnosePort = (commit: string) => Promise<{ failed: string[]; catalogMs: number; previewCases?: PreviewCaseRun[]; details?: Record<string, string>; outputs?: Record<string, string[]> }>;
 
 /** The scheduled diagnostics, when due: each failure files an item; nothing here touches the gate. */
 export async function runDiagnostics(ports: Pick<GatePorts, 'now' | 'file'> & { diagnose: DiagnosePort }, record: GateRecord): Promise<string[] | null> {
   const verified = record.verified;
   if (!verified || (record.diagnosticsAt && ports.now() - Date.parse(record.diagnosticsAt) < diagnosticsIntervalMs)) return null;
-  const { failed: checks, catalogMs, previewCases = [], details = {} } = await ports.diagnose(verified);
+  const { failed: checks, catalogMs, previewCases = [], details = {}, outputs = {} } = await ports.diagnose(verified);
   const at = new Date(ports.now()).toISOString();
   // A preview case that failed or was not covered reaches an owner like any failing check.
   const failed = [...new Set([...checks, ...previewCases.filter(run => run.verdict !== 'passed').map(run => `e2e:${run.case}`)])];
@@ -404,9 +405,9 @@ export async function runDiagnostics(ports: Pick<GatePorts, 'now' | 'file'> & { 
   // before — whose item is reused, never re-filed — still has its newest detail readable in status.
   record.diagnosticFailures = Object.fromEntries(failed.map(check => [check, { commit: verified, detail: details[check]?.slice(0, 1000) ?? null, at }]));
   for (const check of failed) {
-    const detail = record.diagnosticFailures[check]!.detail;
+    const detail = record.diagnosticFailures[check]!.detail, output = outputs[check]?.length ? `\n\nThe last lines of its output:\n\n\`\`\`\n${outputs[check]!.join('\n').slice(-12_000)}\n\`\`\`` : '';
     await fileFailure(ports, record, at, { key: `diagnostic:${check}`, title: `Diagnostic failure on main: ${check}`,
-      description: `The scheduled full run against the verified commit ${verified} failed ${check}${detail ? `: ${detail}` : ''}. It never blocks a gate or a merge; fix it at its cause.` });
+      description: `The scheduled full run against the verified commit ${verified} failed ${check}${detail ? `: ${detail}` : ''}. It never blocks a gate or a merge; fix it at its cause.${output}` });
   }
   record.catalogMs = catalogMs;
   record.diagnosticsAt = at;

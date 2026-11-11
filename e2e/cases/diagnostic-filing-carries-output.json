@@ -1,0 +1,15 @@
+{
+  "id": "diagnostic-filing-carries-output",
+  "title": "A diagnostic failure on main is filed with its failing step and the tail of its output",
+  "description": "Runs a fixture case whose command step prints output and fails through the real trial E2E group, batchGatePorts' diagnose and runDiagnostics: the filed item's description names the case, the failing step and the last lines of that step's output.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the diagnostic filing carries the case, the failing step and its output's last lines",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:diagnostic-filing-carries-output tests/diagnostic-filing-carries-output.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

@@ -22,6 +22,8 @@ export interface TrialE2eCase {
   missing?: boolean;
   /** The step that failed, as the runner names it, or why the case could not run. */
   failingStep?: string | null;
+  /** GY-3265: the failing step's last lines of output, secrets redacted; the diagnostics' filing carries them, the trial record does not. */
+  output?: string[];
   /** GY-3180: the case's browser or runner could not start, so the head was never judged: the trial ends with no verdict. */
   hostFailure?: boolean;
 }
@@ -182,8 +184,9 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 0 });
         else {
           const step = outcome.failingStep;
+          const output = step && outcome.attemptResults.findLast(attempt => attempt.failingStep)?.steps?.find(record => record.index === step.index)?.output;
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 1,
-            failingStep: step ? `step ${step.index + 1} ${step.name}: ${step.reason}` : 'a step failed without naming one' });
+            failingStep: step ? `step ${step.index + 1} ${step.name}: ${step.reason}` : 'a step failed without naming one', ...(output?.length ? { output } : {}) });
         }
       }
     }

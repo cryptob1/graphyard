@@ -15,14 +15,17 @@ import { message, storeAction } from './state.js';
 
 /** The gate's own item key in the trial (a proofless pseudo-item, like a revert's). */
 const gateKey = gateTrialKey;
+/** How many lines of a failure's output its diagnostic filing carries (GY-3265). */
+const outputLines = 80;
 const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(Boolean);
 
 /**
  * What one trial run of `checks` on `commit` failed, as gate check ids, with each failing case's
- * failing-step text as the trial supplied it (GY-3264); the trial is bounded by `timeoutMs`, the
- * gate's own clock, never the merge-trial deadline (GY-3142).
+ * failing-step text as the trial supplied it (GY-3264) and the last lines of its output (GY-3265:
+ * the failing step's for a case, the trial log's for the build or a test file); the trial is bounded
+ * by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142).
  */
-async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<{ failed: string[]; details: Record<string, string> }> {
+async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
   const run = await reads.trial(commit, tests, { key: gateKey, criteria: cases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: cases }] as Work['criteria'] : [] }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
@@ -30,7 +33,10 @@ async function trialFailures(reads: MergeWriterReads, commit: string, checks: re
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
   const details = Object.fromEntries((run.e2e ?? []).filter(entry => entry.failingStep).map(entry => [entry.proof, entry.failingStep!]));
-  return { failed: failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected'))), details };
+  const logTail = (run.logTail ?? '').split('\n').filter(line => line.trim()).slice(-outputLines);
+  const outputs = Object.fromEntries([...(run.e2e ?? []).filter(entry => entry.output?.length).map(entry => [entry.proof, entry.output!.slice(-outputLines)]),
+    ...failed.filter(check => !check.startsWith('e2e:') && logTail.length).map(check => [check, logTail])]);
+  return { failed: failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected'))), details, outputs };
 }
 const trialChecks = async (...args: Parameters<typeof trialFailures>) => (await trialFailures(...args)).failed;
 
@@ -89,13 +95,13 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     file,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
-      const suite = await trialChecks(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
+      const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
       const held = await catalog(commit), cases = held.map(id => `e2e:${id}`), started = reads.now();
-      const { failed, details } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs) : { failed: [], details: {} }, catalogMs = reads.now() - started;
+      const { failed, details, outputs } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs) : { failed: [], details: {}, outputs: {} }, catalogMs = reads.now() - started;
       const previews = reads.gate?.previews;
       const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
         : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
-      return { failed: [...new Set([...suite, ...failed])], catalogMs, previewCases, details };
+      return { failed: [...new Set([...suite.failed, ...failed])], catalogMs, previewCases, details, outputs: { ...suite.outputs, ...outputs } };
     },
   };
 }

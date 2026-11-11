@@ -790,7 +790,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e.map(({ output: _output, ...entry }) => entry) } : {}) });
   }
   let pushes = 0;
   for (;;) {
