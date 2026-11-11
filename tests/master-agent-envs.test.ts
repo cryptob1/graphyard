@@ -7,7 +7,8 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
-import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
 import { readDispatchCursor } from '../src/dispatch/cursor.js';
@@ -262,21 +263,18 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
 
     // Worker dispatch: the exhausted Codex account is skipped before anything is claimed, and the
     // session starts on claude-c with that runtime, its home, and without the Codex-only arguments.
-    const calls: string[][] = []; let claims = 0;
-    const dispatched = await dispatchWork(root, ready(), config.workers[0], [], herdr(calls), [ready()], async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }) });
-    const tab = tabEnvironment(calls[0]);
-    assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
-    // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
-    // GY-121: both come from the files in the worktree that the short typed line references.
-    assert.match(typedRuntime(calls[1][3]!), / -- claude --permission-mode bypassPermissions --session-id [0-9a-f-]{36} --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
-    const worker = expandTypedCommand(calls[1][3]!);
-    assert.equal(worker.kind, 'claude'); assert.equal(worker.args[worker.args.indexOf('--settings') + 1], sessionHarnessFile(root, 'worker', 'worker-a'));
-    assert.equal(roleOf(worker.args), launchAuthorization.replace(/\s+/g, ' '), 'the role file holds the launch authorization');
-    assert.match(worker.args.at(-1)!, /^Implement GY-68: /, 'the request is the last argument');
-    assert.doesNotMatch(typedRuntime(calls[1][3]!) + worker.args.join(' '), /gpt-codex/);
+    const failover = recordedRuns(); let claims = 0;
+    const dispatched = await dispatchWork(root, ready(), config.workers[0], { allWork: [ready()], prepare: async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: failover.exec, probe: registry({ worker: ['codex', 'claude-a', 'claude-b', 'claude-c'] }) });
+    const [worker] = failover.runs;
+    assert.equal(worker!.env.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(worker!.env.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(worker!.env.CODEX_HOME, undefined);
+    // GY-93: the failed-over worker runs the account's runtime with its own settings file, and its request opens with the launch authorization (GY-3259).
+    assert.equal(worker!.runtime, 'claude'); assert.equal(worker!.args[worker!.args.indexOf('--settings') + 1], sessionHarnessFile(root, 'worker', 'worker-a'));
+    assert.ok(worker!.request.includes(launchAuthorization.replace(/\s+/g, ' ')), 'the request carries the launch authorization');
+    assert.match(worker!.request, /Implement GY-68: /);
+    assert.doesNotMatch(worker!.args.join(' '), /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
-    await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe: spentWorkers }), /No healthy agent account for worker profile worker-spent/);
+    await assert.rejects(dispatchWork(root, ready(), config.workers[1], { allWork: [ready()], prepare: async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, release: async () => {}, headless: recordedRuns().exec, probe: spentWorkers }), /No healthy agent account for worker profile worker-spent/);
     assert.equal(claimed, false, 'a profile with no healthy account claims nothing');
 
     // The durable loop reads the same health: the spent profile is unavailable, with reasons.
@@ -385,15 +383,13 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
     const tick = await runDispatchTick(config, await readDispatchCursor(root, config), effects);
     assert.equal(launches, 2); assert.equal(tick.launched[0].relaunched, true); assert.deepEqual(tick.refused, []);
 
-    // A worker: the dropped launch releases its claim and closes the pane, then a fresh claim relaunches it.
+    // A worker on Muse: one claim, one run, its request on the command line and never pasted.
     const credential = await token(credentialDirectory, 'workers', 'worker-oc', 'worker-oc-token-');
     const profile = { name: 'muse-worker', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch' as const, kind: 'muse' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} };
-    // A worker on Muse likewise: one claim, one launch, its request on the command line and never pasted.
-    const workerCalls: string[][] = []; const claims: number[] = [];
-    const result = await dispatchWork(root, ready(), profile, [], herdr(workerCalls, args => args[1] === 'prompt' ? stalled : undefined), [ready()],
-      async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { prompt: fast, probe: { cacheMs: 0, registry: homeRegistry([{ name: 'muse-a', kind: 'muse', home: null }], { worker: ['muse-a'] }) } as FleetProbe });
-    assert.deepEqual(claims, [1]); assert.equal(result.delivery, 'request'); assert.equal(result.relaunched, 0);
-    assert.equal(workerCalls.filter(args => args[0] === 'agent' && args[1] === 'prompt').length, 0);
+    const muse = recordedRuns(); const claims: number[] = [];
+    await dispatchWork(root, ready(), profile, { allWork: [ready()], prepare: async () => { claims.push(claims.length + 1); return { epoch: claims.length, path: join(root, `assigned-${claims.length}`), base: 'c'.repeat(40) }; }, release: async () => {}, headless: muse.exec,
+      probe: { cacheMs: 0, registry: homeRegistry([{ name: 'muse-a', kind: 'muse', home: null }], { worker: ['muse-a'] }) } as FleetProbe });
+    assert.deepEqual(claims, [1]); assert.equal(muse.runs.length, 1); assert.match(muse.runs[0]!.request, /Implement GY-68: /);
   } finally { await cleanup(); }
 });
 
@@ -420,14 +416,14 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const config = await configure(root, next => { next.run.smokeWorkflow = 'deploy-smoke.yml'; next.run.deploymentUrl = 'https://graphyard.example/api/health'; next.environments = [opencodeAccount]; });
     // Worker, reviewer and producer sessions: broadest approval, each with only its own role's credential.
     const credential = await token(credentialDirectory, 'workers', 'worker-oc', 'worker-oc-token-');
-    const workerCalls: string[][] = [];
-    await dispatchWork(root, ready(), { name: 'oc', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a'] }) } as FleetProbe });
-    const workerTab = tabEnvironment(workerCalls[0]);
+    const oc = recordedRuns();
+    await dispatchWork(root, ready(), { name: 'oc', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a'] }, { allWork: [ready()], prepare: async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: oc.exec, probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a'] }) } as FleetProbe });
+    const workerTab = oc.runs[0]!.env;
     // GY-2959: the worker launch derives the repository-tree grant from the checkout it serves; the reviewer keeps the broad allow-all.
     const workerGrant = JSON.parse(workerTab.OPENCODE_PERMISSION).external_directory;
     assert.equal(workerGrant[`${root}/**`], 'allow'); assert.equal(workerGrant[`${root}/.graphyard/**`], 'allow'); assert.equal(workerGrant['*'], 'deny');
     assert.equal(workerTab.GRAPHYARD_TOKEN_FILE, credential);
-    assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(workerCalls).includes('worker-oc-token-'), false);
+    assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(oc.runs).includes('worker-oc-token-'), false);
     await saveReviewerProfile(root, { name: 'review-oc', agentName: 'review-oc', kind: 'opencode', accounts: ['opencode-a'] });
     const reviewCalls: string[][] = [];
     let reviewTab: Record<string, string> = {};
@@ -517,9 +513,9 @@ test('unit:opencode-launch-pregrants-repository-tree — an opencode worker laun
   try {
     await configure(root, next => { next.environments = [opencodeAccount]; });
     const credential = await token(credentialDirectory, 'workers', 'worker-oc2', 'worker-oc2-token-');
-    const workerCalls: string[][] = [];
-    await dispatchWork(root, ready(), { name: 'oc2', principal: 'worker-oc2', agentName: 'eng-oc2', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a2'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a2'] }) } as FleetProbe });
-    const grant = JSON.parse(tabEnvironment(workerCalls[0]).OPENCODE_PERMISSION).external_directory;
+    const oc2 = recordedRuns();
+    await dispatchWork(root, ready(), { name: 'oc2', principal: 'worker-oc2', agentName: 'eng-oc2', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a2'] }, { allWork: [ready()], prepare: async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: oc2.exec, probe: { cacheMs: 0, registry: homeRegistry([opencodeAccount], { worker: ['opencode-a2'] }) } as FleetProbe });
+    const grant = JSON.parse(oc2.runs[0]!.env.OPENCODE_PERMISSION).external_directory;
     assert.equal(grant[`${root}/**`], 'allow', 'the repository tree is granted: a bisect worktree beside the assigned one never prompts');
     assert.equal(grant[`${root}/.graphyard/**`], 'allow', 'the managed and bisect worktrees under .graphyard are granted beside it');
     assert.equal(grant['*'], 'deny', 'everything outside the repository is denied, so no other prompt waits for a person');
