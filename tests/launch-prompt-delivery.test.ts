@@ -21,6 +21,7 @@ import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/
 import { repositoryClaudeConfig } from '../src/harness.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordedRuns } from './helpers/headless-runs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 import type { FleetRoleName } from '../src/model/registry.js';
 import { hostname } from 'node:os';
@@ -142,10 +143,10 @@ class FakeHerdr {
 test('e2e:worker-request-trial-only-tests — dispatched worker receives the trial exception and genuine-failure instructions', async () => {
   const { root, token, cleanup } = await installed();
   try {
-    const herdr = new FakeHerdr();
+    const worker = recordedRuns();
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'trial-worker', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
-    await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, undefined, { probe: fleet('worker', 'opencode') });
-    const request = herdr.named('trial-worker').request!;
+    await dispatchWork(root, ready(), profile, { allWork: [ready()], prepare: async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: worker.exec, probe: fleet('worker', 'opencode') });
+    const request = worker.runs[0]!.request;
     assert.match(request, /including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture/);
     assert.match(request, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
     assert.match(request, /For sandbox-only test failures, including required criteria tests/);
@@ -199,11 +200,10 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
     // Worker on OpenCode, under the supervisor: --prompt on the watched command line.
     const workerCredential = await token('worker');
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: workerCredential, agentArgs: [], approvals: 'auto', environment: {} };
-    const dispatched = await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, undefined, { probe: fleet('worker', 'opencode') });
-    assert.equal(dispatched.delivery, 'request');
-    const worker = herdr.named('eng-oc');
-    assert.ok(worker.request!.startsWith(`${autonomyContract} Implement GY-93:`), 'OpenCode loads no role file, so the autonomy contract leads the request (GY-184)');
-    assert.equal(worker.toolCalls.length, 1); assert.deepEqual(worker.pasted, []);
+    // A worker is one headless run (GY-3259): its request is its own last argument, never pasted.
+    const workerRuns = recordedRuns();
+    await dispatchWork(root, ready(), profile, { allWork: [ready()], prepare: async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), release: async () => {}, headless: workerRuns.exec, probe: fleet('worker', 'opencode') });
+    assert.ok(workerRuns.runs[0]!.request.startsWith(`${autonomyContract} Implement GY-93:`), 'OpenCode loads no role file, so the autonomy contract leads the request (GY-184)');
     assert.equal(herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'no launch typed anything into a session');
 
     // A runtime already busy on its request is a session that started: it is seen `working`,
