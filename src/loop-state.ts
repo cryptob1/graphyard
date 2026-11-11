@@ -51,5 +51,7 @@ export function ledgerSnapshot<T extends object>(ledger: T, records: RecordWithI
 export async function saveLedger(client: LoopStateClient, kind: LoopStateKind, ledger: object, records: RecordWithId[]) {
   const before: Map<string, string> = (ledger as any)[baseline] ?? new Map();
   const ids = new Set(records.map(record => record.id));
-  await client.write(kind, records.filter(record => before.get(record.id) !== JSON.stringify(record)), [...before.keys()].filter(id => !ids.has(id)));
+  const changed = records.filter(record => before.get(record.id) !== JSON.stringify(record));
+  const removed = [...before.keys()].filter(id => !ids.has(id));
+  if (changed.length || removed.length) await client.write(kind, changed, removed);
 }

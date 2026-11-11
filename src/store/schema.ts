@@ -19,9 +19,9 @@ import { registryRefusalTables } from './tables/registry-refusals.js';
  * appears after every table it references. A feature adds its tables to one module here.
  */
 export const tables: readonly TableDefinition[] = [
-  loopState, ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
+  ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers,
+  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers, loopState,
 ];
 
 /** Tables retired from the schema and logical backups. */

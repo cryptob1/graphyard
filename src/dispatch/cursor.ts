@@ -5,23 +5,12 @@ import { readEnvironmentLog, type EnvironmentLog } from '../master/environments.
 import { type MasterConfig } from '../master/profiles.js';
 import { reviewVerdictReminderMs } from '../reviewer.js';
 import { requestAttemptLimit } from '../producer.js';
-/**
- * Every string the cursor holds is bounded where it is composed, never only checked at persist
- * time (GY-120): a reason the dispatcher composed and then could not persist failed the whole
- * tick, and with it every launch for every item, until the string happened to change. The caps
- * nest — a stored failure reason leaves room for the wait sentence that wraps it, and that
- * sentence is bounded again before it becomes a tick reason — so a reason at its cap still
- * yields a valid tick. `bounded` marks every cut with an ellipsis rather than hiding it.
- */
+/** Keep status summaries readable; persisted strings have no length cap. */
 export const launchWaitLimit = 50;
 export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
 export const ellipsis = '…';
 export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
-/**
- * The closure failures a tick stores, as the sentences the cursor holds. The sentence wraps a
- * reason already bounded below the cap, and is bounded again so a reason at its own cap cannot
- * push the stored string past `cursorTextLimit` and refuse the whole tick's persist.
- */
+/** The latest closure failures shown in status. */
 export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
   failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
@@ -137,8 +126,6 @@ export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGra
 export const observationWakeIntervalMs = 60_000;
 /** How long a role with no account left is not launched before its accounts are read again. */
 export const capacityRecheckMs = 60_000;
-/** How many missing session handles the cursor remembers between ticks between ticks. */
-export const sessionMissLimit = 500;
 /**
  * A tick whose snapshot read fails is retried on its own short backoff rather than a whole
  * interval later, never faster than the first step and never slower than the interval. The read
@@ -160,7 +147,9 @@ export async function readDispatchCursor(root: string, config: MasterConfig): Pr
   const client = await loopStateClient(config);
   await migrateLoopFile(client, 'dispatch', dispatchCursorPath(config), value => {
     const { botReviewers: _retired, ...stored } = value as Record<string, unknown>;
-    return [dispatchCursorSchema.parse(stored)];
+    const cursor = dispatchCursorSchema.parse(stored);
+    if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository');
+    return [cursor];
   });
   const stored = (await client.read('dispatch'))[0];
   const cursor = stored ? dispatchCursorSchema.parse(stored) : emptyDispatchCursor(config);
@@ -178,7 +167,7 @@ export interface PersistFailure { field: string | null; kind?: 'review' | 'produ
 /**
  * A persist that failed, attributed. A schema refusal names the path it refused; the request and
  * item that path was composed for come from the cursor (a recorded refusal) or from the tick's
- * own wait list (a tick reason). Anything else — the file, the disk — is the write's own message.
+ * own wait list (a tick reason). Anything else is the storage request's own message.
  */
 export function attributePersistFailure(error: unknown, cursor: DispatchCursor, reasons: Pick<DispatchWait, 'kind' | 'requestId' | 'work'>[]): Error & { persistFailure: PersistFailure } {
   const issue = (error as { issues?: { path: PropertyKey[]; message: string }[] })?.issues?.[0];
