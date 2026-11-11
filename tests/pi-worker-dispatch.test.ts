@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import type { FleetClient } from '../src/fleet.js';
-import { expandTypedCommand } from './helpers/launch-shell.js';
+import { appendFileSync } from 'node:fs';
+import type { HeadlessExec } from '../src/headless-session.js';
 import { coordinatorConfinementRefusal } from '../src/master/confinement.js';
 import { runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError } from '../src/worker-sandbox.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
@@ -99,31 +100,20 @@ test('unit:pi-first-worker-order — a normal risk named change on its first two
   assert.equal(chooseSession(registry, { role: 'reviewer', host, prefer: 'fast' }, Date.now()).account?.name, 'claude-b');
 });
 
-/** A Herdr world on which the listed runtimes never come up (their pane keeps echoing the command), and a pi launch can be refused outright. */
-function world(healthy: Set<string>, refusePi?: string, exitPi = false) {
+/** Headless worker runs where Pi stops at once on its provider's limit notice and every other runtime runs on (GY-3259). */
+function runs() {
   const kinds: string[] = [];
-  let typedCommand = '', now = Date.now();
-  const json = (result: unknown) => JSON.stringify({ result });
-  return { kinds, bounds: () => ({ clock: () => now, wait: (ms: number) => { now += ms; } }), run: (_command: string, args: string[]): string => {
-    if (args[0] === 'tab' && args[1] === 'create') return json({ root_pane: { pane_id: 'w1V:pP1', tab_id: 'w1V:tP1' } });
-    if (args[0] === 'pane' && args[1] === 'run') {
-      const kind = expandTypedCommand(args[3]).kind;
-      kinds.push(kind); typedCommand = args[3];
-      if (kind === 'pi' && refusePi) throw new Error(refusePi);
-      return '';
-    }
-    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
-    const kind = kinds.at(-1);
-    if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: kind === 'pi' && exitPi ? { shell_pid: 10, foreground_process_group_id: 10 } : { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: healthy.has(kind) ? [{ argv: [kind] }] : [] } });
-    if (args[0] === 'pane' && args[1] === 'read') return kind === 'pi' && exitPi ? `vish@host ~/code/project ❯ ${typedCommand}\npi: command not found\nvish@host ~/code/project ❯\n` : healthy.has(kind) ? `${kind === 'claude' ? 'Claude Code' : kind} ready\n` : `vish@host ~/code/project ❯ ${typedCommand}\n`;
-    if (args[0] === 'agent' && args[1] === 'get') return healthy.has(kind) ? json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
-    if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, name: args[3] } });
-    return json({});
-  } };
+  const exec: HeadlessExec = async (_command, args, options) => {
+    const kind = basename(args[args.indexOf('--') + 1] ?? '');
+    kinds.push(kind);
+    if (kind !== 'pi') return '';
+    appendFileSync(join(options.run, 'log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), stream: 'stderr', text: 'Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2030-10-17 08:27:35"}' })}\n`);
+    throw new Error('exited with code 1');
+  };
+  return { kinds, exec };
 }
 
-test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is refused before it starts, records the failure on the account and the same real dispatch launches the next account', async () => {
+test('unit:pi-launch-failure-falls-back — a Pi run that stops at once on its limit records the failure on the account and the same real dispatch launches the next account', async () => {
   // One marked parent holds the repository and the credentials, so the loop's reclaim pass sees one directory, not an empty-looking sibling.
   const holder = await temporaryDirectory('pi-dispatch'), root = join(holder, 'repository'), credentials = join(holder, 'credentials');
   await mkdir(root); await mkdir(credentials, { mode: 0o700 });
@@ -143,7 +133,7 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
      } as any;
 
-  const dispatch = async (refusePi?: string, exitPi = false, piAccounts = ['pi-a', 'pi-b']) => {
+  const dispatch = async (piAccounts = ['pi-a', 'pi-b']) => {
     const at = new Date().toISOString();
     await mkdir(dirname(master.credentialFile), { recursive: true });
     let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['pi', 'claude'].includes(runtime.name)),
@@ -166,27 +156,18 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
     };
     let claims = 0;
     const prepare = async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) });
-    const herdr = world(new Set(['claude']), refusePi, exitPi);
-    const dispatched = await dispatchWork(root, item, profile, [], herdr.run, [item], prepare, async () => {}, 5_000, at, { start: herdr.bounds(), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
-    return { dispatched, kinds: herdr.kinds, chosen, ended, claims };
+    const worker = runs();
+    const dispatched = await dispatchWork(root, item, profile, { allWork: [item], prepare, release: async () => {}, observedAt: at, headless: worker.exec, probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
+    return { dispatched, kinds: worker.kinds, chosen, ended, claims };
   };
 
-  // Both Pi accounts never come up: each is recorded and the strong account takes the same dispatch.
-  const never = await dispatch();
-  assert.deepEqual(never.kinds, ['pi', 'pi', 'claude'], 'Pi is tried first, then the next Pi account, then the strong account, in one dispatch');
-  assert.equal(never.dispatched.account!.environment, 'claude-b');
-  assert.deepEqual(never.dispatched.fallback!.failed.map(failure => failure.account), ['pi-a', 'pi-b']);
-  // A Pi launch the host refuses before any session starts — it cannot confine the runtime — also falls through.
-  const refused = await dispatch('A pi session cannot be launched on this host: Graphyard never starts a session unconfined');
-  assert.deepEqual(refused.kinds, ['pi', 'pi', 'claude']);
-  assert.equal(refused.dispatched.account!.environment, 'claude-b');
-  assert.deepEqual(refused.dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['pi-a', 'pi'], ['pi-b', 'pi']], 'the refusal is recorded on each Pi account the dispatch passed over');
-  // A Pi session that exits back to the shell before it is ready also falls through.
-  const exited = await dispatch(undefined, true);
-  assert.deepEqual(exited.kinds, ['pi', 'pi', 'claude']);
-  assert.deepEqual(exited.dispatched.fallback!.failed.map(failure => failure.account), ['pi-a', 'pi-b']);
+  // Both Pi accounts stop at once on their limit: each is recorded and the strong account takes the same dispatch.
+  const spent = await dispatch();
+  assert.deepEqual(spent.kinds, ['pi', 'pi', 'claude'], 'Pi is tried first, then the next Pi account, then the strong account, in one dispatch');
+  assert.equal(spent.dispatched.account!.environment, 'claude-b');
+  assert.deepEqual(spent.dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['pi-a', 'pi'], ['pi-b', 'pi']], 'the failure is recorded on each Pi account the dispatch passed over');
   // Three Pi accounts: the two launches the dispatch spent on Pi are all it gets; the third launch goes to the strong account.
-  const three = await dispatch(undefined, true, ['pi-a', 'pi-b', 'pi-c']);
+  const three = await dispatch(['pi-a', 'pi-b', 'pi-c']);
   assert.deepEqual(three.kinds, ['pi', 'pi', 'claude'], 'no third Pi start within one dispatch');
 });
 
