@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { bridgeTerminals } from '../src/master/terminal-bridge';
+import { serveXterm } from './xterm';
 
 const stub = resolve('fixtures/herdr-terminal-stub');
 const settled = { timeout: 15_000 };
@@ -19,7 +20,7 @@ async function containerServer(site: string) {
   const [{ url }] = await once(child, 'message') as [{ url: string }];
   const signIn = async (browser: import('@playwright/test').Browser) => {
     const { code } = await (await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
-    const page = await browser.newPage();
+    const page = await browser.newPage(); await serveXterm(page);
     await page.goto(`${url}/#sign-in=${code}&master`);
     return page;
   };

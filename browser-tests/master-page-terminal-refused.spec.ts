@@ -5,6 +5,7 @@ import { rm, symlink } from 'node:fs/promises';
 import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 import { join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
+import { serveXterm } from './xterm';
 
 test('e2e:master-page-terminal-refused — when the terminal cannot start, the Master page says "refused:" with the cause, not "Detached"', async ({ browser }) => {
   const site = await temporaryDirectory('refused-terminal');
@@ -16,7 +17,7 @@ test('e2e:master-page-terminal-refused — when the terminal cannot start, the M
   const [{ url }] = await once(child, 'message') as [{ url: string }];
   try {
     const { code } = await (await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
-    const page = await browser.newPage();
+    const page = await browser.newPage(); await serveXterm(page);
     let connections = 0;
     page.on('websocket', () => connections++);
     await page.goto(`${url}/#sign-in=${code}&master`);
