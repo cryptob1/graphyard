@@ -35,8 +35,8 @@ export default function CreateWork({ work, error, busy, setCreating, setBusy, se
     <label><span><Term term="exclusive resource">Exclusive resources</Term> (comma separated)</span><input name="exclusiveResources" placeholder="staging:sms-test-account"/></label>
     <label><span>Required <Term term="automated checks">CI checks</Term></span><input name="checks" defaultValue="test, typecheck" required/></label>
     <label><span><Term term="dependency">Depends on</Term></span><select name="dependency"><option value="">No dependency</option>{work.map(w => <option key={w.id} value={w.id}>{w.key} · {w.title}</option>)}</select></label>
-    </details>
     <p className="muted">Created as not started. Someone else must approve the code before it merges. More dependencies can be added through the CLI.</p>
+    </details>
     {error && <p role="alert" className="amber">{error}</p>}
     <button disabled={busy}>{busy ? 'Creating…' : 'Create work item'}</button>
   </form></section></Dialog>;

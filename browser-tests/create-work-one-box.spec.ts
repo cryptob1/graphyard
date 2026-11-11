@@ -61,6 +61,9 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     expect(draft.policy).toEqual({ review: true, checks: ['test', 'typecheck'] });
     expect(draft.scenarioRequirements).toEqual([]); expect(draft.evidence).toEqual([]);
     expect(storedWorkSchema.shape.criteria.safeParse(draft.criteria).success).toBe(true);
+    const omitted = await post('work', { title: 'API title-only draft' });
+    expect(omitted.criteria).toEqual([]); expect(omitted.ready).toBe(false); expect(omitted.lease).toBeNull(); expect(omitted.candidate).toBeNull();
+    expect(omitted.policy).toEqual(draft.policy);
     const empty = await post('work', { title: 'Explicit empty draft', criteria: [] });
     expect(empty.criteria).toEqual([]); expect(empty.ready).toBe(false);
     for (const invalid of [[{ id: 'AC-1', text: 'Incomplete' }], [{ id: 'AC-1', text: 'No e2e', proofs: ['unit:only'] }]]) {
@@ -80,8 +83,10 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator', cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository: 'owner/project', baseBranch: 'main', hostId: 'browser-host', masterAgentName: 'master-session', operatorAgent: { id: 'master', credentialFile: '/outside/master' }, workers: [{ name: 'worker', principal: 'worker', agentName: 'worker-session', mode: 'launch', kind: 'codex', credentialFile: '/outside/worker', agentArgs: [], approvals: 'auto', environment: {} }] });
     const state = emptyDaemonState(config);
     const released: string[] = [], dispatched: string[] = [], checks: string[] = [], wakes: string[] = [];
+    let masterVisible = true;
+    const handovers: string[] = [];
     const effects: DaemonEffects = {
-      agents: () => [{ name: 'master-session', pane_id: 'master-pane', agent: 'codex', agent_status: 'working' }],
+      agents: () => masterVisible ? [{ name: 'master-session', pane_id: 'master-pane', agent: 'codex', agent_status: 'working' }] : [],
       credentials: async () => ({ worker: { available: true, reason: null } }),
       snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
       release: async (item, reason) => { released.push(item.id); return post(`work/${item.id}/ready`, { expectedRevision: item.revision, reason }, masterToken); },
@@ -92,13 +97,18 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
         await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{specCheck}', $2::jsonb) WHERE id=$1", [item.id, JSON.stringify({ policyRevision: item.policyRevision, verdict: 'ready', paraphrase: 'The export change is proven through the browser', gaps: [], reviewer: 'spec-reviewer', at: new Date().toISOString() })]);
         return { pane: 'spec-pane', launch: randomUUID() };
       },
-      masterSession: { launch: async () => { throw new Error('Master is already present'); }, wake: async (_pane, prompt) => { wakes.push(prompt); } },
+      masterSession: { launch: async handover => { handovers.push(handover); masterVisible = true; return { agentName: 'master-session', pane: 'master-pane', runtime: 'codex', account: null, session: null }; }, wake: async (_pane, prompt) => { wakes.push(prompt); } },
       closeSession: () => {}, persist: async () => {},
     };
     await runCycle(config, state, effects); await runCycle(config, state, effects);
     expect(released).toEqual([]); expect(dispatched).toEqual([]); expect(checks).toEqual([]);
     expect(wakes).toHaveLength(1); expect(wakes[0]).toContain(`master requirements ${draft.key} FILE REASON`);
     expect(masterCauses([draft])[0].detail).toContain(waiting);
+    masterVisible = false;
+    await runCycle(config, state, effects);
+    expect(handovers).toHaveLength(1); expect(handovers[0]).toContain(`master requirements ${draft.key} FILE REASON`);
+    await runCycle(config, state, effects);
+    expect(wakes).toHaveLength(1);
     const requirements = { expectedPolicyRevision: draft.policyRevision, reason: 'Define observable behavior and proof', criteria, dependencies: [], exclusiveResources: [] };
     expect((await request(`work/${draft.id}/requirements`, { ...requirements, criteria: [] }, masterToken)).status).toBeGreaterThanOrEqual(400);
     expect((await request(`work/${draft.id}/requirements`, { ...requirements, criteria: [{ ...criteria[0], proofs: ['unit:only'] }] }, masterToken)).status).toBeGreaterThanOrEqual(400);
@@ -122,6 +132,7 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     expect(specified.criteria).toEqual(criteria); expect(specified.ready).toBe(false);
     await expect(page.locator('article.item-page')).not.toContainText(waiting);
   } finally {
+    await page.unrouteAll({ behavior: 'wait' });
     http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); await store.close();
   }
 });
