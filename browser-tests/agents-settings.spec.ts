@@ -25,7 +25,7 @@ function registry(): AgentRegistry {
     roles: [
       { name: 'worker', accounts: ['claude-a', 'claude-b', 'codex'], concurrency: 4, policy: { args: ['--permission-mode', 'bypassPermissions'], tools: [], model: null } },
       { name: 'reviewer', accounts: ['codex', 'claude-b'], concurrency: 2 },
-      { name: 'approver', accounts: ['pi-b', 'claude-b'], concurrency: 1, policy: { args: ['--thinking', 'low'], tools: ['read', 'bash'], model: 'glm' } },
+      { name: 'master', accounts: ['claude-b'], concurrency: 1, policy: { args: ['--thinking', 'low'], tools: ['read', 'bash'], model: 'glm' } },
       { name: 'producer', accounts: ['claude-b', 'pi-b'], concurrency: 3, policy: { args: [], tools: ['Read', 'Bash(npm test:*)'], model: 'sonnet' } },
     ],
     reason: 'Proposed from ~/.coding_agents on agent-host-1',
@@ -97,8 +97,8 @@ test('integration:agents-settings-page — Settings › Agents renders every run
   await expect(role('worker')).toContainText('Launch policy: flags --permission-mode bypassPermissions · every tool the runtime allows · each account\'s own model');
   await expect(role('reviewer')).toContainText('Preference order: codex → claude-b');
   await expect(role('reviewer')).toContainText('Launch policy: no extra flags');
-  await expect(role('approver')).toContainText('Preference order: pi-b → claude-b');
-  await expect(role('approver')).toContainText('Launch policy: flags --thinking low · tools read, bash · model glm');
+  await expect(role('master')).toContainText('Preference order: claude-b');
+  await expect(role('master')).toContainText('Launch policy: flags --thinking low · tools read, bash · model glm');
   await expect(role('producer')).toContainText('tools Read, Bash(npm test:*) · model sonnet');
 
   // Which account each running session was launched on; an ended session is not running.
