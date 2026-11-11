@@ -54,6 +54,16 @@ export function itemLine(item: Work, now: number, launched: AttemptLaunch | null
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
+/** Read npm's latest release without confusing it with the managed repository's serving state. */
+export async function npmPublishedVersion(run: ChildRun): Promise<string> {
+  try {
+    const version = JSON.parse(String(await run('npm', ['view', '@cryptob1/graphyard', 'version', '--json', '--registry=https://registry.npmjs.org/'], { timeoutMs: 5_000 })));
+    return typeof version === 'string' && version ? version : 'not published';
+  } catch (error) {
+    return /E404/.test(String(error)) ? 'not published' : 'unavailable';
+  }
+}
+
 /** The `master status` page. `run` reads main's tip from the checkout's remote-tracking ref; the deploy unit fetches it. */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, run: ChildRun = defaultChildRun) {
   // An unreachable control plane (GY-2966) is reported, not thrown: since when, the server's last exit and the free disk space, as the loop recorded them.
@@ -103,6 +113,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // "no test check configured" so a managed repository never looks like it trials with zero tests.
   const trialTests = trialTestGateStatus(root);
   const recorded = state?.controlPlane ?? null;
+  const controlUpdate = controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now);
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
@@ -126,7 +137,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
     // that the install still does not run). Never the managed repository's serving (GY-2955).
-    controlPlaneUpdate: controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now),
+    controlPlaneUpdate: controlUpdate ? { ...controlUpdate, publishedVersion: await npmPublishedVersion(run) } : null,
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     applications,
