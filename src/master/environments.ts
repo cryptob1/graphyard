@@ -363,6 +363,10 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
   assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
   const plan = agentLaunchPlan(kind, profile.approvals, fleetArgs ?? [...(contract?.args ?? []), ...own], { ...contract?.environment, ...profileEnvironment }, reach.repositoryRoot);
+  if (reach.headless && contract?.headlessArgs) {
+    const explicit = agentLaunchPlan(kind, profile.approvals, [...contract.headlessArgs, ...(fleetArgs ?? [])], { ...contract.environment, ...profileEnvironment }, reach.repositoryRoot);
+    if (explicit.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', explicit.refusal);
+  }
   // So is an effective launch whose own arguments or environment still let the runtime ask.
   if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
   // The plan's variables come last: they are the recipe's, where the profile set none, or the

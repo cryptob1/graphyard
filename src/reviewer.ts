@@ -13,12 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, withLaunchClose, acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
+import { acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
-import { closeHerdrPane, stopCreatedHerdrTab, type HerdrAgent } from './master/herdr.js';
+import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
@@ -892,7 +892,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   product?: boolean;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
-  /** How a headless review's one child runs (headless-session.ts); the host's by default, and a runtime with no one-shot form keeps its pane session. */
+  /** The one-task model executor; the host's by default. */
   headless?: HeadlessExec | null;
 } = {}) {
   dependencies = { ...dependencies, coordinatorRoot: sessionCoordinatorRoot(root, dependencies) };
@@ -985,10 +985,10 @@ export async function launchReview(root: string, work: Work, profileName: string
   // A launch that never became a session gives its reservation back; one whose tab Herdr could
   // not confirm closed keeps it, settled as failed with the reason, so the session it may have
   // left behind is still on the record.
-  const release = (error: unknown) => updateReviewLedger(root, ledger => {
-    const reason = error instanceof Error ? error.message : String(error);
-    ledger.reviews = ledger.reviews.map(entry => entry.id === id ? { ...entry, state: 'failed' as const, launching: undefined, closedAt: now().toISOString(), resolution: `the launch failed: ${reason}`.slice(0, 900) } : entry);
-  }).catch(() => { /* a reservation that cannot be given back is failed by reconciliation once it is stale */ });
+  const release = (_error: unknown) => updateReviewLedger(root, ledger => {
+    ledger.reviews = ledger.reviews.filter(entry => entry.id !== id);
+  }).catch(() => { /* reconciliation releases a stale reservation if this write fails */ });
+
   try {
     // GY-1705: re-hold a reviewer account this item's last two sessions each spent, before
     // selectAccount — auto-dispatch and manual launches call this path directly, not only failover.
@@ -1035,7 +1035,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // A headless session (headless-session.ts) holds no binding at all: the launcher posts its answer.
       const runHeadless = headless;
       const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
-      let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
+      const delivery: RequestDelivery = 'request';
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
       /** The session the run is on: a headless run moves off a logged-out account (GY-3218). */
       const on = { current: selected };
@@ -1060,7 +1060,6 @@ export async function launchReview(root: string, work: Work, profileName: string
               credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
           });
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
-          delivery = 'request';
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
             contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: runHeadless, moveAccount,
             onRun: async run => {
@@ -1075,16 +1074,10 @@ export async function launchReview(root: string, work: Work, profileName: string
         await on.current.release?.(`reviewer launch failed: ${String(error)}`.slice(0, 400));
         // A launch that never became a session leaves no checkout behind.
         await discard();
-        const malformedTab = (error as any)?.herdrTab as string | undefined;
-        // Closed through the loop's own close path, and recorded in the failure (GY-413).
-        let closed: string | null = null;
-        if (pane || tabId || malformedTab) try { closed = await closeFailedLaunch(pane, tabId ?? malformedTab, dependencies.run); }
-          catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
+
         await rm(sessionDirectory, { recursive: true, force: true });
         // A launch that failed for want of room says so, with the path.
         const failure = writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
-        // A disk-exhaustion report keeps its advice last; the close rides on it as `paneClosed` (GY-413).
-        if (closed) { if (failure === error) withLaunchClose(failure, closed); else Object.assign(failure, { paneClosed: closed }); }
         throw failure;
       }
       // The runtime is up: the reserved record takes the pane, the token's real expiry and the delivery.
@@ -1095,13 +1088,12 @@ export async function launchReview(root: string, work: Work, profileName: string
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
           // A headless run holds its request from its first instant: there is nothing to acknowledge or re-prompt.
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(on.current) ? { session: registrySessionOf(on.current) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}), acknowledgedAt: reserved.acknowledgedAt ?? now().toISOString() });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(on.current) ? { session: registrySessionOf(on.current) } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}), acknowledgedAt: reserved.acknowledgedAt ?? now().toISOString() });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
       } catch (error) {
         liveRun(agentName)?.run.cancel('its ledger record could not be written');
-        if (!await unrecordedPaneStopped(error, pane, tabId, agentName, () => stopCreatedHerdrTab(pane, tabId, dependencies.run))) throw error;
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no

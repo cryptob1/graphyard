@@ -23,6 +23,7 @@ import type { CredentialMask } from './master/confinement.js';
 import { endRun, liveRun, registerRun, type AdoptedRun } from './runner/registry.js';
 import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
+import { underTestRunner } from './runtime-environment.js';
 import { runtimeAdapter } from './master/runtimes.js';
 import { confinedRuntimeArgs } from './worker-sandbox.js';
 
@@ -108,7 +109,7 @@ export function awaitHeadlessRun(directory: string, options: { signal?: AbortSig
     tick();
   });
 }
-export const defaultHeadlessExec = (): HeadlessExec => spawnHeadless;
+export const defaultHeadlessExec = (): HeadlessExec => underTestRunner() ? async () => { throw new Error('A test must supply a headless model executable; the host runtime is never used by tests'); } : spawnHeadless;
 /** A live child may return from dispatch after this startup observation; early failures move accounts first. */
 export const headlessStartupMs = 1000;
 

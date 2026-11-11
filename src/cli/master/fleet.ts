@@ -1,3 +1,4 @@
+import { headlessInventory, sessionAgents } from '../../session-inventory.js';
 
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
@@ -26,7 +27,7 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   // The fleet on this host against the CLI checkout's commit: the release a restart would load.
   if (id === 'review') {
     const snapshot = await masterApi('work-snapshot');
-    return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
+    return print(await reviewCommand(root, args, snapshot, sessionAgents(headlessInventory())));
   }
   if (id === 'harness') {
     const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });

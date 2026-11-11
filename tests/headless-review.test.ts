@@ -222,7 +222,10 @@ test('integration:headless-review — each runtime runs its one-shot form, and t
   assert.deepEqual(headlessArgs('codex', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '--add-dir', '/x'], 'REQUEST'), ['exec', '--sandbox', 'workspace-write', '--add-dir', '/x', '--skip-git-repo-check', 'REQUEST'], 'codex exec takes no approval flag: it never asks');
   assert.deepEqual(headlessArgs('claude', ['--permission-mode', 'bypassPermissions'], 'REQUEST'), ['--permission-mode', 'bypassPermissions', '-p', 'REQUEST']);
   assert.deepEqual(headlessArgs('pi', ['--model', 'm', '{request}'], 'REQUEST'), ['--model', 'm', 'REQUEST', '-p'], 'a registry contract places the request itself');
-  assert.equal(headlessKind('gemini'), false, 'a runtime with no one-shot form keeps its pane session');
+  assert.equal(headlessKind('gemini'), false, 'a runtime with no built-in form requires an explicit contract');
+  assert.deepEqual(headlessArgs('muse', [], 'REQUEST'), ['exec', 'REQUEST']);
+  assert.throws(() => headlessArgs('gemini', [], 'REQUEST'), /headlessArgs/);
+  assert.deepEqual(headlessArgs('gemini', ['--tools', 'read'], 'REQUEST', { args: [], headlessArgs: ['once', '--prompt', '{request}'] }), ['once', '--tools', 'read', '--prompt', 'REQUEST']);
   const options = { cwd: root, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10_000, signal: new AbortController().signal, run: join(root, '.graphyard', 'exec-probe', randomUUID()), detached: new AbortController().signal };
   assert.equal(await spawnHeadless(process.execPath, ['-e', 'process.stdin.on("data", () => process.exit(3)); process.stdin.on("end", () => console.log("{}"))'], options), '{}\n', 'stdin is closed: nothing waits on a person');
   await assert.rejects(spawnHeadless(process.execPath, ['-e', 'console.error("limit reached"); process.exit(2)'], options), /exited with code 2: limit reached/);
@@ -246,6 +249,8 @@ test('integration:headless-run-survives-loop-restart — a headless review in fl
   const [directory] = readdirSync(runs).map(name => join(runs, name));
   const meta = readRunMeta(directory!)!;
   assert.ok(runAlive(meta), 'the child is live');
+  const stableRun = (await readReviewLedger(root)).reviews.find(record => record.id === launched.review)!.headless!;
+  assert.equal(meta.id, stableRun.id);
 
   // The loop stops (as its unit's restart stops it): the line counts the run it leaves running, and signals none.
   const config = { url, repository: 'owner/project', run: { intervalSeconds: 30 } } as never;
@@ -271,6 +276,7 @@ test('integration:headless-run-survives-loop-restart — a headless review in fl
   await adopted!.settled;
   const record = (await readReviewLedger(root)).reviews.find(entry => entry.id === launched.review)!;
   assert.equal(record.verdict?.state, 'APPROVED');
+  assert.deepEqual(record.headless, stableRun, 'adoption preserves the durable run-to-verdict link');
   assert.equal(record.verdict?.reviewer, reviewer);
   const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; sha: string; state: string; source?: string }[];
   assert.deepEqual([review!.reviewer, review!.sha, review!.state, review!.source], [reviewer, head, 'APPROVED', 'control-plane'], 'the verdict landed under the reviewer identity');
