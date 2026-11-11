@@ -139,6 +139,7 @@ test('unit:tests/publish-tag.test.ts — the release workflow is tag-only, uses 
   assert.match(workflow, /node-version: '24'/);
   assert.match(workflow, /npm install --global npm@11\.5\.2/);
   assert.match(workflow, /docker\/setup-buildx-action@/);
+  assert.match(workflow, /concurrency:\n  group: publish\n  queue: max/);
   assert.match(workflow, /node scripts\/build-publisher\.mjs/);
   assert.match(workflow, /node scripts\/publish-verified\.mjs --provenance/);
   assert.match(workflow, /GRAPHYARD_PUBLISH_COMMIT: \$\{\{ github.sha \}\}/);

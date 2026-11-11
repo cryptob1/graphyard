@@ -6,10 +6,10 @@ permissions:
   contents: read
   id-token: write
   packages: write
-# Serialize latest/verified tags without cancelling a release in progress.
+# Serialize latest/verified tags and retain pending releases.
 concurrency:
   group: publish
-  cancel-in-progress: false
+  queue: max
 jobs:
   publish:
     runs-on: ubuntu-latest
