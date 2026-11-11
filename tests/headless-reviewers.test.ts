@@ -86,9 +86,10 @@ async function configure(entries: { name: string; kind: string; failure?: string
     const executable = entry.kind === 'cursor' ? 'cursor-agent' : entry.kind;
     // The only substitute is the model executable. It records its actual argv, home and namespace.
     await writeFile(join(bin, executable), `#!${process.execPath}
-const fs = require('node:fs');
+import fs from 'node:fs';
 const home = process.env.RUNTIME_HOME;
 const args = process.argv.slice(2);
+fs.appendFileSync(home + '/starts', '1');
 fs.writeFileSync(home + '/started.json', JSON.stringify({ args, home, namespace: fs.readlinkSync('/proc/self/ns/mnt'), token: process.env.GRAPHYARD_TOKEN ?? null, credential: fs.existsSync(${JSON.stringify((await loadMasterConfig(root)).credentialFile)}), tty: !!process.stdout.isTTY }));
 if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); }
 (async () => {
@@ -122,17 +123,18 @@ async function dispatch(work: Work, confined = false) {
       assert.equal(queued.requestId, request.id);
     } finally { delete process.env.GRAPHYARD_CONFINEMENT; }
   }
-  let calls = 0;
+  let calls = 0, dispatchCalls = 0;
   const run = (command: string, args: string[], options?: { cwd?: string }) => {
     assert.notEqual(command, 'herdr', 'reviews must never call Herdr');
     return execFileSync(command, args, { encoding: 'utf8', cwd: options?.cwd });
   };
-  const effects = dispatchEffects(root, config, { snapshot: async () => ({ work: [await stored(work.id)], now: now() }), mutate, run, headless: spawnHeadless, ...(confined ? { coordinatorRoot: root } : {}) });
+  const effects = dispatchEffects(root, config, { snapshot: async () => { dispatchCalls++; return { work: [await stored(work.id)], now: now() }; }, mutate, run, headless: spawnHeadless, ...(confined ? { coordinatorRoot: root } : {}) });
   // There are no interactive agents in this fixture; the real headless inventory is authoritative.
   effects.inventory = async () => headlessInventory();
   const launch = effects.launchReview;
   effects.launchReview = (...args) => { calls++; return launch(...args); };
   const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects);
+  assert.equal(dispatchCalls, 1, 'one host dispatch invocation');
   assert.equal(calls, 1, JSON.stringify(tick));
   assert.equal(tick.launched.length, 1, JSON.stringify(tick));
   const record = (await readReviewLedger(root)).reviews.find(record => record.key === work.key)!;
@@ -186,6 +188,9 @@ for (const [index, failure] of ['Not logged in · Please run /login', "You've hi
   assert.equal(snapshot.accounts.find(account => account.name === failed)?.eligible, false);
   assert.equal(snapshot.sessions.filter(session => session.account === failed && !session.endedAt).length, 0);
   assert.equal(record.headless?.kind, 'muse');
+  const durable = JSON.parse(await readFile(join(liveRun(record.agentName)!.run.directory!, 'session.json'), 'utf8'));
+  assert.equal(durable.id, record.headless!.id);
+  assert.equal(durable.kind, 'muse'); assert.equal(durable.context.kind, 'muse');
   assert.match(record.headless?.reason ?? '', /login|limit/i);
   await writeFile(join(homes.get(successor)!, 'release'), '');
   assert.equal((await reviewed(record.id)).verdict?.state, 'APPROVED');
@@ -218,4 +223,19 @@ test('e2e:headless-reviewers — confinement refusal starts no model and never f
   const work = await insert(reviewItem('GY-9471'));
   await assert.rejects(launchReview(root, work, 'reviewer', [], now(), { headless: spawnHeadless, coordinatorRoot: join(scratch, 'missing-coordinator') }), /cannot be launched|Git directory|not a git repository/i);
   await assert.rejects(started('refused'), /ENOENT/);
+});
+
+test('e2e:headless-reviewers — exhausting every account leaves the exact request pending with its diagnosis', async () => {
+  await configure([{ name: 'last-login', kind: 'claude', failure: 'Not logged in' }, { name: 'last-limit', kind: 'muse', failure: "You've hit your session limit" }]);
+  const work = reviewItem('GY-9480');
+  const launched = await dispatch(work);
+  const record = await reviewed(launched.id);
+  assert.equal(record.state, 'failed');
+  assert.match(record.resolution!, /limit/i);
+  const pending = (await stored(work.id)).autoDispatch!.review!;
+  assert.equal(pending.id, record.requestId);
+  assert.equal(pending.state, 'requested');
+  assert.equal(pending.sha, head); assert.equal(pending.baseSha, base);
+  for (const name of ['last-login', 'last-limit']) assert.equal(await readFile(join(homes.get(name)!, 'starts'), 'utf8'), '1', 'each eligible account starts at most once');
+  assert.equal((await registry.snapshot(hostId)).sessions.filter(session => !session.endedAt).length, 0);
 });

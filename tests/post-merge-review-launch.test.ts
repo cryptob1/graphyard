@@ -1,3 +1,4 @@
+import { launchReview, pendingHeadless } from './helpers/pending-review.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -15,10 +16,10 @@ import { runDispatchTick } from '../src/dispatch/tick.js';
 import { unknownParent } from '../src/dispatch/post-merge.js';
 import { type DispatchEffects } from '../src/dispatch/effects.js';
 import { owedPostMergeReviews, postMergeRequestId, postMergeRefusalProbeMs } from '../src/model/post-merge-review.js';
-import { launchReview, readReviewLedger, saveReviewerProfile, reviewRetryPrompt } from '../src/reviewer.js';
+import { readReviewLedger, saveReviewerProfile, reviewRetryPrompt } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { readReviewBinding } from '../src/review-post.js';
-import { startedAtOnce, expandTypedCommand, requestOf } from './helpers/launch-shell.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
 // Every instant this file holds is derived from the run's own clock (GY-1694): a base reading taken
@@ -111,8 +112,7 @@ const effects: DispatchEffects = {
 
 /** The verdict the launched session would post, read from the binding its session directory carries, sent as the launch's one-time token. */
 async function postSessionVerdict(work: Work) {
-  const tab = herdrCalls.filter(args => args[0] === 'tab' && args[1] === 'create').at(-1)!;
-  const directory = tab.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length);
+  const directory = (await readReviewLedger(root)).reviews.find(record => record.key === work.key)!.sessionDirectory;
   const binding = await readReviewBinding(directory);
   assert.deepEqual([binding.mode, binding.key, binding.sha, binding.baseTip], ['control-plane', work.key, M, B], 'the binding names the merge commit and its parent, and no pull request');
   assert.match(binding.verdictToken!, /^[0-9a-f]{64}$/);
@@ -232,14 +232,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
     }
     await insert(work);
     const prompts: string[] = [];
-    const run = (command: string, args: string[]) => {
-      if (args[0] === 'pane' && args[1] === 'run') {
-        const launch = expandTypedCommand(args[3]);
-        prompts.push(requestOf(launch.kind, launch.args)!);
-      }
-      return herdr(command, args);
-    };
-    await launchReview(root, work, 'reviewer-claude', [], at(), { run, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
+    await launchReview(root, work, 'reviewer-claude', [], at(), { run: herdr, headless: (command, args, options) => { prompts.push(args.at(-1)!); return pendingHeadless(command, args, options); }, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
     const record = (await readReviewLedger(root)).reviews.find(entry => entry.key === work.key)!;
     assert.deepEqual(record.reviewInputs, { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements });
     // A changed later snapshot must not replace the launch facts when its session is reminded.
@@ -256,9 +249,9 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
       assert.ok(brief.includes(`node ${launcher} guide review`));
       assert.match(brief, /policy revision 1/);
       assert.match(brief, /missing later trusted results do not block review; missing or inadequate test implementation can/);
-      assert.match(brief, /Post exactly one verdict/);
-      assert.match(brief, /one review posted with --event COMMENT/);
-      assert.match(brief, /one-time token/);
+      assert.match(brief, /Post exactly one verdict|Answer in one JSON object/);
+      if (brief === retry) assert.match(brief, /one review posted with --event COMMENT/);
+      if (brief === retry) assert.match(brief, /one-time token/);
       assert.match(brief, /mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker/);
       assert.match(brief, /Discover the correct path with rg --files or command with CLI --help, then retry the authorized read/);
       assert.match(brief, /necessary input remains unavailable through authorized equivalent reads/);
@@ -269,7 +262,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
     }
     assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
     assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'review-claude-1');
-    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
+    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run: herdr, probe: fleet, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
     assert.equal(prompts.length, 1, 'one session answers this head');
     const session = await readReviewBinding(record.sessionDirectory!);
     const body = { event: 'APPROVE', body: verdictBody, sha: record.sha, token: session.verdictToken };

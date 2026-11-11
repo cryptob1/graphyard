@@ -723,6 +723,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + readOnlySession
+    + (plane.answer ? reviewRecoverySection() : '')
     + (plane.answer ?? reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
     + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
@@ -1080,8 +1081,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const failure = writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
         throw failure;
       }
-      // The runtime is up: the reserved record takes the pane, the token's real expiry and the delivery.
-      // A record that cannot be written leaves no session behind: the pane is stopped and the credential withdrawn.
+      // Record the launch before attaching settlement; a fast answer must not lose its binding.
       let record: ReviewRecord;
       try {
         record = await updateReviewLedger(root, ledger => {
@@ -1094,6 +1094,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         });
       } catch (error) {
         liveRun(agentName)?.run.cancel('its ledger record could not be written');
+        await on.current.release?.('the review ledger could not be written');
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
       // The posted answer is the record's verdict, which the next reconcile settles; a run with no

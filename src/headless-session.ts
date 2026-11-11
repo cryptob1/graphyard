@@ -38,8 +38,7 @@ export type HeadlessExec = (command: string, args: string[], options: { cwd: str
 /**
  * How each runtime takes one request and exits: a subcommand before its own flags, the flags that
  * select print mode after them, and flags its one-shot form does not accept. The request is the
- * last argument, or takes a registry contract's `{request}` place. A runtime without a form here
- * keeps its pane session.
+ * last argument, or takes a registry contract's `{request}` place. A runtime without a built-in form requires a registry headless contract.
  */
 export const headlessKind = (kind: string | undefined, contract?: RegisteredLaunch | null): kind is string => !!kind && (!!runtimeAdapter(kind)?.headless || !!contract?.headlessArgs);
 export class HeadlessConfigurationError extends Error {}
@@ -172,7 +171,7 @@ export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'arg
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
   const prepare = async (on: HeadlessAccountLaunch) => {
     headlessArgs(on.kind, on.args, input.prompt, on.contract);
-    assertLaunchable(on.kind, on.contract);
+    assertLaunchable(on.kind, on.contract ? { ...on.contract, args: on.contract.headlessArgs ?? on.contract.args } : null);
     const trust = await launchRecipe(on.kind)?.trust?.(input.directory, on.environment, on.args);
     const confinement = await sessionConfinement(on.kind, on.args, { directory: input.directory, cwd: input.directory, environment: on.environment, ownGitHubCredential: true, credentialMask: on.credentialMask }, input.coordinatorRoot);
     if (trust) await launchRecipe(on.kind)?.verify?.(trust);
@@ -210,10 +209,10 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const env = runEnvironment(process.env, launch.environment);
       const argv = [...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, prompt, launch.contract)];
-      persist();
       const active = liveRun(input.name);
       if (active) active.agent = launch.kind;
       await input.onRun?.({ id, kind: launch.kind, ...(refused ? { reason: refused } : {}) });
+      persist();
       let output: string | null = null;
       let startup: NodeJS.Timeout | undefined;
       try {
@@ -239,7 +238,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
       }
     }
   })().finally(ready);
-  void settled.catch(() => {}).finally(() => { endRun(input.name, runRecord(input.kind, { events: [] }, null, startedAt, new Date().toISOString())); rmSync(runDirectory, { recursive: true, force: true }); });
+  void settled.catch(() => {}).finally(() => { endRun(input.name, runRecord(launch.kind, { events: [] }, null, startedAt, new Date().toISOString())); rmSync(runDirectory, { recursive: true, force: true }); });
   await started;
   return { settled };
 }

@@ -439,7 +439,7 @@ export const registryContractRefusal = (kind: string) => `Graphyard refuses to l
 export function assertLaunchable(kind: string, registered: RegisteredLaunch | null = null) {
   if (launchRecipe(kind)) return;
   if (!registered) throw new LaunchRefusedError(kind);
-  if (!(registered.headlessArgs ?? registered.args).some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
+  if (!registered.args.some(argument => argument !== requestPlaceholder) && !Object.keys(registered.environment ?? {}).length) throw new LaunchRefusedError(kind, registryContractRefusal(kind));
 }
 /**
  * A profile with `approvals: "prompt"` would start its runtime without the recipe above and wait at

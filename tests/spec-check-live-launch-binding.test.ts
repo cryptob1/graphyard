@@ -1,3 +1,4 @@
+import { launchLegacySpecCheck as launchSpecCheck } from './helpers/pending-review.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -14,7 +15,7 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { daemonStateSchema } from '../src/daemon/state.js';
 import { specCheckEndedKey } from '../src/daemon/cycle.js';
-import { launchSpecCheck, type SpecCheckLaunchResult } from '../src/spec-check.js';
+import { type SpecCheckLaunchResult } from '../src/spec-check.js';
 import { postSpecCheck } from '../src/spec-check-post.js';
 import type { Work } from '../src/model.js';
 import { fleet } from './helpers/review-fleet.js';

@@ -85,6 +85,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       candidate, submission: { epoch: 1, pr: 7 },
       observation: { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: BASE, baseTree: sha40('tree'), baseTipContained: true },
       gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] });
+    work.autoDispatch = { review: { id: 'fixture-review-request', kind: 'review', provider: 'github', pr: 7, sha: HEAD, baseSha: BASE, policyRevision: 1, state: 'requested', requestedAt: at, reason: 'fixture review owed' }, producers: [], history: [] };
     await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
 
     // The checkout a pre-GY-3212 release installed: its credential directory under the fixture
@@ -159,8 +160,8 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       "try { review = run(process.execPath, [process.env.GRAPHYARD_CLI, 'master', 'review', 'GY-1'], { cwd: process.env.GRAPHYARD_REPOSITORY_ROOT }); }",
       "catch (error) { console.log('MASTER-REVIEW-FAILED ' + String(error.stderr || error.message).replace(/\\s+/g, ' ').slice(0, 1500)); process.exit(1); }",
       "const record = JSON.parse(review);",
-      "if (record.work !== 'GY-1' || record.mode !== 'control-plane' || !record.launch) throw new Error(`master review did not launch the control-plane review: ${review.slice(0, 400)}`);",
-      "console.log('MASTER-REVIEW-OK ' + record.agentName);",
+      "if (record.work !== 'GY-1' || !record.queued || record.requestId !== 'fixture-review-request') throw new Error(`master review did not queue the durable review request: ${review.slice(0, 400)}`);",
+      "console.log('MASTER-REVIEW-OK ' + record.requestId);",
       '',
     ].join('\n'));
 
@@ -241,11 +242,13 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
     // control-plane review and starts its reviewer in a main-server pane under its own confinement.
     assert.ok(masterOutput.includes('MASTER-AGENT-LIST-OK'), `herdr agent list ran inside the confinement: ${masterOutput.slice(-800)}`);
     assert.ok(masterOutput.includes('MASTER-REVIEW-OK'), `master review GY-1 ran inside the confinement: ${masterOutput.slice(-800)}`);
-    assert.ok(agentLists >= 2, 'the main Herdr served both inventory reads, the session\'s and the review launch\'s');
-    assert.equal(reviewLaunches.length, 1, 'the main Herdr started the reviewer master review launched');
-    assert.match(reviewLaunches[0], /bwrap .*--unshare-pid/, 'the reviewer pane carries its own confinement, built on the host by Herdr');
-    assert.ok(reviewPaneLines[0].includes(worktreeRoot(root, migrated)), `the reviewer checkout lies in the host's managed worktree root, where the host pane finds it: ${reviewPaneLines[0]}`);
-    assert.ok(connections >= 2, 'every answer came through the main server\'s own socket');
+    assert.ok(agentLists >= 1, 'the confined master still reaches Herdr for its own inventory');
+    assert.equal(reviewLaunches.length, 0, 'a confined review caller never starts a Herdr reviewer');
+    assert.equal(reviewPaneLines.length, 0);
+    const queued = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
+    assert.equal(queued.autoDispatch.review.id, 'fixture-review-request', 'the host loop owns execution of this durable request');
+    assert.ok(connections >= 1, 'the master inventory came through the main server socket');
+
   } finally {
     if (herdrServer) await new Promise<void>(resolve => (herdrServer as NonNullable<typeof herdrServer>).close(() => resolve()));
     if (http) { (http as unknown as { closeAllConnections?: () => void }).closeAllConnections?.(); await new Promise<void>(resolve => http!.close(() => resolve())); }

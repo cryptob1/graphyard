@@ -1,3 +1,4 @@
+import { launchReview, pendingHeadless } from './helpers/pending-review.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -13,7 +14,7 @@ import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.js';
-import { launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
+import { readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor } from '../src/dispatch/cursor.js';
 import { runDispatchTick } from '../src/dispatch/tick.js';
@@ -394,14 +395,13 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
 
     // Reviewer: its own file allows exactly the verdict the master's rules deny.
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
-    const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), probe: fleet(), registerLaunch });
+    const reviewCalls: string[][] = []; let reviewArgs: string[] = [];
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { headless: (command, args, options) => { reviewArgs = args; return pendingHeadless(command, args, options); }, run: herdr(reviewCalls), probe: fleet(), registerLaunch });
     const reviewerFile = sessionHarnessFile(root, 'reviewer', 'claude-reviewer');
-    const typedReview = expandTypedCommand(reviewCalls[1][3]);
-    assert.deepEqual(reviewCalls[1].slice(0, 2), ['pane', 'run']); assert.equal(typedReview.kind, 'claude');
-    assert.deepEqual(typedReview.args.slice(-9, -3), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', reviewerFile]);
-    assert.equal(typedReview.args.at(-3), '--append-system-prompt-file'); assert.equal(roleOf(typedReview.args), launchAuthorization.replace(/\s+/g, ' '));
-    assert.match(typedReview.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
+    assert.equal(reviewCalls.some(args => args[0] === 'pane'), false);
+    assert.equal(reviewArgs[reviewArgs.indexOf('--permission-mode') + 1], 'bypassPermissions');
+    assert.equal(reviewArgs[reviewArgs.indexOf('--settings') + 1], reviewerFile);
+    assert.match(reviewArgs.at(-1)!, /You are the independent Graphyard reviewer/);
     const reviewerSettings = JSON.parse(await readFile(reviewerFile, 'utf8'));
     assert.ok(reviewerSettings.permissions.allow.includes(`Bash(node ${config.cliPath} review post:*)`));
     assert.equal(denied(reviewerSettings.permissions.deny, `node ${config.cliPath} review post --event APPROVE`), false, 'the master deny on review calls cannot block the reviewer');
@@ -425,10 +425,12 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     // A runtime that does not read Claude settings is launched with its profile arguments unchanged.
     await saveReviewerProfile(root, { name: 'cursor-reviewer', agentName: 'review-cursor-1', kind: 'cursor' });
     const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
-    const cursorCalls: string[][] = [];
-    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), probe: fleet('cursor'), registerLaunch });
-    const typedCursor = expandTypedCommand(cursorCalls[1][3]);
-    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
+    const cursorCalls: string[][] = []; let cursorArgs: string[] = [];
+    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { headless: (command, args, options) => { cursorArgs = args; return pendingHeadless(command, args, options); }, run: herdr(cursorCalls), probe: fleet('cursor'), registerLaunch });
+    assert.equal(cursorCalls.some(args => args[0] === 'pane'), false);
+    assert.deepEqual(cursorArgs.slice(0, -1), ['--force', '--trust', '-p']);
+    assert.ok(cursorArgs.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`));
+
   } finally { await cleanup(); }
 });
 

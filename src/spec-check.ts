@@ -136,6 +136,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     const cliRefusal = cliUnreachableRefusal(config, credentialMaskFor(config, {}));
     if (cliRefusal) throw new LauncherUnavailableError(cliRefusal);
     const sessionDirectory = resolve(reviewerCredentialDirectory(config), 'sessions', id);
+    const on = { current: selected };
     try {
       // The control plane registers the launch before the session starts: the reviewer, the token
       // hash, the expiry. A launch it refuses starts nothing and writes no credential.
@@ -155,7 +156,6 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const vendor = await readVendorPrompts();
       {
         // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
-        const on = { current: selected };
         const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
           const moved = accountLaunch(profile, next.account, { writable, headless: true });
           const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, checkout: checkout.worktree });
@@ -178,6 +178,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane: null, checkout: checkout.directory, tokenExpiresAt: expiresAt, settled: ended };
       }
     } catch (error) {
+      await on.current.release?.(`spec-check launch failed: ${String(error)}`.slice(0, 400));
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.
       await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});
       throw error;
