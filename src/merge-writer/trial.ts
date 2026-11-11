@@ -7,7 +7,7 @@ import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
-import { buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
+import { affectedPackages, buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
@@ -985,13 +985,18 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   let packageScripts: Record<string, unknown> | undefined;
   let nodePackage = false;
   let manager: PackageManager = { name: 'npm' };
-  // GY-3200: what a pnpm workspace's affected build and tests are measured against.
-  const base = input.baseTip ?? `${input.mergeSha}^1`;
+  // GY-3250: the pnpm workspace packages the candidate's own changes affect; null builds and tests all.
+  let affected: string[] | null = null;
   const build = async (): Promise<TrialRun | undefined> => {
     enterStep('install');
     nodePackage = await holds('package.json');
     if (nodePackage) {
       manager = packageManager(worktree);
+      if (manager.name === 'pnpm' && manager.workspace) {
+        const selected = affectedPackages(worktree, input.changedFiles);
+        log.push(`affected packages: ${selected.summary}`);
+        affected = selected.packages;
+      }
       // GY-3207: every child from here on (install, build, selection, tests) runs under the Node
       // major the checkout declares, fetched into the trial's own npm cache inside the install step.
       env = { ...env, PATH: (await pinnedNodePath(worktree, env.PATH, async (command, args) => {
@@ -1013,10 +1018,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
       // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
       try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
-      if (packageScripts === undefined || packageScripts?.build || (manager.name === 'pnpm' && manager.workspace)) {
+      const argv = buildArgv(manager, affected);
+      if (argv && (packageScripts === undefined || packageScripts?.build || (manager.name === 'pnpm' && manager.workspace))) {
         enter('build');
         enterStep('build');
-        const [command, ...args] = buildArgv(manager, input.changedFiles, base);
+        const [command, ...args] = argv;
         const built = await child('build', command!, args);
         if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
         readOnly('build', built);
@@ -1205,7 +1211,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         preMerge = declared.preMerge;
       }
-      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts, manager: { test: testArgv(manager, input.changedFiles, base), run: manager.name === 'pnpm' ? pnpm(manager.version, 'run') : ['npm', 'run'] } }));
+      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts, manager: { test: testArgv(manager, affected), run: manager.name === 'pnpm' ? pnpm(manager.version, 'run') : ['npm', 'run'] } }));
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,7 +1,7 @@
 // GY-3200: which package manager a checkout uses, read from its lockfile, and the command lines
 // the merge trial, worktree setup, worker verification and the serve pass run through it.
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, globSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { npmCiArgs } from './cli/test-isolation.js';
 
 export type PackageManager = { name: 'npm' } | { name: 'pnpm'; version: string; workspace: boolean; turbo: boolean };
@@ -29,23 +29,58 @@ export const installArgv = (manager: PackageManager): string[] =>
 /** A change to one of these root files builds and tests the whole workspace. */
 export const rootTrigger = (file: string) => /^(?:package\.json|pnpm-workspace\.yaml|pnpm-lock\.yaml|turbo\.json|\.npmrc|tsconfig[^/]*\.json)$/.test(file);
 
+/** GY-3250: the workspace packages a change selects: null when a root trigger selects all. */
+export interface AffectedPackages { packages: string[] | null; summary: string }
+
 /**
- * The build: npm's root build script as today; in a pnpm workspace with turbo, turbo builds the
- * packages the change affects (its dependsOn ^build builds their dependencies first); without
- * turbo, pnpm builds the changed packages, their dependents and those packages' dependencies in
- * topological order. A root-trigger change builds everything.
+ * The packages a pnpm workspace change affects, from the candidate's own changed files (the trial
+ * base to its merge commit, so commits a back-merge brought that the base already holds are not
+ * among them): each package holding a changed file, then every package depending on one of those,
+ * transitively. `summary` names each and why, for the trial log.
  */
-export function buildArgv(manager: PackageManager, changedFiles: readonly string[], base: string): string[] {
-  if (manager.name === 'npm') return ['npm', 'run', 'build'];
-  if (!manager.workspace) return pnpm(manager.version, 'run', 'build');
-  const all = changedFiles.some(rootTrigger);
-  if (manager.turbo) return pnpm(manager.version, 'exec', 'turbo', 'run', 'build', ...(all ? [] : [`--filter=...[${base}]`]));
-  return pnpm(manager.version, '--recursive', '--if-present', ...(all ? [] : [`--filter=...[${base}]...`]), 'run', 'build');
+export function affectedPackages(root: string, changedFiles: readonly string[]): AffectedPackages {
+  const trigger = changedFiles.find(rootTrigger);
+  if (trigger) return { packages: null, summary: `all (root trigger ${trigger})` };
+  const patterns = [...readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8').matchAll(/^\s*-\s*['"]?([^'"#\n]+?)['"]?\s*$/gm)].map(match => match[1]!);
+  const dirs = globSync(patterns.filter(pattern => !pattern.startsWith('!')).map(pattern => `${pattern}/package.json`), { cwd: root, exclude: ['**/node_modules/**', ...patterns.filter(pattern => pattern.startsWith('!')).map(pattern => `${pattern.slice(1)}/package.json`)] }).map(file => dirname(file));
+  const packages = dirs.map(dir => {
+    const manifest = JSON.parse(readFileSync(join(root, dir, 'package.json'), 'utf8'));
+    return { dir, name: String(manifest.name ?? dir), uses: Object.keys({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.peerDependencies, ...manifest.optionalDependencies }) };
+  }).sort((a, b) => b.dir.length - a.dir.length || a.dir.localeCompare(b.dir));
+  const reasons = new Map<string, string>();
+  for (const file of changedFiles) {
+    const owner = packages.find(entry => file.startsWith(`${entry.dir}/`));
+    if (owner) reasons.set(owner.name, 'changed');
+  }
+  for (let grown = true; grown;) {
+    grown = false;
+    for (const entry of packages) {
+      const used = entry.uses.find(name => reasons.has(name) && name !== entry.name);
+      if (used && !reasons.has(entry.name)) { reasons.set(entry.name, `depends on ${used}`); grown = true; }
+    }
+  }
+  return { packages: [...reasons.keys()], summary: reasons.size ? [...reasons].map(([name, why]) => `${name} (${why})`).join(', ') : 'none (no workspace package changed)' };
 }
 
-/** The test check: `npm test` as today, `pnpm test`, or turbo's affected tests under the same root-trigger rule. */
-export function testArgv(manager: PackageManager, changedFiles: readonly string[], base: string): string[] {
+const turboFilters = (packages: readonly string[] | null) => packages === null ? [] : packages.length ? packages.map(name => `--filter=${name}`) : ['--filter=//'];
+
+/**
+ * The build: npm's root build script as today; in a pnpm workspace, the affected packages
+ * (`affectedPackages`, null for all): turbo builds them (its dependsOn ^build builds their
+ * dependencies first); without turbo, pnpm builds them and their dependencies in topological
+ * order. Null when a pnpm workspace change affects no package: nothing to build.
+ */
+export function buildArgv(manager: PackageManager, packages: readonly string[] | null): string[] | null {
+  if (manager.name === 'npm') return ['npm', 'run', 'build'];
+  if (!manager.workspace) return pnpm(manager.version, 'run', 'build');
+  if (manager.turbo) return pnpm(manager.version, 'exec', 'turbo', 'run', 'build', ...turboFilters(packages));
+  if (packages?.length === 0) return null;
+  return pnpm(manager.version, '--recursive', '--if-present', ...(packages ?? []).map(name => `--filter=${name}...`), 'run', 'build');
+}
+
+/** The test check: `npm test` as today, `pnpm test`, or turbo's tests of the affected packages. */
+export function testArgv(manager: PackageManager, packages: readonly string[] | null): string[] {
   if (manager.name === 'npm') return ['npm', 'test'];
   if (!manager.turbo || !manager.workspace) return pnpm(manager.version, 'test');
-  return pnpm(manager.version, 'exec', 'turbo', 'run', 'test', ...(changedFiles.some(rootTrigger) ? [] : [`--filter=...[${base}]`]));
+  return pnpm(manager.version, 'exec', 'turbo', 'run', 'test', ...turboFilters(packages));
 }
