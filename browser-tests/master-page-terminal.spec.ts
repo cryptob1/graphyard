@@ -7,6 +7,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
+import { serveXterm } from './xterm';
 
 const stub = resolve('fixtures/herdr-terminal-stub');
 const settled = { timeout: 15_000 };
@@ -37,7 +38,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
 
     // The operator signs in from a link straight to the Master page and sees the master's screen.
     const { code } = await (await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
-    const operator = await browser.newPage();
+    const operator = await browser.newPage(); await serveXterm(operator);
     await operator.goto(`${url}/#sign-in=${code}&master`);
     await expect(operator.getByRole('heading', { name: 'Master', exact: true })).toBeVisible(settled);
     await expect(rows(operator)).toContainText('screen of w1:master', settled);
@@ -53,7 +54,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
       .toEqual([{ actor: 'operator', payload: { pane: 'w1:master', line: 'status please' } }]);
 
     // A reader's session sees the same screen, read-only: what it types never reaches the pane.
-    const reader = await browser.newPage();
+    const reader = await browser.newPage(); await serveXterm(reader);
     await reader.addInitScript(() => sessionStorage.setItem('graphyard-token', 'test-reader'));
     await reader.goto(`${url}/#master`);
     await expect(rows(reader)).toContainText('screen of w1:master', settled);

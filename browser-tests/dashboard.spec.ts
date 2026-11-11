@@ -606,7 +606,8 @@ const nestedInteractives = (page: Page) => page.evaluate(() => [...document.quer
 
 test('card and ownership candidate references link to the exact PR and commit in the configured repository', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+  // On the context, so the popups the links open are stubbed too: a page route never reaches them (GY-3261).
+  await page.context().route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
   const cardLink = cardPrLink(page);
   await expect(cardLink).toHaveAttribute('href', prHref);
   await expect(cardLink).toContainText('PR #1');
@@ -682,7 +683,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     expect(await outline(detailShaLink(page))).toEqual(focusRing);
     // Linking the SHA must not turn it into an unreadable widget: the text stays
     // selectable with the ordinary gestures, and the whole SHA is its title.
-    await page.route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
+    await page.context().route('https://github.com/**', route => route.fulfill({ body: 'GitHub destination stub' }));
     const shaText = detailShaLink(page).locator('code');
     expect(await shaText.evaluate(e => getComputedStyle(e).userSelect)).toBe('text');
     await page.evaluate(() => window.getSelection()?.removeAllRanges());
