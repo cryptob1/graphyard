@@ -17,7 +17,7 @@ const head = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-0000000000${n}`, key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'task', priority: 2, stage: 'test', ready: true, epoch: 1, revision: 5, policyRevision: 1,
   createdAt: iso(now - (200 - n) * minute), updatedAt: iso(now - 62 * minute), stageEnteredAt: iso(now - 62 * minute), lease: null, lastAssignment: { owner: 'implementer', epoch: 1 },
   workspaces: [], candidate: { sha: sha(n), baseSha: base, createdAt: iso(now - 62 * minute) }, submission: { epoch: 1, sha: sha(n), at: iso(now - 62 * minute) },
-  reworkRequested: false, scenarioRequirements: [], evidence: [], observation: { source: 'control-plane', candidate: { sha: sha(n) } }, blocker: null, violations: [], criteria: [],
+  reworkRequested: false, scenarioRequirements: [], evidence: [], observation: { source: 'control-plane', candidate: { sha: sha(n) } }, blocker: null, violations: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }],
   policy: { checks: ['test'], review: true }, dependencies: [], nextAction: null,
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] },
     { name: 'test', passed: false, reasons: [trialRefusal(sha(n), base)] }],

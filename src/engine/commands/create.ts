@@ -15,7 +15,7 @@ export async function open(c: Omit<Ctx, 'work'> & { work?: Work }): Promise<Work
   } else if (actor.team !== 'maintainer') admin(actor);
   demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
   demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-  const criteria = declareBootstrap(engine, actor, data, [], 1, now);
+  const criteria = data.criteria.length ? declareBootstrap(engine, actor, data, [], 1, now) : [];
   const scenarioRequirements: Work['scenarioRequirements'] = [];
   const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
   for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {

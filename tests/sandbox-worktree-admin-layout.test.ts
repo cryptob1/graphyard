@@ -68,7 +68,7 @@ test('integration:sandbox-worktree-admin-layout — production dispatch confines
     git('remote', 'add', 'origin', 'https://github.com/hello-huck/huck.git');
     const own = join(root, '.graphyard/worktrees/GY-1-26');
     git('worktree', 'add', '-b', 'graphyard/gy-1-26', own);
-    const item = { id: 'work-1', key: 'GY-1', title: 'Bootstrap', type: 'bug', description: '', priority: 1, dependencies: [], criteria: [],
+    const item = { id: 'work-1', key: 'GY-1', title: 'Bootstrap', type: 'bug', description: '', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }],
       policy: { checks: [], review: true }, stage: 'ready', epoch: 0, ready: true, lease: null, blocker: null, workspaces: [], gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
     // Only the control-plane commands are stubbed; production preparation and confinement run.
     const cli = join(cliRoot, 'graphyard.mjs');

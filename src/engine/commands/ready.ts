@@ -4,6 +4,7 @@ import type { Ctx } from './types.js';
 import { adoptFollowUpWindow } from './shared.js';
 
 export function screen({ work, actor }: Ctx) {
+  demand(work.criteria.length > 0, 'Waiting on the master: writing the criteria', 409);
   // GY-1760: an item only the master side can satisfy — the loop's own measurement, or a
   // master-role session's observation of the master checkout — is never released to a worker, whoever asks.
   // GY-2605: nor is an owner-held item, unless the owner's own human admin session asks or the owner answered on the item (GY-2606).

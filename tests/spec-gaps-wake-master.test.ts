@@ -9,7 +9,7 @@ const at = '2026-11-06T07:00:00Z', now = Date.parse(at);
 const check = (extra: Record<string, unknown> = {}) => ({ at, verdict: 'gaps', gaps: ['AC-1 names no file', 'AC-2 has no proof'], recheck: false, reviewer: 'r', paraphrase: 'p', policyRevision: 2, ...extra });
 const item = (extra: Record<string, unknown> = {}) => ({
   id: 'id', key: 'GY-9', title: 'Gapped', type: 'feature', stage: 'ready', ready: true, epoch: 0, revision: 1, policyRevision: 2,
-  criteria: [], dependencies: [], evidence: [], gates: [], workspaces: [], lease: null, candidate: null, submission: null, blocker: null,
+  criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], lease: null, candidate: null, submission: null, blocker: null,
   createdAt: at, updatedAt: at, specCheck: check(), ...extra,
 }) as unknown as Work;
 

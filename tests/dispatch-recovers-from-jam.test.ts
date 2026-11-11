@@ -33,7 +33,7 @@ const jamAgents = (): HerdrAgent[] => profiles.map(({ agentName }) => ({ name: a
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 0,
-    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
+    dependencies: [], criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], policy: { checks: ['test'], review: true }, 
     stage: 'build', revision: 1, policyRevision: 1,
     createdAt: at(-7_200_000), updatedAt: observedAt, stageEnteredAt: at(-600_000),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,

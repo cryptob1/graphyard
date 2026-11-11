@@ -32,7 +32,7 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 export const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() })
-    .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = data.criteria.length ? filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria) : null; if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),

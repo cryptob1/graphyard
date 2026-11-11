@@ -79,6 +79,7 @@ export function computeAccount(work: Work, all: Work[], now: Date): Computed {
   // Backlog is not open work: an item nobody has released is waiting on the operator deciding it
   // is ready, which is a goal-setting call and not an action anyone runs. Its refusal still maps
   // (to `attention`); the item simply raises none until it is released.
+  if (work.stage !== 'done' && !work.criteria.length) return waits({ kind: 'session', on: 'master', detail: 'Waiting on the master: writing the criteria' }, 'ready', 'Waiting on the master: writing the criteria');
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
 

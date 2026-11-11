@@ -28,7 +28,7 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // refused mid-flight; a delivered item's gates are history.
   const filed = work.stage !== 'done' && !work.submission && !(work.lease && Date.parse(work.lease.expiresAt) > now.getTime())
     ? filingRefusal({ type: work.type, description: work.description, criteria: work.criteria }) : null;
-  add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
+  add('ready', [...(!work.criteria.length ? ['Waiting on the master: writing the criteria'] : []), ...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
     ...(work.blocker ? [work.blocker] : []), ...(filed ? [filed] : [])]);
   const candidate = work.candidate;
   const obs = work.observation;

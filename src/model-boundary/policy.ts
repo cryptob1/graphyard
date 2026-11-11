@@ -31,3 +31,6 @@ export const policySchema = z.object({
   deploySmoke: z.boolean().optional(),
 }).strict();
 export const resourcesSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9._:/-]*$/).max(200)).max(30).refine(v => new Set(v).size === v.length, 'Resource names must be unique');
+
+/** Only filing and storage admit a draft; requirements keep criteriaSchema. */
+export const draftCriteriaSchema = (max: number) => z.union([z.array(criterionSchema).max(0), criteriaSchema(max)]);
