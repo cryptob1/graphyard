@@ -116,7 +116,7 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const instance = panes?.configHome && panes.session ? { configHome: panes.configHome, session: panes.session } : herdrTarget();
   const [cols, rows] = [size('cols', 120), size('rows', 40)];
   let closed = false, framed = false;
-  let activePane = pane;
+  let activePane = pane, typed = '';
   const close = () => {
     if (closed) return; closed = true;
     if (control) herdr.send({ type: 'terminal.release' });
@@ -127,7 +127,7 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
     line: line => {
       let record: any; try { record = JSON.parse(line); } catch { return; }
       if (['hello', 'session', 'scrollback'].includes(record.type)) {
-        if (record.session) activePane = record.session.pane;
+        if (record.session) { if (activePane !== record.session.pane) typed = ''; activePane = record.session.pane; }
         socket.write(text(record));
       }
       if (record.type === 'terminal.frame' && typeof record.bytes === 'string') { framed = true; socket.write(frame(2, Buffer.from(record.bytes, 'base64'))); }
@@ -139,11 +139,12 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const request = { control, pane, cols, rows, master: followsMaster };
   const herdr = host ? bridgedStream(host, request, handlers) : terminalStream(request, handlers, async () => {
     const config = await loadMasterConfig(process.cwd()).catch(() => null);
-    return config ? terminalSessionReader(() => config)() : { pane: loopPanesRegistry(services.engine).latest?.master ?? null, account: null, runtime: null, state: 'unknown' };
+    if (config) return terminalSessionReader(() => config)();
+    const pane = loopPanesRegistry(services.engine).latest?.master ?? null;
+    return { pane, account: null, runtime: null, state: pane ? 'unknown' : 'absent' };
   }, instance);
   const command = herdr.send;
 
-  let typed = '';
   const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane: activePane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
   const message = (text: string) => {
     let input: any; try { input = JSON.parse(text); } catch { return; }

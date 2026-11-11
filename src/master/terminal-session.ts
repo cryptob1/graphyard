@@ -10,7 +10,7 @@ import { readSessionScreenOrError } from './prompt-delivery.js';
 export interface TerminalSession { account: string | null; runtime: string | null; pane: string | null; state: string }
 export type SessionReader = () => Promise<TerminalSession>;
 export const terminalSessionReader = (config: () => MasterConfig): SessionReader => async () => {
-  const master = masterSessionSchema.parse(JSON.parse(await readFile(daemonStatePath(config()), 'utf8')).master ?? {});
+  const master = masterSessionSchema.parse(JSON.parse(await readFile(daemonStatePath(config()), 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error; })).master ?? {});
   const runtime = master.agentName ? await observeHerdrAgents(undefined, null) : null;
   const agent = runtime?.agents.find(agent => agent.name === master.agentName || agent.pane_id === master.pane);
   const screen = master.agentName ? (await readSessionScreenOrError(agent?.pane_id ?? master.agentName)).screen : undefined;
@@ -22,11 +22,12 @@ export interface TerminalStream { send(command: unknown): void; end(): void }
 
 export function terminalStream(request: TerminalRequest, handlers: TerminalHandlers, session?: SessionReader, instance = herdrTarget()): TerminalStream {
   let child: import('node:child_process').ChildProcess | undefined;
+  const pendingInput: unknown[] = [];
   let stopped = false, previous = '', pane: string | null | undefined;
   let timer: ReturnType<typeof setTimeout>;
   const abort = new AbortController();
   const emit = (value: unknown) => { if (!stopped) handlers.line(JSON.stringify(value)); };
-  const detach = () => { const old = child; child = undefined; old?.stdin?.end(); if (old) setTimeout(() => old.kill(), 1_000).unref(); };
+  const detach = () => { pendingInput.length = 0; const old = child; child = undefined; old?.stdin?.end(); if (old) setTimeout(() => old.kill(), 1_000).unref(); };
   const refresh = async () => {
     try {
       const current = request.master && session ? await session() : { pane: request.pane, account: null, runtime: null, state: request.pane ? 'unknown' : 'absent' };
@@ -50,6 +51,7 @@ export function terminalStream(request: TerminalRequest, handlers: TerminalHandl
           opened.on('error', error => { if (child === opened && !stopped) handlers.exit(error.message); });
           opened.on('exit', code => { if (child === opened && !stopped) handlers.exit(stderr.trim() || `herdr exited with code ${code}`); });
           createInterface({ input: opened.stdout! }).on('line', line => { if (child === opened && !stopped) handlers.line(line); });
+          for (const command of pendingInput.splice(0)) opened.stdin!.write(`${JSON.stringify(command)}\n`);
         }
       }
     } catch (error) { if (!stopped) handlers.exit(error instanceof ChildProcessError && (error.cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'herdr is not installed where the server runs, and no host supervisor is connected to stream it' : error instanceof Error ? error.message : String(error)); }
@@ -60,6 +62,8 @@ export function terminalStream(request: TerminalRequest, handlers: TerminalHandl
     send: (command: any) => {
       if (command.type === 'terminal.resize') { request.cols = String(command.cols); request.rows = String(command.rows); }
       if (child?.stdin?.writable) child.stdin.write(`${JSON.stringify(command)}\n`);
+      // The hello can arrive while history is loading; keep those first keystrokes.
+      else if (pane && !stopped && command.type === 'terminal.input') pendingInput.push(command);
     },
     end: () => { stopped = true; clearTimeout(timer); abort.abort(); detach(); },
   };

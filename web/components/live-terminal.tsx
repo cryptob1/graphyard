@@ -70,7 +70,7 @@ export default function LiveTerminal({ token, pane, label }: { token: string; pa
           if (typeof event.data === 'string') {
             const message = JSON.parse(event.data);
             if (message.refused) { setReason(message.refused); setState('refused'); return; }
-            if (message.type === 'scrollback') { terminal.reset(); terminal.write(message.data); return; }
+            if (message.type === 'scrollback') { terminal.reset(); terminal.write(message.data.replace(/\r?\n/g, '\r\n')); return; }
             if (message.session) setSession(message.session);
             if (message.mode) {
               writable = message.mode === 'control' && !!message.session?.pane; setState(message.mode); setReason(''); delay = 250;

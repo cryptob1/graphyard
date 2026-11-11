@@ -13,7 +13,7 @@ if (args[0] === 'agent' && args[1] === 'list') {
 if (args[0] === 'agent' && args[1] === 'read') { process.stdout.write('Ready'); process.exit(0); }
 if (args[0] === 'pane' && args[1] === 'read') {
   if (args.slice(3).join(' ') !== '--source recent --lines 1000 --ansi') process.exit(2);
-  process.stdout.write(Array.from({ length: 1000 }, (_, i) => `earlier line ${String(i).padStart(4, '0')}\r\n`).join(''));
+  process.stdout.write(Array.from({ length: 1000 }, (_, i) => `earlier line ${String(i).padStart(4, '0')}\n`).join(''));
   if (fixture().gap) process.stdout.write(`${fixture().gap}\r\n`);
   process.exit(0);
 }

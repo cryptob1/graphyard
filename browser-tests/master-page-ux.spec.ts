@@ -82,13 +82,15 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     await page.evaluate(() => (window as any).testTerminal.select(0, (window as any).testTerminal.buffer.active.baseY, 6));
     const selected = await page.evaluate(() => (window as any).testTerminal.getSelection());
     await page.keyboard.press('Control+Shift+C');
+    expect(selected).not.toBe('');
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(selected);
     await page.evaluate(() => navigator.clipboard.writeText('right click paste'));
     await page.locator('.terminal-host').click({ button: 'right' });
     await expect.poll(f.inputs).toContain('\x1b[200~right click paste\x1b[201~');
     await page.evaluate(() => (window as any).survivedDrop = true);
-    f.current.gap = 'output produced during the gap'; await f.save();
     f.child.send('drop-terminals');
+    await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'connecting');
+    f.current.gap = 'output produced during the gap'; await f.save();
     await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
     expect(await page.evaluate(() => (window as any).survivedDrop)).toBe(true);
     f.current.master.pane = 'w1:replacement'; f.current.master.account = 'second-account'; f.current.status = 'working'; await f.save();
@@ -96,6 +98,9 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     await expect(page.getByRole('status')).toContainText('second-account · codex · working · w1:replacement');
     f.current.master.pane = null; f.current.master.agentName = ''; await f.save();
     await expect(page.getByRole('status')).toContainText('The loop relaunches the master on its own.');
+    f.child.send('drop-terminals');
+    await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'control');
+    await expect(page.getByRole('status')).toContainText('absent · No pane');
     f.current.master.pane = 'w1:returned'; f.current.master.agentName = 'master'; await f.save();
     await expect(page.locator('.xterm-rows')).toContainText('screen of w1:returned');
   } finally { await f.stop(); }
