@@ -23,7 +23,7 @@ import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
-import { defaultHeadlessExec, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
+import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
 import { liveRun } from '../runner/registry.js';
 import { detectRuntimeExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
@@ -230,7 +230,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
       await chosen.release?.(`worker launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
       // A run that ended at once on its account's limit notice or logged-out login gives way to the
       // profile's next account in this same dispatch (GY-417); a write probe diagnoses the host, never the account.
-      if (!chosen.account || !(error instanceof HeadlessWorkerExit && error.moveOn)) throw error;
+      // So does a runtime with no one-task contract on this account.
+      if (!chosen.account || !(error instanceof HeadlessWorkerExit && error.moveOn || error instanceof HeadlessConfigurationError)) throw error;
       startError = error;
       const failure: AccountStartFailure = { account: chosen.account.name, kind: launch.kind ?? 'unknown', reason: failureText(error).slice(0, 500), at: new Date().toISOString() };
       if (offer && canary) canary.failed = failure.reason;
