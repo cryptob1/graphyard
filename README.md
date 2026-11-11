@@ -2,7 +2,7 @@
 
 **Run AI coding agents like Claude Code and Codex on your repository, and ship each goal from one sentence to production with independent review and proof.**
 
-[![Graphyard walkthrough: a goal moves from the master to a worker, through spec check, independent review and a merge trial on the latest main, then deploys, with automatic revert on failure](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
+[![Graphyard walkthrough: a goal moves from the master to a worker through spec check, independent review and a merge trial, then deploys, with automatic revert on failure](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
 The four roles are worker, reviewer, producer and master.
 
@@ -37,11 +37,11 @@ From your repository's checkout:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-It prints a Setup link: open it and connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips Docker for the control plane). File a goal in **New work item** with a title and optional description; the master writes the criteria and proofs, or expand **Advanced** to specify them yourself. Watch with `npx @cryptob1/graphyard master status`. Graphyard updates daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates now. In Setup, the operator can invite viewers or maintainers with a one-time sign-in link and revoke invitations made there.
+It prints a Setup link: connect accounts for the worker and reviewer roles (`--master codex` runs a Codex master; `--local` skips control-plane Docker). File a goal in **New work item**: a title and optional description; the master writes the criteria and proofs; **Advanced** takes full detail. Watch with `npx @cryptob1/graphyard master status`. Graphyard updates daily; `npx @cryptob1/graphyard upgrade --plan`, then `npx @cryptob1/graphyard upgrade`, updates now. In Setup, the operator invites viewers or maintainers with a one-time sign-in link and revokes them there.
 
-Run `npx @cryptob1/graphyard doctor` in the checkout to check credentials, agent logins, confinement, the kernel and services; failed checks print the fix.
+Run `npx @cryptob1/graphyard doctor` to check credentials, agent logins, confinement, the kernel and services; failed checks print the fix.
 
-Operators and maintainers can change priority (P0–P3) on a work row or item page. Changes record who changed it and why in History; the next dispatch uses the new priority. Existing P4 items retain P4 until changed. `graphyard priority GY-N 0|1|2|3 REASON` and `graphyard master priority GY-N 0|1|2|3 REASON` require an audit reason.
+Operators and maintainers change priority (P0–P3) on a work row or item page; History records who and why, and the next dispatch uses it. P4 items keep P4 until changed. `graphyard priority GY-N 0|1|2|3 REASON` and `graphyard master priority GY-N 0|1|2|3 REASON` require a reason.
 
 ## Learn more
 
