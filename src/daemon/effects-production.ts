@@ -36,7 +36,6 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
-import { launchSpecCheck } from '../spec-check.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
 import { upstreamFiler } from './control-plane.js';
@@ -200,8 +199,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Claude configuration), read from the registry document and this host's account configs.
     checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),
     setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
-    // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
-    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run, coordinatorRoot: deps.coordinatorRoot }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice.
     dispatchTick: snapshot => ticking ??= (async () => {

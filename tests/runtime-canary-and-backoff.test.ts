@@ -10,7 +10,6 @@ import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../src/model/registry.js';
-import { readySpecCheck } from './helpers/spec-check.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { workFixture } from './helpers/work-fixture.js';
 
@@ -40,7 +39,7 @@ const registryOf = (runtimes: FleetRuntime[]): Pick<AgentRegistry, 'runtimes' | 
   roles: [{ name: 'worker', accounts: ['oc-a', 'cl-a'] }] as AgentRegistry['roles'] });
 function work(id: string, key: string, overrides: Partial<Work> = {}): Work {
   return workFixture({ id, key, priority: 1, createdAt: iso(t0 - 3_600_000), updatedAt: iso(t0), stageEnteredAt: iso(t0),
-    specCheck: readySpecCheck(iso(t0 - 3_600_000)), ...overrides });
+     ...overrides });
 }
 const session = (startedAt: number, overrides: Record<string, unknown> = {}) => ({ id: 'worker-0:1', kind: 'implementation', principal: 'worker-0', runtime: 'opencode', host: 'machine-b', epoch: 1,
   subject: 'GY-1', state: 'running', startedAt: iso(startedAt), runtimeStartedAt: iso(startedAt), updatedAt: iso(startedAt), initialHead: 'a'.repeat(40), ...overrides });

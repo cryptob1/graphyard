@@ -1,7 +1,7 @@
 {
   "id": "review-bearer-restart",
-  "title": "Review and spec-check bearers survive a server restart",
-  "description": "Starts real HTTP servers in separate OS processes over one temporary real Postgres database. Original unused launch tokens post exactly one bound ordinary, delivered-item and spec-check verdict after restart. Spent, expired, replaced, revoked and mismatched tokens fail; independence, head and requirements binding remain enforced, and unusable sessions release without approval.",
+  "title": "Review bearers survive a server restart",
+  "description": "Starts real HTTP servers in separate OS processes over one temporary real Postgres database. Original unused launch tokens post exactly one bound ordinary and delivered-item verdict after restart. Spent, expired, replaced, revoked and mismatched tokens fail; independence, head and requirements binding remain enforced, and unusable sessions release without approval.",
   "target": "any",
   "required": false,
   "steps": [

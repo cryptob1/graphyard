@@ -105,7 +105,7 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
 
 test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a shipped case cites binds a case on the head and can be filed before sync, pinning a shipped revision when one exists', async () => {
   // GY-1800: imported here so a tree without the fixture revisions fails this case, not the file.
-  const { fixtureCases, specCheckShownCase, shippedScenarioRevisions } = await import('../src/scenarios.js');
+  const { fixtureCases, shippedScenarioRevisions } = await import('../src/scenarios.js');
   const shipped = await loadCases(root);
   // New cases need not be registered before filing (GY-2973); the head must hold every bound
   // case, and an existing shipped revision must still be pinned before any sync.
@@ -126,7 +126,7 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a ship
   }
   // A scenario shipped in code from a case definition is exactly the case file of that id, so sync revises it from the file later.
   assert.ok(fixtureCases, 'src/scenarios.ts ships the fixture cases');
-  for (const definition of [...fixtureCases(), specCheckShownCase()]) {
+  for (const definition of fixtureCases()) {
     const entry = shipped.find(candidate => candidate.definition.id === definition.id);
     assert.ok(entry, `e2e/cases/${definition.id}.json ships beside its revision`);
     assert.deepEqual(scenarioDefinition(entry), scenarioDefinition({ file: entry.file, definition }));

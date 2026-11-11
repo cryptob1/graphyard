@@ -44,7 +44,7 @@ test('integration:close-dead-worktree-panes — an exited Graphyard pane in a re
   assert.deepEqual(projected[0].sessions, []);
   for (let index = 0; index <= 500; index++) state.actions[`old:${index}`] = {
     attempts: 1, epoch: null, cycle: 0, kind: 'close', work: null, state: 'done', principal: null,
-    at: new Date(clock - 1000 + index).toISOString(), detail: 'old action', pane: index === 0 ? 'pane-dead' : undefined,
+    at: new Date(clock - 1000 + index).toISOString(), detail: 'old action',
   };
   pruneDaemonState(state);
   assert.equal(state.actions['old:0'], undefined);
