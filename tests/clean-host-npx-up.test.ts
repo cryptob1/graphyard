@@ -7,8 +7,6 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { defaultChildRun } from '../src/child-runner.js';
-import { publishTokenFiles, publishVerified } from '../src/publish-verified.js';
 import { databaseUrl } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -168,15 +166,14 @@ test('e2e:clean-host-npx-up — a fresh account runs npx @cryptob1/graphyard up 
   // What the image build adds to that tree: the built dashboard (ignored by Git, so the tree stays the commit's).
   execFileSync(process.execPath, [join(dirname(createRequire(join(source, 'package.json')).resolve('vite/package.json')), 'bin', 'vite.js'), 'build', '--configLoader', 'runner'], { cwd: upstream, stdio: 'ignore' });
 
-  // The Graphyard host publishes the verified commit: both images and the npm package, with the operator's tokens.
+  // Actions and this offline proof build and invoke the exact same publisher entry point.
   const npm = await npmRegistry(), images = await imageRegistry(), tools = await standIns(stubs, origin, upstream, await databaseUrl('npx_up'));
   const published = { npm_config_registry: npm.url, GRAPHYARD_IMAGE_REGISTRY: `${images.host}/cryptob1` };
-  const publisher = join(base, 'publisher');
-  await mkdir(publisher);
-  await writeFile(publishTokenFiles(publisher).npm, 'npm-token\n', { mode: 0o600 });
-  await writeFile(publishTokenFiles(publisher).ghcr, 'ghcr-token\n', { mode: 0o600 });
-  const outcome = await publishVerified(commit, { root: upstream, directory: publisher, run: defaultChildRun, env: { ...process.env, ...published, PATH: tools.path } });
-  assert.ok('version' in outcome, JSON.stringify(outcome));
+  execFileSync(process.execPath, ['scripts/build-publisher.mjs'], { cwd: source });
+  const publication = await run(process.execPath, [join(source, 'scripts/publish-verified.mjs')], { cwd: upstream,
+    env: { ...process.env, ...published, GRAPHYARD_PUBLISH_COMMIT: commit, NPM_TOKEN: 'stand-in', GITHUB_TOKEN: 'stand-in', PATH: tools.path } });
+  assert.equal(publication.code, 0, publication.stderr);
+  const outcome = JSON.parse(publication.stdout.trim());
   assert.deepEqual([...images.tags.keys()].sort(), [`cryptob1/graphyard-trial:${commit}`, 'cryptob1/graphyard-trial:verified', `cryptob1/graphyard:${commit}`, 'cryptob1/graphyard:verified']);
   assert.equal(npm.packages.get('@cryptob1/graphyard')['dist-tags'].latest, outcome.version);
 

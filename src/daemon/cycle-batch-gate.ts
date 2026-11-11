@@ -94,7 +94,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null; publish?: Promise<void> }>();
+const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
 const stopped = new WeakSet<object>();
 /** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
 export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
@@ -113,7 +113,7 @@ function mergeGateRecord(file: string, merge: (latest: GateRecord | null) => Gat
 }
 
 /** What a gate's write keeps of the diagnostics' own fields (GY-3147, GY-3193): they recorded them meanwhile. */
-const diagnosticFields = (latest: GateRecord | null, current: GateRecord) => ({ catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, previewCases: latest?.previewCases ?? current.previewCases, ...mergeFilings(latest, current) });
+const diagnosticFields = (latest: GateRecord | null, current: GateRecord) => ({ releaseTagged: latest?.releaseTagged ?? current.releaseTagged, catalogMs: latest?.catalogMs ?? current.catalogMs, diagnosticsAt: latest?.diagnosticsAt ?? current.diagnosticsAt, previewCases: latest?.previewCases ?? current.previewCases, ...mergeFilings(latest, current) });
 
 /** The commit served at rollout, which becomes the first verified commit: the deploy record's when it names this repository, else main's tip. */
 async function rolloutCommit(root: string, repository: string, reads: MergeWriterReads) {
@@ -156,24 +156,22 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('batch-gate:verified-ref', 'failed', `Could not publish the verified commit ${record!.verified!.slice(0, 12)} at refs/graphyard/verified: ${message(error)}`);
     }
   }
-  // GY-3214: a verified commit's images and npm package are published beside the gate, one commit
-  // at a time. Nothing here delays or undoes a verification: a failure is one journal line and the
-  // next verified commit publishes again; a missing operator token is one standing blocker row,
-  // logged when it first names what is missing.
-  const publishPackages = async (commit: string) => {
-    const row = (key: string, kind: 'blocker' | 'deployment', state: 'done' | 'failed', detail: string) => {
-      if (cycle.state.actions[key]?.state === state && cycle.state.actions[key]?.detail === detail) return;
-      cycle.log(actionLine(cycle.state.cycle, storeAction(cycle.state, key, { kind, work: null, principal: null, state, detail, attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() })));
-    };
+  // The deploy watch writes this after health, CLI publication and pinning. Re-read every cycle,
+  // including after restart; a kept/failed deployment is not a successful release. The deploy
+  // record retains verification even when the gate has already advanced to a newer commit.
+  // Retire the standing blocker left by the former host publisher.
+  delete cycle.state.actions['publish-verified:blocker'];
+  const deployed = readDeployRecord(deployRecordPath(gate.root));
+  if (reads.pushReleaseTag && gate.repository.toLowerCase() === graphyardRepository &&
+      deployed?.repository?.toLowerCase() === graphyardRepository && (deployed.verified || deployed.tip === record.verified) &&
+      deployed.tip && !deployed.reason && !deployed.failed && !deployed.restore && record.releaseTagged !== deployed.tip) {
     try {
-      const outcome = await reads.publishVerified!(commit);
-      if ('blocker' in outcome) return row('publish-verified:blocker', 'blocker', 'failed', outcome.blocker);
-      delete cycle.state.actions['publish-verified:blocker'];
-      row('publish-verified', 'deployment', 'done', `Published graphyard@${outcome.version} as latest and ${outcome.images.join(', ')}`);
-    } catch (error) {
-      row('publish-verified', 'deployment', 'failed', `Could not publish the verified commit ${commit.slice(0, 12)}; the next verified commit publishes again: ${message(error)}`.slice(0, 1900));
-    }
-  };
+      const tag = await reads.pushReleaseTag(deployed.tip);
+      record.releaseTagged = deployed.tip;
+      await mergeGateRecord(file, latest => ({ ...(latest ?? record!), releaseTagged: deployed.tip }));
+      note('publish-tag', 'done', `Pushed ${tag}; GitHub Actions publishes the package and images`);
+    } catch (error) { note('publish-tag', 'failed', `Could not push the release tag: ${message(error)}`); }
+  }
   if (!live.gate) {
     const current = record;
     live.gate = (async () => {
@@ -190,9 +188,6 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
           const landings = await ports.landings(before, outcome.tip);
           const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
           await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
-        }
-        if (outcome.outcome === 'verified' && reads.publishVerified && gate.repository.toLowerCase() === graphyardRepository) {
-          live.publish = (live.publish ?? Promise.resolve()).then(() => publishPackages(outcome.tip));
         }
         if (outcome.outcome !== 'idle') {
           const reason = gateOutcomeReason(outcome);
@@ -223,5 +218,5 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.diagnostics = null; }
     })();
   }
-  return { gate: live.gate, diagnostics: live.diagnostics, publish: live.publish ?? null };
+  return { gate: live.gate, diagnostics: live.diagnostics };
 }
