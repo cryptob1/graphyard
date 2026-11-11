@@ -343,6 +343,7 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   });
   await page.getByRole('button', { name: '＋ New work item' }).click();
   await page.getByLabel('Title', { exact: true }).fill('Delayed creation');
+  await page.getByText('Advanced', { exact: true }).click();
   await page.getByLabel('Acceptance criterion').fill('No data crosses sessions');
   await page.getByLabel('Required proof').fill('manual:session');
   await page.getByRole('button', { name: 'Create work item', exact: true }).click();

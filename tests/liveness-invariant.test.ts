@@ -129,7 +129,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   // reason, and a wait on an item that does not exist.
   const at = new Date().toISOString();
   const shell = (key: string, overrides: Partial<Work>) => ({ id: `id-${key}`, key, title: key, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
-    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
     submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [], ...overrides } as unknown as Work);
   const mute = shell('GY-MUTE', { gates: [{ name: 'review', passed: false, reasons: [] }] });
   const orphan = shell('GY-ORPHAN', { stage: 'build', gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-GONE is unfinished'] }] });
@@ -207,7 +207,7 @@ test('unit:violations-get-successor-actions — resync and request-review rows r
     const now = () => new Date(clock);
     const at = new Date(t0).toISOString();
     const work = { id: `id-${kind}`, key: `GY-${kind.toUpperCase()}`, title: kind, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
-      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
       submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [] } as unknown as Work;
     const inputs = kind === 'resync' ? { kind, pr: 1, sha: null, baseSha: null, baseTip: null, observedAt: null }
       : { kind, provider: 'reviewer', requestId: 'request-1', pr: 1, sha: 'a'.repeat(40), baseSha: base, policyRevision: 1 };

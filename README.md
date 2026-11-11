@@ -18,7 +18,7 @@ Prerequisites (Linux host): Linux 7.0+ with Landlock ABI 9+ (`uname -r`); Node/n
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-It prints a Setup link: connect worker and reviewer accounts, file goals under **New work item** with acceptance criteria and required proof names. Reviews run headless: six built-in forms, others declare `launch.headlessArgs` (`graphyard guide runtimes`). Watch with `graphyard master status`; update via `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Setup invites or revokes viewers and maintainers.
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. Reviews run headless: six built-in forms, others declare `launch.headlessArgs` (`graphyard guide runtimes`). Watch: `graphyard master status`; update: `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Setup invites or revokes viewers and maintainers.
 
 ## Learn more
 

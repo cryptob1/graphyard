@@ -32,7 +32,7 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 export const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() })
-    .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = data.criteria.length ? filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria) : null; if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   priority: z.union([
     z.object({ priority: z.number().int().min(0).max(3), reason: z.string().trim().min(1).max(2000) }).strict(),
     z.object({ priority: z.number().int().min(0).max(3), source: z.literal('dashboard') }).strict(),

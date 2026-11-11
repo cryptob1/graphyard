@@ -202,6 +202,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   if (phase === 'shipped') {
     return make(link ? `Shipped in ${link}` : 'Shipped', 'shipped');
   }
+  if (!work.criteria.length) return make('Waiting on the master: writing the criteria', 'waiting');
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);
   const reasons = (g: Gate | undefined) => (g?.reasons ?? []).map(r => ({ raw: r, ...plainReason(r, g!.name, now, work) }));
