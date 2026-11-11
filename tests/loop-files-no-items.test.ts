@@ -9,7 +9,6 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, type MergeWriterState } from '../src/daemon/cycle-merge-writer.js';
 import { daemonStatePath, readDaemonState, writeDaemonState } from '../src/daemon/state.js';
-import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
@@ -151,16 +150,10 @@ test('unit:diagnostician-removed-cursor-loads — a cursor preserves passive dia
 
 function tip40() { return sha('basetip'); }
 
-test('unit:diagnostician-removed-cursor-loads — the loop launches no diagnostician session, and acceptance still reads the run.diagnostician model settings', async () => {
+test('unit:diagnostician-removed-cursor-loads — the loop launches no diagnostician session, and reports no diagnoses', async () => {
   // The role's tool is gone from the Pi integration, and no module launches its sessions.
   const pi = await import('../integrations/pi/index.js');
   assert.equal('diagnose' in pi.graphyardTools, false, 'graphyard_diagnose is retired');
-  // The headless model settings survive under the same configuration key, for the acceptance runs.
-  const settings = diagnosticianSettings({ diagnostician: { model: 'zai/acceptance', fallbackModel: 'zai/strong' }, pi: { command: 'pi-a' } });
-  assert.deepEqual({ model: settings.model, fallbackModel: settings.fallbackModel, command: settings.command, enabled: settings.enabled },
-    { model: 'zai/acceptance', fallbackModel: 'zai/strong', command: 'pi-a', enabled: true });
-  const defaults = diagnosticianSettings(undefined);
-  assert.equal(defaults.model, 'zai/glm-5.3-flash', 'the default model reads even with no run.diagnostician configured');
   // A daemon summary carries no diagnoses section, so no status line can name a diagnostician run.
   const summary = await import('../src/daemon/run.js');
   const state = emptyDaemonState(config());

@@ -18,11 +18,7 @@ export const proposedRuntimes: readonly FleetRuntime[] = [
 ];
 
 /** Default concurrency a proposal gives each role; an operator changes it in the registry. */
-export const proposedConcurrency: Record<FleetRoleName, number> = { worker: 4, reviewer: 2, producer: 3, approver: 1, 'escalation-handler': 1, doctor: 1, diagnostician: 1, acceptance: 1, planner: 1, master: 1 };
+export const proposedConcurrency: Record<FleetRoleName, number> = { worker: 4, reviewer: 2, producer: 3, master: 1 };
 
-/**
- * The roles a proposal names a runtime's accounts for, where not every role: Pi runs the narrow
- * roles headless (GY-169) — the approver's verdict, a producer's proofs, and the doctor's rounds
- * (GY-711) — and, from GY-1746, the worker role, where dispatch tries it first for low and medium risk items.
- */
+/** Pi runs workers and proof producers. */
 export const proposedRuntimeRoles: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['worker', 'producer'] };

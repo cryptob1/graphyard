@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
-import { RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
+import { registryRoles, RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
 import { holdLimitNoticeAccount } from './model/account-quota.js';
@@ -32,7 +32,13 @@ export async function readRegistry(db: Pick<pg.PoolClient, 'query'>): Promise<Re
 }
 
 const appendRegistry = async (db: Pick<pg.PoolClient, 'query'>, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) => {
+  const removedRoles = registry.roles.filter(role => !registryRoles.includes(role.name)).map(role => role.name);
+  if (removedRoles.length) {
+    registry.roles = registry.roles.filter(role => registryRoles.includes(role.name));
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}roles-retired`, JSON.stringify({ change: { removedRoles }, registry })]);
+  }
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, `${registryEventPrefix}${kind}`, JSON.stringify({ change, registry })]);
+  return removedRoles.length ? [`Removed retired roles: ${removedRoles.join(', ')}`] : [];
 };
 
 /**
@@ -122,8 +128,8 @@ export class AgentRegistry {
       try { applied = applyRegistryMutation(current, kind, input, { actor: actor.id, at: now.toISOString() }); }
       catch (error) { if (error instanceof RegistryError) demand(false, error.message, 409); throw error; }
       const parsed = registryMutationSchemas[kind].parse(input);
-      await this.append(db, actor, kind, applied.registry, { ...parsed, removed: applied.removed });
-      const result = { revision: applied.registry.revision, kind, removed: applied.removed, registry: fleetView(applied.registry, now.getTime()) };
+      const attention = await this.append(db, actor, kind, applied.registry, { ...parsed, removed: applied.removed });
+      const result = { attention, revision: applied.registry.revision, kind, removed: applied.removed, registry: fleetView(applied.registry, now.getTime()) };
       return result;
     }));
   }

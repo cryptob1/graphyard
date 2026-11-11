@@ -4,6 +4,8 @@
 
 [![Graphyard walkthrough: a goal moves from the master to a worker, through spec check, independent review and a merge trial on the latest main, then deploys, with automatic revert on failure](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
+The four roles are worker, reviewer, producer and master.
+
 ## Why Graphyard
 
 - **You decide only goals, money and credentials.** An AI master plans everything else.
