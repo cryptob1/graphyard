@@ -614,7 +614,7 @@ test('unit:e2e-step-environment-isolated — a step\'s process holds TARGET_URL,
   const seen = (id: string) => Object.fromEntries(report.cases.find(entry => entry.id === id)!.attemptResults[0].steps![0].output.map(line => line.split(/=(.*)/s).slice(0, 2)));
   const bare = seen('bare');
   assert.equal(bare.TARGET_URL, 'http://target.test:4310');
-  assert.deepEqual(Object.keys(bare).filter(name => !(hostPassthrough as readonly string[]).includes(name) && !['_', 'PWD', 'OLDPWD', 'SHLVL'].includes(name)), ['TARGET_URL'], `a step without secrets sees the host basics and the target only, not ${JSON.stringify(bare)}`);
+  assert.deepEqual(Object.keys(bare).filter(name => !(hostPassthrough as readonly string[]).includes(name) && !['_', 'PWD', 'OLDPWD', 'SHLVL'].includes(name)), ['E2E_SCREENSHOTS_DIR', 'TARGET_URL'], `a step without secrets sees the host basics, its screenshots directory and the target only, not ${JSON.stringify(bare)}`);
   for (const name of ['GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE', 'GRAPHYARD_URL', 'GRAPHYARD_UAT_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN', 'RAILWAY_TOKEN', 'HERDR_SESSION', 'ANTHROPIC_API_KEY']) assert.equal(bare[name], undefined, `${name} never reaches a step`);
   const declared = seen('env');
   assert.equal(declared.PLAYER_PASSWORD, '[secret:PLAYER_PASSWORD]', 'the declared secret is set, and redacted in the record');
