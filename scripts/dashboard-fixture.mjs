@@ -104,7 +104,7 @@ export function fixtureApi(path, role = 'admin') {
  * The words a person sees in rendered markup, each with whether it carries a hover definition:
  * text outside `hidden` elements and outside the body of a closed <details> (its <summary>
  * counts), not counting elements marked `data-title` (item titles, which are the operator's own
- * words). Attributes, tooltips included, never count as words. A word is `explained` when it sits
+ * words) or `data-fun` (the Fun decoration, GY-3268, which the page menu's Fun toggle removes). Attributes, tooltips included, never count as words. A word is `explained` when it sits
  * inside a <Term>, the shared glossary's `<abbr class="term" title="…">`; another element's title
  * (a card's "In this step for 3h", say) is not a definition and never counts as one.
  */
@@ -130,7 +130,7 @@ export function readableWords(html) {
     if (voids.has(name) || token.endsWith('/>')) continue;
     // A collapsed native select shows only its selected option.
     const unselectedOption = name === 'option' && !/\sselected(\s|=|$)/.test(attributes);
-    const hidden = unselectedOption || /\shidden(\s|=|$)/.test(attributes) || /\sdata-title(\s|=|$)/.test(attributes) || /aria-hidden="true"/.test(attributes);
+    const hidden = unselectedOption || /\shidden(\s|=|$)/.test(attributes) || /\sdata-(title|fun)(\s|=|$)/.test(attributes) || /aria-hidden="true"/.test(attributes);
     // A closed <details> shows only its <summary>: the rest is skipped once the summary closes.
     stack.push({ name, skip: hidden, open: name === 'details' && /\sopen(\s|=|$)/.test(attributes), term: name === 'abbr' && /class="term"/.test(attributes) && /\stitle="/.test(attributes) });
   }

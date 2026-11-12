@@ -11,6 +11,7 @@ import Priority from './priority';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
+import { Agent } from '../fun';
 
 /** The plain sentence without its leading "Stuck: ": the group already says it is blocked. */
 const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
@@ -53,7 +54,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}
-    <span className="row-who" title="Who acts next">{actor.who}</span>
+    <span className="row-who" title="Who acts next">{item.lease?.owner && actor.who === 'Builder agent' ? <Agent id={item.lease.owner}/> : actor.who}</span>
     <span className="row-time">{timed ? <StatusAge held={held}/> : group === 'needs-you' && waited !== null ? <span className="waited">Waiting {formatDuration(waited / 60000)}</span> : null}</span>
     {group === 'needs-you' && <button type="button" className="decide" onClick={e => { e.stopPropagation(); onOpen(item.id); }}>Decide</button>}
   </div>;

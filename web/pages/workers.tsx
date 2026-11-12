@@ -7,6 +7,7 @@ import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
 import { shortShas } from '../candidate';
+import { Agent } from '../fun';
 
 /**
  * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
@@ -120,7 +121,7 @@ function since(row: WorkerRow, now: number) {
 
 function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="mono agent-name" title={`${row.principal} · ${row.runtime} on ${row.host}`}>{row.agentName ?? row.principal}</span><Attach row={row} open={() => setSelected(row.workId)}/></th>
+    <th scope="row" data-label="Agent"><span className="agent-name"><Agent id={row.principal} master={row.roleKind === 'master'}/></span><Attach row={row} open={() => setSelected(row.workId)}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now, release)}</td>
@@ -143,7 +144,7 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   return <table className="sessions-table" aria-label="Principals">
     <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Working on</th><th scope="col">For</th><th scope="col">Sessions today</th></tr></thead>
     <tbody>{principals.map(entry => <tr key={entry.principal} data-principal={entry.principal} data-current={entry.current ? `${entry.current.key}:${entry.current.epoch ?? ''}` : 'idle'}>
-      <th scope="row" data-label="Account" className="mono">{entry.principal}</th>
+      <th scope="row" data-label="Account"><Agent id={entry.principal}/></th>
       <td data-label="Role">{roleWords[entry.roleKind]}</td>
       <td data-label="Working on">{entry.current ? <button type="button" className="text-button" onClick={() => setSelected(entry.current!.workId)}>{entry.current.key}</button> : <span className="muted">idle</span>}</td>
       <td data-label="For">{entry.current ? spent(entry.current.sinceMs) : '—'}</td>

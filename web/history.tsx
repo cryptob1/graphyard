@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Agent } from './fun';
 
 type Event = { seq: number; kind: string; actor: string; created_at: string; payload?: { details?: { oldPriority?: number; newPriority?: number; reason?: string } } };
 export default function History({ events }: { events: Event[] }) {
@@ -18,7 +19,7 @@ export default function History({ events }: { events: Event[] }) {
     <div className="history-scroll" role="region" aria-label="History entries" tabIndex={0}>
       <div className="timeline">{groups.slice(0, limit).map(({ newest, oldest, count }) => <div key={newest.seq}>
         <span>{new Date(newest.created_at).toLocaleString()}{count > 1 && <> back to {new Date(oldest.created_at).toLocaleString()}</>}</span>
-        <strong>{newest.kind === 'priority' ? 'Priority changed' : newest.kind}{count > 1 && ` × ${count}`}</strong><small>{newest.actor}</small>{newest.kind === 'priority' && <p>P{newest.payload?.details?.oldPriority} → P{newest.payload?.details?.newPriority} · {newest.payload?.details?.reason}</p>}
+        <strong>{newest.kind === 'priority' ? 'Priority changed' : newest.kind}{count > 1 && ` × ${count}`}</strong><small><Agent id={newest.actor}/></small>{newest.kind === 'priority' && <p>P{newest.payload?.details?.oldPriority} → P{newest.payload?.details?.newPriority} · {newest.payload?.details?.reason}</p>}
       </div>)}</div>
       {events.length === 0 && <p>No history loaded.</p>}
     </div>

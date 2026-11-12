@@ -2,6 +2,7 @@ import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
+import { ShippedToday } from '../fun';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
@@ -93,6 +94,7 @@ export default function TopBar(dashboard: Dashboard) {
   return <div className="top-bar">
     {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
     {status && <ReleaseLine status={status}/>}
+    {status && <ShippedToday work={dashboard.work}/>}
     {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;
 }

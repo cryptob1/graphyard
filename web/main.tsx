@@ -14,6 +14,7 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { idempotencyKey } from './idempotency-key';
+import { ShippedToast, confetti } from './fun';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -104,6 +105,18 @@ function App() {
   // A read answered while the same item is still open is kept even when a work poll re-ran the effect meanwhile, so a later failed read never leaves history empty.
   const selectedRef = useRef(selected); selectedRef.current = selected;
   useEffect(() => { const epoch = sessionEpoch.current, current = () => selectedRef.current === selected && epoch === sessionEpoch.current; if (selected) void api(`events?work=${selected}`).then(rows => { if (current()) setEvents(rows); }).catch(e => { if (current()) setError(e.message); }); }, [selected, work]);
+  // GY-3268: an item that merges while the page is open gets a toast naming its builder, and confetti.
+  const merged = useRef<Map<string, boolean> | null>(null);
+  const [shipped, setShipped] = useState<Work | null>(null);
+  useEffect(() => {
+    if (!work.length) return;
+    const isMerged = (w: Work) => w.stage === 'done' && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt);
+    const fresh = merged.current ? work.filter(w => isMerged(w) && merged.current!.get(w.id) === false) : [];
+    merged.current = new Map(work.map(w => [w.id, isMerged(w)]));
+    if (!fresh.length) return;
+    setShipped(fresh.at(-1)!); confetti();
+  }, [work]);
+  useEffect(() => { if (!shipped) return; const timer = setTimeout(() => setShipped(null), 8000); return () => clearTimeout(timer); }, [shipped]);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
@@ -114,6 +127,7 @@ function App() {
     <main className="main">{error && <div role="alert" className="notice danger">{error}{error === SIGN_IN_NEEDED && <> <button type="button" onClick={signOut}>Sign in</button></>}</div>}
       <TopBar {...dashboard}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
+    {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
