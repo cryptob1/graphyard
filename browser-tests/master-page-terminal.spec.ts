@@ -72,7 +72,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     expect((await calls()).some(entry => entry.args?.[0] === 'pane' && entry.args?.[1] === 'close')).toBe(false);
 
     // GY-3259: terminal attachment is the master's alone; a worker's output is its item's run log.
-    await expect(operator.getByRole('row', { name: /work-claude/ })).toBeVisible(settled);
+    await expect(operator.getByRole('row', { name: /Builds code/ })).toBeVisible(settled);
     await expect(operator.getByRole('button', { name: 'Watch', exact: true })).toHaveCount(0);
     await operator.close();
   } finally {
