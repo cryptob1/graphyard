@@ -44,6 +44,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:0161aa6cf3d5e2729cfe74ed8bb00596640b6185d0e51dc72ff4b3c77a22d6d0',
   // GY-3257: durable review/producer ledgers and dispatch cursor.
   'sha256:7e40bafabb2d9745ec219230a13720fb068698526ed76387d97b905680d40d54',
+  // GY-3267: the merge trial's kept browser-case screenshots.
+  'sha256:e90c91c8758dbce1c60a7a1222e98ece78afdf3dc01a60d33c2cd51ae02b49ac',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

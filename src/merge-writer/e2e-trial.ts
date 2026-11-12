@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
 import { projectCaseSuite } from '../release-project.js';
-import type { E2eReport } from '../e2e/runner.js';
+import type { CaseOutcome, E2eReport } from '../e2e/runner.js';
 import { confinedSession } from '../e2e/steps.js';
 import { composeProjectName } from '../compose-preview.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
@@ -26,6 +26,26 @@ export interface TrialE2eCase {
   output?: string[];
   /** GY-3180: the case's browser or runner could not start, so the head was never judged: the trial ends with no verdict. */
   hostFailure?: boolean;
+  /**
+   * GY-3267: the last screenshot of the case's browser run (base64 PNG), kept for the item page;
+   * absent when the run kept none — an item whose cases drove no browser shows no screenshot.
+   */
+  screenshot?: string;
+}
+
+/** GY-3267: the most bytes of one kept screenshot (a small PNG) and the most cases whose screenshots one trial keeps. */
+export const trialScreenshotBytesMax = 512 * 1024, trialScreenshotCasesMax = 10;
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** GY-3267: the last screenshot a case's run kept, as base64, when it is a PNG within the byte bound; none otherwise. */
+export async function keptScreenshot(outcome: Pick<CaseOutcome, 'attemptResults'>): Promise<string | undefined> {
+  const shot = (outcome.attemptResults.at(-1)?.steps ?? []).findLast(step => step.screenshots?.length)?.screenshots?.at(-1);
+  if (!shot) return undefined;
+  try {
+    const bytes = await readFile(shot);
+    if (bytes.length > trialScreenshotBytesMax || !bytes.subarray(0, pngSignature.length).equals(pngSignature)) return undefined;
+    return bytes.toString('base64');
+  } catch { /* a screenshot that cannot be read is not kept */ }
 }
 
 /** Why a case cannot run and the trial refuses the head: the declaration to add. */
@@ -176,17 +196,19 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
       const ran = report as E2eReport | null;
       for (const entry of loaded) {
         const outcome = ran?.cases.find((item: { id: string }) => item.id === entry.proof.slice(4));
+        // GY-3267: the case's last screenshot rides the result whatever its verdict, so the item page shows the changed page.
+        const screenshot = outcome && outcome.verdict !== 'unrun' ? await keptScreenshot(outcome) : undefined;
         if (outcome?.attemptResults?.at(-1)?.hostFailure)
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 0, failed: 1, hostFailure: true, failingStep: outcome.failingStep?.reason ?? 'the case could not start' });
         else if (!outcome || outcome.verdict === 'unrun')
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 0, failed: 1, failingStep: outcome?.stoppedBy ? `the run stopped at required case ${outcome.stoppedBy}` : 'the case never ran' });
         else if (outcome.verdict === 'passed')
-          cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 0 });
+          cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 0, ...(screenshot ? { screenshot } : {}) });
         else {
           const step = outcome.failingStep;
           const output = step && outcome.attemptResults.findLast(attempt => attempt.failingStep)?.steps?.find(record => record.index === step.index)?.output;
           cases.push({ proof: entry.proof, case: entry.proof.slice(4), executed: 1, failed: 1,
-            failingStep: step ? `step ${step.index + 1} ${step.name}: ${step.reason}` : 'a step failed without naming one', ...(output?.length ? { output } : {}) });
+            failingStep: step ? `step ${step.index + 1} ${step.name}: ${step.reason}` : 'a step failed without naming one', ...(output?.length ? { output } : {}), ...(screenshot ? { screenshot } : {}) });
         }
       }
     }

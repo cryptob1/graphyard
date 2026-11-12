@@ -16,7 +16,9 @@ import { exactApproval } from '../model/review.js';
 import { decisionWork } from '../store/decision-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
+import { trialScreenshotBytesMax, trialScreenshotCasesMax } from '../merge-writer/e2e-trial.js';
 import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { keepTrialScreenshots } from './trial-screenshots.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import { recordDispatch } from '../engine/evaluate.js';
@@ -57,6 +59,9 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
       // GY-2965: how each bound E2E case ran against the served head; a run of one becomes a trusted record on the item and a run in the case's history.
       e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(200), executed: z.number().int().min(0), failed: z.number().int().min(0),
         missing: z.boolean().optional(), failingStep: z.string().max(2000).nullable().optional() }).strict()).max(trialE2eResultLimit).optional(),
+      // GY-3267: each browser case's kept screenshots (after the candidate, before the base tip), base64 PNGs within the trial's capture bound.
+      screenshots: z.array(z.object({ case: z.string().min(1).max(200),
+        before: z.string().max(Math.ceil(trialScreenshotBytesMax / 3) * 4).optional(), after: z.string().max(Math.ceil(trialScreenshotBytesMax / 3) * 4).optional() }).strict()).max(trialScreenshotCasesMax).optional(),
       preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
     z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().min(1).max(1000),
       phases: trialPhaseDurations, attempts: trialAttempts.min(1), durationMs: z.number().int().min(0) }).strict(),
@@ -206,7 +211,9 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     }
     const { kind, ...fields } = data;
     const event: MergeRecordEvent = data;
-    const payload = kind === 'intent' ? { key: work!.key, ...fields } : kind === 'refused' ? { ...fields, kind: 'merge' } : fields;
+    // GY-3267: the kept screenshots' bytes live in their own table and on the item, never in the ledger row.
+    const lean = 'screenshots' in fields ? (({ screenshots: _screenshots, ...rest }) => rest)(fields) : fields;
+    const payload = kind === 'intent' ? { key: work!.key, ...fields } : kind === 'refused' ? { ...fields, kind: 'merge' } : lean;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, mergeRecordKinds[event.kind], JSON.stringify(payload)]);
     work!.mergeLedger = await foldItemLedger(db, work!, data);
     // GY-3229: a trial that could not write a read-only file system is the host's fault: one blocker naming the path, never a rework.
@@ -225,6 +232,11 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
           environment: 'merge-writer-trial' };
         await appendEvidence(work!, evidence, db);
       }
+    }
+    // GY-3267: each verdict trial replaces the earlier trial's kept browser-case screenshots; one that kept none clears them.
+    if (data.kind === 'trial' && data.outcome === 'verdict') {
+      const cases = await keepTrialScreenshots(db, work!.id, data.screenshots ?? []);
+      work!.trialScreenshots = cases.length ? { mergeSha: data.mergeSha, baseTip: data.baseTip, at: now.toISOString(), cases } : null;
     }
     if (kind === 'reconciled') {
       const mergedAt = work!.mergeLedger?.pushedAt ?? now.toISOString();

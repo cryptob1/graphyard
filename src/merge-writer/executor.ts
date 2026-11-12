@@ -10,7 +10,7 @@ import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { runTrial, recordedTests, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
-import type { TrialE2eCase } from './e2e-trial.js';
+import { trialScreenshotCasesMax, type TrialE2eCase } from './e2e-trial.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 import { mergeServeRevertKind, type MergeServeRevert } from './serve-revert-ledger.js';
@@ -79,6 +79,27 @@ export interface MergeTrialRun extends TrialRun {
     /** GY-2954: the first failing case's assertion text in the base run's TAP, bounded. */ assertion?: string };
   /** GY-2984, GY-3167: a feature or bug item's proofs that every one passed on the base tip too, with that tip: the head's proofs show nothing it changed. */
   notReproduced?: { proofs: string[]; tip: string };
+  /**
+   * GY-3267: the browser cases' kept screenshots — `after` from the candidate's run, `before` from
+   * the base tip's — posted with the trial record and shown side by side on the item page.
+   */
+  screenshots?: TrialCaseShot[];
+}
+/** GY-3267: one browser case's kept screenshots, base64 PNGs as the trial's e2e run captured them. */
+export interface TrialCaseShot { case: string; before?: string; after?: string }
+/**
+ * GY-3267: the browser cases' kept screenshots of a trial, each case's last one: `after` from the
+ * candidate run's e2e results, `before` added from the base tip's, bounded as the trial record
+ * accepts. A case that kept no screenshot on either side is absent.
+ */
+export function mergeTrialShots(into: readonly TrialCaseShot[], from: readonly TrialE2eCase[], side: 'before' | 'after'): TrialCaseShot[] {
+  const merged = new Map(into.map(shot => [shot.case, { ...shot }]));
+  for (const entry of from) {
+    if (!entry.screenshot) continue;
+    const shot = merged.get(entry.case) ?? { case: entry.case };
+    merged.set(entry.case, { ...shot, ...(side === 'before' ? { before: entry.screenshot } : { after: entry.screenshot }) });
+  }
+  return [...merged.values()].filter(shot => shot.before !== undefined || shot.after !== undefined).slice(0, trialScreenshotCasesMax);
 }
 /** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
 export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly string[] }, at: string): TrialFlaked =>
@@ -90,6 +111,7 @@ export type MergeRecordEvent =
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
     /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
     /** GY-2965: how each bound E2E case ran against the served head; the passing runs become trusted evidence (the trial is the trusted producer). */ e2e?: TrialE2eCase[];
+    /** GY-3267: each browser case's kept screenshots (after the candidate, before the base tip), stored by the control plane and shown on the item page. */ screenshots?: TrialCaseShot[];
     /** GY-1834: the trial's flake, kept on the item's merge ledger so the flake ledger reads it after any restart. */ flaked?: TrialFlaked }
   /**
    * A trial that reached no verdict on its retry either (GY-1832): its final outcome, the phase and
@@ -492,15 +514,17 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   }
   // The bound E2E cases' counts ride the same proofs map the acceptance gate reads (GY-2965).
   const e2eCounts = Object.fromEntries((verdict.e2e ?? []).map(entry => [entry.proof, { executed: entry.executed, failed: entry.failed }]));
-  const first: MergeTrialRun = { ...verdict, files, proofs: { ...counted(), ...e2eCounts }, ...(leftover ? { leftover } : {}) };
+  // GY-3267: the candidate run's kept screenshots are the after side; the base run adds the before.
+  const shots = mergeTrialShots([], verdict.e2e ?? [], 'after');
+  const first: MergeTrialRun = { ...verdict, files, proofs: { ...counted(), ...e2eCounts }, ...(leftover ? { leftover } : {}), ...(shots.length ? { screenshots: shots } : {}) };
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
   const rerunAttempt = () => { epoch++; tap = ''; byRunner = {}; };
   // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
   const rerunInput = { ...input, e2eProofs: [] as const };
   // Only the run on the base tip reads counts: attribution reads failing files, so it spends no runner's time.
-  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = [], counting?: 'count') => {
+  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = [], counting?: 'count', e2eFrom?: string) => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt, ...(counting ? { countProofs } : {}) }); return { run: rerun, tap, proofs: counted() }; }
+    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, ...(e2eFrom ? { e2eFrom } : {}), mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt, ...(counting ? { countProofs } : {}) }); return { run: rerun, tap, proofs: counted() }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap, proofs: counted() } : null; }
   };
   const ownProofFiles = discovered ?? input.proofFiles;
@@ -517,21 +541,26 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
  */
 async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], git: ChildRun,
-  retest: (sha: string, files: string[], e2eProofs: readonly string[], counting: 'count') => Promise<{ run: TrialRun; proofs: ProofCounts } | null>): Promise<MergeTrialRun> {
-  let tip: string, files: string[];
+  retest: (sha: string, files: string[], e2eProofs: readonly string[], counting: 'count', e2eFrom: string) => Promise<{ run: TrialRun; proofs: ProofCounts } | null>): Promise<MergeTrialRun> {
+  const e2eProofs = input.e2eProofs ?? [];
+  let tip: string, files: string[], baseCases: string[];
   try {
     tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase();
     files = proofFiles.length ? listed(String(await git('git', ['-C', input.root, 'ls-tree', '--name-only', tip, '--', ...proofFiles]))) : [];
+    baseCases = e2eProofs.length ? String(await git('git', ['-C', input.root, 'ls-tree', '--name-only', tip, '--', ...e2eProofs.map(proof => `e2e/cases/${proof.slice(4)}.json`)])).split('\n').map(line => line.trim()) : [];
   } catch { return run; }
   if (proofFiles.length && !files.length) return run;
-  const e2eProofs = input.e2eProofs ?? [];
-  const onBase = await retest(tip, files, e2eProofs, 'count').catch(() => null);
+  // GY-3267: the head's cases run on the tip (a case new on the head too, for its before screenshot); one new on the head still counts as failing there.
+  const onBase = await retest(tip, files, e2eProofs, 'count', input.mergeSha).catch(() => null);
   if (!onBase || onBase.run.build !== 'pass') return run;
   const passes = ({ executed, failed }: { executed: number; failed: number }) => executed > 0 && failed === 0;
   const passing = input.proofs.every(proof => passes(onBase.proofs[proof]!))
-    && e2eProofs.every(proof => { const ran = onBase.run.e2e?.find(entry => entry.proof === proof); return !!ran && passes(ran); });
+    && e2eProofs.every(proof => { const ran = onBase.run.e2e?.find(entry => entry.proof === proof); return baseCases.includes(`e2e/cases/${proof.slice(4)}.json`) && !!ran && passes(ran); });
   const proofs = [...input.proofs, ...e2eProofs];
-  return passing ? { ...run, notReproduced: { proofs, tip } } : run;
+  // GY-3267: the base run's kept screenshots are the before side of whatever the trial already kept.
+  const shots = mergeTrialShots(run.screenshots ?? [], onBase.run.e2e ?? [], 'before');
+  const withBefore = shots.length ? { ...run, screenshots: shots } : run;
+  return passing ? { ...withBefore, notReproduced: { proofs, tip } } : withBefore;
 }
 
 /**
@@ -790,7 +819,10 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e.map(({ output: _output, ...entry }) => entry) } : {}) });
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(flaked ? { flaked } : {}),
+      // GY-3267: the screenshots travel once, in their own field — never inside the e2e results.
+      ...(run.e2e?.length ? { e2e: run.e2e.map(({ output: _output, screenshot: _screenshot, ...entry }) => entry) } : {}),
+      ...(run.screenshots?.length ? { screenshots: run.screenshots } : {}) });
   }
   let pushes = 0;
   for (;;) {

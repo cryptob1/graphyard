@@ -177,6 +177,10 @@ img.mark{width:26px;height:26px}
 .left-list{margin:0;padding-left:18px;font-size:var(--type-body);line-height:1.7;color:var(--text)}
 .left-step h3{margin:0 0 var(--space-2);font-size:var(--type-body);font-weight:600}.left-step h3 small{font-weight:400}.left-step+.left-step{margin-top:var(--space-3)}
 .run-log{max-height:28rem;overflow:auto;margin:var(--space-2) 0 0;padding:var(--space-3);background:var(--bg);border-radius:var(--radius-lg);font-size:var(--type-small);white-space:pre-wrap;word-break:break-word}
+.trial-shots .trial-case{margin:0;font-size:var(--type-small);font-weight:450;color:var(--text-2);overflow-wrap:anywhere}
+.trial-pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--space-3)}
+.trial-shot{margin:0;display:flex;flex-direction:column;gap:var(--space-2)}
+.trial-shot figcaption{font-size:var(--type-small);color:var(--text-2)}
 .panel .later-steps{margin:0}.panel .later-steps .left-step{margin-top:var(--space-3)}
 .criterion-full summary{cursor:pointer;list-style:none}.criterion-full summary::-webkit-details-marker{display:none}.criterion-full[open] summary .criterion-text{display:none}.criterion-full p{margin:6px 0 0;font-size:var(--type-small);color:var(--text)}
 .criterion-mark{display:inline-block;width:1.2em;color:var(--needs-you)}.criterion-met .criterion-mark{color:var(--shipped)}

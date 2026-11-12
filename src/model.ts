@@ -22,6 +22,7 @@ export * from './model-boundary/closure.js';
 export * from './model/user-facing.js';
 export * from './model-boundary/user-facing.js';
 export * from './model/product-review.js';
+export * from './model/trial-screenshots.js';
 export * from './model-boundary/product-review.js';
 export * from './model/human-proof.js';
 export * from './model/single-case.js';
