@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { serveGitHttp } from './helpers/git-http-remote.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -16,28 +16,6 @@ import { writeMergeToken } from '../src/install/merge-token.js';
 
 const TOKEN = 'github_pat_fixture_token_value';
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-
-/** git http-backend as a CGI behind a server that answers 401 unless the Basic password is the token. */
-async function serve(projectRoot: string, token: string, log: string[]) {
-  const server = createServer((request, response) => {
-    log.push(`${request.method} ${request.url}`);
-    const password = Buffer.from((request.headers.authorization ?? '').replace(/^Basic /, ''), 'base64').toString().split(':')[1];
-    if (password !== token) { response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="git"' }).end(); return; }
-    const [path, query = ''] = request.url!.split('?');
-    const cgi = spawn('git', ['http-backend'], { env: { PATH: process.env.PATH!, GIT_PROJECT_ROOT: projectRoot, GIT_HTTP_EXPORT_ALL: '1', REMOTE_USER: 'x-access-token', REQUEST_METHOD: request.method!, PATH_INFO: path, QUERY_STRING: query, CONTENT_TYPE: request.headers['content-type'] ?? '', ...(request.headers['content-length'] ? { CONTENT_LENGTH: request.headers['content-length'] } : {}), ...(request.headers['content-encoding'] ? { HTTP_CONTENT_ENCODING: request.headers['content-encoding'] } : {}) } });
-    request.pipe(cgi.stdin);
-    const chunks: Buffer[] = [];
-    cgi.stdout.on('data', chunk => chunks.push(chunk));
-    cgi.on('close', () => {
-      const output = Buffer.concat(chunks), split = output.indexOf('\r\n\r\n');
-      const headers = Object.fromEntries(output.subarray(0, split).toString().split('\r\n').map(line => line.split(': ') as [string, string]));
-      const { Status, ...rest } = headers;
-      response.writeHead(Status ? Number(Status.split(' ')[0]) : 200, rest).end(output.subarray(split + 4));
-    });
-  });
-  await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept));
-  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}/repo.git`, close: () => server.close() };
-}
 
 async function fixture(label: string) {
   const directory = await temporaryDirectory(label), origin = join(directory, 'repo.git'), checkout = join(directory, 'checkout');
@@ -60,7 +38,7 @@ async function fixture(label: string) {
 }
 
 test('e2e:merge-writer-token — a token install fetches and pushes over token-authenticated smart HTTP; a wrong token is refused and no log holds it', { timeout: 120_000 }, async () => {
-  const f = await fixture('merge-writer-token-http'), log: string[] = [], server = await serve(f.directory, TOKEN, log);
+  const f = await fixture('merge-writer-token-http'), log: string[] = [], server = await serveGitHttp(f.directory, TOKEN, log);
   try {
     const installDir = join(f.directory, 'config', 'owner-project');
     const tokenFile = await writeMergeToken(installDir, TOKEN);

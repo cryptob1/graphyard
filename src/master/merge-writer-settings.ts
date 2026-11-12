@@ -18,25 +18,29 @@ export const defaultDeployKeyFile = (installId: string, home?: string) => join(h
 export const defaultMergeTokenFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'merge-writer.token');
 
 /**
- * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
- * how many heads it trials at once. Unset, the key is the install's default and the trials
- * `defaultMergeWriterParallel`.
+ * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's credential — the
+ * deploy key, the fine-grained token, or the operator's gh login — and how many heads it trials at
+ * once. Unset, the key is the install's default and the trials `defaultMergeWriterParallel`.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
   tokenFile: z.string().trim().min(1).max(1000).optional(),
+  /** GY-3269 (`install --push-auth gh`): the merge writer pushes with the operator's gh login; no credential file exists. */
+  pushAuth: z.literal('gh').optional(),
   parallel: z.number().int().min(1).max(maxMergeWriterParallel).optional(),
-}).passthrough().transform(({ retrials, ...kept }) => kept).refine(settings => !(settings.deployKeyFile && settings.tokenFile), { message: 'Set run.mergeWriter.deployKeyFile or tokenFile, not both' });
+}).passthrough().transform(({ retrials, ...kept }) => kept).refine(settings => [settings.deployKeyFile, settings.tokenFile, settings.pushAuth].filter(Boolean).length <= 1, { message: 'Set run.mergeWriter.deployKeyFile, tokenFile or pushAuth — one merge-writer credential, not several' });
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 
 /** `~/` at the start of a configured path is the home directory, as a shell would read it. */
 const expandHome = (path: string, home: string) => path === '~' ? home : path.startsWith('~/') ? join(home, path.slice(2)) : path;
 
 /** The settings with their defaults applied, for the install `installId` (install/types.ts `installIdFor`). */
-export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string): { deployKeyFile?: string; tokenFile?: string; parallel: number } => {
+export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string): { deployKeyFile?: string; tokenFile?: string; pushAuth?: 'gh'; parallel: number } => {
   const parallel = run.mergeWriter?.parallel ?? defaultMergeWriterParallel, base = home ?? homedir();
-  // Exactly one credential: the configured token, else the configured or default deploy key, else a token the install stored beside where the deploy key would be (GY-3220).
+  // Exactly one credential: the configured token, else the gh login (GY-3269), else the configured or
+  // default deploy key, else a token the install stored beside where the deploy key would be (GY-3220).
   if (run.mergeWriter?.tokenFile) return { tokenFile: expandHome(run.mergeWriter.tokenFile, base), parallel };
+  if (run.mergeWriter?.pushAuth) return { pushAuth: 'gh', parallel };
   if (!run.mergeWriter?.deployKeyFile && existsSync(defaultMergeTokenFile(installId, home))) return { tokenFile: defaultMergeTokenFile(installId, home), parallel };
   return { deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), base), parallel };
 };

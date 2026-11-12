@@ -35,17 +35,19 @@ test('unit:tests/merge-writer-token.test.ts — the token file is 0600, its askp
   assert.equal(ask("Username for 'https://github.com': "), 'x-access-token');
   assert.equal(ask("Password for 'https://x-access-token@github.com': "), TOKEN);
 
-  assert.equal(mergeWriterRemote('owner/project', file, {}), 'https://github.com/owner/project.git');
-  assert.equal(mergeWriterRemote('owner/project', file, { GRAPHYARD_MERGE_WRITER_GIT_URL: 'http://127.0.0.1:1/r.git' }), 'http://127.0.0.1:1/r.git');
+  assert.equal(mergeWriterRemote('owner/project', { tokenFile: file }, {}), 'https://github.com/owner/project.git');
+  assert.equal(mergeWriterRemote('owner/project', { tokenFile: file }, { GRAPHYARD_MERGE_WRITER_GIT_URL: 'http://127.0.0.1:1/r.git' }), 'http://127.0.0.1:1/r.git');
   assert.equal(mergeWriterRemote('owner/project', undefined, { GRAPHYARD_MERGE_WRITER_GIT_URL: 'http://127.0.0.1:1/r.git' }), 'origin', 'a deploy key install keeps origin');
-  const args = pushArgs('main', 'a'.repeat(40), 'b'.repeat(40), mergeWriterRemote('owner/project', file, {}));
+  const args = pushArgs('main', 'a'.repeat(40), 'b'.repeat(40), mergeWriterRemote('owner/project', { tokenFile: file }, {}));
   assert.ok(!args.join(' ').includes(TOKEN) && args[1] === 'https://github.com/owner/project.git');
   assert.equal(pushArgs('main', 'a', 'b')[1], 'origin');
 });
 
-test('unit:tests/merge-writer-token.test.ts — exactly one of deployKeyFile and tokenFile is set', async () => {
-  assert.throws(() => mergeWriterSettingsSchema.parse({ deployKeyFile: '/k', tokenFile: '/t' }), /not both/);
+test('unit:tests/merge-writer-token.test.ts — exactly one of deployKeyFile, tokenFile and pushAuth is set', async () => {
+  assert.throws(() => mergeWriterSettingsSchema.parse({ deployKeyFile: '/k', tokenFile: '/t' }), /one merge-writer credential/);
+  assert.throws(() => mergeWriterSettingsSchema.parse({ tokenFile: '/t', pushAuth: 'gh' }), /one merge-writer credential/);
   assert.deepEqual(mergeWriterSettings({ mergeWriter: { tokenFile: '~/t' } }, 'owner-project', '/home/loop'), { tokenFile: '/home/loop/t', parallel: 3 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { pushAuth: 'gh' } }, 'owner-project', '/home/loop'), { pushAuth: 'gh', parallel: 3 });
   assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '/k' } }, 'owner-project', '/home/loop'), { deployKeyFile: '/k', parallel: 3 });
   const home = await temporaryDirectory('merge-token-home');
   assert.ok(mergeWriterSettings({}, 'owner-project', home).deployKeyFile, 'no token file: the deploy key');

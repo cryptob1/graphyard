@@ -355,24 +355,34 @@ export const deployKeySshCommand = (deployKeyFile: string) => `ssh -i ${deployKe
  */
 export const pushInheritedVariables = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR'] as const;
 /**
- * The push child's environment (AC-2): the allowlisted variables above, git's global and system
- * configuration off, no terminal prompt, and the one credential, the deploy key, as GIT_SSH_COMMAND.
+ * GY-3269 (`--push-auth gh`): git's one credential helper when the merge writer pushes with the
+ * operator's gh login. `gh auth token` answers git's password prompt at the moment of the push, so
+ * the token is never on disk, in an argument, a URL or a variable — it crosses from gh to git
+ * alone, inside the push child.
  */
-export function pushEnvironment(credential: string | { deployKeyFile?: string; tokenFile?: string }, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export const ghTokenCredentialHelper = `!f() { test "$1" = get && printf 'username=x-access-token\npassword=%s\n' "$(gh auth token)"; }; f`;
+/**
+ * The push child's environment (AC-2): the allowlisted variables above, git's global and system
+ * configuration off, no terminal prompt, and the one credential: the deploy key as GIT_SSH_COMMAND,
+ * or, with a token, the askpass helper beside it, or, with the gh login, the credential helper
+ * above as git's only configuration.
+ */
+export function pushEnvironment(credential: string | { deployKeyFile?: string; tokenFile?: string; pushAuth?: 'gh' }, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept = Object.fromEntries(pushInheritedVariables.flatMap(name => typeof environment[name] === 'string' ? [[name, environment[name]!] as const] : []));
-  const { deployKeyFile, tokenFile } = typeof credential === 'string' ? { deployKeyFile: credential, tokenFile: undefined } : credential;
+  const { deployKeyFile, tokenFile, pushAuth } = typeof credential === 'string' ? { deployKeyFile: credential, tokenFile: undefined, pushAuth: undefined } : credential;
   const base = { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+  if (pushAuth) return { ...base, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: ghTokenCredentialHelper };
   // GY-3220: a token reaches git only through the askpass helper beside it, which reads the file; the token is never in an argument or URL.
   return tokenFile ? { ...base, GIT_ASKPASS: join(dirname(tokenFile), mergeAskpassName), GRAPHYARD_MERGE_TOKEN_FILE: tokenFile } : { ...base, GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile!) };
 }
 /** The GIT_ASKPASS helper's file name, written beside the token (`writeMergeToken`). */
 export const mergeAskpassName = 'merge-writer-askpass';
 /**
- * Where the merge writer fetches and pushes: `origin` (SSH, the deploy key) or, with a token, the
- * explicit https URL of the repository. GRAPHYARD_MERGE_WRITER_GIT_URL replaces that URL for tests.
+ * Where the merge writer fetches and pushes: `origin` (SSH, the deploy key) or, with a token or the
+ * operator's gh login, the explicit https URL of the repository. GRAPHYARD_MERGE_WRITER_GIT_URL replaces that URL for tests.
  */
-export const mergeWriterRemote = (repository: string, tokenFile: string | undefined, environment: NodeJS.ProcessEnv = process.env) =>
-  tokenFile ? environment.GRAPHYARD_MERGE_WRITER_GIT_URL || `https://github.com/${repository}.git` : 'origin';
+export const mergeWriterRemote = (repository: string, credential: { tokenFile?: string; pushAuth?: string } | undefined, environment: NodeJS.ProcessEnv = process.env) =>
+  credential?.tokenFile || credential?.pushAuth ? environment.GRAPHYARD_MERGE_WRITER_GIT_URL || `https://github.com/${repository}.git` : 'origin';
 /** `git push origin --force-with-lease=refs/heads/BASE:<baseTip> <mergeSha>:refs/heads/BASE`: the merge commit lands only on the tip it was tested on. */
 export const pushArgs = (base: string, baseTip: string, mergeSha: string, remote = 'origin') => ['push', remote, `--force-with-lease=refs/heads/${base}:${baseTip}`, `${mergeSha}:refs/heads/${base}`];
 /**

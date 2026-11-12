@@ -27,7 +27,9 @@ export async function registerLocalProfiles(request: ProfileRequest): Promise<Pr
   }
 
   try {
-    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, herdrWorkspace: workspace, credentialDirectory: request.installDirectory });
+    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, herdrWorkspace: workspace, credentialDirectory: request.installDirectory,
+      // GY-3269: master.json records that the merge writer pushes with the gh login.
+      ...(request.pushAuth ? { run: { mergeWriter: { pushAuth: request.pushAuth } } } : {}) });
     registration.master = { configured: true, kind: request.masterKind, detail: request.masterKind ? `run: graphyard master start ${request.masterKind}` : 'no authenticated agent runtime was detected for the master session' };
   } catch (error: any) { registration.master = { configured: false, kind: request.masterKind, detail: `master setup did not complete: ${error.message}` }; }
 

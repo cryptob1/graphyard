@@ -1,0 +1,13 @@
+{
+  "id": "push-with-gh-login",
+  "title": "An install pushes with the operator's gh login instead of a deploy key",
+  "description": "A scratch bare repository is served over token-authenticated git smart HTTP on loopback, and a stub gh prints that token: install --push-auth gh --apply registers no deploy key, records the gh login as the merge writer's credential in the install record and master.json, and the merge writer's fetch and push land over https — with the token in no file under the install directory or checkout, no command line, and no session environment, because gh answers git's credential prompt inside the push child at the moment of the push.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "install and merge writer push with the gh login",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/push-with-gh-login.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
