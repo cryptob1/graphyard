@@ -103,8 +103,9 @@ test('e2e:push-with-gh-login — install --push-auth gh --apply registers no dep
     assert.equal(git(remote.origin, 'rev-parse', 'main'), remote.mergeSha, 'the merge landed on the served repository');
 
     // The push child's environment carries the helper that runs gh, never a token or an askpass file.
-    const push = pushEnvironment({ pushAuth: 'gh' }, { PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: 'ambient' });
+    const push = pushEnvironment({ pushAuth: 'gh' }, { PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: 'ambient', GH_CONFIG_DIR: '/custom/gh' });
     assert.equal(push.GH_TOKEN, undefined);
+    assert.equal(push.GH_CONFIG_DIR, '/custom/gh', 'gh keeps the config directory the loop named');
     assert.match(push.GIT_CONFIG_VALUE_0!, /gh auth token/);
     assert.ok(!Object.values(push).includes(TOKEN), 'no push variable holds the token');
     const found = [...await filesHolding(fixture.configHome, TOKEN), ...await filesHolding(remote.checkout, TOKEN), ...await filesHolding(fixture.root, TOKEN)];

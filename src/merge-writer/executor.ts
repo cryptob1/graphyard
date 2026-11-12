@@ -371,7 +371,12 @@ export function pushEnvironment(credential: string | { deployKeyFile?: string; t
   const kept = Object.fromEntries(pushInheritedVariables.flatMap(name => typeof environment[name] === 'string' ? [[name, environment[name]!] as const] : []));
   const { deployKeyFile, tokenFile, pushAuth } = typeof credential === 'string' ? { deployKeyFile: credential, tokenFile: undefined, pushAuth: undefined } : credential;
   const base = { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
-  if (pushAuth) return { ...base, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: ghTokenCredentialHelper };
+  if (pushAuth) return { ...base,
+    // gh reads its login from its config directory: the home by default, or wherever the loop's own
+    // environment moved it. These are paths, never credentials.
+    ...(environment.GH_CONFIG_DIR ? { GH_CONFIG_DIR: environment.GH_CONFIG_DIR } : {}),
+    ...(environment.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: environment.XDG_CONFIG_HOME } : {}),
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: ghTokenCredentialHelper };
   // GY-3220: a token reaches git only through the askpass helper beside it, which reads the file; the token is never in an argument or URL.
   return tokenFile ? { ...base, GIT_ASKPASS: join(dirname(tokenFile), mergeAskpassName), GRAPHYARD_MERGE_TOKEN_FILE: tokenFile } : { ...base, GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile!) };
 }
