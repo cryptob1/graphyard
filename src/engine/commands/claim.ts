@@ -38,6 +38,9 @@ export async function run(c: Ctx) {
   work.lastAssignment = { owner: actor.id, epoch: work.epoch, claimedAt: now.toISOString(), ...(actor.displayName ? { displayName: actor.displayName } : {}), ...(actor.runtime ? { runtime: actor.runtime } : {}) };
   work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + engine.leaseSeconds * 1000).toISOString() };
   beginAttempt(work, work.lease, now);
+  // GY-3266: a fresh claim starts under the current criteria, so a revision a previous attempt
+  // never synced is nothing for this one to wait for.
+  work.unsyncedRevision = null;
 }
 
 export async function prepare({ engine, actor, id, key }: Prepare) {

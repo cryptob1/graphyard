@@ -280,7 +280,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </section>
     {admin && item.stage !== 'done' && <details className="edit-menu"><summary>Edit</summary>
       <p className="muted">These change the rules for this item and need fresh proof afterwards.</p>
-      <button disabled={busy || worker.active} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>
+      <button disabled={busy} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>
     </details>}
     {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}
     {/* Everything technical, one click down, in the control plane's own vocabulary. */}

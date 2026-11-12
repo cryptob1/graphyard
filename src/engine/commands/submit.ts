@@ -10,6 +10,11 @@ import { observeSubmittedHead } from '../observe.js';
 export async function run(c: Ctx) {
   const { db, actor, data, all, now, observation, work } = c;
   activeLease(work, actor, data.epoch, now);
+  // GY-3266: a requirements revision recorded under this lease is refused here until the worker
+  // has synced it, so the submission is judged against criteria the worker has seen. The refusal
+  // names the revision; `sync GY-N` acknowledges it and complete again.
+  const unsynced = work.unsyncedRevision;
+  demand(!unsynced, `Requirements were revised under this attempt (policy revision ${unsynced?.policyRevision}) and not synced yet: run sync ${work.key} to pick up the changed criteria, then complete again`);
   const workspace = work.workspaces.find(w => w.epoch === data.epoch);
   demand(workspace, 'Register the assignment workspace first');
   // GY-1523: the control plane is the only merge writer, so a submission is a head it observed

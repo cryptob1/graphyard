@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { unauthorizedProofs } from '../../model/proof.js';
-import { admin, deploySmokeProof, deploySmokeRequired, demand, singleCaseWarnings } from '../../model.js';
+import { admin, criteriaChanges, deploySmokeProof, deploySmokeRequired, demand, singleCaseWarnings } from '../../model.js';
 import type { Principal, Work } from '../../model.js';
 import { resolveScenario } from '../../scenarios.js';
 import { e2eProofRefusal } from '../../model/user-facing.js';
@@ -20,7 +20,11 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   demand(!work.observation?.merged, 'Merged work requires a follow-up task');
   // A revision read before the item's last one is refused as exactly that, first (GY-1293).
   demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-  demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
+  // GY-3266: a live lease no longer refuses the revision — it is recorded at once below and the
+  // lease stays; the worker reaches the changed criteria at its next sync or status, and complete
+  // refuses until that sync.
+  const previousCriteria = work.criteria;
+  const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
   demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
   // GY-3037: an item keeps its e2e proof through a revision; no description excuses one.
@@ -60,10 +64,13 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   work.warnings = warnings.length ? warnings : undefined;
   work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
   // A revision is a hand-off for an item already under way: its timeline counts it, and the
-  // lapsed lease it discards (a live one was refused above) ends that attempt at its deadline.
-  if (work.lease) endLapsedAttempt(work, work.lease, now);
+  // lapsed lease it discards ends that attempt at its deadline. A live one stays (GY-3266): the
+  // revision is queued on it instead, and complete refuses the submission until the worker's
+  // sync acknowledges it.
+  if (liveLease) work.unsyncedRevision = { policyRevision: work.policyRevision, at: now.toISOString(), by: actor.id, changed: criteriaChanges(previousCriteria, revised) };
+  if (work.lease && !liveLease) endLapsedAttempt(work, work.lease, now);
   recordIntervention(work, 'requirements');
-  work.lease = null;
+  work.lease = liveLease ? work.lease : null;
   work.observation = null; work.mergeAuthorization = null;
   // A submitted implementation must be explicitly reconsidered for changed intent.
   if (work.submission) work.reworkRequested = true;

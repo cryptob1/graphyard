@@ -101,6 +101,21 @@ export interface Observation {
   landing?: LandingCheck;
   revertedDelivery?: RevertedDelivery; // a merged change whose content the base branch does not hold; see model/landing-check.ts
 }
+/**
+ * GY-3266: the requirements revision an attempt's live lease has not synced yet. A revision under
+ * a live lease is recorded at once and the lease stays; this marker is what the worker reads at
+ * its next sync or status (the revised criteria with what changed), what `complete` refuses on
+ * until that sync acknowledges it (a heartbeat naming the policy revision), and what a fresh
+ * claim clears, since a new attempt starts under the current criteria.
+ */
+export interface UnsyncedRevision { policyRevision: number; at: string; by: string; changed: string[] }
+/** GY-3266: what one requirements revision changed, one line per criterion — added, changed or removed. */
+export function criteriaChanges(previous: readonly Criterion[], revised: readonly Criterion[]): string[] {
+  const before = new Map(previous.map(ac => [ac.id, ac.text])), after = new Map(revised.map(ac => [ac.id, ac.text]));
+  const lines = [...after].map(([id, text]) => before.has(id) ? before.get(id) === text ? null : `${id} changed: ${text}` : `${id} added: ${text}`);
+  const removed = [...before].filter(([id]) => !after.has(id)).map(([id, text]) => `${id} removed: ${text}`);
+  return [...lines, ...removed].filter((line): line is string => line !== null).map(line => line.slice(0, 500));
+}
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
   /**
@@ -113,6 +128,8 @@ export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string; reanchor?: { state: 'blocked'; reasons: string[]; supersededRequestId: string; environmentId: string; at: string };
     fault?: { kind: 'evaluator-error'; errors: string[]; attempts: EvaluationAttempt[]; requestId: string; attemptId: string; at: string } }>;
   criteria: Criterion[];
+  /** GY-3266: set while a revision recorded under the attempt's live lease awaits the worker's sync; see UnsyncedRevision. */
+  unsyncedRevision?: UnsyncedRevision | null;
   /** GY-2975: one warning per criterion whose text pins exactly one case, computed at create and requirements revision; absent when no criterion does. */
   warnings?: string[];
   retiredCriterionIds?: string[];

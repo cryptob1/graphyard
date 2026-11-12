@@ -1,0 +1,16 @@
+{
+  "id": "requirements-while-leased",
+  "title": "A requirements revision on a leased item is queued and reaches the worker at its next sync, instead of being refused",
+  "description": "A fixture item leased to a worker keeps its lease through a requirements revision: the revision is recorded at once, the worker's sync shows the changed criteria and acknowledges them, a complete before that sync is refused naming the revision, and one after it is accepted and judged against the revised criteria.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "revise requirements under a live lease, refuse complete before the sync, accept it after",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/requirements-while-leased.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

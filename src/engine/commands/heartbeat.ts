@@ -12,6 +12,13 @@ import type { Ctx } from './types.js';
 /** The renewal itself: the lease checks every heartbeat passes, written once for the item-locked fast path and the operator-agent path. */
 export function run({ engine, work, actor, data, now }: Ctx) {
   renewLease(engine, work, actor, data.epoch, now);
+  // GY-3266: a heartbeat naming the policy revision is the worker's sync acknowledging the
+  // requirements revision queued under its lease. It must name the item's current revision — one
+  // that landed after the worker read names itself, and the worker reloads and syncs again.
+  if (data.syncedPolicyRevision !== undefined) {
+    demand(data.syncedPolicyRevision === work.policyRevision, `Policy revision changed; the sync named ${data.syncedPolicyRevision}, ${work.key} is at ${work.policyRevision}; reload before syncing`);
+    work.unsyncedRevision = null;
+  }
 }
 
 /**

@@ -42,7 +42,10 @@ export const commands = {
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
-  heartbeat: z.object({ epoch }).strict(),
+  // GY-3266: a heartbeat may carry the policy revision the worker has synced — the worker's sync
+  // sends it to acknowledge a requirements revision recorded under its live lease, which complete
+  // refuses until then.
+  heartbeat: z.object({ epoch, syncedPolicyRevision: z.number().int().positive().optional() }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
   // released — and the ledger keeps the git message, so the failure is on the item without
