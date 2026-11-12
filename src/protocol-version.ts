@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { managedBlockConfined } from './master/profiles.js';
 
 /**
  * The master-merge exchange contract: the shape of the merge request the CLI's merge step
@@ -46,12 +49,17 @@ export function cliCommit(root: string, run: SyncRun = syncRun): string | null {
 }
 /**
  * The release a process loads from `root`, read once at its startup: the commit, and whether tracked
- * files differ from it (a dirty checkout runs code no commit names).
+ * files differ from it (a dirty checkout runs code no commit names). AGENTS.md differing only inside
+ * its managed block is Graphyard's own writing, never loaded code, so it is not dirty (GY-3271).
  */
 export function readRelease(root: string, run: SyncRun = syncRun): { commit: string | null; dirty: boolean | null } {
   const commit = cliCommit(root, run);
   if (!commit) return { commit: null, dirty: null };
   let dirty: boolean | null;
-  try { dirty = run('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no']).trim().length > 0; } catch { dirty = null; }
+  try {
+    const changed = run('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no']).split('\n').filter(line => line.trim().length > 3);
+    dirty = changed.some(line => line.slice(3).trim() !== 'AGENTS.md')
+      || (changed.length > 0 && !managedBlockConfined(run('git', ['-C', root, 'show', 'HEAD:AGENTS.md']), readFileSync(join(root, 'AGENTS.md'), 'utf8')));
+  } catch { dirty = null; }
   return { commit, dirty };
 }

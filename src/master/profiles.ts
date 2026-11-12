@@ -1,6 +1,7 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { environmentKinds, runtimeAdapter, runtimeHomeVariables, runtimeKinds, type EnvironmentKind } from './runtimes.js';
 import { defaultChildRun } from '../child-runner.js';
@@ -469,14 +470,42 @@ export function parseCoordinatorCheckout(root: string, commitRead: string, statu
   return { root, commit, modified, untracked };
 }
 const checkoutGitRun: CheckoutRun = (command, args) => defaultChildRun(command, args).then(output => String(output));
+
+// GY-3271: AGENTS.md's managed `<!-- graphyard -->` block (repository-setup.ts renders it) is
+// Graphyard's own writing — the refresh step rewrites the committed block (GY-2240) — and a change
+// Graphyard itself writes must never block Graphyard. The checkout guard and the loop's release
+// reading both ignore a diff confined to that block; a change outside it still refuses as before.
+const managedBlockStart = '<!-- graphyard -->', managedBlockEnd = '<!-- /graphyard -->';
+/** AGENTS.md's text outside its managed block, or null when its markers are malformed — never judged confined. */
+function outsideManagedBlock(text: string): string | null {
+  const starts = text.split(managedBlockStart).length - 1, ends = text.split(managedBlockEnd).length - 1;
+  if (!starts && !ends) return text;
+  const start = text.indexOf(managedBlockStart), end = text.indexOf(managedBlockEnd);
+  if (starts !== ends || starts > 1 || start < 0 || end < start) return null;
+  return text.slice(0, start) + text.slice(end + managedBlockEnd.length);
+}
+/** Whether HEAD's and the working AGENTS.md differ only inside the managed block (GY-3271). */
+export function managedBlockConfined(head: string, working: string): boolean {
+  const outside = [outsideManagedBlock(head), outsideManagedBlock(working)];
+  return outside[0] !== null && outside[1] !== null && outside[0] === outside[1];
+}
 /** Reads how the checkout at `root` stands, through the asynchronous runner. An unreadable checkout (no git, no commit) is never dirty: it cannot be read as code either. */
 export async function readCoordinatorCheckout(root: string, run: CheckoutRun = checkoutGitRun): Promise<CoordinatorCheckout> {
   const git = async (args: string[]) => String(await run('git', ['-C', root, ...args]));
   let commitRead: string;
   try { commitRead = await git(['rev-parse', 'HEAD']); }
   catch { return { root, commit: null, modified: [], untracked: [] }; }
-  try { return parseCoordinatorCheckout(root, commitRead, await git(['status', '--porcelain', '-z', '--untracked-files=normal'])); }
+  let checkout: CoordinatorCheckout;
+  try { checkout = parseCoordinatorCheckout(root, commitRead, await git(['status', '--porcelain', '-z', '--untracked-files=normal'])); }
   catch { return { root, commit: commitRead.trim() || null, modified: [], untracked: [] }; }
+  // GY-3271: AGENTS.md alone changed, and only inside its managed block, is Graphyard's own
+  // writing, not uncommitted work. An AGENTS.md that cannot be read stays dirty, as before.
+  if (checkout.modified.length === 1 && checkout.modified[0] === 'AGENTS.md' && !checkout.untracked.length) {
+    try {
+      if (managedBlockConfined(await git(['show', 'HEAD:AGENTS.md']), await readFile(join(root, 'AGENTS.md'), 'utf8'))) return { ...checkout, modified: [] };
+    } catch { /* unreadable stays dirty */ }
+  }
+  return checkout;
 }
 /** Every path that makes the checkout dirty: what a refusal names and what a lease match is judged on. */
 export const dirtyCheckoutPaths = (checkout: CoordinatorCheckout) => checkout.commit ? [...checkout.modified, ...checkout.untracked] : [];

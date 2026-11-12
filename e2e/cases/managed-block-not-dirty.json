@@ -1,0 +1,13 @@
+{
+  "id": "managed-block-not-dirty",
+  "title": "A CLI checkout whose only change is the managed AGENTS.md block is not dirty",
+  "description": "Real Git fixtures: a checkout whose only change lies inside AGENTS.md's managed graphyard block passes up's dirty-checkout preflight and the loop's refusal and records a clean release; a change outside the block, or real work beside it, still stops as before (GY-3271).",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "managed-block-only AGENTS.md change is not uncommitted work",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/managed-block-not-dirty.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
