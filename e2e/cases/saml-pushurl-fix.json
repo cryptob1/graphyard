@@ -1,0 +1,13 @@
+{
+  "id": "saml-pushurl-fix",
+  "title": "Preflight offers the SSH-pushurl fix for a SAML org and install --apply sets it",
+  "description": "A checkout whose origin fetches over SSH from a remote refusing with a SAML SSO message (the install transport's ssh answer to the probe the preflight runs): the install preflight names the pushurl-only fix — git remote set-url --push origin git@github.com:OWNER/REPO.git with an https fetch URL — and --push-auth gh, install --apply sets both URLs, and a re-run stops naming it. Under --push-auth gh no Repository check runs, and a non-SAML refusal changes nothing.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "SAML pushurl preflight and apply",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/saml-pushurl-fix.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

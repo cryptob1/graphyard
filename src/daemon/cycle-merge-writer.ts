@@ -95,8 +95,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
   const settings = mergeWriterSettings(config.run, installIdFor(config.repository));
   // GY-2997: the trial's children run the merge's code, so they never read the deploy key the push uses, nor any coordinator credential.
   const hidden = trialHiddenPaths(settings.tokenFile ?? settings.deployKeyFile, options.environment);
-  // GY-3220: with a token the merge writer alone fetches and pushes over the repository's https URL; origin stays SSH.
-  const remote = mergeWriterRemote(config.repository, settings.tokenFile, options.environment);
+  // GY-3220, GY-3269: with a token or the gh login the merge writer alone fetches and pushes over the repository's https URL; origin stays SSH.
+  const remote = mergeWriterRemote(config.repository, settings, options.environment);
   const base = config.baseBranch, ref = `refs/remotes/origin/${base}`;
   const tip = async () => {
     const sha = (await git('rev-parse', '--verify', '--quiet', `${ref}^{commit}`)).trim().toLowerCase();
@@ -107,7 +107,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
     git: (args, env) => gitAs(args, env),
     fetch: async () => {
-      if (settings.tokenFile) await gitAs(['fetch', '--no-tags', remote, `+refs/heads/${base}:${ref}`], pushEnvironment(settings, options.environment));
+      if (settings.tokenFile || settings.pushAuth) await gitAs(['fetch', '--no-tags', remote, `+refs/heads/${base}:${ref}`], pushEnvironment(settings, options.environment));
       else await git('fetch', '--no-tags', 'origin', base);
       return tip();
     },

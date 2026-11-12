@@ -80,6 +80,12 @@ export interface InstallInputs {
   createEnvironments?: boolean;
   /** The merge writer's credential is a fine-grained token piped in (`--merge-token-stdin`, GY-3220), not a deploy key. */
   mergeToken?: boolean;
+  /**
+   * GY-3269 (`--push-auth gh`): the merge writer pushes with the operator's gh login — `gh auth
+   * token` answers git's credential prompt at the moment of each push — and no deploy key is
+   * created or registered. The token is never stored on disk.
+   */
+  pushAuth?: 'gh';
 }
 
 export function installIdFor(repository: string) {

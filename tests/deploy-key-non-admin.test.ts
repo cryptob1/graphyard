@@ -66,7 +66,8 @@ test('unit:tests/deploy-key-non-admin.test.ts — a login that can list keys kee
     const { summary } = await apply(fixture, ['--provider', 'compose', '--repo', 'owner/project', '--apply']);
     assert.equal(summary.deployKey, join(installDirectory('owner-project', fixture.configHome), 'deploy-key'));
     const lines = fixture.commandLines();
-    assert.ok(!lines.some(line => line.startsWith('ssh ')), 'a successful list probes nothing over ssh');
+    // The key's push probe; GY-3269's SAML preflight may still ask the fetch direction (git-upload-pack) without the key.
+    assert.ok(!lines.some(line => line.startsWith('ssh ') && line.includes(PROBE)), 'a successful list probes nothing over ssh');
     assert.deepEqual(lines.filter(line => line.startsWith('gh repo deploy-key add ')), [`gh repo deploy-key add ${join(installDirectory('owner-project', fixture.configHome), 'deploy-key.pub')} -R owner/project --allow-write --title graphyard-merge-writer-install-test-host`]);
     assert.deepEqual(fixture.state.deployKeys.map(entry => entry.key), [DEPLOY_PUBLIC_KEY]);
   } finally { await fixture.cleanup(); }

@@ -3,7 +3,7 @@ import { chown, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export interface CommandResult { stdout: string; stderr: string; code: number }
-export interface RunOptions { input?: string; cwd?: string; timeout?: number; allowFailure?: boolean }
+export interface RunOptions { input?: string; cwd?: string; timeout?: number; allowFailure?: boolean; /** GY-3269: the child's whole environment (execFile semantics: it replaces the inherited one), so a check can ask a command exactly what another child would see. */ env?: Record<string, string> }
 
 /**
  * The server image runs `USER node` (uid 1000), and a bind mount keeps the host file's owner
@@ -43,7 +43,7 @@ export interface Transport {
 
 function local(program: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
   return new Promise((accept, reject) => {
-    const child = execFile(program, args, { encoding: 'utf8', cwd: options.cwd, timeout: options.timeout ?? 600_000, maxBuffer: 8_000_000, windowsHide: true }, (error: any, stdout, stderr) => {
+    const child = execFile(program, args, { encoding: 'utf8', cwd: options.cwd, env: options.env, timeout: options.timeout ?? 600_000, maxBuffer: 8_000_000, windowsHide: true }, (error: any, stdout, stderr) => {
       if (!error) return accept({ stdout: String(stdout), stderr: String(stderr), code: 0 });
       const result = { stdout: String(stdout ?? ''), stderr: String(stderr ?? error.message ?? ''), code: Number.isInteger(error.code) ? error.code : 1 };
       if (options.allowFailure) accept(result); else reject(commandFailure(program, result));

@@ -70,6 +70,8 @@ export const installRecordSchema = z.object({
    * record that predates it: that installation keeps the delivery model it had.
    */
   merger: z.enum(['control-plane', 'github']).nullable().default(null),
+  /** GY-3269: the merge writer pushes with the operator's gh login (`--push-auth gh`), so a redeploy asks for it again. */
+  pushAuth: z.literal('gh').optional(),
   /** Legacy full-install marker: a workerless private-server install was not observation-only. The Herdr migration drops it. */
   herdrInstance: z.boolean().optional(),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),

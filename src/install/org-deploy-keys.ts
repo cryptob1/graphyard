@@ -11,5 +11,5 @@ export async function orgDeployKeysPreflight(gh: GitHubCli, repository: string):
   let enabled: unknown;
   try { enabled = JSON.parse((await gh(['api', `orgs/${org}`], { allowFailure: true })).stdout).deploy_keys_enabled_for_repositories; } catch { return null; }
   if (enabled !== false) return null;
-  return { name: 'Organization deploy keys', ok: false, detail: `the ${org} organization disables deploy keys for repositories (deploy_keys_enabled_for_repositories=false), and the merge writer pushes ${repository} with a deploy key`, fix: `HUMAN: an owner of ${org} enables deploy keys under Organization settings → Member privileges → Deploy keys, then rerun; or pipe a repository-scoped fine-grained token (Contents read and write) to 'graphyard up --merge-token-stdin' instead of a deploy key` };
+  return { name: 'Organization deploy keys', ok: false, detail: `the ${org} organization disables deploy keys for repositories (deploy_keys_enabled_for_repositories=false), and the merge writer pushes ${repository} with a deploy key`, fix: `HUMAN: an owner of ${org} enables deploy keys under Organization settings → Member privileges → Deploy keys, then rerun; or run 'graphyard up --push-auth gh' to push with the gh login, or pipe a repository-scoped fine-grained token (Contents read and write) to 'graphyard up --merge-token-stdin' instead of a deploy key` };
 }

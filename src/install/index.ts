@@ -26,6 +26,7 @@ import { herdrPluginBinding } from '../repository-setup.js';
 import { sshOrigin } from '../merger-mode.js';
 import { herdrViaEnv } from '../master/herdr.js';
 import { localTransport, type Transport } from './transport.js';
+import { pushEnvironment } from '../merge-writer/executor.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight } from './loop-unit.js';
@@ -74,6 +75,8 @@ export interface ProfileRequest {
   runtimes: DetectedRuntime[]; herdr: HerdrState;
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
   runHerdr?: (args: string[]) => string;
+  /** GY-3269: the merge writer pushes with the operator's gh login (`--push-auth gh`); master.json records it under run.mergeWriter. */
+  pushAuth?: 'gh';
 }
 
 export interface HerdrChoice { herdr?: 'skip' }
@@ -102,6 +105,7 @@ export function installRequestFromArgs(args: string[]) {
     local: { type: 'boolean' },
     'no-herdr': { type: 'boolean' },
     'observe-only': { type: 'boolean' }, 'merge-token-stdin': { type: 'boolean' },
+    'push-auth': { type: 'string' },
     // GY-3232: retired by GY-3212 and ignored. A pre-GY-3212 deploy watch still passes them when it
     // restarts onto this release; the restarted watch then migrates the install to the main Herdr.
     'herdr-instance': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' },
@@ -116,6 +120,10 @@ export function installRequestFromArgs(args: string[]) {
     if (changes.length) throw new Error(`--observe-only changes nothing the repository owns, so it cannot be combined with ${changes.join(', ')}`);
   }
   if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
+  // GY-3269: the gh login is the alternative to both the deploy key and a piped token — one merge-writer credential.
+  const pushAuth = values['push-auth'];
+  if (pushAuth !== undefined && pushAuth !== 'gh') throw new Error('Use --push-auth gh');
+  if (pushAuth && values['merge-token-stdin']) throw new Error('Choose one merge-writer credential: --push-auth gh (the gh login) or --merge-token-stdin (a fine-grained token)');
   const reviewPolicy = values['review-policy'];
   if (reviewPolicy && reviewPolicy !== 'agent') throw new Error('Use --review-policy agent');
   // A count that silently became NaN would install a control plane with no worker principal
@@ -131,6 +139,7 @@ export function installRequestFromArgs(args: string[]) {
     ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'agent' } : {}),
     ...(values['server-name'] ? { serverName: values['server-name'] } : {}),
     ...(values['merge-token-stdin'] ? { mergeToken: true } : {}),
+    ...(pushAuth ? { pushAuth: 'gh' as const } : {}),
     ...(values['observe-only'] ? { observeOnly: true, herdr: 'skip' as const } : {}) };
   return { values, request };
 }
@@ -156,7 +165,7 @@ export function redeployArguments(record: InstallRecord, image: string, sourceRo
   return ['--repo', record.repository, '--provider', record.provider,
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(record.deployment?.port ? ['--port', String(record.deployment.port)] : []), '--review-policy', 'agent', ...mode, '--image', image,
-    ...(sourceRoot ? ['--source-root', shellWord(sourceRoot)] : []), '--apply'];
+    ...(record.pushAuth ? ['--push-auth', 'gh'] : []), ...(sourceRoot ? ['--source-root', shellWord(sourceRoot)] : []), '--apply'];
 }
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
@@ -319,7 +328,9 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
   }
-  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main' };
+  // A rerun without --push-auth keeps the credential the install recorded, as it keeps the base branch; a piped token replaces it.
+  const pushAuth = rawInputs.pushAuth ?? (rawInputs.mergeToken ? undefined : record?.pushAuth);
+  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main', ...(pushAuth ? { pushAuth } : {}) };
   // A compose server observes submitted heads from the operator's checkout, mounted at /repo; no other provider can mount it.
   const { repoCheckout, repoGitDir } = provider === 'compose' ? composeCheckoutMounts(root) : { repoCheckout: null, repoGitDir: null };
   const transport = dependencies.transport ?? localTransport();
@@ -546,14 +557,52 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
  * scopes `gh` does not list (a fine-grained token) is not refused for scopes it may hold.
  */
 export const GITHUB_CLI_SCOPES = ['repo'] as const;
-export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
+/**
+ * GY-3269: under `--push-auth gh`, `token` is `gh auth token` run in the push child's own
+ * environment (`pushEnvironment`) — where no ambient GH_TOKEN exists and a keyring-stored login
+ * must reach its Secret Service over the session bus. A login the push child cannot read would
+ * fail every fetch and push with an empty password while `gh auth status` in the installer's
+ * fuller shell still passes, so it is refused here. Only its exit code is read; the token it
+ * prints goes nowhere.
+ */
+export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string, pushAuth?: 'gh', token?: { code: number } | null): PreflightItem {
   const needed = [...GITHUB_CLI_SCOPES];
   if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes ${needed.join(',')} (the account must administer ${repository})` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
   const lacking = held ? needed.filter(scope => !held.includes(scope)) : [];
   if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
-  return { name: 'GitHub CLI', ok: true, detail: `authenticated for the deploy key and the release wiring with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}` };
+  if (pushAuth && token && token.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'the gh login answers here, but gh auth token fails in the push child\'s environment: a login kept in the system keyring reaches it only over the session bus, and an ambient GH_TOKEN is not inherited', fix: 'Run the install from a session whose keyring is unlocked (a desktop login), or pipe a fine-grained token instead: --merge-token-stdin' };
+  return { name: 'GitHub CLI', ok: true, detail: pushAuth
+    ? `the merge writer fetches and pushes ${repository} over https with this gh login, whose token reaches git only at the moment of each push`
+    : `authenticated for the deploy key and the release wiring with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}` };
+}
+
+/** The https origin of REPOSITORY, the fetch URL the SAML SSO fix (GY-3269) moves origin to. */
+export const httpsOrigin = (repository: string) => `https://github.com/${repository}.git`;
+/** The OWNER/REPOSITORY an SSH GitHub URL names, or null for any other URL. */
+const sshRepositoryOf = (url: string) => /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)(.+?)(?:\.git)?$/.exec(url)?.[1];
+/** GY-3269: the line of a git output in which the remote refuses with SAML/SSO, or null when it names none. */
+export function samlRefusal(output: string): string | null {
+  for (const raw of output.split('\n')) {
+    const line = raw.trim();
+    if (/\b(?:SAML|SSO|single sign-?on)\b/i.test(line)) return line.slice(0, 300);
+  }
+  return null;
+}
+/**
+ * GY-3269: an SSH fetch of the checkout's origin that the remote refuses with SAML/SSO — the SAML
+ * organization that rejects the operator's personal SSH key. The probe is the fetch direction's own
+ * (deploy-key.ts's `git-receive-pack` probe is the push's): `git-upload-pack` is what a fetch asks
+ * github.com to run over ssh, read through the transport (the host's own ssh in production, BatchMode
+ * so it never prompts). Null when origin does not fetch REPOSITORY over SSH, or the remote answers
+ * anything else: a network failure, a missing key or a plain refusal is not SAML and changes nothing.
+ */
+export async function samlRefusedFetch(root: string, repository: string, transport: Pick<Transport, 'exec'>): Promise<string | null> {
+  const git = (...args: string[]) => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim(); } catch { return ''; } };
+  if (sshRepositoryOf(git('remote', 'get-url', 'origin'))?.toLowerCase() !== repository.toLowerCase()) return null;
+  const probe = await transport.exec('ssh', ['-o', 'BatchMode=yes', 'git@github.com', `git-upload-pack '${repository}.git'`], { allowFailure: true, timeout: 20_000 });
+  return probe.code === 0 ? null : samlRefusal(`${probe.stdout}\n${probe.stderr}`);
 }
 
 /**
@@ -561,13 +610,20 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
  * the control-plane merge writer pushes OWNER/REPO through with the deploy key over SSH alone. Any
  * other URL — the https one `gh repo create --source` leaves behind, most often, or an SSH one
  * naming another repository — fails naming the exact set-url command that fixes it.
+ *
+ * GY-3269: a push URL that is right can still be refused on the fetch side — SAML SSO rejects the
+ * operator's personal SSH key — and that preflight names the pushurl-only fix (https fetch, SSH
+ * push) and `--push-auth gh`, which `--apply` sets (performInstall).
  */
-export function repositoryOriginPreflight(root: string, repository: string): PreflightItem {
+export async function repositoryOriginPreflight(root: string, repository: string, transport: Pick<Transport, 'exec'>): Promise<PreflightItem> {
   const ssh = sshOrigin(repository);
   const git = (...args: string[]) => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim(); } catch { return ''; } };
   const origin = git('remote', 'get-url', '--push', 'origin');
-  const pushed = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)(.+?)(?:\.git)?$/.exec(origin)?.[1];
-  if (pushed?.toLowerCase() === repository.toLowerCase()) return { name: 'Repository', ok: true, detail: `origin pushes to ${origin}, which the merge writer's deploy key pushes over SSH` };
+  if (sshRepositoryOf(origin)?.toLowerCase() === repository.toLowerCase()) {
+    const saml = await samlRefusedFetch(root, repository, transport);
+    if (saml) return { name: 'Repository', ok: true, detail: `origin's SSH fetch of ${repository} is refused with SAML SSO (${saml}); fetch over https and push over SSH instead`, fix: `git remote set-url origin ${httpsOrigin(repository)} && git remote set-url --push origin ${ssh} — install --apply sets both; or reinstall with --push-auth gh, which fetches and pushes over https with the gh login and no deploy key` };
+    return { name: 'Repository', ok: true, detail: `origin pushes to ${origin}, which the merge writer's deploy key pushes over SSH` };
+  }
   // An explicit pushurl is what set-url --push changes; set-url alone changes the url it would keep overriding.
   const flag = git('config', '--get-all', 'remote.origin.pushurl') ? ' --push' : '';
   return { name: 'Repository', ok: false, detail: origin ? `origin pushes to ${origin}, and the merge writer pushes ${repository} with the SSH deploy key alone` : `the checkout names no origin, and the merge writer pushes ${repository} with the SSH deploy key alone`, fix: `git remote set-url${flag} origin ${ssh}` };
@@ -582,6 +638,9 @@ function deployKeyAction(session: InstallSession): PlanAction {
   const { inputs } = session;
   if (inputs.mergeToken) return inputs.observeOnly ? held({ id: 'github.merge-token', target: 'github', title: 'Store the merge writer\'s token' }, 'no token is stored, so the merge writer cannot push')
     : { id: 'github.merge-token', target: 'github', state: existsSync(resolve(session.directory, MERGE_TOKEN_FILE)) ? 'update' : 'create', title: `Store the merge writer's fine-grained token piped to stdin (${resolve(session.directory, MERGE_TOKEN_FILE)}, mode 0600; Contents read/write on ${inputs.repository} only); the merge writer fetches and pushes ${inputs.baseBranch} over https with it, and no deploy key, GitHub App, webhook or branch protection is set up` };
+  // GY-3269: --push-auth gh — the operator's gh login is the merge writer's credential; nothing is generated, registered or stored.
+  if (inputs.pushAuth) return inputs.observeOnly ? held({ id: 'github.push-auth', target: 'github', title: `Push with the operator's gh login` }, 'no master loop is installed to push')
+    : { id: 'github.push-auth', target: 'github', state: 'satisfied', title: `No deploy key: the merge writer fetches and pushes ${inputs.baseBranch} over https with the operator's gh login, whose token answers git's credential prompt at the moment of each push and is never written to disk or handed to any session` };
   const title = 'Generate the merge writer\'s deploy key';
   if (inputs.observeOnly) return held({ id: 'github.deploy-key', target: 'github', title: `${title} and register it on ${inputs.repository}` }, 'no deploy key is generated or registered, so the merge writer cannot push');
   const file = resolve(session.directory, DEPLOY_KEY_FILE);
@@ -594,11 +653,14 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const gh = githubCli(context.transport);
   const observeOnly = !!session.inputs.observeOnly;
   // gh registers the deploy key; observe-only still refuses a signed-out caller (GY-1862). It needs
-  // only the `repo` scope.
-  preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository));
-  if (!observeOnly && !session.inputs.mergeToken) { const orgKeys = await orgDeployKeysPreflight(gh, session.inputs.repository); if (orgKeys) preflight.push(orgKeys); }
-  // GY-2940: the control-plane merge writer pushes this checkout with the deploy key over SSH alone, so an https origin is refused before anything is installed.
-  if (session.delivery.merger === 'control-plane' && !observeOnly) preflight.push(repositoryOriginPreflight(session.root, session.inputs.repository));
+  // only the `repo` scope. Under --push-auth gh the login is itself the merge writer's credential,
+  // so the same check asks `gh auth token` in the push child's environment: a login that answers
+  // `gh auth status` in this fuller shell but not there would push an empty password every cycle.
+  preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository, session.inputs.pushAuth,
+    session.inputs.pushAuth ? await gh(['auth', 'token'], { allowFailure: true, env: pushEnvironment({ pushAuth: 'gh' }) }) : null));
+  if (!observeOnly && !session.inputs.mergeToken && !session.inputs.pushAuth) { const orgKeys = await orgDeployKeysPreflight(gh, session.inputs.repository); if (orgKeys) preflight.push(orgKeys); }
+  // GY-2940: the control-plane merge writer pushes this checkout with the deploy key over SSH alone, so an https origin is refused before anything is installed. GY-3269: under --push-auth gh it pushes the repository's https URL with the gh login, so origin's shape is no longer its credential.
+  if (session.delivery.merger === 'control-plane' && !observeOnly && !session.inputs.pushAuth) preflight.push(await repositoryOriginPreflight(session.root, session.inputs.repository, context.transport));
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
   // before anything is created (GY-1457). The test suite's checkouts are all temporary, so it
   // checks durableCheckoutPreflight directly.
@@ -729,8 +791,8 @@ export interface InstallSummary {
   principals: { id: string; role: string; fingerprint: string; tokenFile: string }[];
   /** The merge writer's deploy key (GY-2010): its private key file; null for --observe-only. */
   deployKey: string | null;
-  /** Which credential the merge writer pushes with (GY-3220); the token's value is never recorded. */
-  mergeCredential: 'deploy-key' | 'token' | null;
+  /** Which credential the merge writer pushes with (GY-3220, GY-3269); a token's value is never recorded. */
+  mergeCredential: 'deploy-key' | 'token' | 'gh' | null;
   health: boolean; status: { actor: string; role: string; repository: string };
   profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
   release: { mode: 'local' | 'release-candidate' | 'per-pr' };
@@ -867,7 +929,18 @@ export async function acquireApplyLock(directory: string, now: number, pauses: A
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
   const log = (line: string) => deps.log(vault.scrub(line));
+  const observeOnly = !!session.inputs.observeOnly;
   await materializeInstall(session);
+
+  // GY-3269: the SAML preflight's fix, applied. An SSH fetch the remote refuses with SAML/SSO keeps
+  // its SSH pushurl — the deploy key pushes over it — and moves the fetch to https, which the
+  // operator's own git credentials serve. Idempotent: once set, the fetch is no longer SSH and the
+  // preflight stops naming it.
+  if (session.delivery.merger === 'control-plane' && !observeOnly && !session.inputs.pushAuth && await samlRefusedFetch(session.root, session.inputs.repository, context.transport)) {
+    await context.transport.exec('git', ['-C', session.root, 'remote', 'set-url', 'origin', httpsOrigin(session.inputs.repository)]);
+    await context.transport.exec('git', ['-C', session.root, 'remote', 'set-url', '--push', 'origin', sshOrigin(session.inputs.repository)]);
+    log(`origin now fetches ${httpsOrigin(session.inputs.repository)} and pushes ${sshOrigin(session.inputs.repository)}: SAML SSO refused the SSH fetch`);
+  }
 
   const observation = await adapter.observe(context);
   log(`Provisioning ${context.provider} for ${session.inputs.repository}`);
@@ -880,18 +953,20 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect the ${context.provider} provider logs.`);
 
   let record = session.record ?? emptyRecord(session, url);
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, pushAuth: session.inputs.pushAuth, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
-  const observeOnly = !!session.inputs.observeOnly;
   const gh = githubCli(context.transport);
-  // The merge writer's deploy key (GY-2010): the only credential Graphyard holds on GitHub.
+  // The merge writer's deploy key (GY-2010): the only credential Graphyard holds on GitHub — unless
+  // the merge writer pushes with a piped token (GY-3220) or the operator's gh login (GY-3269).
   const ensure = deps.ensureDeployKey ?? ((installDir: string, repository: string, cli: GitHubCli) => ensureDeployKey(installDir, repository, cli));
   const token = !observeOnly && session.inputs.mergeToken;
+  const ghLogin = !observeOnly && session.inputs.pushAuth;
   if (token && !deps.mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
   if (token) { await writeMergeToken(session.directory, deps.mergeToken!); log(`Merge writer token stored at ${resolve(session.directory, MERGE_TOKEN_FILE)}`); }
-  const deployKey = observeOnly || token ? null : await ensure(session.directory, session.inputs.repository, gh);
+  const deployKey = observeOnly || token || ghLogin ? null : await ensure(session.directory, session.inputs.repository, gh);
   if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
+  if (ghLogin) log(`The merge writer pushes with the operator's gh login (--push-auth gh); no deploy key is registered`);
 
   const release: InstallSummary['release'] = { mode: session.delivery.policy.mode };
 
@@ -913,7 +988,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
     url,
     principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: tokenFile(session.directory, principal.id) })),
-    deployKey, mergeCredential: observeOnly ? null : token ? 'token' : 'deploy-key',
+    deployKey, mergeCredential: observeOnly ? null : token ? 'token' : ghLogin ? 'gh' : 'deploy-key',
     health, status, profiles, drift: plan.drift,
     nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : nextSteps(session, url, profiles),
     release,
@@ -948,6 +1023,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     reviewPolicy: value('review-policy', inputs.reviewPolicy),
     image: value('image', inputs.image), serverName: value('server-name', inputs.serverName),
     herdr: inputs.herdr === 'skip' ? ['--no-herdr'] : [],
+    pushAuth: inputs.pushAuth ? ['--push-auth', 'gh'] : [],
   };
   return ['graphyard', 'install', ...Object.values(flags).flat(), ...flag('observe-only', inputs.observeOnly), '--apply'].join(' ');
 }
@@ -1074,6 +1150,7 @@ async function registerProfiles(session: InstallSession, url: string): Promise<P
     workerTokens: workerIds.map(principal => ({ principal, token: session.tokens.get(principal)! })),
     runtimes, herdr, workers, reviewers: [], masterKind: master?.kind ?? null,
     ...(deps.runHerdr ? { runHerdr: deps.runHerdr } : {}),
+    ...(session.inputs.pushAuth ? { pushAuth: session.inputs.pushAuth } : {}),
   };
   return deps.registerProfiles ? deps.registerProfiles(request) : (await import('./profiles.js')).registerLocalProfiles(request);
 }
@@ -1104,7 +1181,7 @@ function nextSteps(session: InstallSession, url: string, profiles: ProfileRegist
     `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
     'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it.',
   ];
-  steps.push(`The merge writer trial-merges each submitted head and pushes ${session.inputs.baseBranch} with the deploy key alone; no GitHub App, webhook, pull request or branch protection is involved, and reviews run as control-plane reviewer sessions (graphyard master environments --apply writes their profiles).`);
+  steps.push(`The merge writer trial-merges each submitted head and pushes ${session.inputs.baseBranch} with ${session.inputs.pushAuth ? "the operator's gh login (--push-auth gh)" : 'the deploy key alone'}; no GitHub App, webhook, pull request or branch protection is involved, and reviews run as control-plane reviewer sessions (graphyard master environments --apply writes their profiles).`);
   if (!profiles.workers.length) steps.push('No authenticated agent runtime was found on this machine; sign in to a supported runtime and rerun --apply, or add a worker profile with "graphyard master worker add".');
   if (!session.principals.some(principal => principal.role === 'producer')) steps.push('No proof producer was created. Add one with --producer-proof NAME for each proof that CI may submit; a producer must never be given to an implementation worker.');
   steps.push('Never copy an admin, coordinator, or producer credential into a worker session.');
