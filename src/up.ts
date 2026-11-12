@@ -296,6 +296,8 @@ interface UpState {
    * master loop runs again, the install re-issues every credential and the loop starts a fresh cursor.
    */
   reissue?: string[] | null;
+  /** GY-3269: the merge writer pushes with the gh login (--push-auth gh); a rerun without the flag keeps it, a piped token replaces it. */
+  pushAuth?: 'gh' | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 const knownUpSteps = upSteps as readonly string[];
@@ -482,6 +484,8 @@ export function baseBranchNamespaceRefusal(branch: string): string | null {
 
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
   const state = await readState(deps.root, request);
+  state.pushAuth = request.pushAuth ?? (request.mergeToken === undefined ? state.pushAuth : null) ?? null;
+  request = { ...request, ...(state.pushAuth ? { pushAuth: state.pushAuth } : {}) };
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
@@ -602,7 +606,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   // unless the merge writer pushes with a piped token (GY-3220) or the gh login (GY-3269).
   const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(request.baseBranch ? ['--base-branch', request.baseBranch] : []), ...(request.port ? ['--port', String(request.port)] : []), mode, ...(state.noHerdr ? ['--no-herdr'] : []), ...(request.mergeToken ? ['--merge-token-stdin'] : []), ...(request.pushAuth ? ['--push-auth', 'gh'] : [])];
   const installInput = request.mergeToken ? { stdin: request.mergeToken } : {};
-  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch '${request.baseBranch}'` : ''}${request.port ? ` --port ${request.port}` : ''}${request.agent ? ' --agent' : ''}`;
+  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.baseBranch ? ` --base-branch '${request.baseBranch}'` : ''}${request.port ? ` --port ${request.port}` : ''}${request.pushAuth ? ' --push-auth gh' : ''}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
     if (!deps.gh || !deps.git) throw new UpStop('preflight: control-plane merger needs gh and git on this machine to create the repository when it is missing', upExitCodes.prerequisite);
@@ -892,8 +896,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (!(counts?.loggedIn > 0)) return report ?? null;
       const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
       // Only an absent record means no install here; one that cannot be read or validated stops the run naming it.
-      const settled = await settleWorkerCredentials(directory).catch((error: any) => { throw new UpStop(`accounts: this install's record in ${directory} cannot be read: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard install --repo ${request.repository} --apply to rewrite it, then ${rerun()}`, upExitCodes.failed); });
-      if (settled.missing.length) throw new UpStop(`accounts: ${settled.issued.length ? `issued ${settled.issued.join(', ')}, but ` : ''}this install's worker credentials are missing (${settled.missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
+      const settled = await settleWorkerCredentials(directory).catch((error: any) => { throw new UpStop(`accounts: this install's record in ${directory} cannot be read: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard install --repo ${request.repository}${request.pushAuth ? ' --push-auth gh' : ''} --apply to rewrite it, then ${rerun()}`, upExitCodes.failed); });
+      if (settled.missing.length) throw new UpStop(`accounts: ${settled.issued.length ? `issued ${settled.issued.join(', ')}, but ` : ''}this install's worker credentials are missing (${settled.missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository}${request.pushAuth ? ' --push-auth gh' : ''} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
       if (!settled.issued.length) return report ?? null;
       deps.emit({ kind: 'note', text: `accounts: issued this install's worker credentials (${settled.issued.join(', ')}), so the profiles write makes a worker profile from each.` });
       // The settle just made every configured worker present, so this write issues nothing more.

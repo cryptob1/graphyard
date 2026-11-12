@@ -14,6 +14,7 @@ import { installDirectory, readInstallRecord } from '../src/install/secrets.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema } from '../src/master.js';
+import { recordedUp, runUp, upRequestFromArgs, type UpDependencies } from '../src/up.js';
 
 // GY-3269 AC-1: `install --push-auth gh` makes the operator's gh login the merge writer's
 // credential. Against a git remote that accepts only HTTPS with a token, and a stub gh standing in
@@ -94,6 +95,10 @@ test('e2e:push-with-gh-login — install --push-auth gh --apply registers no dep
     assert.equal((await readInstallRecord(install))?.pushAuth, 'gh');
     assert.equal(requests[0]?.pushAuth, 'gh', 'the profile request master.json records carries the gh login');
     assert.match(resumeCommand(session), /--push-auth gh/);
+    // A rerun without the flag keeps the recorded gh login, as it keeps the base branch.
+    const rerun = await prepareInstall(fixture.root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request, fixture.deps, 'apply');
+    assert.equal(rerun.inputs.pushAuth, 'gh', 'a bare install --apply keeps the recorded --push-auth gh');
+    assert.match(resumeCommand(rerun), /--push-auth gh/);
     for (const surface of [JSON.stringify(plan), JSON.stringify(summary), fixture.commandLines().join('\n'), fixture.transport.commands.map(command => command.input ?? '').join('\n'), [...fixture.transport.files.values()].map(file => file.content).join('\n')]) {
       assert.ok(!surface.includes(TOKEN), `the install surface holds no token: ${surface.slice(0, 200)}`);
     }
@@ -166,4 +171,21 @@ test('integration:push-with-gh-login — preflight asks gh in the push child\'s 
     assert.match(`${check?.detail} ${check?.fix}`, /keyring/);
     await assert.rejects(() => applyInstall(session, plan), /Preflight is incomplete/);
   } finally { await fixture.cleanup(); }
+});
+
+test('integration:push-with-gh-login — a rerun of up without the flag keeps --push-auth gh for every install child', async () => {
+  const root = await temporaryDirectory('push-with-gh-login-up');
+  const runs: string[][] = [];
+  const deps: UpDependencies = {
+    root, emit: () => {}, now: () => 0, sleep: async () => {},
+    serverUrl: async () => 'http://127.0.0.1:4310', masterToken: async () => 'm'.repeat(40), status: async () => null,
+    publishOnboarding: async () => null, landlockAbi: () => 9,
+    cli: async args => { runs.push(args); return args.includes('--plan') ? { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] }) } : { code: 1, stdout: '', stderr: 'the run stops at install' }; },
+    gh: async () => ({ code: 0, stdout: '', stderr: '' }),
+    git: async () => ({ code: 0, stdout: 'git@github.com:owner/project.git', stderr: '' }),
+  };
+  await runUp({ repository: 'owner/project', provider: 'compose', agent: false, master: 'claude', pushAuth: 'gh' }, deps);
+  runs.length = 0;
+  await runUp(upRequestFromArgs([], recordedUp(root)), deps);
+  assert.ok(runs.length > 0 && runs.every(args => args.includes('--push-auth')), `every install child of the rerun carries --push-auth gh: ${JSON.stringify(runs)}`);
 });

@@ -328,7 +328,9 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   if (!detectedBase && existsSync(resolve(root, '.git'))) {
     try { detectedBase = detectedBaseBranch(execFileSync('git', ['-C', root, 'branch', '-r'], { encoding: 'utf8' })) ?? undefined; } catch {}
   }
-  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main' };
+  // A rerun without --push-auth keeps the credential the install recorded, as it keeps the base branch; a piped token replaces it.
+  const pushAuth = rawInputs.pushAuth ?? (rawInputs.mergeToken ? undefined : record?.pushAuth);
+  const inputs = { ...rawInputs, provider, baseBranch: detectedBase ?? 'main', ...(pushAuth ? { pushAuth } : {}) };
   // A compose server observes submitted heads from the operator's checkout, mounted at /repo; no other provider can mount it.
   const { repoCheckout, repoGitDir } = provider === 'compose' ? composeCheckoutMounts(root) : { repoCheckout: null, repoGitDir: null };
   const transport = dependencies.transport ?? localTransport();

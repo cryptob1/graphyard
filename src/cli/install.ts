@@ -86,7 +86,7 @@ export const installCommands = defineCommands([
       '                                --merge-token-stdin pipes a fine-grained token (Contents read/write on the repository) to',
       '                                the install instead of a deploy key, where the organization disables deploy keys.',
       '                                --push-auth gh pushes with the gh login itself: git asks gh auth token at the moment',
-      '                                of each push, so no key or token is ever stored; for SAML organizations, say.',
+      '                                of each push, so no key or token is ever stored (for example, in SAML organizations); a rerun keeps it.',
       '                                --base-branch NAME builds on that branch (default: the repository\'s default branch);',
       '                                a rerun without the flag keeps the branch the install recorded.',
       '                                --port N serves the control plane on 127.0.0.1:N (default: the first free port from',
