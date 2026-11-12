@@ -376,6 +376,12 @@ export function pushEnvironment(credential: string | { deployKeyFile?: string; t
     // environment moved it. These are paths, never credentials.
     ...(environment.GH_CONFIG_DIR ? { GH_CONFIG_DIR: environment.GH_CONFIG_DIR } : {}),
     ...(environment.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: environment.XDG_CONFIG_HOME } : {}),
+    // Since gh 2.24 the login lives in the system keyring whenever a Secret Service exists, and
+    // `gh auth token` reaches it over the session bus: without these two it prints nothing, git
+    // sends an empty password, and every fetch and push fails while `gh auth status` in a fuller
+    // shell still passes. Socket paths, never credentials.
+    ...(environment.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: environment.DBUS_SESSION_BUS_ADDRESS } : {}),
+    ...(environment.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: environment.XDG_RUNTIME_DIR } : {}),
     GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: ghTokenCredentialHelper };
   // GY-3220: a token reaches git only through the askpass helper beside it, which reads the file; the token is never in an argument or URL.
   return tokenFile ? { ...base, GIT_ASKPASS: join(dirname(tokenFile), mergeAskpassName), GRAPHYARD_MERGE_TOKEN_FILE: tokenFile } : { ...base, GIT_SSH_COMMAND: deployKeySshCommand(deployKeyFile!) };

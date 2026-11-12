@@ -26,6 +26,7 @@ import { herdrPluginBinding } from '../repository-setup.js';
 import { sshOrigin } from '../merger-mode.js';
 import { herdrViaEnv } from '../master/herdr.js';
 import { localTransport, type Transport } from './transport.js';
+import { pushEnvironment } from '../merge-writer/executor.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight } from './loop-unit.js';
@@ -554,13 +555,22 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
  * scopes `gh` does not list (a fine-grained token) is not refused for scopes it may hold.
  */
 export const GITHUB_CLI_SCOPES = ['repo'] as const;
-export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string, pushAuth?: 'gh'): PreflightItem {
+/**
+ * GY-3269: under `--push-auth gh`, `token` is `gh auth token` run in the push child's own
+ * environment (`pushEnvironment`) — where no ambient GH_TOKEN exists and a keyring-stored login
+ * must reach its Secret Service over the session bus. A login the push child cannot read would
+ * fail every fetch and push with an empty password while `gh auth status` in the installer's
+ * fuller shell still passes, so it is refused here. Only its exit code is read; the token it
+ * prints goes nowhere.
+ */
+export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string, pushAuth?: 'gh', token?: { code: number } | null): PreflightItem {
   const needed = [...GITHUB_CLI_SCOPES];
   if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes ${needed.join(',')} (the account must administer ${repository})` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
   const lacking = held ? needed.filter(scope => !held.includes(scope)) : [];
   if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
+  if (pushAuth && token && token.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'the gh login answers here, but gh auth token fails in the push child\'s environment: a login kept in the system keyring reaches it only over the session bus, and an ambient GH_TOKEN is not inherited', fix: 'Run the install from a session whose keyring is unlocked (a desktop login), or pipe a fine-grained token instead: --merge-token-stdin' };
   return { name: 'GitHub CLI', ok: true, detail: pushAuth
     ? `the merge writer fetches and pushes ${repository} over https with this gh login, whose token reaches git only at the moment of each push`
     : `authenticated for the deploy key and the release wiring with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}` };
@@ -641,8 +651,11 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const gh = githubCli(context.transport);
   const observeOnly = !!session.inputs.observeOnly;
   // gh registers the deploy key; observe-only still refuses a signed-out caller (GY-1862). It needs
-  // only the `repo` scope. Under --push-auth gh the login is itself the merge writer's credential.
-  preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository, session.inputs.pushAuth));
+  // only the `repo` scope. Under --push-auth gh the login is itself the merge writer's credential,
+  // so the same check asks `gh auth token` in the push child's environment: a login that answers
+  // `gh auth status` in this fuller shell but not there would push an empty password every cycle.
+  preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository, session.inputs.pushAuth,
+    session.inputs.pushAuth ? await gh(['auth', 'token'], { allowFailure: true, env: pushEnvironment({ pushAuth: 'gh' }) }) : null));
   if (!observeOnly && !session.inputs.mergeToken && !session.inputs.pushAuth) { const orgKeys = await orgDeployKeysPreflight(gh, session.inputs.repository); if (orgKeys) preflight.push(orgKeys); }
   // GY-2940: the control-plane merge writer pushes this checkout with the deploy key over SSH alone, so an https origin is refused before anything is installed. GY-3269: under --push-auth gh it pushes the repository's https URL with the gh login, so origin's shape is no longer its credential.
   if (session.delivery.merger === 'control-plane' && !observeOnly && !session.inputs.pushAuth) preflight.push(await repositoryOriginPreflight(session.root, session.inputs.repository, context.transport));
