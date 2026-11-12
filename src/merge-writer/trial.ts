@@ -678,6 +678,12 @@ export interface RunTrialInput {
   secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
   /** GY-2965: the item's `e2e:` proofs; each binds e2e/cases/NAME.json, which the trial runs against the served head. */
   e2eProofs?: readonly string[];
+  /**
+   * GY-3267: the candidate whose bound cases run here (the base-tip run's): the files it adds — its new
+   * cases and their specs — are laid over this checkout before the cases run, so a case new on the
+   * candidate is run against the base tip and keeps its before screenshot.
+   */
+  e2eFrom?: string;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -1114,6 +1120,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (input.e2eProofs?.length) {
       enter('tests');
       enterStep('tests: e2e');
+      if (input.e2eFrom) {
+        const added = String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean);
+        if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom, '--', ...added], { timeoutMs: remaining() });
+      }
       const ran = await containerTrialE2e({
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
         networkWrapper: boundary,

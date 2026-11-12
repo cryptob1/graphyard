@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdir, readFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configHome, installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -205,7 +205,11 @@ export interface GeneralStepContext { url: string; root: string; env: Record<str
 
 /** A command step: pass on exit 0, fail otherwise, keeping failure identity/cause alongside the output tail. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
-  const result = started(await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal }), 'the step\'s command could not start');
+  // GY-3267: a command that drives a browser leaves its screenshots in E2E_SCREENSHOTS_DIR (the Playwright config
+  // captures each test's last page there); the newest is the step's screenshot, kept for the item page.
+  const shots = join(context.artifacts, `${context.session}-shots`);
+  const result = started(await context.run(step.run, [], { cwd: context.root, env: { ...context.env, [screenshotsDirectoryVariable]: shots }, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal }), 'the step\'s command could not start');
+  const screenshot = await newestPng(shots);
   const sanitized = redact(result.output, context.secrets);
   const lines = sanitized.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
   const test = lines.find(line => /^\s*(?:✖ (?!failing tests:)|not ok \d+ - )/.test(line));
@@ -217,7 +221,20 @@ export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>
   const retained = diagnostics.map(line => line.trim().slice(0, 500));
   const output = [...retained, ...tail.slice(-(keptOutputLines - retained.length))];
   const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${diagnostic ? `: ${diagnostic}` : ''}`;
-  return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output }, reason };
+  return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output, ...(screenshot ? { screenshots: [screenshot] } : {}) }, reason };
+}
+
+/** GY-3267: where a command step's browser leaves its screenshots (the Playwright config reads it). */
+export const screenshotsDirectoryVariable = 'E2E_SCREENSHOTS_DIR';
+/** The most recently written PNG anywhere under `directory`; none when it holds none. */
+async function newestPng(directory: string): Promise<string | undefined> {
+  let newest: { file: string; at: number } | undefined;
+  const entries = await readdir(directory, { recursive: true }).catch(() => [] as string[]);
+  for (const name of entries.filter(entry => entry.endsWith('.png'))) {
+    const file = join(directory, name), at = (await stat(file)).mtimeMs;
+    if (!newest || at > newest.at) newest = { file, at };
+  }
+  return newest?.file;
 }
 
 /** The judge's verdict line (GY-2985): the last `VERDICT: SAME|BETTER|WORSE` wins, so its own reasoning never counts; none is no verdict. */

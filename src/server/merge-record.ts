@@ -233,9 +233,10 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
         await appendEvidence(work!, evidence, db);
       }
     }
-    // GY-3267: the trial's kept browser-case screenshots are stored and named on the item for its page, replacing the earlier trial's.
-    if (data.kind === 'trial' && data.outcome === 'verdict' && data.screenshots?.length) {
-      work!.trialScreenshots = { mergeSha: data.mergeSha, baseTip: data.baseTip, at: now.toISOString(), cases: await keepTrialScreenshots(db, work!.id, data.screenshots) };
+    // GY-3267: each verdict trial replaces the earlier trial's kept browser-case screenshots; one that kept none clears them.
+    if (data.kind === 'trial' && data.outcome === 'verdict') {
+      const cases = await keepTrialScreenshots(db, work!.id, data.screenshots ?? []);
+      work!.trialScreenshots = cases.length ? { mergeSha: data.mergeSha, baseTip: data.baseTip, at: now.toISOString(), cases } : null;
     }
     if (kind === 'reconciled') {
       const mergedAt = work!.mergeLedger?.pushedAt ?? now.toISOString();
