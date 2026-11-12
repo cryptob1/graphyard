@@ -9,7 +9,7 @@ import { releaseView, servedFor } from '../../src/model/release';
 import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-stage';
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
-import { BuildLine, Playful } from '../fun';
+import { BuildLine, Playful, ShippedToday } from '../fun';
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
@@ -61,7 +61,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><BuildLine/><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
+    <div className="page-heading"><div><h1>Work</h1><BuildLine/><ShippedToday work={work}/><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
       <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
