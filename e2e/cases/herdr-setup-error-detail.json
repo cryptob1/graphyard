@@ -1,0 +1,9 @@
+{
+  "id": "herdr-setup-error-detail",
+  "title": "A failed Herdr setup step reports Herdr's own error",
+  "description": "A stub herdr that exits 1 printing 'plugin graphyard is disabled': install --apply's failed Herdr setup step line carries that text and the exit code, not a generic refusal with no diagnostic.",
+  "target": "any",
+  "required": false,
+  "secrets": [],
+  "steps": [{ "kind": "command", "name": "The failed step names Herdr's command, exit code and stderr", "run": "node --import tsx tests/helpers/run-tests.ts tests/herdr-setup-error-detail.test.ts", "timeoutSeconds": 300 }]
+}

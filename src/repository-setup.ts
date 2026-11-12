@@ -148,7 +148,14 @@ export async function setupRepository(root: string, input: Connection, options: 
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const instructions = managedInstructions(existing);
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
-    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, null).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
+    try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, null).trim(); }
+    catch (error: any) {
+      // GY-3270: the step's failure line carries Herdr's own error — the command, its exit code and
+      // the last lines of its stderr (a plugin linked but disabled names itself) — never a bare refusal.
+      const tail = String(error?.stderr ?? '').trim().split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 300);
+      const exit = Number.isInteger(error?.status) ? `exited ${error.status}` : `could not run (${error?.code ?? error?.signal ?? 'no exit code'})`;
+      throw new Error(`herdr ${args.join(' ')} ${exit}${tail ? `: ${tail}` : ''}; no credentials were printed. Check the Herdr installation and rerun init.`);
+    }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
   const directory = await localDirectory(connectionRoots(root)[0]);
