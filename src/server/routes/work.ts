@@ -11,6 +11,7 @@ import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanP
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { readTrialScreenshot } from '../trial-screenshots.js';
 import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork, workIdByRef } from '../../store/locked-read.js';
@@ -118,6 +119,16 @@ export const workRoutes = defineRoutes('work', [
       const shot = await readProductScreenshot(services, decodeURIComponent(id), decodeURIComponent(name));
       res.writeHead(200, { 'Content-Type': shot.mediaType, 'Content-Length': shot.bytes.length, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
       res.end(shot.bytes);
+      return Sent;
+    },
+  },
+  // The screenshots a merge trial kept of its browser cases (GY-3267), served to any reader of the item (its panel fetches them).
+  {
+    method: 'GET', path: /^\/api\/work\/([^/]+)\/trial-screenshots\/([^/]+)\/(before|after)$/,
+    async handle({ res, services }, [id, name, side]) {
+      const bytes = await readTrialScreenshot(services, decodeURIComponent(id), decodeURIComponent(name), side as 'before' | 'after');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': bytes.length, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
+      res.end(bytes);
       return Sent;
     },
   },

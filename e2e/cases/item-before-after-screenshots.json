@@ -1,0 +1,16 @@
+{
+  "id": "item-before-after-screenshots",
+  "title": "An item that changes the dashboard shows before and after screenshots of the changed page",
+  "description": "A change to the app is seen from the item page itself (GY-3267): the merge trial's browser run of each bound case keeps its last screenshot on the candidate and on the base tip, and the item page on the served dashboard shows them side by side; an item whose trial ran no browser case shows none. A real control plane and Postgres carry two fixture items through their recorded trials while a real browser holds the dashboard open.",
+  "tags": ["dashboard", "screenshots"],
+  "target": "uat",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the item page shows a browser case's before and after screenshots, and an item with no browser case shows none",
+      "run": "npm run test:browser -- browser-tests/item-before-after-screenshots.spec.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

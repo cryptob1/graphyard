@@ -42,5 +42,19 @@ export const productReviewScreenshots = defineTable({
 );`,
 });
 
+/**
+ * GY-3267: the screenshots a merge trial kept of the browser cases it ran — each case's last
+ * screenshot on the base tip and on the candidate — replaced by each fresh trial record of the
+ * item (server/trial-screenshots.ts `keepTrialScreenshots`) and kept 30 days.
+ */
+export const trialCaseScreenshots = defineTable({
+  name: 'trial_case_screenshots', orderBy: 'work_id,case_name',
+  ddl: `CREATE TABLE IF NOT EXISTS trial_case_screenshots (
+  work_id uuid NOT NULL REFERENCES work_items(id), case_name text NOT NULL, before_bytes bytea, after_bytes bytea,
+  recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY(work_id, case_name)
+);`,
+});
+
 /** The merge writer's tables, registered after the work tables they reference. */
-export const mergesTables = [changeNumbers, itemPreviewFiles, productReviewScreenshots];
+export const mergesTables = [changeNumbers, itemPreviewFiles, productReviewScreenshots, trialCaseScreenshots];

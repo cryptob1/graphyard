@@ -128,6 +128,40 @@ function ProductScreenshot({ item, name, token }: { item: Work; name: string; to
       : <small className="muted">{failed ? `Screenshot ${name} is unavailable` : `Loading screenshot ${name}…`}</small>}
   </figure>;
 }
+/** One kept screenshot of the item's merge trial (GY-3267), read with the session's token. */
+function TrialShot({ item, name, side, sha, token }: { item: Work; name: string; side: 'before' | 'after'; sha: string; token: string }) {
+  const [src, setSrc] = useState<string | null>(null), [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let url: string | null = null, active = true;
+    void fetch(`/api/work/${encodeURIComponent(item.id)}/trial-screenshots/${encodeURIComponent(name)}/${side}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(response => { if (!response.ok) throw new Error(String(response.status)); return response.blob(); })
+      .then(blob => { if (active) setSrc(url = URL.createObjectURL(blob)); }, () => { if (active) setFailed(true); });
+    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+  }, [item.id, name, side, token]);
+  return <figure className="trial-shot">
+    <figcaption>{side === 'before' ? 'Before' : 'After'} · <span className="mono">{sha.slice(0, 8)}</span></figcaption>
+    {src ? <img className="artifact-preview" src={src} alt={`${side} screenshot of case ${name}`}/>
+      : <small className="muted">{failed ? `The ${side} screenshot is no longer kept` : `Loading the ${side} screenshot…`}</small>}
+  </figure>;
+}
+/**
+ * GY-3267: what the merge trial's browser run of each case saw — the base tip before the change
+ * and the candidate with it, side by side, so a change to the app is seen without opening the
+ * install. An item whose trial ran no browser case keeps none, and shows none.
+ */
+export function TrialScreenshotsPanel({ item, token }: { item: Work; token: string }) {
+  const shots = item.trialScreenshots;
+  if (!shots?.cases.length) return null;
+  return <section className="panel" aria-label="Screenshots"><h2>Screenshots <small>the merge trial's browser run, before and after</small></h2>
+    {shots.cases.map(entry => <div className="trial-shots" key={entry.case}>
+      <h3 className="trial-case">{entry.case}</h3>
+      <div className="trial-pair">
+        {entry.before ? <TrialShot item={item} name={entry.case} side="before" sha={shots.baseTip} token={token}/> : null}
+        {entry.after ? <TrialShot item={item} name={entry.case} side="after" sha={shots.mergeSha} token={token}/> : null}
+      </div>
+    </div>)}
+  </section>;
+}
 const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unmeasured } as const;
 /**
  * The item's local preview (GY-1902): its link while it runs, its state and why it ended, the
@@ -270,6 +304,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl> : <p className="muted">{controlPlane ? 'No commit submitted yet.' : 'No pull request yet.'}</p>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
+    <TrialScreenshotsPanel item={item} token={token}/>
     <ProductReviewPanel item={item} token={token}/>
     <HumanChecksPanel item={item} token={token}/>
     <WorkerRunsPanel item={item} token={token}/>
