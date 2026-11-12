@@ -121,7 +121,7 @@ function since(row: WorkerRow, now: number) {
 
 function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
   return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="agent-name"><Agent id={row.principal} master={row.roleKind === 'master'}/></span><Attach row={row} open={() => setSelected(row.workId)}/></th>
+    <th scope="row" data-label="Agent"><span className="agent-name"><Agent id={row.principal} master={row.roleKind === 'master'} detail={`${row.runtime} on ${row.host}`}/></span><Attach row={row} open={() => setSelected(row.workId)}/></th>
     <td data-label="Role">{roleWords[row.roleKind]}</td>
     <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
     <td data-label="Doing now">{doing(row, item, now, release)}</td>

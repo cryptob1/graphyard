@@ -32,9 +32,9 @@ export function friendlyName(id: string): string | null {
   return NAMES[(hash >>> 0) % NAMES.length];
 }
 /** An account as the dashboard names it: its friendly name with the account id on hover, or the id itself with Fun off. */
-export function Agent({ id, master }: { id: string; master?: boolean }) {
+export function Agent({ id, master, detail }: { id: string; master?: boolean; detail?: string }) {
   const fun = useFun(), name = fun ? (master ? 'the Foreman' : friendlyName(id)) : null;
-  return <span className="agent" data-agent={id} title={id}>{name ?? id}</span>;
+  return <span className="agent" data-agent={id} title={detail ? `${id} · ${detail}` : id}>{name ?? id}</span>;
 }
 
 /** A quiet state's line: playful with Fun on, plain with it off. */
