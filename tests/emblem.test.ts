@@ -40,7 +40,7 @@ test('unit:emblem-validation — an emblem is one <svg> root at most 8 KB with n
 });
 
 test('unit:emblem-header — the top bar renders the emblem as an image beside the project name', () => {
-  const html = renderToStaticMarkup(createElement(TopBar, { view: 'work', setView: () => {}, status: { repository: 'owner/night-yard' }, selected: null, features: {} } as unknown as Parameters<typeof TopBar>[0]));
+  const html = renderToStaticMarkup(createElement(TopBar, { view: 'work', setView: () => {}, status: { repository: 'owner/night-yard' }, selected: null, features: {}, work: [], observedAt: 0 } as unknown as Parameters<typeof TopBar>[0]));
   const name = /<p class="project-name"[^>]*>(.*?)<\/p>/.exec(html)![1];
   assert.equal(name, '<img class="project-emblem" src="/favicon.svg" alt=""/>owner/night-yard', 'the emblem img rides beside the project name text, and adds no text of its own');
 });
