@@ -16,6 +16,7 @@ import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
 import type { ComposeServer } from './compose-recovery.js';
 import type { FaultItem } from './control-plane.js';
+import type { MemoryNote } from '../model/project-memory.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** GY-1713: body `error` + zod `issues` so a refusal names the refused field; else stringify. */
@@ -136,6 +137,8 @@ export interface DaemonEffects {
   alertWebhook?: (text: string) => Promise<void>;
   /** GY-3233: files a control-plane fault to the upstream install master.json's `upstream` names. Absent, no upstream is configured. */
   fileUpstream?: (input: FaultItem, key: string) => Promise<{ key?: string } | null>;
+  /** GY-3274: the master lessons recorded in `.graphyard/project-memory.json` since the loop's copy was read; absent, none are adopted. */
+  recordedLessons?: () => Promise<MemoryNote[] | null>;
   /** The release this process loaded, read once at startup. */
   loadedRelease?: LoopRelease | null;
   persist: (state: DaemonState) => Promise<void>;

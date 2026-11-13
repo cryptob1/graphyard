@@ -15,6 +15,8 @@ import { coordinatorCheckoutRoot, promotionCommand, runtimeLoginHomes, workerCon
 import { masterCredentialMask } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
+import { readProjectMemory } from '../project-memory.js';
+import { masterLessonsSection } from '../model/project-memory.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, launchSession } from './launch.js';
 import { type HerdrAgent, herdrSessionPaths, stopCreatedHerdrTab } from './herdr.js';
@@ -265,11 +267,12 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
-    // shared master prompt (GY-898), the same one the loop's launch carries with its handover.
+    // shared master prompt (GY-898), the same one the loop's launch carries with its handover,
+    // with the master's own recorded lessons (GY-3274) after it.
     // The master is confined like every other launched session (GY-1658): its configuration,
     // administration and browser-flow commands run from the coordinator root with the checkout
     // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
-    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)), herdrPaths: herdrSessionPaths(config) } }));
+    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config) + masterLessonsSection(await readProjectMemory(root).catch(() => null)), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)), herdrPaths: herdrSessionPaths(config) } }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

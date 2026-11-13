@@ -7,6 +7,8 @@ export const memoryNoteSchema = z.object({
   text: z.string(),
   by: z.string(),
   at: z.string(),
+  /** A master lesson marked for workers (GY-3274): carried in worker prompts too. */
+  forWorkers: z.boolean().optional(),
 }).strict();
 
 export const memoryChangeSchema = z.object({

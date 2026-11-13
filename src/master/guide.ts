@@ -11,6 +11,8 @@ The master is an AI coordinator, not the loop program. It files work, diagnoses 
 
 Run \`master status\` and act until scoped work is Done or blocked and serving is healthy. Review/rework/proof setup are work to advance. Status reports items, queue, sessions and capacity. Serving belongs to the managed repository; no deployment reads \`unconfigured\`.
 
+The master keeps its own lessons: after resolving a recurring fault, a refused command, or an owner correction, record one lesson with \`master lesson add TEXT\` — \`--for workers\` when the workers it dispatches should see it too — and prune with \`master lesson remove ID\` the lessons that stopped being true. Every master launch prompt carries what remains, newest first, so a lesson is written once instead of relearned.
+
 Optional item \`owner\` names a human, separate from the worker lease. Set with create/requirements; null returns ownership to the install. \`master init --for PERSON --token-stdin\` registers a personal master without another supervisor. It creates/dispatches that person's items; the install master handles unowned work. Capacity and merge writer stay shared. Work → Now shows personal work; Work shows all.
 
 ## The loop

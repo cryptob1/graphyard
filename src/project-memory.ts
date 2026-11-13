@@ -1,14 +1,26 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { emptyProjectMemory, updateProjectMemoryFromWork, type ProjectMemory } from './model/project-memory.js';
+import { emptyProjectMemory, masterLessons, updateProjectMemoryFromWork, type MemoryNote, type ProjectMemory } from './model/project-memory.js';
 import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
 
-export { emptyProjectMemory, isNoteRoleRelevant, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordNoteInMemory, retainedMemoryChanges, retainedMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type SessionRole } from './model/project-memory.js';
+export { emptyProjectMemory, isNoteRoleRelevant, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterLessons, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type SessionRole } from './model/project-memory.js';
 export { projectMemorySchema } from './model-boundary/project-memory.js';
 
 export const projectMemoryPath = (root: string) => resolve(root, '.graphyard', 'project-memory.json');
+
+/**
+ * The master lessons recorded in `.graphyard/project-memory.json`, or null when that file is absent
+ * or unreadable (GY-3274): the master session writes them directly, so the loop reads them back
+ * from the file rather than trusting its own older copy.
+ */
+export async function recordedMasterLessons(root: string): Promise<MemoryNote[] | null> {
+  try {
+    const raw = await readFile(projectMemoryPath(root), 'utf8');
+    return masterLessons(projectMemorySchema.parse(JSON.parse(raw)));
+  } catch { return null; }
+}
 
 export async function readProjectMemory(root: string): Promise<ProjectMemory> {
   const file = projectMemoryPath(root);

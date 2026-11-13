@@ -1,0 +1,15 @@
+{
+  "id": "master-lessons",
+  "title": "The master keeps durable lessons it reads on every launch",
+  "description": "Runs the real master-session launch against the executable credential-free runtime fixture through a stub Herdr, after `master lesson add` recorded lessons in project memory: the next launch prompt contains them, a lesson added --for workers reaches a worker's prompt and one without it does not, the 41st lesson drops the oldest, remove deletes by id, and a worker identity is refused. No provider credentials, accounts or network.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master lessons recorded, carried and bounded",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-lessons.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

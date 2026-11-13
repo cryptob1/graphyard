@@ -40,6 +40,7 @@ import { batchGateStep } from './cycle-batch-gate.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
+import { reconcileMasterLessons } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
@@ -165,6 +166,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle).then(() => batchGateStep(cycle)));
   if (own) { await launches.idle(); performed.push(...launches.drain()); }
   await step('persist', async () => {
+    // GY-3274: lessons the master session recorded straight to the file are adopted from it — the
+    // file is their truth — before the cycle's own answers and merges join them.
+    if (effects.recordedLessons) state.projectMemory = reconcileMasterLessons(state.projectMemory, await effects.recordedLessons());
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);

@@ -6,6 +6,12 @@ export const retainedMemoryNotes = 20;
 export const retainedMemoryChanges = 30;
 export const recentChangesWindowMs = 24 * 3_600_000;
 export const projectMemoryWordBudget = 500;
+/** The master's own lessons (GY-3274): notes of this kind the master records and every master launch prompt carries. */
+export const masterLessonKind = 'master-lesson';
+export const retainedMasterLessons = 40;
+export const masterLessonCharacterLimit = 300;
+/** The stored lessons' total stays under this many words, by dropping the oldest. */
+export const masterLessonWordTotal = 1200;
 export type MemoryNote = z.infer<typeof memoryNoteSchema>;
 export type MemoryChange = z.infer<typeof memoryChangeSchema>; // not strict: a memory written before GY-2873 carries `pitfalls`, and one before GY-2874 its retired records, which parsing drops
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
@@ -26,14 +32,66 @@ export function isNoteRoleRelevant(note: MemoryNote, role: SessionRole): boolean
   return noteRoles[role]?.includes(note.kind.toLowerCase()) ?? true;
 }
 
+/** The master's lessons in a memory, newest first. */
+export function masterLessons(memory: ProjectMemory | null | undefined): MemoryNote[] {
+  return (memory?.notes ?? []).filter(note => note.kind === masterLessonKind).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+}
+
+/** Newest-first notes with each kind's own retention: `retainedMemoryNotes` ordinary notes, `retainedMasterLessons` master lessons. */
+export function boundMemoryNotes(notes: MemoryNote[]): MemoryNote[] {
+  let lessons = 0, ordinary = 0;
+  return [...notes].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .filter(note => note.kind === masterLessonKind ? lessons++ < retainedMasterLessons : ordinary++ < retainedMemoryNotes);
+}
+
 /** Record a note in project memory, newest first, replacing one with the same id. */
 export function recordNoteInMemory(memory: ProjectMemory, note: MemoryNote): boolean {
   const entry: MemoryNote = { ...note, text: note.text.trim() };
-  memory.notes = [entry, ...memory.notes.filter(n => n.id !== entry.id)]
-    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-    .slice(0, retainedMemoryNotes);
+  memory.notes = boundMemoryNotes([entry, ...memory.notes.filter(n => n.id !== entry.id)]);
   memory.updatedAt = memory.notes[0]?.at ?? entry.at;
   return true;
+}
+
+/** Record one of the master's own lessons (GY-3274): a short note the next master launch prompt carries. */
+export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at?: string; forWorkers?: boolean }): MemoryNote {
+  const text = input.text.trim();
+  if (!text) throw new Error('A lesson needs its text');
+  if (text.length > masterLessonCharacterLimit) throw new Error(`A lesson is at most ${masterLessonCharacterLimit} characters and this one is ${text.length}: ${text.slice(0, 120)}…`);
+  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at ?? new Date().toISOString(), ...(input.forWorkers ? { forWorkers: true } : {}) };
+  recordNoteInMemory(memory, note);
+  // The stored total stays under the word budget, dropping the oldest lessons first.
+  while (memory.notes.filter(entry => entry.kind === masterLessonKind).length > 1
+    && docsWords(masterLessons(memory).map(lesson => lesson.text).join(' ')) >= masterLessonWordTotal) {
+    const oldest = masterLessons(memory).at(-1)!;
+    memory.notes = memory.notes.filter(entry => entry.id !== oldest.id);
+  }
+  return note;
+}
+
+/** Delete one of the master's lessons by id. */
+export function removeMasterLesson(memory: ProjectMemory, id: string): MemoryNote {
+  const lesson = masterLessons(memory).find(note => note.id === id);
+  if (!lesson) throw new Error(`No master lesson ${id}`);
+  memory.notes = memory.notes.filter(note => note.id !== id);
+  return lesson;
+}
+
+/**
+ * Adopt the file's master lessons into the loop's copy (GY-3274): the master session records them
+ * straight to `.graphyard/project-memory.json`, so the file — never the loop's older copy — is their
+ * truth, additions and removals alike. `null` (no readable file) changes nothing.
+ */
+export function reconcileMasterLessons(memory: ProjectMemory, lessons: MemoryNote[] | null): ProjectMemory {
+  if (!lessons) return memory;
+  memory.notes = boundMemoryNotes([...lessons, ...memory.notes.filter(note => note.kind !== masterLessonKind)]);
+  return memory;
+}
+
+/** The master's lessons as its own launch prompt carries them, newest first. */
+export function masterLessonsSection(memory: ProjectMemory | null | undefined): string {
+  const lessons = masterLessons(memory);
+  if (!lessons.length) return '';
+  return `Master lessons, your own recorded experience, newest first: ${lessons.map(lesson => `- ${lesson.text}`).join(' ')} `;
 }
 
 /** Record a verified merge in project memory. */
@@ -88,13 +146,16 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (!memory) return '';
   const budget = options?.wordBudget ?? projectMemoryWordBudget;
 
-  // Role-relevant notes first, then newest
-  const notes = [...memory.notes].sort((a, b) => {
+  // Role-relevant notes first, then newest; the master's lessons reach a role only through their
+  // own section below (a worker sees those marked for it, no other role sees any), never as notes.
+  const notes = memory.notes.filter(note => note.kind !== masterLessonKind).sort((a, b) => {
     const aRel = isNoteRoleRelevant(a, role) ? 1 : 0;
     const bRel = isNoteRoleRelevant(b, role) ? 1 : 0;
     if (aRel !== bRel) return bRel - aRel;
     return Date.parse(b.at) - Date.parse(a.at);
   });
+  // The lessons the master marked for the workers it dispatches (GY-3274); no other role reads them.
+  const lessons = role === 'worker' ? masterLessons(memory).filter(lesson => lesson.forWorkers) : [];
 
   // Filter changes: if baseSha provided, those since session base (or all recent in window)
   const baseSha = options?.baseSha;
@@ -105,7 +166,7 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (baseMerge) changes = changes.filter(c => c.sha !== baseMerge.sha && Date.parse(c.mergedAt) > Date.parse(baseMerge.mergedAt));
   changes.sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 
-  if (!notes.length && !changes.length) return '';
+  if (!notes.length && !changes.length && !lessons.length) return '';
 
   const parts: string[] = ['Shared project memory:'];
 
@@ -135,6 +196,18 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
       // GY-1125 follow-up finding 5: continue to allow later shorter notes to be considered
     }
     if (noteLines.length) parts.push('Recent notes:', noteLines.join(' '));
+  }
+
+  // The master's lessons for workers, newest first, inside the same budget
+  if (lessons.length) {
+    const lessonLines: string[] = [];
+    for (const lesson of lessons) {
+      const line = `- ${lesson.text}`;
+      const candidate = [...parts, 'Master lessons for workers:', ...lessonLines, line].join(' ');
+      if (docsWords(candidate) > budget) continue;
+      lessonLines.push(line);
+    }
+    if (lessonLines.length) parts.push('Master lessons for workers:', lessonLines.join(' '));
   }
 
   // Add merges since base
