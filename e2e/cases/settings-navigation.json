@@ -1,0 +1,9 @@
+{
+  "id": "settings-navigation",
+  "title": "Settings holds configuration; everyday pages sit beside the work",
+  "description": "At 1280px and 390px a served dashboard shows Product under Master, Costs under Workers and Test cases under Tests, never in Settings; Settings reaches Agents, Setup and, behind an Advanced fold, Operator automation by click and by keyboard; #setup still opens Setup; readers and workers gain no configuration controls; the phone menu neither clips nor scrolls sideways.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Navigate everyday and configuration pages", "run": "npm run test:browser -- browser-tests/settings-navigation.spec.ts", "timeoutSeconds": 300 }]
+}

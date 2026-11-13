@@ -42,7 +42,9 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     const masterToken = 'browser-master-token-long-enough-123456789';
     await page.route('**/api/**', async route => {
       const { pathname, search } = new URL(route.request().url());
-      await route.fulfill({ response: await route.fetch({ url: url + pathname + search }) });
+      // A dashboard poll still in flight when the test tears the server down is answered by nobody.
+      const response = await route.fetch({ url: url + pathname + search }).catch(() => null);
+      await (response ? route.fulfill({ response }) : route.abort()).catch(() => {});
     });
     await page.goto('/?sign-in');
     await page.getByLabel('Access token').fill('browser-operator');

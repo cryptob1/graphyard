@@ -41,7 +41,7 @@ async function sidebarEntry(page: Page, entry: string) {
   if (page.viewportSize()!.width <= 650 && await menu.getAttribute('aria-expanded') !== 'true') await menu.click();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: entry, exact: true }).click();
 }
-async function openPage(page: Page, section: 'Shipped' | 'Settings', tab: string) {
+async function openPage(page: Page, section: 'Shipped' | 'Tests' | 'Settings', tab: string) {
   await sidebarEntry(page, section);
   await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
 }
@@ -131,7 +131,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   test(`the release line and the section tabs share the top bar on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await fixture(page); await login(page);
-    await openPage(page, 'Settings', 'Test cases');
+    await openPage(page, 'Tests', 'Test cases');
     const line = page.locator('.release-line');
     const tabs = page.getByRole('navigation', { name: 'Pages in this section' });
     await expect(line).toBeVisible();
@@ -272,7 +272,7 @@ test('both dialogs move, trap, and restore focus and close with Escape; an item 
   await cardSelect(page).click(); await page.getByRole('button', { name: '← Back' }).click();
   await expect(workHeading(page)).toBeVisible();
   await checkDialog(page, page.getByRole('button', { name: '＋ New work item' }));
-  await openPage(page, 'Settings', 'Test cases');
+  await openPage(page, 'Tests', 'Test cases');
   await checkDialog(page, page.getByRole('button', { name: '＋ New test case' }));
   expect(state.writes).toBe(0);
 });
@@ -285,7 +285,7 @@ test('reader has no creation controls; graph filters and search still work', asy
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
   await page.getByLabel('Search work').fill('GY-1');
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
-  await openPage(page, 'Settings', 'Test cases');
+  await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Test-case library' })).toBeVisible();
   await expect(page.getByRole('button', { name: '＋ New test case' })).toHaveCount(0);
 });
@@ -444,7 +444,7 @@ test('scenario loading, failure, retry and real empty library are distinct', asy
     await pending;
     return route.fulfill(failing ? { status: 503, json: { error: 'Runner catalog unavailable' } } : { json: [] });
   });
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByRole('status')).toHaveText('Loading test cases…');
   await expect(page.getByText('Describe the behavior you need to prove.')).toHaveCount(0);
   release(); await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -470,7 +470,7 @@ test('a failed re-read keeps already-observed test cases visible and marks them 
   await fixture(page); let reads = false;
   await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
     : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [savedScenario] }));
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
   await publishCase(page, 'published-case');
   await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -483,7 +483,7 @@ test('a failed re-read reports unknown contents instead of claiming an empty or 
   await fixture(page); let reads = false;
   await page.route('**/api/scenarios', route => route.request().method() === 'POST' ? (reads = true, route.fulfill({ json: savedScenario }))
     : reads ? route.fulfill({ status: 503, json: { error: 'Runner catalog unavailable' } }) : route.fulfill({ json: [] }));
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'published-case');
   await expect(page.getByRole('alert')).toContainText('unavailable');
@@ -497,7 +497,7 @@ test('a rejected publish never reports the library as unread or stale', async ({
   await fixture(page);
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [savedScenario] }));
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByRole('heading', { name: 'Saved case' })).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
@@ -512,7 +512,7 @@ test('a rejected publish leaves a confirmed empty library reported as empty', as
   await fixture(page);
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: [] }));
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');
@@ -528,7 +528,7 @@ test('a publish error is not carried into the next form', async ({ page }) => {
   await page.route('**/api/scenarios', route => route.request().method() === 'POST'
     ? (reject ? route.fulfill({ status: 400, json: { error: 'Stable ID exceeds 100 characters' } }) : route.fulfill({ json: savedScenario }))
     : route.fulfill({ json: [] }));
-  await login(page); await openPage(page, 'Settings', 'Test cases');
+  await login(page); await openPage(page, 'Tests', 'Test cases');
   await expect(page.getByText('Describe the behavior you need to prove.')).toBeVisible();
   await publishCase(page, 'rejected-case');
   await expect(page.getByRole('alert')).toContainText('Stable ID exceeds 100 characters');

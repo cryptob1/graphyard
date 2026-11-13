@@ -52,20 +52,23 @@ async function open(page: Page, errors: string[]) {
   await expect(page.getByRole('heading', { name: 'Work', level: 1 })).toBeVisible();
 }
 
-async function openSettings(page: Page, tab: string, phone: boolean) {
+async function openSettings(page: Page, tab: string, phone: boolean, section = 'Settings') {
   const menu = page.getByRole('button', { name: 'Menu' });
   if (phone && await menu.getAttribute('aria-expanded') !== 'true') await menu.click();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: section, exact: true }).click();
+  const tabs = page.getByRole('navigation', { name: 'Pages in this section' });
+  // Operator automation sits behind the Settings tab row's Advanced fold (GY-3297).
+  if (tab === 'Operator automation') await tabs.getByText('Advanced', { exact: true }).click();
+  await tabs.getByRole('button', { name: tab, exact: true }).click();
 }
 
 // A UUID, or a JSON object or array printed as text.
 const internalId = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 const rawJson = /[{[]\s*"[^"]+"\s*:/;
 const pages = [
-  { tab: 'Agents', heading: 'Agents' },
-  { tab: 'Test cases', heading: 'Test-case library' },
-  { tab: 'Operator automation', heading: 'Operator automation' },
+  { tab: 'Agents', heading: 'Agents', section: 'Settings' },
+  { tab: 'Test cases', heading: 'Test-case library', section: 'Tests' },
+  { tab: 'Operator automation', heading: 'Operator automation', section: 'Settings' },
 ] as const;
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }] as const) test(`unit:settings-pages-browser-check — the Agents, settings and automation pages use the shared layout, hide raw JSON and internal ids until expanded, and fit ${viewport.width}px with no console error`, async ({ page }) => {
@@ -73,12 +76,12 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   const errors: string[] = [];
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
   await open(page, errors);
-  for (const { tab, heading } of pages) {
-    await openSettings(page, tab, viewport.name === 'phone');
+  for (const { tab, heading, section } of pages) {
+    await openSettings(page, tab, viewport.name === 'phone', section);
     const main = page.getByRole('main');
     await expect(main.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
-    // The shared layout: the page header with its place in Settings, and a heading block.
-    await expect(main.locator('header .breadcrumb')).toContainText(/^Settings\s*\/\s*/);
+    // The shared layout: the page header with its place in its section, and a heading block.
+    await expect(main.locator('header .breadcrumb')).toContainText(new RegExp(`^${section}\\s*/\\s*`));
     await expect(main.locator('.page-heading h1')).toHaveCount(1);
     await page.waitForTimeout(200);
     // No sideways scroll at this width.
