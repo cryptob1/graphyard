@@ -18,9 +18,9 @@ const [mode, id, root, scratch] = process.argv.slice(2) as [string, string, stri
 const project = process.env.FIXTURE_PROJECT!, log = process.env.RUN_LOG!;
 const body = async () => {
   appendFileSync(log, `start ${id}\n`);
-  // A held job runs until its gate file appears; every other job runs for a moment.
+  // A held job runs until its gate file appears; every other job runs until the test says go, and a moment more.
   if (mode === 'hold') while (!existsSync(join(scratch, `gate-${id}`))) await new Promise(done => setTimeout(done, 20));
-  else await new Promise(done => setTimeout(done, 400));
+  else { while (!existsSync(process.env.RUN_GO!)) await new Promise(done => setTimeout(done, 20)); await new Promise(done => setTimeout(done, 200)); }
   appendFileSync(log, `end ${id}\n`);
 };
 const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

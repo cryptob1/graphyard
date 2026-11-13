@@ -22,17 +22,18 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 
 /** One host: a data directory two fixture installs share, each install its own repository, managed root and project. */
 async function host() {
-  const scratch = await temporaryDirectory('heavy-budget'), data = join(scratch, 'data'), log = join(scratch, 'runs.log');
+  const scratch = await temporaryDirectory('heavy-budget'), data = join(scratch, 'data'), log = join(scratch, 'runs.log'), go = join(scratch, 'go');
   writeFileSync(log, '');
   const installs = ['acme/app', 'acme/site'].map(project => {
     const root = join(scratch, project.replace('/', '-')), managed = join(scratch, `${project.replace('/', '-')}-managed`);
     mkdirSync(join(root, 'site'), { recursive: true }); mkdirSync(managed);
     // The session's commands: each script is the recorded job, and one run with NESTED starts another heavy command through the wrappers.
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { 'test:affected': 'node job.mjs', build: 'node job.mjs', 'build:nested': 'node job.mjs nested' } }));
-    writeFileSync(join(root, 'job.mjs'), `import { appendFileSync } from 'node:fs'; import { execFileSync } from 'node:child_process';
+    writeFileSync(join(root, 'job.mjs'), `import { appendFileSync, existsSync } from 'node:fs'; import { execFileSync } from 'node:child_process';
 const nested = process.argv[2] === 'nested', id = (nested ? 'nested-' : '') + process.env.JOB_ID;
 appendFileSync(process.env.RUN_LOG, 'start ' + id + '\\n');
-await new Promise(done => setTimeout(done, nested ? 50 : 400));
+if (nested) await new Promise(done => setTimeout(done, 50));
+else { while (!existsSync(process.env.RUN_GO)) await new Promise(done => setTimeout(done, 20)); await new Promise(done => setTimeout(done, 200)); }
 if (!nested && process.env.NESTED) execFileSync(${JSON.stringify(join(verificationBin, 'npm'))}, ['run', 'build:nested'], { stdio: 'inherit' });
 appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
     writeFileSync(join(root, 'site', 'index.html'), '<h1>Site</h1>');
@@ -42,7 +43,7 @@ appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
     git(root, 'init', '-q', '-b', 'main'); git(root, 'add', '-A'); git(root, 'commit', '-qm', 'fixture');
     return { project, root, managed };
   });
-  const base = { PATH: process.env.PATH, HOME: process.env.HOME, GRAPHYARD_DATA_HOME: data };
+  const base = { PATH: process.env.PATH, HOME: process.env.HOME, GRAPHYARD_DATA_HOME: data, RUN_GO: go };
   const started: { id: string; project: string; child: ChildProcess; stderr: () => string; closed: Promise<number | null> }[] = [];
   after(() => { for (const job of started) job.child.kill('SIGKILL'); });
   const track = (id: string, project: string, child: ChildProcess) => {
@@ -54,6 +55,8 @@ appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
   };
   return {
     scratch, data, log, installs, started, directory: hostHeavyJobsDirectory(base),
+    /** Jobs run until this: a test that counts who waits lets every process reach the budget first, however slowly the host starts them. */
+    go: () => writeFileSync(go, ''),
     /** A worker session's command, typed as the session types it: through the wrappers its harness puts first on PATH. */
     session: (install: typeof installs[number], id: string, script: string, nested = false) => track(id, install.project, spawn('npm', ['run', script],
       { cwd: install.root, stdio: ['ignore', 'ignore', 'pipe'], env: { ...base, ...verificationEnvironment(install.project, base), RUN_LOG: log, JOB_ID: id, ...(nested ? { NESTED: '1' } : {}) } })),
@@ -88,6 +91,11 @@ test('e2e:host-heavy-budget — two installs on one host launch nine heavy jobs 
     fixture.launch(app, 'trial', 'GY-1'), fixture.launch(site, 'trial', 'GY-2'), fixture.launch(app, 'gate', 'gate-app'),
     fixture.launch(site, 'check', 'GY-3'), fixture.launch(app, 'preview', 'preview-app'), fixture.launch(site, 'deploy', 'deploy-site'), fixture.launch(app, 'deploy', 'deploy-app'),
   ];
+  // Every process reaches the budget before any job ends: two run, and the other seven say what they wait for.
+  const waiting = /waits for a host heavy-job slot|waiting for a host heavy-job slot/;
+  await until(() => fixture.events().length + jobs.filter(job => waiting.test(job.stderr())).length >= jobs.length, 'all nine run or wait');
+  assert.equal(fixture.events().length, 2, `two run while seven wait: ${JSON.stringify(fixture.events())}`);
+  fixture.go();
   const codes = await Promise.all(jobs.map(job => job.closed));
   assert.deepEqual(codes, jobs.map(() => 0), jobs.map(job => `${job.id}: ${job.stderr()}`).join('\n'));
   const events = fixture.events(), ids = ['affected-app', 'build-site', 'GY-1', 'GY-2', 'gate-app', 'GY-3', 'preview-app', 'deploy-site', 'deploy-app'];
@@ -99,8 +107,8 @@ test('e2e:host-heavy-budget — two installs on one host launch nine heavy jobs 
     assert.deepEqual(order, [`start ${id}`, `start nested-${id}`, `end nested-${id}`, `end ${id}`]);
   }
   // A job that waited said what it waits for and which jobs of which projects hold it — the other install's among them.
-  const waits = jobs.flatMap(job => job.stderr().split('\n').filter(line => /waits for a host heavy-job slot|waiting for a host heavy-job slot/.test(line)).map(line => ({ job, line })));
-  assert.ok(waits.length >= 7, `seven of nine waited: ${waits.length}`);
+  const waits = jobs.flatMap(job => job.stderr().split('\n').filter(line => waiting.test(line)).map(line => ({ job, line })));
+  assert.equal(new Set(waits.map(({ job }) => job.id)).size, 7, `seven of nine waited: ${waits.map(({ job }) => job.id).join(', ')}`);
   for (const { line } of waits) assert.match(line, /held by .+\(acme\/(app|site)\)/);
   assert.ok(waits.some(({ job, line }) => line.includes(`(${job.project === 'acme/app' ? 'acme/site' : 'acme/app'})`)), 'a waiter names a holder of the other project');
   assert.ok(waits.some(({ line }) => line.includes('every Graphyard project on this host shares 2 at once') && line.includes(join(fixture.directory, 'limit'))), 'and the shared limit, with where it is set');
@@ -111,6 +119,7 @@ test('e2e:host-heavy-budget — nested heavy work under a limit of one runs on i
   const fixture = await host(), [app] = fixture.installs;
   mkdirSync(fixture.directory, { recursive: true });
   writeFileSync(join(fixture.directory, 'limit'), '1\n');
+  fixture.go();
   const job = fixture.session(app, 'affected-app', 'test:affected', true);
   assert.equal(await job.closed, 0, job.stderr());
   assert.doesNotMatch(job.stderr(), /waits for a host heavy-job slot/);

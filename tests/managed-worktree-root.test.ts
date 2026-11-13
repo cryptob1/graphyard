@@ -111,7 +111,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = launchOf(produceCalls).args;
-    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
+    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', hostHeavyJobsDirectory()], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
     assert.equal(launchOf(produceCalls).stem, join(produced.checkout, `.graphyard/launch/${produced.agentName}`), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
@@ -125,7 +125,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), reviewStart.indexOf('--skip-git-repo-check')), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), reviewStart.indexOf('--skip-git-repo-check')), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', hostHeavyJobsDirectory()], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
     assert.ok(reviewStart.at(-1)!.includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
@@ -269,7 +269,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const refused = await launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { headless: async () => { throw new Error('model spawn failed'); }, run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
     await failedReview(root, refused.review);
 
-    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'every resolved or failed launch is gone from the root');
 
     // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
     const live = await produce('GY-111');
@@ -290,8 +290,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     gone(live.checkout);
     const last = await allocateSessionCheckout(managed, 'proof', 'GY-115', H, randomUUID());
     await removeSessionCheckout(root, managed, last.directory);
-    assert.deepEqual(await readdir(managed), ['.verification-slots'], 'an installation with no session leaves nothing behind but the host verification lock directory (GY-612)');
-    assert.deepEqual(await readdir(join(managed, '.verification-slots')), [], 'and that holds no slot');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'an installation with no session leaves nothing behind: the host lock directory lives outside the root (GY-3290)');
   } finally { await cleanup(); }
 });
 
@@ -423,7 +422,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
     const failed = await failedReview(root, refused.review);
     assert.match(failed.resolution!, /No space left on device/);
 
-    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'no checkout is left behind');
   } finally { await cleanup(); }
 
   // And the loop records it that way: an action that failed for want of room carries its own
