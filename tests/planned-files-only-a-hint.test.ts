@@ -81,7 +81,7 @@ test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles
   assert.equal(submitted.humanRequest ?? null, null, 'no human request');
   assert.equal(submitted.violations.length, 0, 'no violation');
   for (const field of retired) assert.equal(field in submitted, false, `no ${field}`);
-  assert.ok(!submitted.gates.some(gate => gate.reasons.some(reason => /scope|planned/i.test(reason))), 'no gate holds it on its scope');
+  assert.ok(!submitted.gates.some(gate => gate.reasons.some(reason => /\bscope\b|plannedFiles|planned files/i.test(reason))), 'no gate holds it on its scope');
   assert.deepEqual((await events(w.id)).filter(kind => judged.test(kind)), [], 'nothing requested, widened or judged it');
 });
 

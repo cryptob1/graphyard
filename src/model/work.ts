@@ -83,7 +83,7 @@ export interface Observation {
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   /** Pull-request-era check runs; the control plane records none (`checks: []`) and no gate reads them. */
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[];
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; source?: string; baseSha?: string }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); baseSha: the base a control-plane verdict judged against, its launch's baseTip (GY-2948 AC-2)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; source?: string; baseSha?: string; policyRevision?: number }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); baseSha: the base a control-plane verdict judged against, its launch's baseTip (GY-2948 AC-2)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   /** A pull-request-era conflict reading; the control plane's own test merge decides conflicts (model/base-refresh.ts). */
   conflicting?: boolean;

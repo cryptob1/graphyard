@@ -75,7 +75,7 @@ test('unit:product-review-gates-features — a feature head with passing proofs 
   const done = { ...feature('GY-12'), productReview: review('approved') } as Work;
   assert.equal(reviewGate(done).passed, true);
   // With the merge writer's trial and push recorded and its proof passed, a bug merges with no product review at all.
-  const bug = { ...feature('GY-13'), type: 'bug', mergeLedger: { head: H, baseTip: B, state: 'reconciled', pushedAt: at },
+  const bug = { ...feature('GY-13'), type: 'bug', mergeLedger: { head: H, baseTip: B, state: 'reconciled', pushedAt: at, trial: { head: H, proofs: { 'e2e:feature-works': { executed: 1, failed: 0 } } } },
     evidence: [{ id: 'e1', proof: 'e2e:feature-works', sha: H, baseSha: B, policyRevision: 1, producer: 'merge-trial', trusted: true, result: 'pass', executed: 1, skipped: 0, at }] } as unknown as Work;
   const judged = evaluate(bug, [bug], new Date());
   assert.deepEqual(judged.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'a bug item merges without a product review');

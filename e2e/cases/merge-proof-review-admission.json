@@ -1,0 +1,8 @@
+{
+  "id": "merge-proof-review-admission",
+  "title": "Merge admission requires criterion proofs and a recorded independent review",
+  "description": "Exercises the merge writer and transactional control plane with sensitive items, stale cached gates, wrong evidence bindings, carried approval provenance, and read-only historical audit coverage.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Missing proof and review cannot land", "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-proof-review-admission.test.ts", "timeoutSeconds": 600 }]
+}

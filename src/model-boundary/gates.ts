@@ -10,6 +10,7 @@ import { reviewedBeforeMerge } from '../model/risk-class.js';
 import { productReviewRefusal } from './product-review.js';
 import { humanProofHolds } from '../model/human-proof.js';
 import { mergeLedgerRefusals, unobservedCandidateRefusal } from '../model/gates.js';
+import { keptTrialAheadOfReview } from '../model/merge-queue.js';
 import { leadHoldRefusal } from '../model/delegation.js';
 /**
  * The item's stage and gates, judged from the record alone. The merge writer merges each
@@ -73,8 +74,9 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.
   const ledger = current ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
-  const checkReasons = ledger ? ledger.test : current ? [] : [unobservedCandidateRefusal];
+  const checkReasons = current && keptTrialAheadOfReview(candidate, work.mergeLedger) ? [] : ledger ? ledger.test : current ? [] : [unobservedCandidateRefusal];
   gates.push({ name: 'test', reasons: checkReasons, passed: checkReasons.length === 0 });
+  family('acceptance');
   // A lead hold is a refusal to deliver, and its own reason is reported.
   // Unresolved review threads are the reviewer's inputs, not merge blockers.
   const delivery = leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [];

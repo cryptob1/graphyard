@@ -50,6 +50,8 @@ export interface ObservedVerdict {
   id: number; reviewer: string; state: string; submittedAt: string | null; observedAt: string;
   /** The review request the verdict answered: the live one when it was observed, else the latest one for the head. */
   requestId: string | null;
+  /** The review's own diff base and policy, retained beside the display binding. */
+  baseSha?: string; policyRevision?: number;
   /** GitHub dismissed it: withdrawn, never a verdict that conflicts. */
   dismissed?: boolean;
   /** One of a conflict a fresh review resolved: kept on the record, never acted on. */
@@ -114,11 +116,14 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   const dismissed = new Set(observation!.dismissedReviewIds ?? []);
   for (const verdict of record.verdicts) if (dismissed.has(verdict.id)) verdict.dismissed = true;
   for (const review of observation!.reviews) {
-    if (review.sha !== candidate!.sha || !Number.isSafeInteger(review.id)) continue;
+    if (review.sha !== candidate!.sha || !Number.isSafeInteger(review.id)
+      || (review.baseSha !== undefined && review.baseSha !== (observation!.mergeBase ?? candidate!.baseSha))
+      || (review.policyRevision !== undefined && review.policyRevision !== work.policyRevision)) continue;
     const known = record.verdicts.find(verdict => verdict.id === review.id);
     if (review.state === 'DISMISSED') { if (known) known.dismissed = true; continue; }
-    if (!conflictingVerdictStates.includes(review.state) || known || !reviewerIdentity(review.reviewer)) continue;
-    record.verdicts.push({ id: review.id!, reviewer: review.reviewer, state: review.state, submittedAt: review.submittedAt ?? null, observedAt: at, requestId });
+    if (!conflictingVerdictStates.includes(review.state) || known || !(review.source === 'control-plane' || reviewerIdentity(review.reviewer))) continue;
+    record.verdicts.push({ id: review.id!, reviewer: review.reviewer, state: review.state, submittedAt: review.submittedAt ?? null, observedAt: at, requestId,
+      ...(review.baseSha !== undefined ? { baseSha: review.baseSha } : {}), ...(review.policyRevision !== undefined ? { policyRevision: review.policyRevision } : {}) });
   }
   record.verdicts = record.verdicts.slice(-verdictHistoryLimit);
   work.reviewVerdicts = record;

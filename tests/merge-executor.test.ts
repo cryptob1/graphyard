@@ -726,6 +726,7 @@ test('unit:superseded-intent-settles — an item resubmitted with a new head whi
   assert.ok('mergeSha' in mergedC);
   const mergeC = (mergedC as { mergeSha: string }).mergeSha;
   await record(wC, { kind: 'intent', head: head10, baseTip: tipC, mergeSha: mergeC, risk: 'normal', at: iso(start) });
+  await record(wC, { kind: 'trial', head: head10, baseTip: tipC, mergeSha: mergeC, outcome: 'verdict', build: 'pass', tests: { passed: 2, failed: [], files: 1 }, files: ['tests/app.test.ts'], proofs: { 'unit:app-works': { executed: 1, failed: 0 }, 'e2e:fixture': { executed: 1, failed: 0 } }, durationMs: 5, attempts: [] });
   assert.equal(await reads.push(mergeC, tipC), 'pushed');
   await record(wC, { kind: 'pushed', mergeSha: mergeC, pushedAt: iso(start) });
   const resubmittedC = await resubmit(wC, 10);
@@ -773,7 +774,7 @@ test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:i
   const intent = await request(token(coordinator), `work/${w.id}/merge-record`, { ...body, baseTip: currentTip, mergeSha }, 'k-intent');
   assert.equal(intent.status, 200, JSON.stringify(intent.body));
   // Review by risk (GY-1525): the fixture's delta touches no sensitive path, so its review comes after the merge and the review gate already passes.
-  assert.deepEqual([intent.body.recorded, intent.body.kind, intent.body.stage, intent.body.mergeLedger.state], [true, 'intent', 'merge', 'intent'], 'the intent passes the test gate, so the normal-risk item moves on to merge');
+  assert.deepEqual([intent.body.recorded, intent.body.kind, intent.body.stage, intent.body.mergeLedger.state], [true, 'intent', 'acceptance', 'intent'], 'the intent still owes executed criterion proofs');
   let doc = await document(w.id);
   assert.deepEqual(doc.gates.find(gate => gate.name === 'test')!.reasons, [], 'the intent on this head and tip is the passing trial the test gate wants');
   assert.ok(doc.gates.find(gate => gate.name === 'merge')!.reasons.includes(pushRefusal(heads[5]!)));
@@ -840,8 +841,8 @@ test('integration:merge-record-refuses-unheld-sha — a reconciled naming a merg
   // Another item's held merge commit still delivers nothing, intent or no intent: the ledger intends heads[4]'s merge, not it.
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha: held, observedTip: held })).body.error, unintendedShaRefusal(w.key, held, heads[4]!));
   const after = await document(w.id);
-  // The intent passed the test gate and the normal-risk delta owes its review after the merge (GY-1525), so the stage is merge: still nothing delivered.
-  assert.deepEqual([before.stage, after.stage, after.delivery ?? null, after.mergeLedger?.state], ['test', 'merge', null, 'intent'], 'nothing delivered');
+  // The intent passes the test gate, but executed criterion proofs are still missing: nothing delivered.
+  assert.deepEqual([before.stage, after.stage, after.delivery ?? null, after.mergeLedger?.state], ['test', 'acceptance', null, 'intent'], 'nothing delivered');
   assert.deepEqual(await ledgerKinds(w.id), [...events, 'merge.intent', 'merge-writer.intent'], 'only the intent was written');
   // A commit that exists only in the object store, never on main, is refused the same way; an unknown sha too.
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha: 'a'.repeat(40), observedTip: 'a'.repeat(40) })).status, 409);
@@ -1036,6 +1037,8 @@ test(`${advanceBase ? 'integration:refused-intent-base-advance' : 'integration:r
   const ordinary = await submittedItem(sideNumber);
   const ordinaryRecord = (event: MergeRecordEvent) => record({ ...ordinary, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
   await ordinaryRecord({ kind: 'intent', head: sideSha, baseTip: originalBase, mergeSha: sideSha, risk: 'normal', at: iso(start) });
+  await approve(ordinary.id);
+  await ordinaryRecord({ kind: 'trial', head: sideSha, baseTip: originalBase, mergeSha: sideSha, outcome: 'verdict', build: 'pass', tests: { passed: 2, failed: [], files: 1 }, files: ['tests/app.test.ts'], proofs: { 'unit:app-works': { executed: 1, failed: 0 }, 'e2e:fixture': { executed: 1, failed: 0 } }, durationMs: 5, attempts: [] });
   await ordinaryRecord({ kind: 'pushed', mergeSha: sideSha, pushedAt: iso(start) });
   await ordinaryRecord({ kind: 'reconciled', mergeSha: sideSha, observedTip: containing });
   assert.equal((await document(ordinary.id)).stage, 'done');

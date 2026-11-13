@@ -18,7 +18,7 @@ const reviewed = (): Work => {
   const candidate = { sha: head, baseSha: tip, pr: 7, branch: 'graphyard/gy-7-1', author: 'worker' };
   return {
     id: 'w7', key: 'GY-7', type: 'feature', stage: 'build', epoch: 1, lease: null, policyRevision: 3, reworkRequested: false, submission: { epoch: 1, pr: 7 }, candidate,
-    policy: { checks: ['test'], review: true }, criteria: [], evidence: [],
+    dependencies: [], workspaces: [], violations: [], ready: true, policy: { checks: ['test'], review: true }, criteria: [], evidence: [],
     observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], merged: false, mergeSha: null, mergeable: true, protected: false,
       baseTip: tip, mergeBase, baseTipContained: true, at: '2030-01-01T00:00:00.000Z',
       reviews: [{ reviewer: 'reviewer-a', sha: head, state: 'APPROVED', id: 1, submittedAt: '2030-01-01T00:05:00.000Z', body: 'ok', source: 'control-plane', baseSha: mergeBase }] },
