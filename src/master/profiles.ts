@@ -124,6 +124,8 @@ export const workerProfileSchema = z.object({
   approvals: approvalMode,
   environment: safeEnvironment,
   accounts: accountList,
+  /** GY-3293: set on every profile the loop minted itself (worker-pool.ts), so a config that will not load is repaired by removing the loop's own entries, never the operator's. */
+  minted: z.literal(true).optional(),
 }).strict().superRefine((profile, context) => {
   if (profile.mode === 'launch' && !profile.kind) context.addIssue({ code: 'custom', message: 'A launched worker requires kind', path: ['kind'] });
   if (profile.mode === 'launch' && !profile.credentialFile) context.addIssue({ code: 'custom', message: 'A launched worker requires credentialFile', path: ['credentialFile'] });

@@ -6,10 +6,10 @@ import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
 import { readDaemonState } from '../../daemon/state.js';
 import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopCheckoutTrust, encodeLoopPanes, loopAlertsHeader, loopCheckoutTrustHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/loop-presence.js';
+import { encodeLoopCheckoutTrust, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
 import { encodeLoopWhere, loopWhereHeader } from '../../model/where-things-run.js';
 import { loopWhereReport } from '../../master/where.js';
-import { checkoutTrustKey, workerGrowthKey } from '../../daemon/cycle.js';
+import { checkoutTrustKey, standingStepFailures, workerGrowthKey } from '../../daemon/cycle.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
@@ -50,9 +50,10 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
     // GY-3101: and names whether it alerts the operator directly (run.alertUrl) and after how many minutes, for the same page.
     // GY-3225: and names the standing checkout-trust refusal (an untrusted checkout carrying repository Claude configuration), for the Setup checklist's one item.
+    // GY-3293: and names the standing repeated step-failure line (a step failing the same way ten consecutive cycles), for the Setup checklist's Needs you item.
     // GY-3277: and names where this install's parts run — its units, containers, port, URL and directories — for the Setup page's panel.
     const where = await loopWhereReport(root, master);
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: standingStepFailures(state)[0] ? encodeLoopStepFailure(standingStepFailures(state)[0]!) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
