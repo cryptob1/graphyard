@@ -1,0 +1,14 @@
+{
+  "id": "setup-where-things-run",
+  "title": "The Setup page's Where things run panel names this install's units, containers, port, URL, directories and master pane",
+  "description": "A served dashboard whose coordinator read carries the where-report exactly as the loop sends it (X-Graphyard-Loop-Where beside its presence): the Setup page's 'Where things run' panel shows that install's loop and deploy unit names, server and database container names, port, URL, checkout and install directories, and the Herdr master pane, each beside its log command.",
+  "tags": ["dashboard", "setup"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the Where things run panel on the served Setup page",
+    "run": "npm run test:browser -- browser-tests/setup-where-things-run.spec.ts",
+    "timeoutSeconds": 240
+  }]
+}

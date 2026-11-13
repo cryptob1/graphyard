@@ -20,6 +20,12 @@ npx @cryptob1/graphyard up --repo OWNER/NAME
 
 The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. Workers and reviewers run headless, logged per item (`graphyard guide runtimes`). Where a SAML organization or org policy blocks deploy keys, `--push-auth gh` pushes with your gh login instead of a deploy key. Watch: `graphyard master status`; update: `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Setup invites or revokes viewers and maintainers.
 
+## Where things run
+
+![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
+
+`graphyard guide infra` lists every part with its log command; the Setup page shows this install's own names.
+
 ## Learn more
 
 - `graphyard guide TOPIC` and `graphyard master guide` print every procedure.

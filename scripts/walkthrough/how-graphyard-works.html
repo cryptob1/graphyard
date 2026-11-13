@@ -110,14 +110,14 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
         <button class="poster" id="poster" type="button" aria-label="Play the walkthrough">
           <div class="big" aria-hidden="true"></div>
           <strong>How Graphyard works</strong>
-          <span>10 short scenes · 90 seconds</span>
+          <span>11 short scenes · 95 seconds</span>
         </button>
       </div>
       <div class="caption" id="caption" aria-live="polite">Press play to follow one goal from a sentence to production.</div>
       <div class="controls">
         <button type="button" id="play">Play</button>
-        <input type="range" id="scrub" min="0" max="90" step="0.1" value="0" aria-label="Position in the walkthrough">
-        <span id="clock">0:00 / 1:30</span>
+        <input type="range" id="scrub" min="0" max="95" step="0.1" value="0" aria-label="Position in the walkthrough">
+        <span id="clock">0:00 / 1:35</span>
       </div>
       <div class="chapters" id="chapters"></div>
     </div>
@@ -128,7 +128,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
 (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const stage = document.getElementById('stage');
-  const DURATION = 90;
+  const DURATION = 95;
   const objs = [], updaters = [];
 
   function el(tag, attrs, parent) {
@@ -178,7 +178,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   }
 
 
-  const chapters = [[0, 'Roles'], [9, 'Decide'], [18, 'Loop'], [27, 'Ready'], [36, 'Build'], [45, 'Review'], [54, 'Merge trial'], [63, 'Deploy'], [72, 'Revert'], [81, 'Failures']];
+  const chapters = [[0, 'Roles'], [9, 'Decide'], [18, 'Loop'], [27, 'Ready'], [36, 'Build'], [45, 'Review'], [54, 'Merge trial'], [63, 'Deploy'], [72, 'Revert'], [81, 'Failures'], [90, 'Where things run']];
   const sceneLabel = text(stage, 32, 40, 't-scene', '', 'start');
   updaters.push(t => { let i = 0; chapters.forEach(([s], j) => { if (t >= s) i = j; }); sceneLabel.textContent = String(i + 1).padStart(2, '0') + ' · ' + chapters[i][1].toUpperCase(); });
   const ok = (s, x, y, at, out) => { const g = el('g', {}); text(g, 0, 0, 't-title ok-text', '✓ ' + s, 'start'); A(g).at(at, x, y).out(out); };
@@ -270,6 +270,11 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   A(card(360, 60, 'Master diagnoses, files a repair', 'a worker builds it · every gate stays', 'steel')).at(84, 480, 330).out(90.5);
   A(label('AGENTS CHECK AGENTS · THE HUMAN KEEPS THREE DECISIONS', 't-scene')).at(85.6, 480, 440).out(90.5);
 
+  // 11 · Where things run (90–95): the README's diagram itself closes the story — one host, and what sits outside it.
+  const where = el('g', {});
+  el('image', { href: '../../docs/diagrams/where-things-run.svg', x: -480, y: -270, width: 960, height: 540 }, where);
+  A(where).at(90.2, 480, 284, 0.9).out(94.6);
+
   const captions = [
     [0, 9, 'The human sets goals. The master (AI) decides. The loop (plain code) acts. Workers build. The merge writer is the only writer of main.'],
     [9, 13, 'The human keeps three decisions: goals and priorities, money and accounts, and credentials for people.'],
@@ -282,6 +287,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
     [63, 72, 'The loop deploys main and checks health and required end-to-end cases. Normal changes get a post-merge review.'],
     [72, 81, 'If a required live case fails, the merge writer reverts the merge automatically and files a re-land item.'],
     [81, 90, 'Any failure goes to the master, which diagnoses it and files a repair. Agents check agents; gates never relax.'],
+    [90, 95, 'It all runs on one Linux host. graphyard guide infra lists each part and its logs.'],
   ];
   const capEl = document.getElementById('caption');
   const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub');

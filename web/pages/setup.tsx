@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { checklistGreen, paneServer, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
+import { whereLogs, type WhereThingsRun } from '../../src/model/where-things-run';
 import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
 import { CopyButton } from './workers';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
-import { PageHeader, PageSection } from '../components/page-layout';
+import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
 
 /**
@@ -95,6 +96,24 @@ export function AlertsLine({ status }: { status: any }) {
 }
 
 /**
+ * Where this install's parts run (GY-3277), as its loop named them (`setup.where`): the units and
+ * containers beside the command that reads their logs, then the URL, the master's Herdr pane and the
+ * directories. Collapsed at the foot of the page: onboarding does not need it, operating does.
+ * `graphyard guide infra` explains each part; this shows only this install's own names.
+ */
+export function WhereThingsRunPanel({ where, panes }: { where: WhereThingsRun | null; panes: { session: string | null; master?: string | null } | null }) {
+  if (!where) return <p data-where-things-run="unknown" className="muted">Not known yet: the loop names these once it runs (graphyard master run).</p>;
+  const rows: [string, string][] = [['The loop', where.loopUnit], ['Deploy watch', where.deployUnit], ['Server and dashboard', where.server], ['Database', where.database]];
+  return <div data-where-things-run="known">
+    <table className="sessions-table" aria-label="Where things run">
+      <thead><tr><th scope="col">Part</th><th scope="col">Runs as</th><th scope="col">Logs</th></tr></thead>
+      <tbody>{rows.map(([part, name]) => { const logs = whereLogs(name); return <tr key={part}><th scope="row">{part}</th><td data-label="Runs as">{name}</td><td data-label="Logs">{logs ? <code>{logs}</code> : <span className="muted">—</span>}</td></tr>; })}</tbody>
+    </table>
+    <p className="muted">Dashboard {where.url} (port {where.port}){panes?.session ? ` · Herdr session ${panes.session}${panes.master ? `, master pane ${panes.master}` : ''}` : ''} · checkout {where.checkout} · install directory {where.installDirectory}. <code>graphyard guide infra</code> explains each part.</p>
+  </div>;
+}
+
+/**
  * The page body for a status answer and the work items (WORK, read at NOW), without the dashboard's
  * state: what the tests render. The onboarding change is a step of its own while it is open, as
  * `graphyard up` waits for it. WORKUNREAD: the work items are not read yet (or the read failed), so
@@ -114,6 +133,7 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
+    <section aria-label="Where things run"><MoreDetails summary="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></MoreDetails></section>
   </>;
 }
 
