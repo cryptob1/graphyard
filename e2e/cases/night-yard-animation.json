@@ -1,7 +1,7 @@
 {
   "id": "night-yard-animation",
   "title": "The yard moves: a skippable once-per-session boot, rows gliding between groups, a streak on the trial row, and every animation still under reduced motion or Fun off",
-  "description": "A real browser on the built dashboard: the one-second boot sequence (neon logo flicker-in, readout typing out) plays once per browser session and any key skips it; when an item's stage changes, its row glides to its new group on a transform instead of jumping; a row whose merge trial is out carries a running light streak; the rain falls in two parallax sheets, headings flicker in and the top line types itself out; with prefers-reduced-motion every animation is still and no glide or boot runs, and the Fun toggle turns all of it off on the page and the next load.",
+  "description": "A real browser on the built dashboard: the one-second boot sequence (neon logo flicker-in, readout typing out) plays once per browser session and any key skips it; when an item's stage changes, its row glides to its new group on a transform instead of jumping; a row whose merge trial is out carries a running light streak; the rain falls in two parallax sheets with rain and grain behind all page content, headings flicker in and the top line types itself out; with prefers-reduced-motion every animation is still and no glide or boot runs, and the Fun toggle turns all of it off on the page and the next load.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

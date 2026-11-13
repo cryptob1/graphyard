@@ -116,6 +116,16 @@ test('e2e:night-yard-animation — a row in trial carries the streak, the rain f
   // Parallax rain: a near sheet and a far one, at their own speeds.
   expect(await animationOf(page, 'body', '::after')).toBe('gy-rain');
   expect(await animationOf(page, 'html', '::after')).toBe('gy-rain-far');
+  // Atmosphere paints above the root background but below content, palettes and ship toasts.
+  for (const [selector, pseudo] of [['body', '::after'], ['html', '::after'], ['body', '::before']]) {
+    const layer = await page.locator(selector).evaluate((el, ps) => {
+      const style = getComputedStyle(el, ps);
+      return { z: Number(style.zIndex), background: style.backgroundImage, pointerEvents: style.pointerEvents };
+    }, pseudo);
+    expect(layer.z, `${selector}${pseudo} stays behind the page`).toBeLessThan(0);
+    expect(layer.background).not.toBe('none');
+    expect(layer.pointerEvents).toBe('none');
+  }
   // Headings and rows flicker in like a neon sign switching on.
   expect(await animationOf(page, 'h1')).toBe('gy-flicker-in');
   expect(await animationOf(page, '.work-row')).toBe('gy-flicker-in');

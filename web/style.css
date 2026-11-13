@@ -352,16 +352,17 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3{font-family:var(--font-display);letter-spacing:.2px}
 .tile strong,.kpi strong,.city-strip .mono{font-variant-numeric:tabular-nums}
 /* The street: slow rain in two sheets at two depths — the far one fainter and slower still — for
-   parallax. Both sheets are overscanned and moved by transform, so the compositor slides them. */
-html:not([data-theme='daylight']) body::after{content:'';position:fixed;inset:-100px;z-index:60;pointer-events:none;
+   parallax. Negative layers sit above the root background but behind all page content, including
+   dialogs and toasts. Both sheets are overscanned and moved by transform. */
+html:not([data-theme='daylight']) body::after{content:'';position:fixed;inset:-100px;z-index:-1;pointer-events:none;
   background-image:repeating-linear-gradient(36.87deg,transparent 0 64px,color-mix(in srgb,var(--moving) 6%,transparent) 64px 72px,transparent 72px 100px);
   animation:gy-rain 6s linear infinite}
 @keyframes gy-rain{to{transform:translate(60px,-80px)}}
-html:not([data-theme='daylight'])::after{content:'';position:fixed;inset:-130px;z-index:58;pointer-events:none;
+html:not([data-theme='daylight'])::after{content:'';position:fixed;inset:-130px;z-index:-3;pointer-events:none;
   background-image:repeating-linear-gradient(36.87deg,transparent 0 96px,color-mix(in srgb,var(--moving) 3%,transparent) 96px 108px,transparent 108px 150px);
   animation:gy-rain-far 11s linear infinite}
 @keyframes gy-rain-far{to{transform:translate(72px,-96px)}}
-html:not([data-theme='daylight']) body::before{content:'';position:fixed;inset:0;z-index:59;pointer-events:none;opacity:.6;
+html:not([data-theme='daylight']) body::before{content:'';position:fixed;inset:0;z-index:-2;pointer-events:none;opacity:.6;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='gy-grain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23gy-grain)'/%3E%3C/svg%3E")}
 /* Headings and new rows flicker in like a neon sign switching on (AC-4e): the animation runs when
    the element enters the page and never again — React keeps the nodes it already drew. */
