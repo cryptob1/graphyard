@@ -1,0 +1,43 @@
+{
+  "id": "project-emblem",
+  "title": "The project's emblem shows in the dashboard header and as the favicon",
+  "description": "master emblem set stores a valid SVG and the served dashboard shows it beside the project name and as the favicon, rendered as an image; an SVG with a script element, an onload attribute, an external href or over 8 KB is refused with the reason; without an emblem the default icon shows.",
+  "tags": [
+    "dashboard"
+  ],
+  "target": "any",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "without an emblem the default icon shows",
+      "run": "node --input-type=module <<'JS'\nimport{chromium,expect} from '@playwright/test';\nconst b=await chromium.launch();\ntry{\nconst p=await b.newPage({viewport:{width:1280,height:900}});\nawait p.goto(process.env.TARGET_URL+'?sign-in');\nawait p.getByLabel('Access token').fill('{{token}}');\nawait p.getByRole('button',{name:'Open control plane'}).click();\nconst img=p.locator('.top-bar .project-emblem');\nawait expect(img).toHaveAttribute('src',/\\/favicon\\.svg$/);\nawait expect(img).toBeVisible();\nexpect(await img.evaluate(e=>e.naturalWidth)).toBeGreaterThan(0);\nconst r=await p.request.get(new URL('/favicon.svg',process.env.TARGET_URL).href);\nexpect(r.status()).toBe(200);\nexpect(r.headers()['content-type']).toContain('image/svg+xml');\nconst text=await r.text();\nexpect(text.includes('<title>Graphyard</title>')).toBe(true);\nexpect(text.includes('emblem-e2e-mark')).toBe(false);\n}finally{await b.close()}\nJS",
+      "timeoutSeconds": 120
+    },
+    {
+      "kind": "command",
+      "name": "master emblem reports that none is set",
+      "run": "node --input-type=module <<'JS'\nimport{execFileSync} from 'node:child_process';\nimport{readFileSync,writeFileSync,chmodSync,mkdtempSync} from 'node:fs';\nimport{tmpdir} from 'node:os';\nimport{join,resolve} from 'node:path';\nconst seed=JSON.parse(readFileSync('.graphyard/e2e-serve.json','utf8'));\nconst dir=mkdtempSync(join(tmpdir(),'project-emblem-'));\nconst cred=join(dir,'master.token');\nwriteFileSync(cred,seed.delivery.coordinatorToken);chmodSync(cred,0o600);\nwriteFileSync('.graphyard/master.json',JSON.stringify({version:1,url:process.env.TARGET_URL,credentialFile:cred,cliPath:resolve('bin/graphyard.mjs'),repository:'cryptob1/graphyard',baseBranch:'main',hostId:'project-emblem-e2e',masterAgentName:'graphyard-master-e2e',workers:[],reviewers:[],producers:[],run:{}}));\nchmodSync('.graphyard/master.json',0o600);\nconst before=execFileSync('node',['bin/graphyard.mjs','master','emblem'],{encoding:'utf8'});\nif(!/\"set\": ?false/.test(before))throw new Error('master emblem did not report that none is set: '+before);\nJS",
+      "timeoutSeconds": 180
+    },
+    {
+      "kind": "command",
+      "name": "master emblem set stores a valid SVG and master emblem reports it",
+      "run": "node --input-type=module <<'JS'\nimport{execFileSync} from 'node:child_process';\nimport{writeFileSync,mkdtempSync} from 'node:fs';\nimport{tmpdir} from 'node:os';\nimport{join} from 'node:path';\nconst dir=mkdtempSync(join(tmpdir(),'project-emblem-set-'));\nconst svg='<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><title>emblem-e2e-mark</title><rect width=\"64\" height=\"64\" rx=\"12\" fill=\"#173625\"/><path d=\"M14 32 27 45 50 18\" stroke=\"#c5e69b\" stroke-width=\"7\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>';\nwriteFileSync(join(dir,'emblem.svg'),svg);\nconst out=execFileSync('node',['bin/graphyard.mjs','master','emblem','set',join(dir,'emblem.svg')],{encoding:'utf8'});\nconst after=execFileSync('node',['bin/graphyard.mjs','master','emblem'],{encoding:'utf8'});\nif(!/\"set\": ?true/.test(after)||!after.includes('emblem-e2e-mark'))throw new Error('master emblem did not report the stored emblem: '+after);\nif(!/\"set\": ?true/.test(out))throw new Error('master emblem set did not record the emblem: '+out);\nconsole.log(out.trim());\nJS",
+      "timeoutSeconds": 180
+    },
+    {
+      "kind": "command",
+      "name": "the dashboard shows the emblem in the header and as the favicon",
+      "run": "node --input-type=module <<'JS'\nimport{chromium,expect} from '@playwright/test';\nconst b=await chromium.launch();\ntry{\nconst p=await b.newPage({viewport:{width:1280,height:900}});\nawait p.goto(process.env.TARGET_URL+'?sign-in');\nawait p.getByLabel('Access token').fill('{{token}}');\nawait p.getByRole('button',{name:'Open control plane'}).click();\nconst status=await (await p.request.get(new URL('/api/status',process.env.TARGET_URL).href,{headers:{Authorization:'Bearer {{token}}'}})).json();\nconst bar=p.locator('.top-bar');\nawait expect(bar.locator('.project-name')).toHaveText(status.repository);\nconst img=bar.locator('.project-emblem');\nawait expect(img).toHaveAttribute('src',/\\/favicon\\.svg$/);\nawait expect(img).toBeVisible();\nexpect(await img.evaluate(e=>e.naturalWidth)).toBeGreaterThan(0);\nconst r=await p.request.get(new URL('/favicon.svg',process.env.TARGET_URL).href);\nexpect(r.headers()['content-type']).toContain('image/svg+xml');\nconst text=await r.text();\nexpect(text.includes('emblem-e2e-mark')).toBe(true);\nexpect(text.includes('<script')).toBe(false);\nawait expect(p.locator('link[rel=\"icon\"]')).toHaveAttribute('href','/favicon.svg');\n}finally{await b.close()}\nJS",
+      "timeoutSeconds": 120
+    },
+    {
+      "kind": "command",
+      "name": "invalid SVGs are refused with the reason and the emblem stays",
+      "run": "node --input-type=module <<'JS'\nimport{execFileSync} from 'node:child_process';\nimport{writeFileSync,mkdtempSync} from 'node:fs';\nimport{tmpdir} from 'node:os';\nimport{join} from 'node:path';\nconst dir=mkdtempSync(join(tmpdir(),'project-emblem-refused-'));\nconst file=join(dir,'emblem.svg');\nconst head='<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">';\nconst cases=[\n[head+'<script>alert(1)</script><rect width=\"64\" height=\"64\"/></svg>','script element'],\n[head.replace('<svg ','<svg onload=\"alert(1)\" ')+'<rect width=\"64\" height=\"64\"/></svg>','onload'],\n[head+'<image href=\"https://example.invalid/mark.png\"/></svg>','outside itself'],\n[head+'<rect width=\"64\" height=\"64\"/>'+'<circle cx=\"6\" cy=\"6\" r=\"3\" fill=\"#c5e69b\"/>'.repeat(220)+'</svg>','8 KB'],\n];\nfor(const[svg,needle]of cases){\nwriteFileSync(file,svg);\nlet refused=false,reason='';\ntry{execFileSync('node',['bin/graphyard.mjs','master','emblem','set',file],{encoding:'utf8'});}\ncatch(error){refused=true;reason=String(error.stderr);}\nif(!refused)throw new Error('accepted an emblem it should refuse ('+needle+')');\nif(!reason.includes(needle))throw new Error('refused without naming '+needle+': '+reason);\nconsole.log(needle+' refused');\n}\nJS",
+      "timeoutSeconds": 300
+    }
+  ]
+}
