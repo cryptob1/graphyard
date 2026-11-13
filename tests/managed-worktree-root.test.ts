@@ -14,7 +14,7 @@ import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
+import { acquireVerificationSlot, heavyCommand, heldSlots, hostHeavyJobsDirectory, verificationBin, verificationEnvironment, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
@@ -460,32 +460,29 @@ const GiB = 2 ** 30;
 test('unit:host-verification-slots — heavy verification runs started by a session take a host-wide slot: more runs than slots never exceed the bound at once, the rest wait saying on what, and all complete', async () => {
   const scratch = await temporaryDirectory('slots');
   try {
-    // The bound: max(2, floor(total GB / 8)), overridable per host.
-    assert.equal(defaultVerificationSlots(62 * GiB), 7);
-    assert.equal(defaultVerificationSlots(8 * GiB), 2, 'never fewer than two');
     assert.equal(heavyCommand('tsc', ['--noEmit']), true);
     assert.equal(heavyCommand('npx', ['tsc', '--noEmit']), true);
     assert.equal(heavyCommand('npx', ['vite', 'build']), false);
     assert.equal(heavyCommand('tsc', ['--version']), false);
 
-    // The session harness's environment: a lock directory under the managed worktree root, the bound,
-    // and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
+    // The session harness's environment: the host's lock directory (two jobs at once unless its limit file
+    // says otherwise), the project, and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
     const managedRoot = join(scratch, 'managed'), fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
     await mkdir(fakeBin, { recursive: true });
     // It holds its slot until the test opens the gate, so how many runs wait never depends on how fast five wrappers start.
     await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
     await chmod(join(fakeBin, 'tsc'), 0o755);
-    const environment = verificationEnvironment(managedRoot, { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_VERIFICATION_SLOTS: '2' });
-    const directory = verificationSlotsDirectory(managedRoot);
+    const environment = verificationEnvironment('owner/project', { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_DATA_HOME: managedRoot });
+    const directory = hostHeavyJobsDirectory({ GRAPHYARD_DATA_HOME: managedRoot });
     assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR, directory);
-    assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS, '2');
+    assert.equal(environment.GRAPHYARD_HEAVY_JOB_PROJECT, 'owner/project');
     assert.equal(environment.PATH.split(delimiter)[0], verificationBin);
     assert.ok(existsSync(join(verificationBin, 'tsc')) && existsSync(join(verificationBin, 'npx')));
-    assert.ok(!existsSync(managedRoot), 'nothing is written under the managed root at launch');
+    assert.ok(!existsSync(managedRoot), 'nothing is written until a run takes a slot');
 
     // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
     const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
-    const waitPattern = /waits for a host verification slot: all 2 under .+ are held by tsc --noEmit \(pid \d+/;
+    const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by tsc --noEmit \(owner\/project\) \[pid \d+/;
     const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
       const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
       child.stderr.on('data', chunk => { stderrs[index] += chunk; });
@@ -526,7 +523,7 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
       held--; slot.release();
     }));
     assert.equal(most, 2);
-    assert.ok(lines.some(line => line.includes('waits for a host verification slot')));
+    assert.ok(lines.some(line => line.includes('waits for a host heavy-job slot')));
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
@@ -535,13 +532,11 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
   try {
     // Codex under workspace-write refuses `mkdir slot-N` outside its grants, and the run would go
     // ahead unbounded: every session role grants the lock directory, created before launch.
-    const managedRoot = join(scratch, 'managed'), directory = verificationSlotsDirectory(managedRoot), worktree = join(scratch, 'worktree');
-    const settings = { repository: 'owner/project', run: { worktreeRoot: managedRoot } } as unknown as MasterConfig;
-    assert.deepEqual(sessionSlotsGrant(scratch, settings), [], 'a launch never creates the managed root itself');
-    await mkdir(managedRoot);
-    const grant = sessionSlotsGrant(scratch, settings);
-    assert.deepEqual(grant, [directory]);
-    assert.deepEqual(sessionSlotsGrant(scratch, settings), [directory], 'an existing lock directory is granted again');
+    const worktree = join(scratch, 'worktree'), directory = join(scratch, 'heavy-jobs');
+    process.env.GRAPHYARD_VERIFICATION_SLOTS_DIR = directory;
+    const grant = sessionSlotsGrant();
+    delete process.env.GRAPHYARD_VERIFICATION_SLOTS_DIR;
+    assert.deepEqual(grant, [directory], 'the host lock directory is the only path the budget grants');
     assert.ok(existsSync(directory), 'the lock directory exists before the sandbox is asked to grant it');
 
     // Reviewer and producer: the reach accountLaunch adds to the Codex sandbox.
@@ -557,7 +552,7 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
     assert.ok(probed[0].includes(directory), 'and writes into it');
 
     // An account environment's own PATH never drops the wrappers.
-    const harness = verificationEnvironment(managedRoot, { PATH: '/usr/bin' });
+    const harness = verificationEnvironment('owner/project', { PATH: '/usr/bin' });
     const tab = withVerificationPath(harness, { PATH: '/account/bin:/usr/bin', OTHER: 'x' });
     assert.deepEqual(tab.PATH.split(delimiter), [verificationBin, '/account/bin', '/usr/bin']);
     assert.equal(tab.OTHER, 'x');
