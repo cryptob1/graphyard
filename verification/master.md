@@ -14,6 +14,7 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
 - `tests/main-batch-gate.test.ts`, `tests/publish-verified.test.ts`, `tests/diagnostic-filing-carries-output.test.ts`: batch gate, diagnostic filings (GY-3141).
 - `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve work and name its commit to the next account; `e2e:worker-credit-handoff`.
+- `tests/idle-stack-cleanup.test.ts`: idle previews and abandoned `graphyard-preview-*` stacks stop with `docker stop` only; a preview link's use renews and restarts; `e2e:idle-stack-cleanup`.
 
 ## Drive
 
