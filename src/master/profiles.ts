@@ -111,6 +111,8 @@ const accountList = z.array(profileName).min(1).max(20).optional();
 // Absent means one, which keeps the profile's fixed session name; see profileConcurrency.
 const sessionConcurrency = z.number().int().min(1).max(20).optional();
 
+/** The most worker profiles a master.json holds (GY-3292): the loop grows the pool no further. */
+export const MAX_WORKER_PROFILES = 100;
 export const workerProfileSchema = z.object({
   name: profileName,
   principal: z.string().trim().min(1).max(200),
@@ -370,7 +372,7 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // Legacy private server, retained only until its existing panes have drained.
   herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
-  workers: z.array(workerProfileSchema).max(100).default([]),
+  workers: z.array(workerProfileSchema).max(MAX_WORKER_PROFILES).default([]),
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
   producers: z.array(producerProfileSchema).max(20).default([]),
   // The agent environments profiles may launch on, discovered or created by master environments.
