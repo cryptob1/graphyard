@@ -6,7 +6,7 @@ import { costSummary, type UsageRow } from '../../model/token-costs.js';
 
 const tokens = z.number().int().min(0).max(1e13);
 const rowSchema = z.object({
-  id: z.string().min(1).max(300), work: z.string().regex(/^[A-Za-z][A-Za-z0-9]*-\d+$/).nullable(), role: z.enum(['worker', 'reviewer', 'producer', 'master']),
+  id: z.string().min(1).max(300), work: z.string().min(1).max(80).nullable(), role: z.enum(['worker', 'reviewer', 'producer', 'master']),
   account: z.string().max(80).nullable(), runtime: z.string().min(1).max(40), model: z.string().min(1).max(200).nullable(), reported: z.boolean(),
   input: tokens, output: tokens, cacheRead: tokens, cacheWrite: tokens, at: z.string().datetime(),
 }).strict();

@@ -527,7 +527,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   try {
     started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id, root,
       // What an adoption after a restart needs to judge and submit the run's evidence (producerRunAdopter); the credential is read from its file then.
-      context: { url: config.url, credentialFile: profile.credentialFile, workId: binding.id, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, proofs: binding.proofs, via, timeoutMs, checkout: checkout.directory },
+      context: { url: config.url, credentialFile: profile.credentialFile, workId: binding.id, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, proofs: binding.proofs, via, timeoutMs, checkout: checkout.directory, account: registry?.account.name ?? null },
       prompt: piProducerPrompt(config, binding, work.criteria, checkout, root, memory),
       options: producerRunOptions(checkout.directory, binding, environment, timeoutMs),
       apply: async result => { const applied = []; for (const payload of result.payloads) applied.push(await submitEvidence(config.url, session.credential, { id: binding.id }, payload, via, dependencies.fetcher)); return applied; } });

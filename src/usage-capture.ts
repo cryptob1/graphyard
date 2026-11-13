@@ -9,6 +9,7 @@ import { runtimeReport, transcriptUsage, type UsageRow } from './model/token-cos
 import { fleetRequest, type FleetConfig } from './fleet.js';
 import { readWorkerRecord, runLogTail, workerRunsDirectory } from './headless-session.js';
 import { runFiles } from './runner/pi.js';
+import { listRunDirectories, runsDirectory } from './runner/registry.js';
 import type { Conversation } from './master/conversation.js';
 
 const outbox = (root: string) => resolve(root, '.graphyard', 'usage-outbox');
@@ -44,6 +45,18 @@ function workerUsage(root: string): { rows: UsageRow[]; done: () => void }[] {
   });
 }
 
+/** The ended producer runs not yet reported: the run registry keeps each a day, with its runtime's own JSON records. */
+function producerUsage(root: string): { rows: UsageRow[]; done: () => void }[] {
+  return listRunDirectories(runsDirectory(root)).flatMap(({ directory, owner, record }) => {
+    const marker = join(directory, reportedMarker);
+    if (!record || owner.role !== 'producer' || existsSync(marker)) return [];
+    let output = '';
+    try { output = readFileSync(runFiles(directory).stdout, 'utf8'); } catch { /* a run that printed nothing reported nothing */ }
+    const account = typeof owner.context.account === 'string' ? owner.context.account : null;
+    return [{ rows: usageRows({ id: directory.split('/').pop()!, work: owner.work, role: 'producer', account, runtime: record.runtime, at: record.endedAt ?? record.startedAt }, output), done: () => writeFileSync(marker, '') }];
+  });
+}
+
 /** The master transcripts read so far: how far, what they held, and what was last reported of each day. */
 const transcripts = new Map<string, { offset: number; pending: string; decoder: StringDecoder; usage: ReturnType<typeof transcriptUsage>; sent: Map<string, string> }>();
 /** The master session's rows that changed since the last report: its transcript is read on from where the last read stopped. */
@@ -73,7 +86,7 @@ let lastCollected = 0;
 export const usageReportMs = 60_000;
 /**
  * Reports every session's usage this host holds and has not reported: noted review runs, ended
- * worker runs and the master transcript's growth. A batch the control plane did not take is kept
+ * worker and producer runs and the master transcript's growth. A batch the control plane did not take is kept
  * and reported again next time.
  */
 export async function collectUsage(root: string, config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, master: Conversation | null, options: { now?: number; fetch?: typeof fetch } = {}) {
@@ -84,7 +97,7 @@ export async function collectUsage(root: string, config: Required<Pick<FleetConf
   try { noted = readdirSync(outbox(root)); } catch { /* nothing noted yet */ }
   const batches = [
     ...noted.flatMap(name => { const file = join(outbox(root), name); try { return [{ rows: JSON.parse(readFileSync(file, 'utf8')) as UsageRow[], done: () => rmSync(file, { force: true }) }]; } catch { rmSync(file, { force: true }); return []; } }),
-    ...workerUsage(root), ...(master ? masterUsage(master) : []),
+    ...workerUsage(root), ...producerUsage(root), ...(master ? masterUsage(master) : []),
   ];
   for (let index = 0; index < batches.length; index += 50) {
     const batch = batches.slice(index, index + 50);
