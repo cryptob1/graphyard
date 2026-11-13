@@ -141,19 +141,19 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge', Date.now()).text, 'Waiting to merge');
 });
 
-test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
+test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, Shipped, Tests, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
   const labels = (d: Dashboard) => primaryEntries(d).map(entry => entry!.label);
   // Tests opens the test-case results (GY-162); the Insights analytics page left with flow analytics (GY-2876).
-  assert.deepEqual(sections.map(section => section.label), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
-  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
-  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
+  assert.deepEqual(sections.map(section => section.label), ['Work', 'Master', 'Workers', 'Shipped', 'Tests', 'Settings']);
+  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 6, role);
+  assert.deepEqual(labels(dashboard()), ['Work', 'Master', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Operator automation', 'Agents', 'Product']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
-  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
+  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 6);
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
@@ -195,11 +195,11 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });
 
-test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 165 words', () => {
+test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 166 words', () => {
   const page = home();
   const count = words(page).length;
-  // 165 (GY-3272): the top bar's city strip and the theme control cost the budget a dozen words.
-  assert.ok(count <= 165, `home renders ${count} words excluding item titles: ${text(page)}`);
+  // 166: the city strip and theme control (GY-3272) cost a dozen words, the Master entry's 'The Chief' one more (GY-3287).
+  assert.ok(count <= 166, `home renders ${count} words excluding item titles: ${text(page)}`);
   for (const gone of ['Delivery slices', 'NO LEAD ASSIGNED', 'ENGINEERING, IN VIEW', 'Every change has an owner', 'Explicit reasons, actionable next steps', 'No delivery requires', 'sessions retain goals', 'leads coordinate only', 'Ownership is explicit', 'Agent fleet'])
     assert.ok(!text(page).includes(gone), `no ${gone}`);
   assert.doesNotMatch(text(page), /\bp50\b|\bp95\b/, 'no percentile microtext by default');
@@ -345,7 +345,7 @@ test('unit:work-page-no-derived-totals — a total that is a sum or subset of th
   assert.equal(sentence, summarySentence(Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as any));
 });
 
-test('integration:work-page-density — every group has one tile, an empty group draws no list, and the page answers what needs you, what is blocked and why, what is moving and what shipped within the 165-word budget', () => {
+test('integration:work-page-density — every group has one tile, an empty group draws no list, and the page answers what needs you, what is blocked and why, what is moving and what shipped within the 166-word budget', () => {
   const page = home();
   const { byGroup } = classify(work, NOW);
   assert.equal(byGroup['needs-you'].length, 0);
@@ -353,5 +353,5 @@ test('integration:work-page-density — every group has one tile, an empty group
   assert.ok(!page.includes('data-group-section="needs-you"'), 'but draws no empty list');
   assert.match(text(page), /A fault blocks it; the master agent clears it/, 'the blocked row says why');
   for (const item of byGroup.moving) assert.ok(page.includes(`data-row="${item.key}"`), item.key);
-  assert.ok(words(page).length <= 165, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
+  assert.ok(words(page).length <= 166, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

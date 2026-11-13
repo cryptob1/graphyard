@@ -1,0 +1,11 @@
+{
+  "id": "master-in-left-menu",
+  "title": "Master is a top-level entry in the left menu, second after Work",
+  "description": "A real browser on the built dashboard: the left menu lists Work, then Master, then Workers; clicking Master opens the master's live page; with Fun on the entry and the page read The Chief, with Fun off both read Master; Workers no longer carries Master as a sub-page.",
+  "tags": ["dashboard", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "Master in the left menu on the dashboard", "run": "npm run test:browser -- browser-tests/master-in-left-menu.spec.ts", "timeoutSeconds": 300 }
+  ]
+}
