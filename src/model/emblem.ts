@@ -44,12 +44,12 @@ export function validateEmblem(input: string): EmblemValidation {
   return { ok: true, svg };
 }
 
-/** Reads one emblem row: the newest emblem event's SVG, or null when none was drawn. */
+/** Reads one emblem row: the newest emblem event, or null when none was drawn. */
 export interface EmblemReader { query(text: string): Promise<unknown> }
 
-/** The emblem in force, or null when the install has none: the newest `emblem.set` event's SVG. */
-export async function readEmblem(db: EmblemReader): Promise<string | null> {
-  const result = await db.query(`SELECT payload->'emblem'->>'svg' AS svg FROM events WHERE work_id IS NULL AND kind='${emblemEventKind}' ORDER BY seq DESC LIMIT 1`) as { rows?: Array<{ svg?: unknown }> };
+/** The emblem in force and who drew it when, or null when the install has none: the newest `emblem.set` event. */
+export async function readEmblem(db: EmblemReader): Promise<{ svg: string; drawnBy: string; at: string } | null> {
+  const result = await db.query(`SELECT payload->'emblem'->>'svg' AS svg, payload->'emblem'->>'at' AS at, actor FROM events WHERE work_id IS NULL AND kind='${emblemEventKind}' ORDER BY seq DESC LIMIT 1`) as { rows?: Array<{ svg?: unknown; at?: unknown; actor?: unknown }> };
   const row = result.rows?.[0];
-  return row && typeof row.svg === 'string' ? row.svg : null;
+  return row && typeof row.svg === 'string' ? { svg: row.svg, drawnBy: String(row.actor), at: String(row.at) } : null;
 }

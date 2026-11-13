@@ -71,7 +71,7 @@ export const staticRoutes = defineRoutes('static', [
       const emblem = await readEmblem(services.engine.store.pool);
       if (emblem === null) return Next;
       res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
-      res.end(req.method === 'HEAD' ? undefined : emblem);
+      res.end(req.method === 'HEAD' ? undefined : emblem.svg);
       return Sent;
     },
   },

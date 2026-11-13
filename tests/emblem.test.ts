@@ -70,6 +70,7 @@ after(async () => { if (http) await new Promise<void>(resolve => http.close(() =
 
 test('integration:emblem-route — master emblem set records the emblem, serves it at /favicon.svg and refuses bad drawings with the reason', async () => {
   assert.equal(await readEmblem(store.pool), null, 'an install with no emblem event serves none');
+  assert.deepEqual(JSON.parse((await request('/api/emblem', master)).text), { set: false }, 'master emblem reports that none is set, so the master knows to draw one');
   const denied = await request('/api/emblem', reader, { svg: valid });
   assert.equal(denied.status, 403, 'a reader identity cannot draw the emblem');
   assert.match(denied.text, /drawn by the master/);
@@ -86,6 +87,8 @@ test('integration:emblem-route — master emblem set records the emblem, serves 
   assert.equal(events, 1, 'exactly one emblem event, with the actor that drew it');
   const drawn = (await store.pool.query(`SELECT actor FROM events WHERE kind='emblem.set'`)).rows[0].actor;
   assert.equal(drawn, 'master');
+  const state = JSON.parse((await request('/api/emblem', reader)).text);
+  assert.deepEqual({ ...state, at: typeof state.at }, { set: true, drawnBy: 'master', at: 'string', bytes: Buffer.byteLength(valid, 'utf8'), svg: valid }, 'master emblem reports the stored emblem, who drew it and when');
   const favicon = await request('/favicon.svg', reader);
   assert.equal(favicon.status, 200);
   assert.match(favicon.contentType!, /image\/svg\+xml/);

@@ -12,6 +12,14 @@ import { emblemByteLimit, emblemEventKind, readEmblem, validateEmblem } from '..
  */
 export const emblemRoutes = defineRoutes('emblem', [
   {
+    // `master emblem` reads this to know whether the project has an emblem yet, and whose.
+    method: 'GET', path: '/api/emblem',
+    async handle({ services }) {
+      const emblem = await readEmblem(services.engine.store.pool);
+      return emblem ? { set: true, drawnBy: emblem.drawnBy, at: emblem.at, bytes: Buffer.byteLength(emblem.svg, 'utf8'), svg: emblem.svg } : { set: false };
+    },
+  },
+  {
     method: 'POST', path: '/api/emblem',
     async handle(context) {
       const { actor, services } = context;
@@ -20,7 +28,7 @@ export const emblemRoutes = defineRoutes('emblem', [
       const validated = validateEmblem(candidate);
       if (!validated.ok) throw new Refusal(validated.reason, 400);
       return services.engine.store.transaction(async (db, now) => {
-        if (await readEmblem(db) === validated.svg) return { set: false, bytes: Buffer.byteLength(validated.svg, 'utf8') };
+        if ((await readEmblem(db))?.svg === validated.svg) return { set: false, bytes: Buffer.byteLength(validated.svg, 'utf8') };
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, emblemEventKind, JSON.stringify({ emblem: { svg: validated.svg, at: now.toISOString() } })]);
         return { set: true, bytes: Buffer.byteLength(validated.svg, 'utf8') };
       });
