@@ -256,7 +256,7 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
 const heavyScript = /^(test|build|typecheck)\b/;
 /**
  * Whether a command is a heavy job: a `tsc` type check (or one through `npx`), or a package
- * manager's test, build or type-check script. A script that starts this repository's own runner
+ * manager's test, build or type-check script. A checkout that carries Graphyard's own runner
  * (tests/helpers/run-tests.ts) is left to it: the runner takes the slot and sizes its breadth by it.
  */
 export function heavyCommand(command: string, args: string[], cwd = process.cwd()) {
@@ -267,7 +267,7 @@ export function heavyCommand(command: string, args: string[], cwd = process.cwd(
   if (command !== 'npm' && command !== 'pnpm' || at < 0) return false;
   const script = ['run', 'run-script'].includes(args[at]!) ? args.slice(at + 1).find(word => !word.startsWith('-')) : args[at] === 't' ? 'test' : args[at]!;
   if (!script || !heavyScript.test(script)) return false;
-  try { return !String(JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8')).scripts?.[script] ?? '').includes('tests/helpers/run-tests.ts'); } catch { return true; }
+  return !existsSync(join(cwd, 'tests/helpers/run-tests.ts'));
 }
 
 /** PATH without the wrapper directory, so the wrapper runs the real command. */
