@@ -59,6 +59,6 @@ export function gateCells(gate: GateRecord | null, id: string, ranNightly: boole
 export async function filedItems(db: Queryable, gate: GateRecord | null): Promise<Map<string, string>> {
   const keys = Object.entries(gate?.filed ?? {}).filter(([key, entry]) => key.startsWith('diagnostic:e2e:') && entry.item).map(([, entry]) => entry.item!);
   if (!keys.length) return new Map();
-  const rows = (await db.query(`SELECT document->>'id' AS id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1::text[])`, [keys])).rows;
+  const rows = (await db.query(`SELECT id::text AS id, key FROM work_index WHERE key = ANY($1::text[])`, [keys])).rows;
   return new Map(rows.map(row => [row.key, row.id]));
 }
