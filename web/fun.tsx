@@ -52,6 +52,11 @@ export const LINES = [
   'The robots are building. You are deciding.', 'File it before you forget it. Ship it before you need it.', 'Somebody always has the next item.',
   'Main stays green. Spirits stay high.', 'Good software is a thousand small yeses.', 'From “what if” to “it’s live” in one sitting.',
   'The crew loves a clear acceptance criterion.', 'Fresh worktree, fresh start.', 'Building software is fun again.',
+  // The noir voice (GY-3272): the same lines, wearing a coat.
+  'The rain never stops. Neither does the merge queue.', 'Somewhere a reviewer is reading your diff in the dark.',
+  'Every shard of neon in this city is a green check somewhere.', 'The commit log remembers what the city forgets.',
+  'Agents drift through the worktree like rain down a window.', 'Two merges in the night. Neither saw the other.',
+  'The queue is long but the streetlights are on.', 'Ship it before the fog rolls in.',
   '“The best way to predict the future is to invent it.” — Alan Kay', '“Simplicity is prerequisite for reliability.” — Edsger Dijkstra',
   '“Make it work, make it right, make it fast.” — Kent Beck', '“Real artists ship.” — Steve Jobs', '“Done is better than perfect.” — Sheryl Sandberg',
   '“What I cannot create, I do not understand.” — Richard Feynman', '“The details are not the details. They make the design.” — Charles Eames',
@@ -96,10 +101,14 @@ export function confetti() {
   document.body.append(burst);
   setTimeout(() => burst.remove(), 2200);
 }
-/** The toast when an item merges while the page is open: who built it and what. */
+/** The toast when an item merges while the page is open: who built it and what. The neon pulse (GY-3272) runs only with Fun on; reduced motion stops it. */
 export function ShippedToast({ item, onClose }: { item: Work; onClose(): void }) {
   const fun = useFun(), builder = builderOf(item), name = builder && fun ? friendlyName(builder) ?? builder : builder;
-  return <div className="toast" aria-live="polite" data-toast={item.key} onClick={onClose}>
+  return <div className={fun ? 'toast pulse' : 'toast'} aria-live="polite" data-toast={item.key} onClick={onClose}>
     {builder ? <span title={builder}>{name}</span> : 'Graphyard'} shipped “{item.title}”{fun ? ' 🎉' : ''}
   </div>;
 }
+
+/** Whether an item's latest merge trial failed on the head it stands at — the row that earns the glitch flicker (GY-3272). */
+export const failedTrial = (item: Pick<Work, 'candidate' | 'mergeLedger'>) =>
+  item.mergeLedger?.state === 'refused' && !!item.candidate && item.mergeLedger.head === item.candidate.sha;
