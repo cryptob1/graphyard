@@ -69,11 +69,11 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
       `journalctl --user -u ${where!.loopUnit}`, `docker logs ${where!.server}`,
     ]) await expect(section).toContainText(shown, { timeout: 15_000 });
 
-    // The same dashboard's Guide page embeds the README, so the where-things-run diagram renders from the page's own bundle.
+    // The same dashboard's Guide page draws where things run as readable panels (GY-3295) naming the same parts.
     await page.getByRole('button', { name: 'Help', exact: true }).click();
-    const diagram = page.locator('.guide img.guide-diagram');
+    const diagram = page.getByRole('figure', { name: 'Where things run' });
     await expect(diagram).toBeVisible({ timeout: 15_000 });
-    await expect.poll(async () => await diagram.evaluate(img => (img as HTMLImageElement).naturalWidth), { timeout: 15_000 }).toBeGreaterThan(0);
+    for (const part of ['graphyard-master-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', '127.0.0.1:4310']) await expect(diagram).toContainText(part);
     await expect(page.locator('.guide')).toContainText('Where things run');
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));

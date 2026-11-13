@@ -1,0 +1,14 @@
+{
+  "id": "docs-first-visit",
+  "title": "A newcomer reads Docs at desktop and phone widths: overview, first item, readable diagrams, FAQ and reference",
+  "description": "A real browser on the served dashboard at 1440px and 390px opens Docs (Help), follows the page's own links and the keyboard from who decides what through the first-item journey, the delivery flow and where-things-run diagrams, the FAQ and the folded reference; finds concrete answers on shared context, delivery, Railway or AWS deployment and access across installs; every on-page link lands; the page never scrolls sideways; diagram labels are at least 14 CSS px with no card, label or arrow overlapping; and a full-page screenshot per width is kept.",
+  "tags": ["dashboard", "docs"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the Docs page at desktop and phone widths",
+    "run": "npm run test:browser -- browser-tests/docs-first-visit.spec.ts",
+    "timeoutSeconds": 240
+  }]
+}
