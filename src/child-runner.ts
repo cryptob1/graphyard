@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
  * The one way the loop, the dispatcher and the merge broker run Herdr, gh, git and systemctl.
@@ -48,6 +49,9 @@ export interface ChildRunOptions {
 export type ChildRun = (command: string, args: string[], options?: ChildRunOptions) => Promise<string> | string;
 export type BoundChildRun = (command: string, args: string[], options?: ChildRunOptions) => Promise<string>;
 
+/** Variables every child started in this async context carries over its own environment: a heavy job's host slot (GY-3290, master/verification-slots.ts). */
+export const inheritedVariables = new AsyncLocalStorage<Record<string, string>>();
+
 export const defaultChildTimeoutMs = 90_000, defaultChildMaxBuffer = 16 * 1024 * 1024;
 /** How long a child with a `started` predicate has to show startup before it is killed. */
 export const defaultChildStartupTimeoutMs = 30_000;
@@ -83,10 +87,11 @@ export class ChildProcessError extends Error {
 export function runChild(command: string, args: string[], options: ChildRunOptions = {}): Promise<string> {
   const timeoutMs = options.timeoutMs ?? defaultChildTimeoutMs, maxBuffer = options.maxBuffer ?? defaultChildMaxBuffer;
   const startupTimeoutMs = options.startupTimeoutMs ?? defaultChildStartupTimeoutMs;
+  const inherited = inheritedVariables.getStore(), env = inherited ? { ...(options.env ?? process.env), ...inherited } : options.env;
   return new Promise<string>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     const [file, ...argv] = [...(options.wrapper ?? []), command, ...args];
-    try { child = spawn(file!, argv, { cwd: options.cwd, env: options.env, detached: !!options.group, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe', ...(options.extraFds ?? [])] }); }
+    try { child = spawn(file!, argv, { cwd: options.cwd, env, detached: !!options.group, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe', ...(options.extraFds ?? [])] }); }
     catch (error) { reject(new ChildProcessError(command, args, { stdout: '', stderr: '', status: null, signal: null, timedOut: false, cause: error })); return; }
     const out: Buffer[] = [], err: Buffer[] = [];
     let outBytes = 0, errBytes = 0, timedOut = false, startupTimedOut = false, settled = false, spawnFailure: unknown;

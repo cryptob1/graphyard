@@ -11,6 +11,7 @@ import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiEnvironment } from '../cli/test-isolation.js';
 import { installArgv, packageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
+import { withHeavyJob } from '../master/verification-slots.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -20,7 +21,10 @@ export const workerVerificationTimeoutMs = 55 * 60_000;
 export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');
 export const workerVerificationPrefix = 'verify-';
 
-export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot()): Promise<WorkerVerificationResult> {
+/** One heavy job of the host (GY-3290): it waits for a slot of the shared budget before its deadline starts. */
+export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot()): Promise<WorkerVerificationResult> =>
+  withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent));
+async function verifyOnHost(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent: string): Promise<WorkerVerificationResult> {
   await mkdir(parent, { recursive: true });
   const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
   await writeTempOwner(allocation);

@@ -479,7 +479,7 @@ export async function anchorSessionCheckout(root: string, directory: string, run
  * the common Git directory for the packed-refs lock — plus the host's verification lock directory.
  */
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
-  return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
+  return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant()];
 }
 /**
  * GY-3235: the checkout a reviewer's or producer's session is confined against is

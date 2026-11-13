@@ -18,6 +18,7 @@ import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
+import { slotsDirectoryVariable, waitStep, withHeavyJob } from '../master/verification-slots.js';
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
@@ -82,6 +83,14 @@ export { mergeRecordKey } from '../merge-writer/executor.js';
 const output = (error: unknown) => { const failed = error as { stdout?: unknown; stderr?: unknown; message?: string }; return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}` || String(failed.message ?? error); };
 
 /**
+ * GY-3290: a trial — a merge's, the batch gate's, a diagnostic's, a revert's; in this process or
+ * detached — is one heavy job of the host: it waits here for a slot of the budget every Graphyard
+ * project on the host shares, naming the holders as its step, before anything of it starts.
+ */
+const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>) =>
+  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal });
+
+/**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
  * GY-1523, and the trial commits). Git writes are the trial ref and the one leased push to
  * `origin`; a trial checkout under `base` is the only worktree made. The push child's environment
@@ -123,8 +132,8 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
-        ...trialShareAllowance(share, timeoutMs) });
+      return heavyTrial(item.key, onStep, signal, () => (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+        ...trialShareAllowance(share, timeoutMs) }));
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
     itemPreviews: { root, base: options.base, timeoutMs: trialTimeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
@@ -661,7 +670,7 @@ const fullServeSha = (sha: string) => /^[0-9a-f]{40}$/i.test(sha);
 function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist: () => Promise<void>, adopted?: Map<string, TrialRunHandle>): MergePorts {
   const launch = reads.launchTrialRun;
   if (!launch && !adopted?.size) return reads;
-  return { ...reads, trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs) => {
+  return { ...reads, trial: (mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs) => heavyTrial(item.key, onStep, signal, async () => {
     const handle = adopted?.get(item.key);
     if (handle) {
       if (handle.mergeSha === mergeSha) return handle.trial(onStep, onTiming, signal);
@@ -675,7 +684,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
     const entry = state.mergeWriter.inFlights?.find(candidate => candidate.key === item.key);
     if (entry) { entry.run = { directory: launched.directory, mergeSha }; await persist().catch(() => {}); }
     return launched.trial(onStep, onTiming, signal);
-  } };
+  }) };
 }
 
 /**
