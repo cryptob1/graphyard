@@ -65,11 +65,11 @@ export function recordNoteInMemory(memory: ProjectMemory, note: MemoryNote): boo
 }
 
 /** Record one of the master's own lessons (GY-3274): a short note the next master launch prompt carries. */
-export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at?: string; forWorkers?: boolean }): MemoryNote {
+export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at: string; forWorkers?: boolean }): MemoryNote {
   const text = input.text.trim();
   if (!text) throw new Error('A lesson needs its text');
   if (text.length > masterLessonCharacterLimit) throw new Error(`A lesson is at most ${masterLessonCharacterLimit} characters and this one is ${text.length}: ${text.slice(0, 120)}…`);
-  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at ?? new Date().toISOString(), ...(input.forWorkers ? { forWorkers: true } : {}) };
+  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at, ...(input.forWorkers ? { forWorkers: true } : {}) };
   recordNoteInMemory(memory, note);
   // The stored total stays under the word budget, dropping the oldest lessons first.
   while (memory.notes.filter(entry => entry.kind === masterLessonKind).length > 1
@@ -120,7 +120,7 @@ function briefSection(markdown: string, heading: string): string | null {
  * Set the install's one product brief (GY-3274): Markdown of at most 800 words whose sections are
  * exactly the required ones, each change kept in history with who and why, newest first.
  */
-export function setProductBrief(memory: ProjectMemory, input: { markdown: string; by: string; why: string; at?: string }): ProductBrief {
+export function setProductBrief(memory: ProjectMemory, input: { markdown: string; by: string; why: string; at: string }): ProductBrief {
   const markdown = input.markdown.trim();
   const why = input.why.trim();
   if (!why) throw new Error('master brief set needs a REASON; every agent decision is attributable');
@@ -128,7 +128,7 @@ export function setProductBrief(memory: ProjectMemory, input: { markdown: string
   if (missing.length) throw new Error(`The product brief needs a ${missing.map(heading => `## ${heading}`).join(', ')} section`);
   const words = docsWords(markdown);
   if (words > productBriefWordLimit) throw new Error(`The product brief is ${words} words, over the ${productBriefWordLimit}-word limit`);
-  const at = input.at ?? new Date().toISOString();
+  const at = input.at;
   const previous = memory.brief;
   const change: ProductBriefChange = { at, by: input.by, why, words };
   const brief: ProductBrief = { markdown, updatedAt: at, by: input.by, why, history: [change, ...(previous?.history ?? [])].slice(0, retainedProductBriefChanges) };

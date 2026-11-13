@@ -101,7 +101,7 @@ test('e2e:product-brief — every master launch prompt includes the brief before
   await writeFile(file, briefMarkdown(''));
   await runBriefCommand(root, 'graphyard-master', ['set', file, 'the', 'standing', 'brief'], deps);
   const memory = await readProjectMemory(root);
-  recordMasterLesson(memory, { id: randomUUID(), text: 'Read the gate record before filing a batch item', by: 'graphyard-master', forWorkers: true });
+  recordMasterLesson(memory, { id: randomUUID(), text: 'Read the gate record before filing a batch item', by: 'graphyard-master', at: new Date().toISOString(), forWorkers: true });
 
   const request = masterRequest(config, 'Handover: continue from master status.', memory);
   assert.match(request, /Product brief for this install \(updated [^)]+ by graphyard-master\): ## Problem/, 'the launch prompt carries the whole brief');
