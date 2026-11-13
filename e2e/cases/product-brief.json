@@ -1,0 +1,15 @@
+{
+  "id": "product-brief",
+  "title": "The master keeps one product brief the whole install builds and judges by",
+  "description": "Records a product brief with `master brief set FILE REASON` in project memory (Markdown, at most 800 words, the five sections) with each change kept in history, proves every master launch prompt carries it before the lessons, that worker and reviewer prompts carry its problem, users and success sections, and that the control plane serves the mirrored brief to a read-only dashboard Product page. Uses a real control plane against Postgres; no provider credentials, accounts or network.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product brief recorded, carried and shown",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-brief.test.ts tests/master-founder-guidance.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

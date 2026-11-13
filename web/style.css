@@ -430,3 +430,4 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .shortcuts kbd{white-space:nowrap}
 /* The row the keyboard cursor is on (GY-3272). */
 .work-row.kb-cursor{outline:2px solid var(--accent);outline-offset:-2px;background:var(--raised);box-shadow:0 0 18px color-mix(in srgb,var(--accent) 20%,transparent)}
+.product-section pre{white-space:pre-wrap;font:inherit;margin:0 0 var(--space-3,16px);max-width:720px;line-height:1.65}
