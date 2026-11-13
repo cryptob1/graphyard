@@ -157,7 +157,7 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
           await reads.record(target, { kind: 'trial-step', head: target.candidate!.sha, step: 'tests', at: new Date().toISOString() });
           const current: Work = (await store.workDocument(target.id))!;
           assert.ok(current.revision > target.revision);
-          assert.equal(await production.mergeWriter!.hold?.(target), null, 'incidental revisions do not invalidate a candidate');
+          assert.equal(await production.mergeWriter!.holdOpening?.(target), null, 'incidental revisions do not invalidate a candidate');
         }
       } finally { release(); }
       const results = await running;
