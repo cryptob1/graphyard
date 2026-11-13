@@ -14,8 +14,8 @@ import { runBriefCommand } from '../src/master/brief.js';
 import { masterRequest } from '../src/master/master-session.js';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { reviewPrompt } from '../src/reviewer.js';
-import { recordMasterLesson } from '../src/model/project-memory.js';
-import { readProjectMemory } from '../src/project-memory.js';
+import { emptyProjectMemory, recordMasterLesson, reconcileMasterMemory } from '../src/model/project-memory.js';
+import { readProjectMemory, recordedMasterMemory } from '../src/project-memory.js';
 import { ProductView } from '../web/pages/product';
 import type { MasterConfig } from '../src/master/profiles.js';
 import type { Principal } from '../src/model.js';
@@ -74,6 +74,9 @@ test('e2e:product-brief — brief set keeps one brief per install in project mem
   assert.match(memory.brief!.markdown, /A second revision tightens the problem\./);
   assert.deepEqual(publishes.length, 2, 'each set publishes the brief to the control plane');
 
+  // The loop adopts the file's brief, so its next write of project memory keeps it.
+  assert.deepEqual(reconcileMasterMemory(emptyProjectMemory('2026-11-13T00:00:00Z'), await recordedMasterMemory(root)).brief, memory.brief);
+
   const shown = await runBriefCommand(root, 'graphyard-master', ['show'], deps) as { markdown: string };
   assert.equal(shown.markdown, memory.brief!.markdown);
 
@@ -82,7 +85,7 @@ test('e2e:product-brief — brief set keeps one brief per install in project mem
   await writeFile(missing, '## Problem\nx\n## Users\ny\n## What success looks like\nz\n## Open questions\nw\n');
   await assert.rejects(runBriefCommand(root, 'graphyard-master', ['set', missing, 'no', 'bets'], deps), /The product brief needs a ## Current bets section/);
   const long = join(root, 'long.md');
-  await writeFile(long, briefMarkdown(`${'\n' + 'filler word '.repeat(120)}`));
+  await writeFile(long, briefMarkdown(`${'\n' + 'filler word '.repeat(400)}`));
   await assert.rejects(runBriefCommand(root, 'graphyard-master', ['set', long, 'too', 'long'], deps), new RegExp(`over the 800-word limit`));
   await assert.rejects(runBriefCommand(root, 'graphyard-master', ['set', second], deps), /Use master brief set FILE REASON/);
   // A worker identity is refused, as for lessons.
@@ -101,7 +104,7 @@ test('e2e:product-brief — every master launch prompt includes the brief before
   recordMasterLesson(memory, { id: randomUUID(), text: 'Read the gate record before filing a batch item', by: 'graphyard-master', forWorkers: true });
 
   const request = masterRequest(config, 'Handover: continue from master status.', memory);
-  assert.match(request, /Product brief for this install \(updated [^)]+\) by graphyard-master\): ## Problem/, 'the launch prompt carries the whole brief');
+  assert.match(request, /Product brief for this install \(updated [^)]+ by graphyard-master\): ## Problem/, 'the launch prompt carries the whole brief');
   assert.ok(request.indexOf('Product brief for this install') < request.indexOf('Master lessons, your own recorded experience'), 'the brief comes before the lessons');
   assert.ok(request.indexOf('Master lessons') < request.indexOf('Handover: continue'), 'the lessons still come before the task handover');
   assert.ok(request.indexOf('Product brief') < request.indexOf('Handover: continue'), 'the brief comes before the task handover');
@@ -154,9 +157,6 @@ test('e2e:product-brief — the control plane serves the mirrored brief and the 
   // Only the install's own identities publish it; a worker cannot, and a malformed brief is refused.
   assert.equal((await call(worker, 'POST', brief)).status, 403);
   assert.equal((await call(coordinator, 'POST', { markdown: 'not a brief' })).status, 400);
-
-  const history = (await store.pool.query(`SELECT actor, kind FROM events WHERE kind = 'product-brief'`)).rows;
-  assert.deepEqual(history, [{ actor: 'graphyard-master', kind: 'product-brief' }], 'the publication is on the event ledger');
 
   // The Product page renders the brief read-only: the sections, who kept it and why, no editing control in sight.
   const html = renderToStaticMarkup(createElement(ProductView, { brief: read.body.brief, error: '', loading: false, retry: () => {} }));

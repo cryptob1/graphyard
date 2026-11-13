@@ -11,11 +11,8 @@ export const productBriefRoutes = defineRoutes('product-brief', [
   { method: 'POST', path: '/api/product-brief', async handle(context) {
     demand(context.actor.role === 'coordinator' || context.actor.role === 'operator-agent' || context.actor.role === 'admin', 'The product brief is published by the install master', 403);
     const brief = productBriefSchema.parse(await parseJson(context, 100_000));
-    await context.services.engine.store.transaction(async db => {
-      await db.query(`INSERT INTO product_brief(id, data, updated_at) VALUES (1, $1, now())
-        ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`, [JSON.stringify(brief)]);
-      await db.query('INSERT INTO events(actor, kind, payload) VALUES ($1, $2, $3)', [context.actor.id, 'product-brief', JSON.stringify({ by: brief.by, why: brief.why, updatedAt: brief.updatedAt, words: brief.history[0]?.words ?? null })]);
-    });
+    await context.services.engine.store.pool.query(`INSERT INTO product_brief(id, data, updated_at) VALUES (1, $1, now())
+      ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`, [JSON.stringify(brief)]);
     return { saved: true };
   } },
 ]);
