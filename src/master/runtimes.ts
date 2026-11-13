@@ -48,6 +48,8 @@ export const providerUsageErrors: readonly RegExp[] = [
   /\busage limits? (?:has|have) been reached\b/i,
   /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
   /\blimit reached\b.*\breset/i,
+  // A free model's allowance (OpenCode's `429 FreeUsageLimitError`, `Free usage limit reached`) spends the account that runs it (GY-3302).
+  /\bFreeUsageLimitError\b/,
 ];
 /** Z.AI's 429 `Weekly/Monthly Limit Exhausted`, which the runtimes that speak to it print verbatim behind their own error labels (GY-973, GY-1817). */
 const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i;

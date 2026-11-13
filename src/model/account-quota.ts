@@ -12,7 +12,8 @@ import type { AgentRegistry, FleetAccount, ObservedQuota, QuotaObservation } fro
 export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' | 'resetsAt' | 'reason' | 'session' | 'source'>, now: number): string | null {
   if (quota.state !== 'exhausted') return null;
   const ahead = (iso: string | null) => !iso || Date.parse(iso) > now;
-  const resets = quota.resetsAt ? `resets ${quota.resetsAt}` : 'reset unknown';
+  // A notice that named no reset is held for the bounded window, which is not its reset (GY-3302).
+  const resets = !quota.resetsAt ? 'reset unknown' : quota.session === 'guessed' ? `reset unknown, held until ${quota.resetsAt}` : `resets ${quota.resetsAt}`;
   if (quota.source === 'operator') return ahead(quota.resetsAt) ? `marked exhausted by an operator${quota.reason ? `: ${quota.reason}` : ''}; ${quota.resetsAt ? resets : 'held until an operator clears it'}` : null;
   if (quota.resetsAt && !ahead(quota.resetsAt)) return null;
   if (quota.session) return `a session reported it spent${quota.reason ? `: ${quota.reason}` : ''}; ${resets}`;
