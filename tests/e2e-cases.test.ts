@@ -281,7 +281,7 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
   assert.equal((await call('scenarios/tracked/runs', operator, { revision: 1, runId: 'r10', baseUrl: 'https://x.test', sha: null, environment: 'uat', durationMs: 1, outcome: 'fail', executed: 1, failingStep: null })).status, 400, 'a failure names its step');
 
   // The page renders the case's outcome, commit, environment, pass rate, flaky flag and each failed run's step.
-  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
+  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, view: 'cases', error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
   const row = html.slice(html.indexOf('data-case="tracked"'));
   const text = row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' ').replace(/&quot;/g, '"').replace(/\s+/g, ' ');
   assert.match(text, /E2E case · e2e\/cases\/tracked\.json · targets uat · optional, never blocks a release · api, tracked/, 'an optional case is marked optional (GY-1378)');
@@ -370,7 +370,7 @@ test('unit:e2e-case-verdict-states — a release run ends each case passed, fail
   // The Tests page marks a required case required.
   const summary = (await call('tests', operator)).body;
   assert.equal(summary.cases.find((entry: any) => entry.id === 'verdict-a').e2e.required, true);
-  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
+  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, view: 'cases', error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
   const row = html.slice(html.indexOf('data-case="verdict-a"'));
   assert.match(row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' '), /targets uat · +required/);
 });

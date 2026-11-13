@@ -4,7 +4,9 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
 import { flakiness, type RunIdentity, type ScenarioRun } from './model/test-cases.js';
-import { testSummary, type CaseSummary } from './test-runs.js';
+import { judgedProofs, testSummary, withdrawnEvidence, type CaseSummary, type JudgedProof } from './test-runs.js';
+import { caseCategory, filedItems, gateCells, placedRuns, type CaseMatrix } from './test-matrix.js';
+import type { GateRecord } from './batch-gate.js';
 import { caseDirectory, caseRunner, caseSchema, scenarioDefinition, type E2eCase } from './e2e/case.js';
 import type { Store } from './store.js';
 
@@ -235,6 +237,11 @@ export type TrackedCase = Omit<CaseSummary, 'latest' | 'lastFailure' | 'history'
   passRate?: number | null;
   /** A repository E2E case (src/e2e/case.ts): its file's tags, target and whether a release requires it; null for a case defined by hand. */
   e2e?: { tags: string[]; target: string; required: boolean } | null;
+  /** Whether `e2e/cases/ID.json` is on the served main (GY-3278); without a checkout to read, whether the registry or the run ledger knows the case. */
+  onMain?: boolean;
+  /** GY-3278 AC-3: the case's category (its first tag, else 'other') and its latest result in each place it runs. */
+  category?: string;
+  matrix?: CaseMatrix;
 };
 
 /**
@@ -243,19 +250,25 @@ export type TrackedCase = Omit<CaseSummary, 'latest' | 'lastFailure' | 'history'
  * revision. An install managing a repository other than Graphyard's own never lists that release's
  * seeded built-in scenarios (GY-2964): rows an older release seeded there (by `graphyard`, with no
  * runs of their own) stay in the registry but are not the repository's cases, so they are left out.
+ * `mainCases` names the case files on the served main (GY-3278), so a case written there never reads
+ * as missing; the read also lists every manual and closed-question proof with its state.
  */
-export async function trackedCases(db: Store['pool'], repository?: string | null): Promise<{ window: number; cases: TrackedCase[] }> {
+export async function trackedCases(db: Store['pool'], repository?: string | null, mainCases: Set<string> | null = null, gate: GateRecord | null = null): Promise<{ window: number; cases: TrackedCase[]; manual: JudgedProof[] }> {
   const summary = await testSummary(db);
+  const placed = await placedRuns(db, [...await withdrawnEvidence(db)]), filed = await filedItems(db, gate);
   const definitions = new Map<string, Scenario>((await db.query('SELECT DISTINCT ON (id) document FROM scenarios ORDER BY id, revision DESC')).rows.map(row => [row.document.id, row.document]));
   const seededElsewhere = repository?.toLowerCase() !== graphyardRepository;
-  return { window: summary.window, cases: summary.cases.filter(entry => !(seededElsewhere && !entry.runs && entry.changed?.by === 'graphyard')).map(entry => {
+  return { window: summary.window, manual: await judgedProofs(db), cases: summary.cases.filter(entry => !(seededElsewhere && !entry.runs && entry.changed?.by === 'graphyard')).map(entry => {
     const judged = entry.history.filter(run => !run.withdrawn && run.result !== 'skipped');
     const definition = definitions.get(entry.id);
     // A run whose target reported no commit is stored on `unknown`; such runs share no commit, so they never make a case flaky together.
     const unknown = entry.history.some(run => run.sha === 'unknown')
       && (({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(entry.history.map(run => run.sha === 'unknown' ? { ...run, sha: `unknown-${run.seq}` } : run) as ScenarioRun[]));
     return { ...entry, ...(unknown || {}), passRate: judged.length ? judged.filter(run => run.result === 'pass').length / judged.length : null,
-      e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment, required: definition.required ?? false } : null };
+      e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment, required: definition.required ?? false } : null,
+      onMain: mainCases ? mainCases.has(entry.id) : !!definition || entry.runs > 0, category: caseCategory(definition?.tags),
+      // The nightly run covers the whole catalog on main: a case it did not fail passed, when its file was there and registered before that run.
+      matrix: { ...placed.get(entry.id), ...gateCells(gate, entry.id, (mainCases?.has(entry.id) ?? true) && !!definition && !!gate?.diagnosticsAt && definition.createdAt <= gate.diagnosticsAt, filed) } };
   }) };
 }
 

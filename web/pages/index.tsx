@@ -65,7 +65,7 @@ export const views: readonly View[] = [
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'shipped', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
   // Every test case with its latest trusted result and history (GY-162). It is shown even before the
   // first run, as never run, rather than hidden; operator agents' scoped API refuses its read.
-  { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView}/> },
+  { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView} openItem={dashboard.setSelected}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.

@@ -432,3 +432,10 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 /* The row the keyboard cursor is on (GY-3272). */
 .work-row.kb-cursor{outline:2px solid var(--accent);outline-offset:-2px;background:var(--raised);box-shadow:0 0 18px color-mix(in srgb,var(--accent) 20%,transparent)}
 .product-section pre{white-space:pre-wrap;font:inherit;margin:0 0 var(--space-3,16px);max-width:720px;line-height:1.65}
+/* GY-3278 Tests rows: each proof's item and criterion; only a merged item's missing case file is an alarm. */
+.proof-item{margin-bottom:var(--space-2)}.proof-item a{display:block}.proof-criterion{display:block;color:var(--text-2)}
+.case-alarm{display:block;color:var(--blocked);font-weight:500}.case-pending{display:block;color:var(--text-2);font-size:var(--type-small)}
+.unbuilt-proofs{margin:var(--space-3) 0}.unbuilt-proofs>summary{cursor:pointer;color:var(--text-2)}
+.case-filters input[type=search]{width:auto;min-width:200px;padding:4px 12px;border-radius:999px}
+.test-matrix .matrix-cell{white-space:nowrap}.test-matrix .matrix-cell small{color:var(--text-2)}.test-matrix .matrix-totals td,.test-matrix .matrix-totals th{font-size:var(--type-small);color:var(--text-2)}.test-matrix .matrix-group th{background:var(--surface);text-align:left}
+.matrix-summary{margin:var(--space-2) 0;font-weight:500}.coverage-grid{width:auto}.coverage-grid td{text-align:center}.coverage-grid td.result-none{color:var(--text-2)}.matrix-help{margin:var(--space-2) 0}.matrix-help>summary{cursor:pointer;color:var(--text-2)}

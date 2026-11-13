@@ -470,7 +470,10 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     const { ports } = gatePorts(batch, () => false, { clock: Date.parse(at) });
     const record = bootstrapGate(repository, verified);
     assert.equal((await runGate(ports, record)).outcome, 'verified');
-    assert.deepEqual(record.lastOutcome, { tip, outcome: 'verified', reason: null, finishedAt: at });
+    const { cases, ...outcome } = record.lastOutcome!;
+    assert.deepEqual(outcome, { tip, outcome: 'verified', reason: null, finishedAt: at });
+    // GY-3278: each gated E2E case's result stays on the outcome, for the Tests page's Main column.
+    assert.deepEqual(cases, { 'case-2': 'pass', 'case-3': 'pass', 'create-work-item': 'pass', smoke: 'pass' });
   }
   // A reverted run names its failing check and the culprit it reverted.
   {
@@ -478,6 +481,8 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     const record = bootstrapGate(repository, verified);
     await runGate(ports, record);
     assert.deepEqual([record.lastOutcome!.outcome, record.lastOutcome!.reason], ['reverted', 'reverted GY-3 for failing e2e:case-3']);
+    assert.equal(record.lastOutcome!.cases!['case-3'], 'fail', 'a case failing its re-run reads failed on main');
+    assert.equal(record.lastOutcome!.cases!['case-2'], 'pass');
     assert.ok(Date.parse(record.lastOutcome!.finishedAt!) > 0, 'the end time is recorded');
   }
   // A timeout names the limit, and the second timeout holds with its reason.

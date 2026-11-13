@@ -1,0 +1,14 @@
+{
+  "id": "tests-page-matrix",
+  "title": "The Tests page's environment matrix shows where each case ran and how it went",
+  "description": "With fixture results where case A passed in Trial and Main but failed Served, and case B only ran in Nightly, the served /api/tests read renders the matrix as the default view: those cells with their ages, 'not run here' in neutral style elsewhere, each category group's pass/fail count, the per-column totals, and 'only failing' leaving case A.",
+  "target": "any",
+  "required": false,
+  "tags": ["dashboard"],
+  "steps": [{
+    "kind": "command",
+    "name": "tests page matrix",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/tests-page-matrix.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

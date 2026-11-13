@@ -76,7 +76,7 @@ test('unit:managed-tests-page-lists-repository-cases-only — a managed reposito
   assert.deepEqual((await gameApi('scenarios')).map((scenario: any) => scenario.id), [], 'no built-in scenario is registered for the managed repository');
   const empty = await gameApi('tests');
   assert.deepEqual(empty.cases, [], '/api/tests answers no cases before the repository has any');
-  const page = text(renderToStaticMarkup(createElement(TestsView, { data: empty, error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false })));
+  const page = text(renderToStaticMarkup(createElement(TestsView, { data: empty, view: 'cases', error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false })));
   assert.match(page, /No test cases yet/, 'the empty state, with no fabricated rows');
   assert.match(page, /e2e\/cases\/ID\.json/, 'it names the e2e/cases/ format a case is added as');
   assert.match(page, /graphyard e2e run/, 'it names the command that records a run');

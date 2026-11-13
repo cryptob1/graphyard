@@ -51,6 +51,8 @@ export interface GateLastOutcome {
   /** The reason it came to that outcome — the failing check a revert names — or null on a plain pass. */
   reason: string | null;
   finishedAt: string;
+  /** GY-3278: each E2E case the run gated, by case id, and whether it passed (its re-run, when it failed once); the Tests page's Main column. */
+  cases?: Record<string, 'pass' | 'fail'>;
 }
 /** The gate's persisted state, beside the deploy record. */
 export interface GateRecord {
@@ -241,6 +243,15 @@ export function gateOutcomeReason(outcome: GateOutcome): string | null {
   return 'reason' in outcome ? outcome.reason : null;
 }
 
+/** The settled batch's E2E cases from its finished steps: a case failing its first run fails only if its re-run failed too. */
+function gatedCases(flight: GateRecord['inFlight']): Record<string, 'pass' | 'fail'> | null {
+  const key = (checks: readonly string[]) => `${flight?.tip} ${[...checks].sort().join(' ')}`;
+  const first = flight?.checks && flight.results?.[key(flight.checks)];
+  if (!first) return null;
+  const failed = first.length ? flight!.results![key(first)] ?? first : [];
+  return Object.fromEntries(flight!.checks!.filter(check => check.startsWith('e2e:')).map(check => [check.slice(4), failed.includes(check) ? 'fail' : 'pass']));
+}
+
 /**
  * One gate of the batch from the last verified commit to the main tip, updating `record` in place.
  * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle. A batch a
@@ -254,8 +265,9 @@ export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutco
   const finishedAt = () => new Date(ports.now()).toISOString();
   return gateFlight(ports, record).then(
     outcome => {
+      const cases = gatedCases(record.inFlight);
       record.inFlight = null;
-      if (outcome.outcome !== 'idle') record.lastOutcome = { tip: outcome.tip, outcome: outcome.outcome, reason: gateOutcomeReason(outcome), finishedAt: finishedAt() };
+      if (outcome.outcome !== 'idle') record.lastOutcome = { tip: outcome.tip, outcome: outcome.outcome, reason: gateOutcomeReason(outcome), finishedAt: finishedAt(), ...(cases ? { cases } : {}) };
       return outcome;
     },
     error => {
