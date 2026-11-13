@@ -24,11 +24,12 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   // lease stays; the worker reaches the changed criteria at its next sync or status, and complete
   // refuses until that sync.
   const previousCriteria = work.criteria;
+  const descriptionChanged = data.description !== undefined && data.description !== work.description;
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
   demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
   // GY-3037: an item keeps its e2e proof through a revision; no description excuses one.
-  const e2e = e2eProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
+  const e2e = e2eProofRefusal({ type: work!.type, description: data.description ?? work!.description, criteria: data.criteria });
   demand(!e2e, e2e!);
   const unphysical = physicalCheckRefusal(data.criteria);
   demand(!unphysical, unphysical!);
@@ -54,6 +55,7 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
   if (data.owner !== undefined) { await assertHumanOwner(engine, db, data.owner); work.owner = data.owner; }
   work.criteria = revised;
+  if (descriptionChanged) work.description = data.description;
   if (data.plannedFiles !== undefined) work.plannedFiles = data.plannedFiles;
   work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
   work.scenarioRequirements = pins; work.policyRevision++;
@@ -67,7 +69,7 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   // lapsed lease it discards ends that attempt at its deadline. A live one stays (GY-3266): the
   // revision is queued on it instead, and complete refuses the submission until the worker's
   // sync acknowledges it.
-  if (liveLease) work.unsyncedRevision = { policyRevision: work.policyRevision, at: now.toISOString(), by: actor.id, changed: criteriaChanges(previousCriteria, revised) };
+  if (liveLease) work.unsyncedRevision = { policyRevision: work.policyRevision, at: now.toISOString(), by: actor.id, changed: [...(descriptionChanged ? [`description changed: ${data.description.slice(0, 450)}`] : []), ...criteriaChanges(previousCriteria, revised)] };
   if (work.lease && !liveLease) endLapsedAttempt(work, work.lease, now);
   recordIntervention(work, 'requirements');
   work.lease = liveLease ? work.lease : null;

@@ -24,12 +24,13 @@ export default function CreateWork({ work, error, busy, setCreating, setBusy, se
     try {
       const filled = rows.map(row => ({ text: String(f.get(`criterion-${row}`) ?? '').trim(), proofs: split(f.get(`proof-${row}`)) })).filter(row => row.text.length || row.proofs.length);
       const criteria = filled.map((row, i) => ({ id: `AC-${i + 1}`, ...row }));
-      const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, checks: split(f.get('checks')) } });
+      const created = await api('work', { title: f.get('title'), description: f.get('description'), hold: f.get('hold') === 'on' || undefined, criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, checks: split(f.get('checks')) } });
       if (epoch !== sessionEpoch.current) return; setCreating(false); await refresh(epoch); if (epoch === sessionEpoch.current) setSelected(created.id);
     } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); }
   }}>
     <label>Title<input name="title" required maxLength={200} placeholder="What needs to change?"/></label>
     <label>Description (optional)<textarea name="description" rows={3}/></label>
+    <label><input type="checkbox" name="hold"/> Hold (keep it out of dispatch until released)</label>
     <p className="muted">Describe the change. The master writes the criteria and proofs.</p>
     <details open={advanced} onToggle={e => setAdvanced(e.currentTarget.open)}><summary>Advanced</summary>
     <fieldset className="criteria-fields"><legend>What must be true when it is done</legend>

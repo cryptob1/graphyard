@@ -17,8 +17,9 @@ export function operator({ work, data }: Ctx) {
   demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
 }
 
-export async function run({ db, actor, work }: Ctx) {
+export async function run({ db, actor, work, data }: Ctx) {
   if (actor.role !== 'operator-agent') admin(actor);
-  work.ready = true;
+  work.ready = true; work.hold = undefined;
+  work.releasedBy = data.by ?? actor.id; work.releaseReason = data.reason ?? `Released by ${work.releasedBy}`;
   await adoptFollowUpWindow(db, work);
 }

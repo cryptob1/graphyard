@@ -1,0 +1,16 @@
+{
+  "id": "release-recorded-hold-edit",
+  "title": "Releases are recorded, items can be held, and descriptions can be edited",
+  "description": "The loop releases an unheld item as 'loop' with a reason, a held item stays undispatched until released (recording who), and a description change shows in history and reaches a leased worker at its next sync.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "release, hold and description edit on a fixture install",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/release-recorded-hold-edit.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
