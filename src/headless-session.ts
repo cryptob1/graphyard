@@ -223,7 +223,11 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
   settled = (async () => {
     let refused = '', runs = 0;
     // What each run's runtime reported of its tokens is noted for the loop's usage report (GY-3289), whatever became of its answer.
-    const noteUsage = () => noteRunUsage(input.root, { id: `${id}:${++runs}`, work: input.work, role: 'reviewer', account: launch.account, runtime: launch.kind, at: new Date().toISOString() }, readText(runFiles(runDirectory).stdout) ?? '');
+    const noteUsage = () => {
+      const printed = readText(runFiles(runDirectory).stdout);
+      // A run that printed nothing never reached its runtime: there is no session to count.
+      if (printed) noteRunUsage(input.root, { id: `${id}:${++runs}`, work: input.work, role: 'reviewer', account: launch.account, runtime: launch.kind, at: new Date().toISOString() }, printed);
+    };
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const env = runEnvironment(process.env, launch.environment);

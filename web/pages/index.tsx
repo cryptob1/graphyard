@@ -62,8 +62,6 @@ export const views: readonly View[] = [
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
-  // What the agents spent (GY-3289): tokens and cost, beside the sessions that spent them.
-  { id: 'costs', icon: '$', label: 'Costs', section: 'workers', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
   // The master agent's live terminal (GY-3211).
   { id: 'master', icon: '▶', label: 'Master', section: 'master', render: dashboard => <MasterPage token={dashboard.token}/> },
   // What waits on a release, beside what shipped.
@@ -76,6 +74,8 @@ export const views: readonly View[] = [
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
   { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt} onOpenSetup={role(dashboard) === 'admin' ? () => dashboard.setView('setup') : undefined}/> },
+  // What the agents spent (GY-3289): tokens and cost from the price sheet, beside the accounts and models that spent them.
+  { id: 'costs', icon: '$', label: 'Costs', section: 'settings', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
   // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for.
   { id: 'product', icon: '◎', label: 'Product', section: 'settings', render: dashboard => <ProductPage api={dashboard.api}/> },
   // The first-run checklist (GY-1419), for the admin who sets Graphyard up: the sign-in link `graphyard up` prints opens it,
