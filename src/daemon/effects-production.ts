@@ -87,7 +87,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
-  const verifyWorkers = workerVerificationPump(root, () => current().hostId, mutate);
+  const verifyWorkers = workerVerificationPump(root, () => current().hostId, mutate, () => worktreeRoot(root, current()));
   let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
     snapshot: async () => {

@@ -1,0 +1,16 @@
+{
+  "id": "worker-runs-declared-check",
+  "title": "A worker runs its declared check with the check's Compose services on its own head",
+  "description": "A fixture repository's preMerge check verify declares a postgres db Compose service. The worker that holds the item's lease runs 'graphyard check verify' in its confined worktree: the host loop runs that check on the worker's HEAD as the merge trial runs it (stub docker first on PATH, a loopback listener for db), and the worker gets the check's output and whether it passed or failed. A worker without the lease is refused, and the worker sandbox reaches no Docker socket.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a leased worker runs its declared check on its head through the host; another worker is refused",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:worker-runs-declared-check tests/worker-runs-declared-check.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

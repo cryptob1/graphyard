@@ -1,5 +1,6 @@
 import { defaultChildRun } from '../child-runner.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
+import { runWorkerCheck } from '../merge-writer/worker-check.js';
 import type { WorkerVerificationJob } from '../server/worker-verification-queue.js';
 
 /**
@@ -17,7 +18,7 @@ export async function moveBranchToHead(root: string, branch: string, head: strin
 
 /** Poll alongside the host loop; trials never hold up supervision or renewal. */
 export function workerVerificationPump(root: string, host: () => string,
-  mutate: (path: string, body: unknown) => Promise<any>) {
+  mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck) {
   return async () => {
     const jobs: WorkerVerificationJob[] = await mutate('worker-verifications/take', { host: host() });
     for (const job of jobs) {
@@ -25,7 +26,9 @@ export function workerVerificationPump(root: string, host: () => string,
         let reply;
         try {
           await moveBranchToHead(root, job.branch, job.input.head);
-          const result = await runWorkerVerification(root, job.work, job.input, job.baseBranch);
+          const result = job.input.mode === 'check'
+            ? await check({ root, base: base(), key: job.work.key, head: job.input.head, check: job.input.check! })
+            : await runWorkerVerification(root, job.work, job.input, job.baseBranch);
           reply = { id: job.id, result };
         } catch (error) { reply = { id: job.id, error: error instanceof Error ? error.message : String(error) }; }
         await mutate('worker-verifications/finish', reply);
