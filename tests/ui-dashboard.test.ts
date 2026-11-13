@@ -220,7 +220,8 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
     assert.match(firstScreen(itemPage(base.key, dashboard({ work: refusedBoard }))), /Who acts next:<\/span> <strong>Master agent<\/strong>/, reason);
   }
   const guide = visibleWords(markup(createElement(GuidePage)));
-  assert.ok(guide.length < 300, `the guide is ${guide.length} words`);
+  // GY-3295: the guide is the newcomer's Docs page; its FAQ and reference stay folded.
+  assert.ok(guide.length < 550, `the guide is ${guide.length} words`);
 });
 
 test('unit:ui-pr-steps — every moving item shows the four states from its gates, done, current and pending, with the current state in plain words naming what it waits on', () => {

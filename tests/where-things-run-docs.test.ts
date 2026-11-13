@@ -53,14 +53,15 @@ test('unit:tests/where-things-run-docs.test.ts — guide infra prints the same f
   assert.equal(printed.trim(), infra.trim(), 'graphyard guide infra prints the topic');
 });
 
-test('unit:tests/where-things-run-docs.test.ts — the diagram SVG exists, names the same units and containers, and the dashboard Guide embeds it beside the README', () => {
+test('unit:tests/where-things-run-docs.test.ts — the diagram SVG exists, names the same units and containers, and the dashboard Guide draws them as readable panels', () => {
   const svg = read('docs/diagrams/where-things-run.svg');
   assert.ok(svg.startsWith('<svg'), 'the diagram is an SVG');
   for (const fact of ['graphyard-master-OWNER-NAME.service', 'graphyard-deploy-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', 'graphyard-OWNER-NAME-db-1', 'graphyard-trial-', '4310', 'YOUR HOST', 'DOCKER', 'GitHub', 'Agent providers', 'npm + GHCR', 'Your browser', 'Herdr'])
     assert.ok(svg.includes(fact), `the diagram names ${fact}`);
+  // GY-3295: the Guide shows where things run as HTML panels, readable at any width, naming the same parts.
   const guidePage = read('web/pages/guide.tsx');
-  assert.ok(guidePage.includes('docs/diagrams/where-things-run.svg'), 'the dashboard Guide bundles the diagram');
-  assert.ok(guidePage.includes('guide-diagram'), 'the Guide renders the README\'s diagram through its bundled copy');
+  for (const fact of ['graphyard-master-OWNER-NAME.service', 'graphyard-deploy-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', 'graphyard-OWNER-NAME-db-1', 'graphyard-trial-', '4310', 'Your Linux host', 'GitHub', 'Agent providers', 'npm and GHCR', 'Your browser'])
+    assert.ok(guidePage.includes(fact), `the Guide's Where things run panels name ${fact}`);
 });
 
 test('unit:tests/where-things-run-docs.test.ts — the loop reports its install\'s units, containers, port and directories, and the header carries them to the control plane', async () => {
