@@ -108,12 +108,14 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
   const section = viewFor(view).section;
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
-    {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
-    {status && <ReleaseLine status={status}/>}
-    <div className="top-bar-live">
-      <CityStrip work={work} observedAt={observedAt}/>
-      {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
+    <div className="top-bar-row">
+      {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
+      <div className="top-bar-live">
+        <CityStrip work={work} observedAt={observedAt}/>
+        {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
+      </div>
     </div>
+    {status && <ReleaseLine status={status}/>}
     {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;
 }

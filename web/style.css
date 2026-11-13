@@ -344,11 +344,12 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* A condensed display face carries the headings; ids, SHAs and numbers stay monospace. */
 html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3{font-family:var(--font-display);letter-spacing:.2px}
 .tile strong,.kpi strong,.city-strip .mono{font-variant-numeric:tabular-nums}
-/* The street: faint rain drifting down the frame, film grain holding still under it. */
-html:not([data-theme='daylight']) body::after{content:'';position:fixed;inset:0;z-index:60;pointer-events:none;
-  background-image:repeating-linear-gradient(36.87deg,transparent 0 64px,color-mix(in srgb,var(--moving) 6%,transparent) 64px 72px,transparent 72px 100px),repeating-linear-gradient(36.87deg,transparent 0 105px,color-mix(in srgb,var(--moving) 4%,transparent) 105px 112px,transparent 112px 160px);
+/* The street: faint rain drifting down the frame, film grain holding still under it. The rain
+   layer is overscanned and moved by transform — the compositor slides it, so nothing repaints. */
+html:not([data-theme='daylight']) body::after{content:'';position:fixed;inset:-100px;z-index:60;pointer-events:none;
+  background-image:repeating-linear-gradient(36.87deg,transparent 0 64px,color-mix(in srgb,var(--moving) 6%,transparent) 64px 72px,transparent 72px 100px);
   animation:gy-rain .9s linear infinite}
-@keyframes gy-rain{to{background-position:60px -80px,96px -128px}}
+@keyframes gy-rain{to{transform:translate(60px,-80px)}}
 html:not([data-theme='daylight']) body::before{content:'';position:fixed;inset:0;z-index:59;pointer-events:none;opacity:.6;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='gy-grain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23gy-grain)'/%3E%3C/svg%3E")}
 /* Neon: the active navigation, the chosen tile and a hovered action glow softly. */
@@ -365,8 +366,10 @@ html:not([data-theme='daylight']) .terminal-host::after{content:'';position:abso
 /* The beacons: every live agent session, and the yard itself in the top bar, breathe. */
 .health.live .health-dot{--group:var(--shipped);animation:gy-halo 2s ease-out infinite}
 .city-strip .beacon{--group:var(--moving);display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--group);animation:gy-halo 1.8s ease-out infinite}
-/* The top bar's live strip and the palette affordance beside it (GY-3272). */
-.top-bar-live{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
+/* The top bar's live strip and the palette affordance share the repository's own row (GY-3272),
+   so the strip adds its news without adding the page a new line of height. */
+.top-bar-row{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
+.top-bar-live{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .city-strip{display:flex;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
 .city-strip .mono{color:var(--text)}
 .palette-button{display:inline-flex;align-items:center;gap:4px;min-height:30px;padding:2px 10px;font-size:var(--type-small);font-weight:500;background:var(--raised);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-2)}
