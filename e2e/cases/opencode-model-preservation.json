@@ -1,0 +1,11 @@
+{
+  "id": "opencode-model-preservation",
+  "title": "An explicitly selected OpenCode account model survives fleet refresh and partial updates, and launches receive its concrete id",
+  "description": "An account explicitly selects glm-5.3 (id zai-coding-plan/glm-5.3) with the implicated typed writer; fleet refresh (the install accounts step's propose --apply), a runtime canary's repin and unrelated partial updates keep the selection and its concrete id reaching every launch, and an explicit model change still works after an operator's quota mark. The November reset itself was an intentional recorded operator-agent action (GY-3301 handoff), not a product overwrite.",
+  "tags": ["registry", "models"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "explicit glm-5.3 across refresh, repin and partial updates", "run": "node --import tsx tests/helpers/run-tests.ts tests/opencode-model-preservation.test.ts", "timeoutSeconds": 600 }
+  ]
+}
