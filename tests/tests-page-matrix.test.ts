@@ -148,7 +148,7 @@ test('e2e:tests-page-matrix — the matrix shows each case\'s result per place, 
   // A grid cell is a link that filters the matrix to its category and place.
   let chosen: MatrixFilter | null = null;
   const all: MatrixFilter = { failing: false, category: 'all', column: 'all', required: 'all' };
-  const tree = expand(createElement(MatrixView, { cases: data.cases, filter: all, setFilter: (next: MatrixFilter) => { chosen = next; }, collapsed: new Set(), toggle: noop, openItem: noop }));
+  const tree = expand(createElement(MatrixView, { cases: data.cases, filter: all, setFilter: (next: MatrixFilter) => { chosen = next; }, collapsed: new Set<string>(), toggle: noop, openItem: noop }));
   find(tree, props => props['data-grid'] === 'dashboard:served').props.children.props.onClick();
   assert.deepEqual(chosen, { ...all, category: 'dashboard', column: 'served' });
   const filtered = render({ matrix: chosen });
