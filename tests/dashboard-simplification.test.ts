@@ -151,7 +151,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   // Settings is configuration only (GY-3297): everyday pages sit beside the work they describe.
   for (const page of ['Agents', 'Setup', 'Operator automation']) assert.equal(sectionOf[page], 'settings', page);
-  assert.deepEqual([sectionOf['Product'], sectionOf['Costs'], sectionOf['Test cases']], ['work', 'workers', 'tests']);
+  assert.deepEqual([sectionOf['Product'], sectionOf['Costs'], sectionOf['Test cases']], ['master', 'workers', 'tests']);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
@@ -159,14 +159,15 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'agents'), ['Agents', 'Setup', 'Operator automation'], 'Operator automation is listed last, inside the Advanced fold');
-  assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>Operator automation</);
+  assert.deepEqual(tabs(dashboard(), 'agents'), ['Agents', 'Setup', 'Advanced', 'Operator automation'], 'Operator automation sits inside the Advanced fold');
+  assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>(<abbr[^>]*>)?Operator automation</);
   assert.deepEqual(tabs(dashboard(), 'tests'), ['Tests', 'Test cases']);
   assert.deepEqual(tabs(dashboard(), 'workers'), ['Workers', 'Costs']);
-  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now', 'Product'], 'a signed-in person has a Now page beside Work');
+  assert.deepEqual(tabs(dashboard(), 'master'), ['Master', 'Product']);
+  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
   agent.actor = { ...agent.actor, sessionKind: 'ai' };
-  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), ['Work', 'Product'], 'an agent session has no Now page');
+  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.

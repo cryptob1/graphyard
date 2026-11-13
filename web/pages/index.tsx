@@ -73,8 +73,8 @@ export const views: readonly View[] = [
   { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView} openItem={dashboard.setSelected}/> },
   // The library of test cases sits beside their results, under Tests (GY-3297).
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'tests', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
-  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for, beside the work.
-  { id: 'product', icon: '◎', label: 'Product', section: 'work', render: dashboard => <ProductPage api={dashboard.api}/> },
+  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for, beside the master that keeps it.
+  { id: 'product', icon: '◎', label: 'Product', section: 'master', render: dashboard => <ProductPage api={dashboard.api}/> },
   // What the agents spent (GY-3289): tokens and cost from the price sheet, beside the sessions that spent them.
   { id: 'costs', icon: '$', label: 'Costs', section: 'workers', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
   // Settings is configuration only (GY-3297). The agent registry, for the identities that may read it, since it names hosts and login homes.

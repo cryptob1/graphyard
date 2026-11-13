@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardApi } from './ui-board';
 
-// GY-3297: Settings holds configuration only. Product sits under Work, Costs under Workers and
+// GY-3297: Settings holds configuration only. Product sits under Master (the Chief keeps the brief), Costs under Workers and
 // Test cases under Tests; Settings keeps Agents and Setup, with Operator automation behind an
 // Advanced fold for the admin alone. Each is reached by click and by keyboard at 1280px and 390px,
 // the old direct links still open, and the phone menu neither clips nor scrolls sideways.
@@ -43,8 +43,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(tabs(page).getByRole('button', { name: 'Operator automation', includeHidden: true })).toBeHidden();
     for (const everyday of ['Product', 'Costs', 'Test cases']) await expect(tabs(page).getByRole('button', { name: everyday, exact: true })).toHaveCount(0);
 
-    // Product beside Work, Costs beside Workers, Test cases beside Tests: clicks.
-    await entry(page, 'Work');
+    // Product beside the Chief, Costs beside Workers, Test cases beside Tests: clicks.
+    await menu(page);
+    await primary(page).locator('[data-nav="master"]').click();
     await tabs(page).getByRole('button', { name: 'Product', exact: true }).click();
     await heading(page, 'Product');
     await entry(page, 'Workers');
