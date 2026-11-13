@@ -149,7 +149,9 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.deepEqual(labels(dashboard()), ['Work', 'Master', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
-  for (const page of ['Test cases', 'Operator automation', 'Agents', 'Costs', 'Product']) assert.equal(sectionOf[page], 'settings', page);
+  // Settings is configuration only (GY-3297): everyday pages sit beside the work they describe.
+  for (const page of ['Agents', 'Setup', 'Operator automation']) assert.equal(sectionOf[page], 'settings', page);
+  assert.deepEqual([sectionOf['Product'], sectionOf['Costs'], sectionOf['Test cases']], ['work', 'workers', 'tests']);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
@@ -157,24 +159,28 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents', 'Costs', 'Product']);
-  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
+  assert.deepEqual(tabs(dashboard(), 'agents'), ['Agents', 'Setup', 'Operator automation'], 'Operator automation is listed last, inside the Advanced fold');
+  assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>Operator automation</);
+  assert.deepEqual(tabs(dashboard(), 'tests'), ['Tests', 'Test cases']);
+  assert.deepEqual(tabs(dashboard(), 'workers'), ['Workers', 'Costs']);
+  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now', 'Product'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
   agent.actor = { ...agent.actor, sessionKind: 'ai' };
-  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), [], 'a section with one page draws no tab row');
+  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), ['Work', 'Product'], 'an agent session has no Now page');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
   const configured = { validation: true, releases: true, automation: true };
-  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'scenarios'), ['Test cases', 'Agents', 'Costs', 'Product']);
-  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'scenarios'), ['Test cases', 'Costs', 'Product']);
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'agents'), [], 'a reader sees Agents alone, so no tab row');
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'tests'), ['Tests', 'Test cases']);
+  assert.ok(!labels(dashboard({}, 'worker', configured)).includes('Settings'), 'a worker has nothing to configure');
   for (const role of ['reader', 'worker']) assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
   // A feature with nothing configured is hidden, not rendered as an empty explainer; an unknown one stays.
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
-  assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents', 'Costs', 'Product']);
+  assert.deepEqual(tabs(none, 'agents'), ['Agents', 'Setup'], 'no Advanced fold while automation is unconfigured');
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: false, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.

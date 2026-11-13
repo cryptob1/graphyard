@@ -121,6 +121,7 @@ img.mark{width:26px;height:26px}
 .dot{background:var(--text-3)}.dot.live,.dot.green{background:var(--shipped)}
 .main{padding:var(--space-6) 40px;display:flex;flex-direction:column;gap:var(--space-5);min-width:0}
 .tabs{display:flex;gap:var(--space-1);flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.tabs-advanced{display:flex;flex-wrap:wrap;gap:var(--space-1)}.tabs-advanced>summary{cursor:pointer;list-style:none}.tabs-advanced>summary::after{content:' ▸'}.tabs-advanced[open]>summary::after{content:' ▾'}
 .tab,.tabs .tab{min-height:0;background:none;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--text-2);padding:10px var(--space-3);font-weight:500;font-size:var(--type-small)}
 .tab.active{color:var(--text);border-bottom-color:var(--accent)}
 /* Page heading and the summary sentence. */
