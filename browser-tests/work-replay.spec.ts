@@ -34,7 +34,10 @@ test('e2e:work-replay — recorded stages, windows, playback and motion preferen
     await snapshot(older, 80, 'ready'); await snapshot(older, 48, 'build');
     await page.route('**/api/**', async route => {
       const url = new URL(route.request().url());
-      await route.fulfill({ response: await route.fetch({ url: http.url + url.pathname + url.search }) });
+      // A poll still in flight when the server closes must not fail the run.
+      const response = await route.fetch({ url: http.url + url.pathname + url.search }).catch(() => null);
+      if (!response) return route.abort('connectionrefused').catch(() => {});
+      await route.fulfill({ response }).catch(() => {});
     });
     await page.goto('/?sign-in'); await page.getByLabel('Access token').fill('test-human-operator');
     await page.getByRole('button', { name: 'Open control plane' }).click();
@@ -74,5 +77,5 @@ test('e2e:work-replay — recorded stages, windows, playback and motion preferen
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.getByRole('button', { name: 'Fun', exact: true }).click();
     await expect(scrub).toBeDisabled(); await expect(dot).toHaveAttribute('data-column', 'Shipped');
-  } finally { await http.close(); await store.close(); }
+  } finally { await page.unrouteAll({ behavior: 'ignoreErrors' }); await http.close(); await store.close(); }
 });
