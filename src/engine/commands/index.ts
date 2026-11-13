@@ -6,6 +6,8 @@ import * as create from './create.js';
 import * as defer from './defer.js';
 import * as evidence from './evidence.js';
 import * as heartbeat from './heartbeat.js';
+import * as hold from './hold.js';
+import * as message from './message.js';
 import * as priority from './priority.js';
 import * as ready from './ready.js';
 import * as reading from './reading.js';
@@ -23,5 +25,5 @@ import * as workspace from './workspace.js';
 /** Every command, one entry each. `run.ts` wraps them all in the same receipt, authorization and save. */
 export const table: Record<Command, Entry> = {
   create, ready, priority, requirements, unblock, rework, claim, heartbeat, release, workspace, submit, blocked, defer,
-  window: windowCommand, evidence, reading, revoke, session, request,
+  window: windowCommand, hold, message, evidence, reading, revoke, session, request,
 };

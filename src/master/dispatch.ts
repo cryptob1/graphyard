@@ -131,6 +131,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.criteria.length) throw new Error('Waiting on the master: writing the criteria');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  if (work.hold) throw new Error(`Dispatch skips ${work.key}: held by ${work.heldBy}: ${work.holdReason}`);
   // GY-1760: an item only the master side can satisfy is never handed to a worker — not by the
   // loop's dispatch step, not by a hand launch — whoever released it, so its master-only steps
   // never reach a worker that must block on them.
@@ -468,7 +469,7 @@ export const destructivePromptGuidance = 'Never give rm or mv a glob or variable
 export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -499,6 +500,8 @@ export function workerPrompt(
     // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.
     + diagnosis
     + resumedAttempt(work)
+    // GY-3298: master messages no earlier attempt acknowledged carry into this one; its sync acknowledges them.
+    + (work.messages?.some(message => !message.acknowledged) ? `Unread messages from the master (your next sync ${work.key} acknowledges them): ${work.messages.filter(message => !message.acknowledged).map(message => `[${message.at} ${message.by}] ${message.text}`).join(' ')} ` : '')
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not write it as a blocker. `

@@ -97,7 +97,7 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
 export function activityLabel(kind: string): string {
   const exact: Record<string, string> = {
     // Commands (src/engine.ts `commands`), recorded under their own names.
-    priority: 'Priority changed', create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked',
+    priority: 'Priority changed', create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked', hold: 'Held out of dispatch', message: 'Master messaged the builder',
     rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a builder stopped', claim: 'Picked up by a builder',
     rereview: 'Asked for a fresh review', mechanicalplan: 'A planned fix round was recorded for the review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
     settle: 'A builder’s attempt ended', autosettle: 'A builder’s attempt ended', release: 'A builder stopped working on it', workspace: 'The builder said where the code lives',

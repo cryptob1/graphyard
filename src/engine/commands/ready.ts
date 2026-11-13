@@ -14,12 +14,12 @@ export function screen({ work, actor }: Ctx) {
 
 export function operator({ work, data }: Ctx) {
   demand(data.expectedRevision === work.revision, 'Task revision changed; reload before mutating');
-  demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
+  demand(work.stage === 'backlog' && !work.ready || work.ready && work.hold, 'Only unreleased backlog work or a held item can be released');
 }
 
 export async function run({ db, actor, work, data }: Ctx) {
   if (actor.role !== 'operator-agent') admin(actor);
-  work.ready = true; work.hold = undefined;
+  work.ready = true; work.hold = undefined; work.holdReason = undefined; work.heldBy = undefined;
   work.releasedBy = data.by ?? actor.id; work.releaseReason = data.reason ?? `Released by ${work.releasedBy}`;
   await adoptFollowUpWindow(db, work);
 }

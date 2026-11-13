@@ -109,6 +109,8 @@ export interface Observation {
  * claim clears, since a new attempt starts under the current criteria.
  */
 export interface UnsyncedRevision { policyRevision: number; at: string; by: string; changed: string[] }
+/** GY-3298: a master message to whichever worker holds the item; the sync that shows it acknowledges it under that worker's epoch. */
+export interface WorkerMessage { id: string; at: string; by: string; text: string; acknowledged?: { at: string; by: string; epoch: number } }
 /** GY-3266: what one requirements revision changed, one line per criterion — added, changed or removed. */
 export function criteriaChanges(previous: readonly Criterion[], revised: readonly Criterion[]): string[] {
   const before = new Map(previous.map(ac => [ac.id, ac.text])), after = new Map(revised.map(ac => [ac.id, ac.text]));
@@ -142,6 +144,10 @@ export interface Work extends Create {
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   /** Who released the item ('loop' for the automatic release) and why. */
   releasedBy?: string; releaseReason?: string;
+  /** GY-3298: why a released item is held out of dispatch (`hold`), and by whom; release clears both. */
+  holdReason?: string; heldBy?: string;
+  /** GY-3298: master messages to the item's worker, read and acknowledged at its sync. */
+  messages?: WorkerMessage[];
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
   submission: { epoch: number; pr: number } | null;
   /**
