@@ -87,6 +87,9 @@ export function computeAccount(work: Work, all: Work[], now: Date): Computed {
   // Done = merged (GY-1981): a delivery owes nothing more, whatever its smoke policy or deployment record.
   if (work.stage === 'done') return waits({ kind: 'settled', on: null, detail: `${key} is delivered; its gates are history and no gate refuses it` });
 
+  // GY-3298: a held item is out of dispatch and retries; a live worker keeps its lease, and release resumes it.
+  if (work.hold) return waits({ kind: 'human', on: work.heldBy ?? 'operator', detail: `${key} is held by ${work.heldBy ?? 'the operator'}: ${work.holdReason ?? 'held'}; release resumes dispatch` }, 'ready', 'Held');
+
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   // An assignment whose lease has lapsed without a submission is held by a session that cannot
   // act. Reclaiming it is mechanical: the reconciliation the control

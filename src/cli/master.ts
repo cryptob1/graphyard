@@ -65,6 +65,8 @@ export const masterCommands = defineCommands([
       '                                App and profile are independent of you and every worker; audited',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE|rework GY-N REASON',
       '                                Apply intent at once with the master\'s identity',
+      '  master hold GY-N REASON       Hold a released item out of dispatch; its worker keeps its lease',
+      '  master message GY-N TEXT      Message the item\'s worker; shown and acknowledged at its next sync',
       '  master priority GY-N 0|1|2|3 REASON  Change priority with an audit reason',
       '  master attest GY-N PROOF REASON  Attest a manual: proof on the exact current head',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',

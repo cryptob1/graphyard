@@ -19,6 +19,8 @@ export function run({ engine, work, actor, data, now }: Ctx) {
     demand(data.syncedPolicyRevision === work.policyRevision, `Policy revision changed; the sync named ${data.syncedPolicyRevision}, ${work.key} is at ${work.policyRevision}; reload before syncing`);
     work.unsyncedRevision = null;
   }
+  // GY-3298: the sync that showed the master's messages acknowledges them under this live epoch.
+  for (const message of work.messages ?? []) if (!message.acknowledged && data.acknowledgedMessages?.includes(message.id)) message.acknowledged = { at: now.toISOString(), by: actor.id, epoch: data.epoch };
 }
 
 /**
