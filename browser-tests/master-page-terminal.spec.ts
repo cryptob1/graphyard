@@ -24,6 +24,10 @@ const handshake = (url: string, token?: string) => new Promise<number>((done, fa
 });
 
 test('e2e:master-page-terminal — the operator types into the master pane live; others watch read-only; closing detaches; workers offer no terminal', async ({ browser }) => {
+  // Three cold browser sessions run in sequence here (operator, reader, Workers), each with its own
+  // sign-in and terminal handshake, beside a suite that runs in parallel: like master-page-paste it
+  // carries a budget that load cannot eat.
+  test.setTimeout(90_000);
   const database = await signInDatabase();
   const site = await mkdtemp(join(tmpdir(), 'graphyard-master-terminal-'));
   const log = join(site, 'herdr.log');
