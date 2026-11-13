@@ -74,6 +74,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
             const message = JSON.parse(event.data);
             if (message.refused) { refused = true; writable = false; setReason(message.refused); setState('refused'); return; }
             if (message.type === 'scrollback') { terminal.reset(); terminal.write(message.data.replace(/\r?\n/g, '\r\n')); return; }
+            if (message.note) { setReason(message.note); return; }
             if (message.session) setSession(message.session);
             if (message.mode) {
               writable = message.mode === 'control' && !!message.session?.pane; setState(message.mode); setReason(''); delay = 250;
@@ -100,30 +101,49 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
           reconnect = setTimeout(connect, delay); delay = Math.min(2000, delay * 2);
         };
       };
-      const paste = async () => {
-        try { terminal.paste(await navigator.clipboard.readText()); }
-        catch { setReason('Clipboard access unavailable. Use Ctrl/Cmd+V, or Shift+right-click for the browser menu.'); }
+      // Text goes in as one bracketed paste, never a raw ^V; a file or image is uploaded and its saved path pasted.
+      const deliver = async (files: File[], pasted: string) => {
+        if (!writable) { setReason('Paste refused: read-only, only the operator and maintainers can type into the master'); return; }
+        for (const file of files) {
+          if (file.size > 20 * 1024 * 1024) { setReason('Not pasted: files are limited to 20 MB'); continue; }
+          const data = await new Promise<string>(done => { const reader = new FileReader(); reader.onload = () => done(String(reader.result).split(',')[1] ?? ''); reader.readAsDataURL(file); });
+          send({ type: 'upload', name: file.name || 'file', data });
+        }
+        if (pasted) input(`\x1b[200~${pasted.replace(/\x1b/g, '').replace(/\r?\n/g, '\r')}\x1b[201~`);
+        terminal.focus();
+      };
+      const paste = (event: ClipboardEvent) => { event.preventDefault(); event.stopPropagation(); void deliver([...event.clipboardData?.files ?? []], event.clipboardData?.getData('text/plain') ?? ''); };
+      const drop = (event: DragEvent) => { event.preventDefault(); void deliver([...event.dataTransfer?.files ?? []], ''); };
+      const over = (event: DragEvent) => event.preventDefault();
+      const readClipboard = async () => {
+        try {
+          const files: File[] = []; let pasted = '';
+          for (const item of await navigator.clipboard.read()) for (const type of item.types) {
+            const blob = await item.getType(type);
+            if (type === 'text/plain') pasted = await blob.text(); else if (type.startsWith('image/')) files.push(new File([blob], `image.${type.slice(6)}`, { type }));
+          }
+          await deliver(files, files.length ? '' : pasted);
+        } catch { setReason('Clipboard access unavailable. Use Ctrl/Cmd+V.'); }
       };
       terminal.attachCustomKeyEventHandler(event => {
-        if (!navigator.clipboard) return true;
-        if ((event.ctrlKey || event.metaKey) && event.shiftKey && ['C', 'V'].includes(event.key.toUpperCase())) {
-          if (event.type === 'keydown') {
-            if (event.key.toUpperCase() === 'C') void navigator.clipboard.writeText(terminal.getSelection()).catch(() => setReason('Use your browser’s Copy command.'));
-            else void paste();
-          }
+        // Ctrl/Cmd+V (with or without Shift) is left to the browser, whose paste event the page handles above.
+        if ((event.ctrlKey || event.metaKey) && event.key.toUpperCase() === 'V') return false;
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toUpperCase() === 'C' && navigator.clipboard) {
+          if (event.type === 'keydown') void navigator.clipboard.writeText(terminal.getSelection()).catch(() => setReason('Use your browser’s Copy command.'));
           event.preventDefault(); return false;
         }
         return true;
       });
-      const context = (event: MouseEvent) => { if (event.shiftKey || !navigator.clipboard) return; event.preventDefault(); void paste(); };
-      host.current!.addEventListener('contextmenu', context);
+      const context = (event: MouseEvent) => { if (event.shiftKey || !navigator.clipboard) return; event.preventDefault(); void readClipboard(); };
+      const element = host.current!;
+      element.addEventListener('paste', paste, true); element.addEventListener('drop', drop); element.addEventListener('dragover', over); element.addEventListener('contextmenu', context);
       const typing = terminal.onData(input);
       const observer = new ResizeObserver(fit); observer.observe(host.current!);
       window.addEventListener('resize', fit);
       fit(); connect();
       stop = () => {
         clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit);
-        host.current?.removeEventListener('contextmenu', context);
+        element.removeEventListener('paste', paste, true); element.removeEventListener('drop', drop); element.removeEventListener('dragover', over); element.removeEventListener('contextmenu', context);
         typing.dispose(); socket.close(); terminal.dispose(); sendKey.current = () => {};
       };
     }, () => { if (live) { setReason('xterm.js did not load. Reload to try again.'); setState('refused'); } });

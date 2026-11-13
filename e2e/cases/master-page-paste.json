@@ -1,0 +1,19 @@
+{
+  "id": "master-page-paste",
+  "title": "Ctrl/Cmd+V on the Master page pastes text and images into the master; a viewer is refused",
+  "description": "A real browser against the real control plane with a stub herdr pane: Ctrl+V with text delivers it as one bracketed paste and no raw ^V byte; pasting a PNG saves it under .graphyard/master-inbox/ and the pane receives its absolute path; a read-only viewer's paste is refused with a note.",
+  "tags": [
+    "dashboard",
+    "master"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Paste text and an image into the Master page terminal",
+      "run": "npm run test:browser -- browser-tests/master-page-paste.spec.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}

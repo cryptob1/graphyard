@@ -7,6 +7,7 @@ import type { Principal } from '../model.js';
 import { loopPanesRegistry } from '../model/loop-presence.js';
 import { herdrTarget } from '../master/herdr.js';
 import { terminalStream, terminalSessionReader, type TerminalRequest } from '../master/terminal-session.js';
+import { maxUploadBytes, saveInboxFile } from '../master/inbox.js';
 import { loadMasterConfig } from '../master/config.js';
 import { authenticate } from './auth.js';
 import { canTypeIntoMasterPane } from './principals.js';
@@ -70,7 +71,7 @@ const hostUpgrade = async (services: Services, req: IncomingMessage, socket: Dup
     if (opcode !== 1) return;
     let message: any; try { message = JSON.parse(payload.toString('utf8')); } catch { return; }
     const answer = mine.answers.get(String(message.id));
-    if (answer && 'log' in message) { mine.answers.delete(String(message.id)); answer(message.log); }
+    if (answer && 'answer' in message) { mine.answers.delete(String(message.id)); answer(message.answer); }
     const handlers = mine.streams.get(String(message.id));
     if (typeof message.line === 'string') handlers?.line(message.line);
     if (typeof message.exit === 'string') { mine.streams.delete(String(message.id)); handlers?.exit(message.exit); }
@@ -85,16 +86,17 @@ export const hostLogTimeoutMs = 10_000;
  * lives (GY-3259): the server never reads a host path. Null when the run is unknown there; a throw
  * when no host supervisor is connected or it does not answer in time.
  */
-export function hostRunLog(run: string, cursor: number): Promise<unknown> {
+export const hostLogRequest = (request: object, noun: string, did: string): Promise<unknown> => {
   const bridge = host;
-  if (!bridge?.socket.writable) return Promise.reject(Object.assign(new Error('The host supervisor is not connected, so run logs cannot be read right now'), { status: 503 }));
+  if (!bridge?.socket.writable) return Promise.reject(Object.assign(new Error(`The host supervisor is not connected, so ${noun} cannot be ${did} right now`), { status: 503 }));
   const id = randomUUID();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { bridge.answers.delete(id); reject(Object.assign(new Error('The host supervisor did not answer the run log read in time'), { status: 504 })); }, hostLogTimeoutMs);
-    bridge.answers.set(id, log => { clearTimeout(timer); resolve(log); });
-    bridge.socket.write(text({ id, type: 'log', run, cursor }));
+    const timer = setTimeout(() => { bridge.answers.delete(id); reject(Object.assign(new Error(`The host supervisor did not answer the ${noun === 'run logs' ? 'run log read' : 'file save'} in time`), { status: 504 })); }, hostLogTimeoutMs);
+    bridge.answers.set(id, answer => { clearTimeout(timer); resolve(answer); });
+    bridge.socket.write(text({ id, ...request }));
   });
-}
+};
+export const hostRunLog = (run: string, cursor: number) => hostLogRequest({ type: 'log', run, cursor }, 'run logs', 'read');
 
 const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest, handlers: Handlers): Stream => {
   const id = randomUUID();
@@ -163,10 +165,21 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const command = herdr.send;
 
   const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane: activePane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
+  // A pasted or dropped file is saved on the master's host and its path typed into the pane as a bracketed paste.
+  const upload = async (name: string, data: Buffer) => {
+    if (data.length > maxUploadBytes) return void socket.write(text({ note: 'Not pasted: files are limited to 20 MB' }));
+    try {
+      const path = host ? await hostLogRequest({ type: 'upload', name, data: data.toString('base64') }, 'files', 'saved') as string | null : saveInboxFile(process.cwd(), name, data);
+      if (!path) throw new Error('the host could not save it');
+      command({ type: 'terminal.input', text: `\x1b[200~${path}\x1b[201~` });
+      socket.write(text({ note: `Pasted ${data.subarray(0, 4).toString('latin1') === '\x89PNG' ? 'image' : 'file'} → ${path}` }));
+    } catch (error) { socket.write(text({ note: `Not pasted: ${error instanceof Error ? error.message : error}` })); }
+  };
   const message = (text: string) => {
     let input: any; try { input = JSON.parse(text); } catch { return; }
     if (!control || !activePane) return;
     if (input.type === 'resize') command({ type: 'terminal.resize', cols: Number(input.cols), rows: Number(input.rows) });
+    if (input.type === 'upload') return void upload(String(input.name ?? 'file'), Buffer.from(String(input.data ?? ''), 'base64'));
     if (input.type !== 'input' || typeof input.data !== 'string') return;
     command({ type: 'terminal.input', text: input.data });
     for (const char of input.data) {
