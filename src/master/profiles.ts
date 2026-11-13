@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { environmentKinds, runtimeAdapter, runtimeHomeVariables, runtimeKinds, type EnvironmentKind } from './runtimes.js';
+import { launchEnvironmentValueLimit } from '../model/registry.js';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
@@ -15,8 +16,12 @@ const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
     .refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher and cannot be set in a worker profile')
     .refine(name => !/(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/.test(name), 'Put secrets in the worker credential file or the agent runtime login, not master profile environment'),
-  z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
-).default({});
+  z.string().min(1).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
+).default({}).superRefine((values, context) => {
+  // GY-3276: a value past the limit names its variable and length, as the launch contract's refusal does.
+  for (const [name, value] of Object.entries(values)) if (value.length > launchEnvironmentValueLimit)
+    context.addIssue({ code: 'custom', path: [name], message: `${name} is ${value.length} characters; a profile environment value is limited to ${launchEnvironmentValueLimit}` });
+});
 
 /**
  * GY-1960: a schema that keeps the fields it does not know. The files one version writes are read

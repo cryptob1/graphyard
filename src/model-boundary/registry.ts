@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { secretName, isAbsolute, capabilityTiers, quotaStates, registryRoles, type AgentRegistry, type RegistryMutation, type FleetAccount, type FleetRuntime, upsert, demandRegistry, registryLimits, type FleetModel, type FleetAccountInput, unobservedQuota, type FleetRole, roleRuntimeRefusal } from '../model/registry.js';
+import { secretName, isAbsolute, launchEnvironmentValueLimit, capabilityTiers, quotaStates, registryRoles, type AgentRegistry, type RegistryMutation, type FleetAccount, type FleetRuntime, upsert, demandRegistry, registryLimits, type FleetModel, type FleetAccountInput, unobservedQuota, type FleetRole, roleRuntimeRefusal } from '../model/registry.js';
 import { notSecret, secretPaths } from '../model/registry-keys.js';
 import { accountKeySchema, smokeObservationSchema } from './registry-keys.js';
 /**
@@ -21,8 +21,13 @@ const text = (max: number) => z.string().trim().min(1).max(max).refine(value => 
 
 const launchEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher').refine(name => !secretName.test(name), 'A launch contract never carries a secret; the credential lives in the runtime login the account references'),
-  z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Environment values cannot contain control characters').refine(notSecret, 'That value looks like a credential; the registry stores references, never secrets'),
-).default({});
+  z.string().min(1).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Environment values cannot contain control characters').refine(notSecret, 'That value looks like a credential; the registry stores references, never secrets'),
+).default({}).superRefine((values, context) => {
+  // GY-3276: a value past the limit is a host problem to fix (a PATH that long), so the refusal
+  // names the variable and its length rather than leaving a bare schema error to decode.
+  for (const [name, value] of Object.entries(values)) if (value.length > launchEnvironmentValueLimit)
+    context.addIssue({ code: 'custom', path: [name], message: `${name} is ${value.length} characters; a launch environment value is limited to ${launchEnvironmentValueLimit}` });
+});
 
 /**
  * How a session of a runtime is started. `kind` is what the session host launches (the agent

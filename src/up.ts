@@ -23,6 +23,8 @@ import { landlockRefusal, readLandlockAbi } from './landlock.js';
 import { recordSupervision } from './master/config.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
+import { mergeWriterSettings } from './master/merge-writer-settings.js';
+import { mergeWriterRemote, pushEnvironment } from './merge-writer/executor.js';
 import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
@@ -1212,6 +1214,8 @@ export const graphyardGitIdentity = { GIT_AUTHOR_NAME: 'Graphyard', GIT_AUTHOR_E
  * object store. The commit is dated from the base tip, so a rerun over the same files publishes the
  * identical commit and pushes nothing new; when the base branch already holds them, nothing is
  * published. Authored under Graphyard's own identity (GY-3221), so no host git identity is needed.
+ * The push uses the install's own push credential — the deploy key, the stored token or the
+ * operator's gh login, whichever the merge writer pushes with (GY-3276) — never the caller's own.
  */
 export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ commit: string } | null> {
   // GY-3221: a failed child's stderr is what explains it; the command and its stderr stay on the
@@ -1224,9 +1228,17 @@ export async function publishOnboarding(root: string, repository: string, run: (
   // name, never skipped, so the change never claims a file it does not hold.
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
   if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
-  const record = await readInstallRecord(installDirectory(installIdFor(repository))).catch(() => null);
+  const installId = installIdFor(repository);
+  const record = await readInstallRecord(installDirectory(installId)).catch(() => null);
+  // GY-3276: the onboarding branch goes out with the install's own push credential — the same one
+  // the merge writer pushes with, resolved the same way — never the operator's personal SSH key,
+  // which a SAML organization refuses. A machine with no install of this repository (no deploy
+  // key, token or recorded gh login) pushes as before, over origin with the caller's environment.
+  const resolved = mergeWriterSettings(record?.pushAuth ? { mergeWriter: { pushAuth: record.pushAuth } } : {}, installId);
+  const credential = resolved.pushAuth || existsSync(resolved.tokenFile ?? '') || existsSync(resolved.deployKeyFile ?? '') ? resolved : undefined;
+  const remote = mergeWriterRemote(repository, credential), credentialEnvironment = credential ? pushEnvironment(resolved) : undefined;
   const base = record?.baseBranch ?? child('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
-  child('git', ['fetch', '--quiet', 'origin', base]);
+  child('git', ['fetch', '--quiet', remote, base], credentialEnvironment);
   const baseCommit = child('git', ['rev-parse', 'FETCH_HEAD']).trim();
   const index = resolve(root, '.graphyard', `onboarding-index.${process.pid}`);
   await mkdir(dirname(index), { recursive: true });
@@ -1242,7 +1254,7 @@ export async function publishOnboarding(root: string, repository: string, run: (
       GIT_AUTHOR_DATE: child('git', ['show', '-s', '--format=%cI', baseCommit]), GIT_COMMITTER_DATE: child('git', ['show', '-s', '--format=%cI', baseCommit]) };
     const commit = child('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], dated).trim();
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
-    child('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
+    child('git', ['push', '--force', remote, `${commit}:refs/heads/${onboardingBranch}`], credentialEnvironment);
     return { commit };
   } finally { await rm(index, { force: true }); }
 }

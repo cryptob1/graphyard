@@ -1,0 +1,13 @@
+{
+  "id": "setup-long-path-and-onboarding-push",
+  "title": "Setup accepts a long PATH and pushes the onboarding branch with the install's own push credential",
+  "description": "A fixture host with a 1,500-character PATH: the registry proposal the accounts step runs applies, and the pinned runtime keeps the whole PATH led by the resolved install directory; a 9,000-character value is refused naming PATH and its exact length. The onboarding branch push lands on a fixture git remote whose SSH door serves git only to the install's deploy key — the credential the merge writer itself pushes with, never the operator's personal SSH key.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "long PATH propose and deploy-key onboarding push",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/setup-long-path-and-onboarding-push.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -4,6 +4,13 @@ import type { AccountSmoke, UnjudgedRuns, RunOutcome } from './registry-keys.js'
 // Pure string check, so the dashboard can share this module without a Node import.
 export const isAbsolute = (value: string) => /^(\/|[A-Za-z]:[\\/])/.test(value);
 export const secretName = /(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/;
+/**
+ * GY-3276: the most one launch-environment value may hold. A host's PATH is the longest value
+ * setup writes — the pinned runtime carries the whole of it (fleet.ts `pinRuntime`), and a host
+ * with many tool directories runs long — so the limit sits above every real PATH, and the
+ * refusal past it names the variable and its exact length instead of a bare schema error.
+ */
+export const launchEnvironmentValueLimit = 8000;
 export type LaunchContract = z.infer<typeof launchContractSchema>;
 export type FleetRuntime = z.infer<typeof runtimeSchema>;
 
