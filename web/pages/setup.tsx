@@ -150,12 +150,11 @@ const day = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleDateStr
  */
 function MachineAccess({ api, access, setAccess }: Pick<Dashboard, 'api'> & { access: TeamAccess; setAccess(value: TeamAccess): void }) {
   const [error, setError] = useState('');
-  const save = (path: string, body: object) => async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setError('');
-    const form = event.currentTarget;
-    try { setAccess(await api(path, body)); form.reset(); } catch (e) { setError((e as Error).message); }
-  };
   const [link, setLink] = useState(''), [token, setToken] = useState('');
+  const save = (path: string, body: object, clear: () => void) => async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setError('');
+    try { setAccess(await api(path, body)); clear(); } catch (e) { setError((e as Error).message); }
+  };
   const share = access.shareLink;
   return <div aria-label="Team access on this machine" role="group">
     <p>{access.summary}</p>
@@ -165,14 +164,14 @@ function MachineAccess({ api, access, setAccess }: Pick<Dashboard, 'api'> & { ac
       {share.state === 'refresh' && ' It expires within seven days: make a fresh one and paste it below.'}
       {share.state === 'expired' && ' It has expired: make a fresh one and paste it below before inviting anyone.'}
     </p> : <p className="amber" data-share-state="missing">{access.guidance}</p>}
-    <form onSubmit={save('team-access/share-link', { url: link })}>
+    <form onSubmit={save('team-access/share-link', { url: link }, () => setLink(''))}>
       <label>Tailscale share link<input name="link" value={link} onChange={event => setLink(event.target.value)} required placeholder="https://login.tailscale.com/…"/></label>
       <button>Save for this machine</button>
     </form>
     <MoreDetails summary="Optional: a single-use Tailscale invite per person">
       <p>Save a Tailscale API access token and each invite makes its own single-use device invite instead of the reusable link. It is saved on this machine only (owner-only file) and never shown again.</p>
       <p>{access.mode === 'api' ? 'A token is saved: invites make single-use Tailscale links.' : 'No token is saved: invites use the machine share link.'}</p>
-      <form onSubmit={save('team-access/tailscale-token', { token })}>
+      <form onSubmit={save('team-access/tailscale-token', { token }, () => setToken(''))}>
         <label>Tailscale API token<input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)}/></label>
         <button>{token ? 'Save token' : 'Remove token'}</button>
       </form>
@@ -224,7 +223,7 @@ function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
     {error && <p role="alert" className="amber">{error}</p>}
     {latest && <div role="status">
       <p>One-time sign-in link for {latest.principal} ({latest.role}). Link expires <time dateTime={latest.expiresAt}>{new Date(latest.expiresAt).toLocaleString()}</time>.</p>
-      <label>Invitation message<textarea readOnly rows={6} value={latest.message}/></label> <CopyButton text={latest.message} label="Copy message"/>
+      <label htmlFor="invitation-message">Invitation message</label><textarea id="invitation-message" readOnly rows={6} value={latest.message}/> <CopyButton text={latest.message} label="Copy message"/>
       <label>Sign-in link<input readOnly value={latest.url}/></label> <CopyButton text={latest.url} label="Copy"/>
     </div>}
     <h3>Invited from this page</h3>

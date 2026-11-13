@@ -1,0 +1,22 @@
+{
+  "id": "one-click-team-access",
+  "title": "Two installs on one Tailscale machine share the machine link and invite with both locks",
+  "description": "With only the tailscale command stubbed, up serves two fixture installs on their own ports (tailscale serve --bg --http=PORT), a rerun keeps the other install's route and a host without Tailscale carries on locally. Two served control planes on one simulated machine share the share link pasted on install A's Setup page; Invite someone on each copies one message with that link and its own URL and port. Invites redeem only on their own install, once, within 24 hours under a controlled clock; the link's 30-day expiry warns in its last seven days and refuses invites once expired; the optional API token is saved 0600, never shown, masked from confined sessions, and makes one single-use device invite through a fake Tailscale API, failing whole when Tailscale refuses. No Docker or Tailscale credentials.",
+  "tags": ["dashboard", "authentication", "setup"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "up's Tailscale serve, the shared link, invites and the token through the real routes",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/one-click-team-access.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "Setup on two installs shares the link and copies both invitations",
+      "run": "npm run test:browser -- browser-tests/one-click-team-access.spec.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}
