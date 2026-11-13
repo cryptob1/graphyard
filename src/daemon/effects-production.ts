@@ -79,7 +79,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
     ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
   // GY-2991: the loop releases backlog itself, under the same identity, to keep the pipeline full.
-  const release: DaemonEffects['release'] = (work, reason) => asOperatorAgent(`work/${work.id}/ready`, { expectedRevision: work.revision, reason });
+  const release: DaemonEffects['release'] = (work, reason) => asOperatorAgent(`work/${work.id}/ready`, { expectedRevision: work.revision, reason, by: 'loop' });
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persist = async (state: DaemonState) => {
