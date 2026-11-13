@@ -2,6 +2,7 @@
 // and of the item page's worker run logs (GY-3259), which only this host holds.
 import { terminalStream, type SessionReader, type TerminalStream } from './terminal-session.js';
 import { readRunLog } from '../headless-session.js';
+import { saveInboxFile } from './inbox.js';
 /**
  * Keeps one WebSocket open to the control plane's /api/terminal-host with the loop's coordinator
  * credential, reconnecting until SIGNAL aborts (CONNECTED is told of each connection). For each `open` the server sends, it runs the herdr
@@ -20,7 +21,8 @@ export async function bridgeTerminals(url: string, token: string, signal: AbortS
     const send = (value: unknown) => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
     socket.onmessage = event => {
       let message: any; try { message = JSON.parse(String(event.data)); } catch { return; }
-      if (message.type === 'log') send({ id: message.id, log: root ? readRunLog(root, String(message.run), Number(message.cursor) || 0) : null });
+      if (message.type === 'log') send({ id: message.id, answer: root ? readRunLog(root, String(message.run), Number(message.cursor) || 0) : null });
+      if (message.type === 'upload') send({ id: message.id, answer: root ? saveInboxFile(root, String(message.name), Buffer.from(String(message.data), 'base64')) : null });
       if (message.type === 'open') streams.set(String(message.id), terminalStream(message, { line: line => send({ id: message.id, line }), exit: reason => { streams.get(String(message.id))?.end(); streams.delete(String(message.id)); send({ id: message.id, exit: reason }); } }, session));
       const child = streams.get(String(message.id));
       if (message.type === 'command' && child) child.send(message.command);
