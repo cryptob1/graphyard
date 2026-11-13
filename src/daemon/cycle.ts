@@ -415,6 +415,8 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
 
 /** The cursor key of the standing checkout-trust attention line (GY-3225). */
 export const checkoutTrustKey = 'checkout-trust';
+/** The standing worker-pool growth failure (GY-3299): master status and Needs you show it until growth succeeds. */
+export const workerGrowthKey = 'workers:grow';
 /**
  * GY-3225: the roles whose every launch in this host's checkout the folder-trust step would
  * refuse — the checkout carries repository Claude configuration and the named accounts' configs do
@@ -451,7 +453,13 @@ async function dispatchStep(cycle: Cycle) {
   if (registry && effects.growWorkers) try {
     const added = await effects.growWorkers(config, allowed);
     if (added.length) await note(cycle, `workers:${allowed}`, 'config', null, 'done', `Added worker profile${added.length === 1 ? '' : 's'} ${added.map(profile => profile.name).join(', ')}: the registry worker role allows ${allowed} workers`);
-  } catch (error) { await note(cycle, 'workers:grow', 'attention', null, 'failed', `Could not add worker profiles for the ${allowed} workers the registry worker role allows: ${message(error)}`); }
+    // GY-3299: growth that works again clears the standing failure from master status and Needs you.
+    if (state.actions[workerGrowthKey]) { delete state.actions[workerGrowthKey]; await effects.persist(state); }
+  } catch (error) {
+    const available = config.workers.filter(profile => profile.mode === 'launch').length;
+    const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
+    await note(cycle, workerGrowthKey, 'attention', null, 'failed', `Could not add worker profiles for the ${allowed} workers the registry worker role allows: ${available} of ${allowed} worker profiles exist, ${running} running. ${message(error)}`);
+  }
   if (effects.release) await releaseBacklog(cycle, allowed);
   advanceFailureRuns(state, snapshot.work, accountNames(config.workers));
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
