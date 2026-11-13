@@ -129,3 +129,21 @@ socket.write(${JSON.stringify(sql)});
   assert.notEqual(refused.code, 0);
   assert.match(refused.out, /Lease missing, expired, or superseded/);
 });
+
+test('a worker check hands the trial the head\'s own changed files and base, so a check that selects its files selects what the merge trial would', async () => {
+  const root = await temporaryDirectory('worker-check-files', process.cwd());
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  writeFileSync(join(root, 'kept.ts'), 'base\n'); git('add', '-A'); git('commit', '-qm', 'base');
+  const baseTip = git('rev-parse', 'HEAD');
+  git('checkout', '-qb', 'graphyard/gy-1-1');
+  writeFileSync(join(root, 'changed.ts'), 'head\n'); git('add', '-A'); git('commit', '-qm', 'head');
+  const head = git('rev-parse', 'HEAD');
+  let seen: Parameters<typeof runTrial>[0] | undefined;
+  const result = await runWorkerCheck({ root, base: root, baseBranch: 'main', key: 'GY-1', head, check: 'test',
+    trial: async input => { seen = input; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, logTail: 'ran' } as any; } });
+  assert.deepEqual(seen?.changedFiles, ['changed.ts']);
+  assert.equal(seen?.baseTip, baseTip);
+  assert.equal(seen?.only, 'test');
+  assert.equal(result.passed, true);
+});
