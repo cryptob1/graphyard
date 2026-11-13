@@ -215,7 +215,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['account', 'quota', 'aider-a', 'exhausted', '--resets-at', resetsAt, '--reason', 'Plan exhausted'], cli);
   const view: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
   assert.equal(view.configured, true);
-  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, live: 0, next: 'claude-a', blocked: null, policy: { args: [], tools: [], model: null } });
+  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, limit: 9, live: 0, next: 'claude-a', blocked: null, policy: { args: [], tools: [], model: null } });
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
@@ -514,7 +514,7 @@ test('unit:registry-visibility — the fleet view and the dashboard show each ac
   // Dashboard: the page renders the same view.
   const page = renderToStaticMarkup(createElement(FleetOverview, { fleet: view }));
   for (const shown of ['claude-b · claude · opus (claude-opus-5) · ineligible', `Ineligible: claude-b quota is exhausted until ${resetsAt} (weekly window spent)`, 'worker (2 of 3), reviewer (2 of 2), producer (1 of 1)', 'Quota: exhausted — 7d 100%', 'worker on GY-5 since', '(limit 1)', 'Ineligible: codex-out is not logged in', 'Login: logged out', 'Ineligible: codex-a is placed on build-host-2', '$15 in / $75 out per MTok', 'Capability: frontier',
-    'worker · 1 of 4 running · next: none', 'claude-a → claude-b → codex-a', 'role producer is paused (concurrency 0)', 'Credential by reference: /agents/claude-a on build-host-1', 'CLAUDE_CONFIG_DIR'])
+    'worker · 1 of 12 running · next: none', 'claude-a → claude-b → codex-a', 'role producer is paused (concurrency 0)', 'Credential by reference: /agents/claude-a on build-host-1', 'CLAUDE_CONFIG_DIR'])
     assert.ok(page.includes(shown.replaceAll('\'', '&#x27;')), shown);
   assert.ok(page.includes(new Date(resetsAt).toLocaleString()), 'the reset time');
 });
