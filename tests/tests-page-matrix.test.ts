@@ -14,7 +14,7 @@ import { server } from '../src/server.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { bootstrapGate, gateRecordPath, writeGateRecord } from '../src/batch-gate.js';
 import type { Principal, Work } from '../src/model.js';
-import { MatrixView, TestsView } from '../web/pages/tests.js';
+import { MatrixView, TestsView, type MatrixFilter } from '../web/pages/tests.js';
 
 // GY-3278 AC-3: the Tests page's default view is the environment matrix — every E2E case, grouped
 // by its first tag, with its latest result in each place it runs (Trial, Main, Served, Nightly),
@@ -51,10 +51,22 @@ const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, 
 const noop = () => {};
 const iso = (offset: number) => new Date(Date.now() + offset).toISOString();
 const hour = 3_600_000;
+/** The rendered element tree with every function component expanded (none of the matrix's own use hooks), so a button's handler can be called. */
+function expand(node: any): any {
+  if (Array.isArray(node)) return node.map(expand);
+  if (!node || typeof node !== 'object' || !('props' in node)) return node;
+  if (typeof node.type === 'function') return expand(node.type(node.props));
+  return { ...node, props: { ...node.props, children: expand(node.props.children) } };
+}
+function find(node: any, match: (props: any) => boolean): any {
+  if (Array.isArray(node)) { for (const child of node) { const found = find(child, match); if (found) return found; } return null; }
+  if (!node || typeof node !== 'object' || !('props' in node)) return null;
+  return match(node.props) ? node : find(node.props.children, match);
+}
 
-async function define(id: string, tags: string[], createdAt: string) {
+async function define(id: string, tags: string[], createdAt: string, required = false) {
   const document = { id, title: `Case ${id.slice(-1).toUpperCase()}`, purpose: 'p', setup: [], steps: ['s'], expected: ['e'], environment: 'any', runner: 'graphyard-e2e',
-    testPath: `e2e/cases/${id}.json`, tags, required: false, revision: 1, hash: 'h', createdAt, createdBy: 'operator' };
+    testPath: `e2e/cases/${id}.json`, tags, required, revision: 1, hash: 'h', createdAt, createdBy: 'operator' };
   await store.pool.query('INSERT INTO scenarios(id,revision,document) VALUES($1,1,$2)', [id, JSON.stringify(document)]);
 }
 async function run(id: string, key: string, document: Record<string, unknown>) {
@@ -65,7 +77,7 @@ async function run(id: string, key: string, document: Record<string, unknown>) {
 test('e2e:tests-page-matrix — the matrix shows each case\'s result per place, group counts and column totals, and only failing leaves the failing case', async () => {
   const work = await engine.execute(operator, 'create', null, { title: 'Dashboard loads', criteria: [{ id: 'AC-1', text: 'The dashboard loads', proofs: ['e2e:case-a'] }] }, randomUUID()) as Work;
   // Case A (dashboard) is registered after the last nightly run, so the nightly never ran it; case B (review) is older.
-  await define('case-a', ['dashboard', 'ui'], iso(0));
+  await define('case-a', ['dashboard', 'ui'], iso(0), true);
   await define('case-b', ['review'], iso(-48 * hour));
   // Case A passed in its merge trial and failed against the served release.
   await run('case-a', 'a-trial', { result: 'pass', environment: 'merge-writer-trial', workId: work.id, workKey: work.key, run: { kind: 'producer', id: 'ev-1', attempt: null, url: null }, at: iso(-3 * hour) });
@@ -124,6 +136,28 @@ test('e2e:tests-page-matrix — the matrix shows each case\'s result per place, 
   assert.doesNotMatch(collapsed, /data-case="case-a"/);
   assert.match(collapsed, /aria-expanded="false">▸ dashboard/);
   assert.equal(group(collapsed, 'dashboard'), '▸ dashboard 0 passing · 1 failing');
+  // AC-4: the summary strip counts the cases per the selected place.
+  const summary = (markup: string) => text(/<p class="matrix-summary"[^>]*>([\s\S]*?)<\/p>/.exec(markup)![1]);
+  assert.equal(summary(html), '2 cases · 1 required · 1 passing · 1 failing · 0 not run');
+  assert.equal(summary(render({ matrix: { failing: false, category: 'all', column: 'served' } })), '2 cases · 1 required · 0 passing · 1 failing · 1 not run in Served');
+  // The coverage grid: each category by place, coloured by its worst case, a dot where none of the category runs.
+  const grid = (category: string, column: string) => new RegExp(`<td data-grid="${category}:${column}" class="([^"]+)">([\\s\\S]*?)</td>`).exec(html) ?? assert.fail(`no grid cell ${category}:${column}`);
+  assert.deepEqual([grid('dashboard', 'served')[1], text(grid('dashboard', 'served')[2])], ['result-fail', '0 ✓ 1 ×']);
+  assert.deepEqual([grid('dashboard', 'trial')[1], text(grid('dashboard', 'trial')[2])], ['result-pass', '1 ✓ 0 ×']);
+  assert.deepEqual([grid('review', 'served')[1], text(grid('review', 'served')[2])], ['result-none', '·'], 'a dot: no review case runs on the served release');
+  // A grid cell is a link that filters the matrix to its category and place.
+  let chosen: MatrixFilter | null = null;
+  const all: MatrixFilter = { failing: false, category: 'all', column: 'all', required: 'all' };
+  const tree = expand(createElement(MatrixView, { cases: data.cases, filter: all, setFilter: (next: MatrixFilter) => { chosen = next; }, collapsed: new Set(), toggle: noop, openItem: noop }));
+  find(tree, props => props['data-grid'] === 'dashboard:served').props.children.props.onClick();
+  assert.deepEqual(chosen, { ...all, category: 'dashboard', column: 'served' });
+  const filtered = render({ matrix: chosen });
+  assert.deepEqual([...filtered.matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['case-a']);
+  assert.deepEqual([...filtered.matchAll(/<th scope="col" title[^>]*>(\w+)<br/g)].map(match => match[1]), ['Served']);
+  // Filter chips for category, required or optional, and place; and the fold that explains the places.
+  for (const group of ['Category', 'Where it runs']) assert.match(html, new RegExp(`role="group" aria-label="${group}"`));
+  assert.deepEqual([...render({ matrix: { ...all, required: 'optional' } }).matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['case-b']);
+  assert.match(html, /<details class="matrix-help"><summary>How this works<\/summary>/);
   // The by-item view is one click away.
   assert.match(html, /aria-pressed="false">By item and criterion</);
 });

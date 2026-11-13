@@ -139,8 +139,8 @@ const folded = (count: number) => `${count} ${count === 1 ? 'proof' : 'proofs'} 
  * reads 'not run here', neutrally.
  */
 type TestsViewMode = 'matrix' | 'cases';
-export interface MatrixFilter { failing: boolean; category: string; column: MatrixColumn | 'all' }
-const allPlaces: MatrixFilter = { failing: false, category: 'all', column: 'all' };
+export interface MatrixFilter { failing: boolean; category: string; column: MatrixColumn | 'all'; required?: 'all' | 'required' | 'optional' }
+const allPlaces: MatrixFilter = { failing: false, category: 'all', column: 'all', required: 'all' };
 const places: Record<MatrixColumn, { label: string; place: string }> = {
   trial: { label: 'Trial', place: 'the latest merge trial that ran it' }, main: { label: 'Main', place: 'the batch gate on main' },
   served: { label: 'Served', place: 'runs against the release this install serves' }, nightly: { label: 'Nightly', place: 'the daily full run' },
@@ -149,11 +149,13 @@ const ago = (at: string) => {
   const minutes = Math.max(0, Math.round((Date.now() - Date.parse(at)) / 60_000));
   return minutes < 60 ? `${minutes} min ago` : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h ago` : `${Math.round(minutes / 1440)} d ago`;
 };
-const failingIn = (entry: TrackedCase, columns: readonly MatrixColumn[]) => columns.some(column => entry.matrix?.[column]?.result === 'fail');
-const tally = (cells: (MatrixCell | undefined)[]) => {
-  const count = (result: MatrixCell['result']) => cells.filter(cell => cell?.result === result).length;
-  return [`${count('pass')} passed`, `${count('fail')} failed`, ...count('skipped') ? [`${count('skipped')} skipped`] : []].join(' · ');
-};
+const categoryOf = (entry: TrackedCase) => entry.category ?? 'other';
+/** A case's state over the shown places: failing when any failed, passing when any passed, else not run. */
+const caseState = (entry: TrackedCase, columns: readonly MatrixColumn[]) => columns.some(column => entry.matrix?.[column]?.result === 'fail') ? 'fail'
+  : columns.some(column => entry.matrix?.[column]?.result === 'pass') ? 'pass' : 'none';
+const count = (cells: (MatrixCell | undefined)[], result: MatrixCell['result']) => cells.filter(cell => cell?.result === result).length;
+const tally = (cells: (MatrixCell | undefined)[]) =>
+  [`${count(cells, 'pass')} passed`, `${count(cells, 'fail')} failed`, ...count(cells, 'skipped') ? [`${count(cells, 'skipped')} skipped`] : []].join(' · ');
 function Cell({ column, cell, openItem }: { column: MatrixColumn; cell: MatrixCell | undefined; openItem: OpenItem }) {
   if (!cell) return <td data-column={column} className="matrix-cell result-none">not run here</td>;
   const r = resultLabel[cell.result], label = <>{r.mark} {r.word}</>, link = cell.link;
@@ -162,22 +164,47 @@ function Cell({ column, cell, openItem }: { column: MatrixColumn; cell: MatrixCe
       : link ? <a href={`#${link.key}`} onClick={event => { if (openItem) { event.preventDefault(); openItem(link.item); } }}>{label}</a> : label}
     <small> {ago(cell.at)}</small></td>;
 }
+const Chip = ({ on, onClick, children }: { on: boolean; onClick(): void; children: React.ReactNode }) =>
+  <button type="button" className={on ? 'chip active' : 'chip'} aria-pressed={on} onClick={onClick}>{children}</button>;
+
+/** Categories by place (GY-3278 AC-4): each cell coloured by its worst case, with its counts, a dot where no case of the category runs there; a click filters the matrix to it. */
+function CoverageGrid({ cases, categories, filter, setFilter }: { cases: TrackedCase[]; categories: string[]; filter: MatrixFilter; setFilter(filter: MatrixFilter): void }) {
+  return <table className="sessions-table coverage-grid" aria-label="Coverage by category">
+    <thead><tr><th scope="col">Category</th>{matrixColumns.map(column => <th key={column} scope="col">{places[column].label}</th>)}</tr></thead>
+    <tbody>{categories.map(category => <tr key={category}><th scope="row">{category}</th>{matrixColumns.map(column => {
+      const cells = cases.filter(entry => categoryOf(entry) === category).map(entry => entry.matrix?.[column]).filter(Boolean);
+      const worst = !cells.length ? 'none' : count(cells, 'fail') ? 'fail' : count(cells, 'skipped') ? 'skipped' : 'pass';
+      const words = cells.length ? tally(cells) : 'no case runs here';
+      return <td key={column} data-grid={`${category}:${column}`} className={`result-${worst}`}>
+        <button type="button" className="text-button" title={`${category} in ${places[column].label}: ${words}`} onClick={() => setFilter({ ...filter, category, column })}>
+          {cells.length ? <>{count(cells, 'pass')} ✓ {count(cells, 'fail')} ×{count(cells, 'skipped') ? ` ${count(cells, 'skipped')} ◌` : ''}</> : '·'}</button></td>;
+    })}</tr>)}</tbody></table>;
+}
+
 export function MatrixView({ cases, filter, setFilter, collapsed, toggle, openItem }: { cases: TrackedCase[]; filter: MatrixFilter; setFilter(filter: MatrixFilter): void; collapsed: ReadonlySet<string>; toggle(category: string): void; openItem: OpenItem }) {
   const columns = filter.column === 'all' ? matrixColumns : [filter.column];
-  const categories = [...new Set(cases.map(entry => entry.category ?? 'other'))].sort();
-  const rows = cases.filter(entry => (filter.category === 'all' || (entry.category ?? 'other') === filter.category) && (!filter.failing || failingIn(entry, columns)));
-  const groups = [...new Set(rows.map(entry => entry.category ?? 'other'))].sort();
+  const required = filter.required ?? 'all';
+  const kept = cases.filter(entry => required === 'all' || (required === 'required') === !!entry.e2e?.required);
+  const categories = [...new Set(cases.map(categoryOf))].sort();
+  const inCategory = kept.filter(entry => filter.category === 'all' || categoryOf(entry) === filter.category);
+  const rows = inCategory.filter(entry => !filter.failing || caseState(entry, columns) === 'fail');
+  const groups = [...new Set(rows.map(categoryOf))].sort();
+  const states = inCategory.map(entry => caseState(entry, columns));
   return <>
+    <p className="matrix-summary" data-summary="">{inCategory.length} {inCategory.length === 1 ? 'case' : 'cases'} · {inCategory.filter(entry => entry.e2e?.required).length} required · {states.filter(state => state === 'pass').length} passing · {states.filter(state => state === 'fail').length} failing · {states.filter(state => state === 'none').length} not run{filter.column === 'all' ? '' : ` in ${places[filter.column].label}`}</p>
+    {categories.length > 0 && <CoverageGrid cases={kept} categories={categories} filter={filter} setFilter={setFilter}/>}
+    <details className="matrix-help"><summary>How this works</summary><p>Trial is the merge trial, which runs an item's bound cases against its candidate merged onto main before it lands. Main is the batch gate, which runs the merged batch's cases on main's tip before anything serves it, and Served is a <code>graphyard e2e run</code> against the release this install serves. Nightly is the daily full run of every case on the last verified commit, which never blocks a merge.</p></details>
     <div className="case-filters" role="group" aria-label="Filter the matrix">
-      <button type="button" className={filter.failing ? 'chip active' : 'chip'} aria-pressed={filter.failing} onClick={() => setFilter({ ...filter, failing: !filter.failing })}>Only failing</button>
-      <select aria-label="Category" value={filter.category} onChange={event => setFilter({ ...filter, category: event.target.value })}><option value="all">Every category</option>{categories.map(category => <option key={category} value={category}>{category}</option>)}</select>
-      <select aria-label="Where it runs" value={filter.column} onChange={event => setFilter({ ...filter, column: event.target.value as MatrixFilter['column'] })}><option value="all">Every place</option>{matrixColumns.map(column => <option key={column} value={column}>{places[column].label}</option>)}</select></div>
+      <Chip on={filter.failing} onClick={() => setFilter({ ...filter, failing: !filter.failing })}>Only failing</Chip>
+      {(['all', 'required', 'optional'] as const).map(value => <Chip key={value} on={required === value} onClick={() => setFilter({ ...filter, required: value })}>{value === 'all' ? 'Required and optional' : value === 'required' ? 'Required' : 'Optional'}</Chip>)}</div>
+    <div className="case-filters" role="group" aria-label="Category">{['all', ...categories].map(category => <Chip key={category} on={filter.category === category} onClick={() => setFilter({ ...filter, category })}>{category === 'all' ? 'Every category' : category}</Chip>)}</div>
+    <div className="case-filters" role="group" aria-label="Where it runs">{(['all', ...matrixColumns] as const).map(column => <Chip key={column} on={filter.column === column} onClick={() => setFilter({ ...filter, column })}>{column === 'all' ? 'Every place' : places[column].label}</Chip>)}</div>
     {rows.length ? <table className="sessions-table test-matrix" aria-label="Where each case runs">
       <thead><tr><th scope="col">Case</th>{columns.map(column => <th key={column} scope="col" title={places[column].place}>{places[column].label}<br/><small className="muted">{places[column].place}</small></th>)}</tr>
         <tr className="matrix-totals"><th scope="row">All cases</th>{columns.map(column => <td key={column} data-column={column}>{tally(rows.map(entry => entry.matrix?.[column]))}</td>)}</tr></thead>
-      {groups.map(category => { const members = rows.filter(entry => (entry.category ?? 'other') === category), open = !collapsed.has(category), failing = members.filter(entry => failingIn(entry, columns)).length;
+      {groups.map(category => { const members = rows.filter(entry => categoryOf(entry) === category), open = !collapsed.has(category), state = members.map(entry => caseState(entry, columns));
         return <tbody key={category} data-category={category}>
-          <tr className="matrix-group"><th scope="rowgroup" colSpan={columns.length + 1}><button type="button" className="text-button" aria-expanded={open} onClick={() => toggle(category)}>{open ? '▾' : '▸'} {category}</button> <span className="muted">{members.length - failing} passing · {failing} failing</span></th></tr>
+          <tr className="matrix-group"><th scope="rowgroup" colSpan={columns.length + 1}><button type="button" className="text-button" aria-expanded={open} onClick={() => toggle(category)}>{open ? '▾' : '▸'} {category}</button> <span className="muted">{state.filter(s => s === 'pass').length} passing · {state.filter(s => s === 'fail').length} failing</span></th></tr>
           {open && members.map(entry => <tr key={entry.id} data-case={entry.id}><th scope="row"><span className="mono">{entry.id}</span>{entry.title ? <><br/><small>{entry.title}</small></> : null}</th>
             {columns.map(column => <Cell key={column} column={column} cell={entry.matrix?.[column]} openItem={openItem}/>)}</tr>)}
         </tbody>; })}

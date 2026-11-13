@@ -438,3 +438,4 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .unbuilt-proofs{margin:var(--space-3) 0}.unbuilt-proofs>summary{cursor:pointer;color:var(--text-2)}
 .case-filters input[type=search]{width:auto;min-width:200px;padding:4px 12px;border-radius:999px}
 .test-matrix .matrix-cell{white-space:nowrap}.test-matrix .matrix-cell small{color:var(--text-2)}.test-matrix .matrix-totals td,.test-matrix .matrix-totals th{font-size:var(--type-small);color:var(--text-2)}.test-matrix .matrix-group th{background:var(--surface);text-align:left}
+.matrix-summary{margin:var(--space-2) 0;font-weight:500}.coverage-grid{width:auto}.coverage-grid td{text-align:center}.coverage-grid td.result-none{color:var(--text-2)}.matrix-help{margin:var(--space-2) 0}.matrix-help>summary{cursor:pointer;color:var(--text-2)}
