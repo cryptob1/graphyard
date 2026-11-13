@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
@@ -36,11 +36,15 @@ await new Promise(done => setTimeout(done, nested ? 50 : 400));
 if (!nested && process.env.NESTED) execFileSync(${JSON.stringify(join(verificationBin, 'npm'))}, ['run', 'build:nested'], { stdio: 'inherit' });
 appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
     writeFileSync(join(root, 'site', 'index.html'), '<h1>Site</h1>');
+    mkdirSync(join(root, 'e2e', 'cases'), { recursive: true });
+    writeFileSync(join(root, 'e2e', 'cases', 'home.json'), JSON.stringify({ id: 'home', title: 'The home page answers', tags: ['api'], target: 'any', required: true,
+      steps: [{ kind: 'http', name: 'read /', method: 'GET', path: '/', status: 200, expect: [] }] }));
     git(root, 'init', '-q', '-b', 'main'); git(root, 'add', '-A'); git(root, 'commit', '-qm', 'fixture');
     return { project, root, managed };
   });
   const base = { PATH: process.env.PATH, HOME: process.env.HOME, GRAPHYARD_DATA_HOME: data };
   const started: { id: string; project: string; child: ChildProcess; stderr: () => string; closed: Promise<number | null> }[] = [];
+  after(() => { for (const job of started) job.child.kill('SIGKILL'); });
   const track = (id: string, project: string, child: ChildProcess) => {
     let stderr = '';
     child.stderr!.on('data', chunk => { stderr += chunk; });
@@ -141,8 +145,11 @@ test('e2e:host-heavy-budget — a lowered limit keeps running jobs and admits no
     let ran = false;
     const queued = withHeavyJob('merge trial GY-9', async () => { ran = true; return holders(); }, { onWait: line => lines.push(line) });
     await until(() => lines.length === 1, 'the new job reports its wait');
-    assert.match(lines[0], /merge trial GY-9 waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by held job one \(acme\/app\) \[pid \d+, .+\]; held job two \(acme\/site\) .+; held job three \(acme\/site\)/);
-    assert.equal(waitStep(fixture.directory), 'waiting for a host heavy-job slot, held by held job one (acme/app), held job two (acme/site), held j');
+    assert.match(lines[0], /merge trial GY-9 waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by held job /);
+    for (const holder of ['held job one (acme/app) [pid ', 'held job two (acme/site) [pid ', 'held job three (acme/site) [pid ']) assert.ok(lines[0].includes(holder), `${holder}: ${lines[0]}`);
+    // A merge trial's step says the same within the control plane's 100 characters.
+    assert.match(waitStep(fixture.directory), /^waiting for a host heavy-job slot, held by held job (one|two|three) \(acme\/(app|site)\), held job /);
+    assert.equal(waitStep(fixture.directory).length, 100);
     assert.deepEqual(holders(), ['held job one', 'held job three', 'held job two'], 'every running job keeps its slot');
 
     // One finishes normally: two still run, which is the limit, so the new job still waits.

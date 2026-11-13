@@ -35,7 +35,7 @@ if (mode === 'trial' || mode === 'gate') {
   await runWorkerCheck({ root, base: scratch, baseBranch: 'main', key: id, head, check: 'test', trial });
 } else if (mode === 'preview') {
   const opened = await openPreview({ root, base: scratch, mergeSha: head, timeoutMs: 120_000, application: { id: 'site', kind: 'static', directory: 'site', build: 'true' },
-    shell: async () => { await body(); return { ok: true, output: '' }; } }, { keep: false, cases: [] });
+    shell: async () => { await body(); return { ok: true, output: '' }; } }, { keep: false, cases: ['home'] });
   await opened.close();
   if (opened.verdict.result !== 'pass') throw new Error(`the preview did not pass: ${opened.verdict.detail}`);
 } else if (mode === 'deploy') {
