@@ -108,6 +108,8 @@ export interface DaemonEffects {
   dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void; onRun?: (run: WorkerRun) => Promise<unknown> }) => Promise<unknown>;
   /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
   registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
+  /** GY-3285: add worker profiles, each under an identity the control plane mints, until `allowed` exist; returns the ones added. */
+  growWorkers?: (config: MasterConfig, allowed: number) => Promise<WorkerProfile[]>;
   /**
    * GY-3225: which registered Claude account launches in this host's checkout the folder-trust step
    * would refuse — the checkout carries repository Claude configuration, and the account's config

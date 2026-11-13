@@ -14,7 +14,7 @@ import { pinnedNodePath } from '../node-pin.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
-export interface WorkerVerificationInput { head: string; epoch: number; mode: 'verify' | 'complete'; preserves?: string[] }
+export interface WorkerVerificationInput { head: string; epoch: number; mode: 'verify' | 'complete' | 'check'; preserves?: string[]; check?: string }
 export const workerVerificationTimeoutMs = 55 * 60_000;
 /** Where worker verifications make their `verify-` allocations, each marked with its owner so the loop's sweep takes back a crashed one's (GY-3188). */
 export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');

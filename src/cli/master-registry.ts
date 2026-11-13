@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import type { MasterConfig } from '../master.js';
 import { discoverHostLogins, installDirectory, proposeFleet } from '../fleet.js';
 import { seedPrices } from '../model/price-sheet.js';
-import { emptyRolePolicy, quotaStates, registryRoles, rolePolicy, type AgentRegistry } from '../model/registry.js';
+import { emptyRolePolicy, quotaStates, registryRoles, roleLimit, rolePolicy, type AgentRegistry } from '../model/registry.js';
 
 export const registryHelp = [
   '  master registry               The fleet the control plane holds: every account with its runtime,',
@@ -32,6 +32,8 @@ export const registryHelp = [
   '  master registry runtime|model|account|role remove NAME --reason R',
   '  master registry session end ID --reason R   End one live session the registry still counts',
   '  master registry history [--limit N]   Every registry change and selection, newest first',
+  '  master workers [N]            Run N workers per account of the registry worker role (accounts × N at',
+  '                                once); the loop adds their identities. Without N, show the limit',
 ];
 
 export interface RegistryCommandApi { read(path: string): Promise<any>; write(path: string, data: unknown): Promise<any> }
@@ -152,6 +154,22 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
   const policy = { ...base, ...defined({ args: values.arg, tools: values.tool?.flatMap(entry => entry.split(',').map(tool => tool.trim()).filter(Boolean)), model: values.model === undefined ? undefined : values.model === 'none' ? null : values.model }) };
   const empty = !policy.args.length && !policy.tools.length && policy.model === null;
   return api.write('agent-registry/roles', { role: { name, accounts, concurrency, ...(empty && !existing?.policy ? {} : { policy }) }, reason: values.reason });
+}
+
+/**
+ * `graphyard master workers [N]` (GY-3285): the one knob for how many workers the install runs. N is
+ * the worker role's concurrency — sessions per account — so the install runs its accounts times N;
+ * the loop adds the worker identities and profiles itself. Without N it reports the limit.
+ */
+export async function workersCommand(args: string[], api: RegistryCommandApi) {
+  const current: AgentRegistry = await api.read('agent-registry/document');
+  const role = current.roles.find(entry => entry.name === 'worker');
+  if (!role) throw new Error('The registry names no worker role; name its accounts with master registry role set worker ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON');
+  const concurrency = args[0] === undefined ? role.concurrency : Number(args[0]);
+  if (!Number.isInteger(concurrency) || concurrency < 0) throw new Error('Use master workers N, the worker sessions each account of the worker role runs at once');
+  if (concurrency !== role.concurrency) await api.write('agent-registry/roles', { role: { name: 'worker', accounts: role.accounts, concurrency, ...(role.policy ? { policy: role.policy } : {}) }, reason: `master workers ${concurrency}` });
+  return { allowed: roleLimit({ ...role, concurrency }), accounts: role.accounts, perAccount: concurrency,
+    line: `${roleLimit({ ...role, concurrency })} workers allowed: ${role.accounts.length} account${role.accounts.length === 1 ? '' : 's'} × ${concurrency} each; master status shows workers running/allowed` };
 }
 
 /**

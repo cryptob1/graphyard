@@ -6,7 +6,7 @@ import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand
 import { reviewCommand as launchReview } from '../../reviewer.js';
 import { writeHarnessPermissions } from '../../harness.js';
 import { reviewerCommand } from '../master-reviewer.js';
-import { registryCommand } from '../master-registry.js';
+import { registryCommand, workersCommand } from '../master-registry.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /** Launch profiles, the master session, reviewer launches and the master's harness rules. */
@@ -23,6 +23,7 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
   if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
   if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
+  if (id === 'workers') return print(await workersCommand(args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'reviewer') return reviewerCommand(root, master, args, print);
   // The fleet on this host against the CLI checkout's commit: the release a restart would load.
   if (id === 'review') {

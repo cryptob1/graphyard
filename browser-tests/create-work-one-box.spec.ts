@@ -115,7 +115,8 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     await runCycle(config, state, effects);
     expect(released).toEqual([draft.id]); expect(dispatched).toEqual([draft.id]);
     expect((await reload(draft.id)).lease?.owner).toBe('worker');
-    await expect(page.locator('article.item-page')).not.toContainText(waiting);
+    // The page reads every 5 s, so the change can land just after a read: allow a full poll cycle.
+    await expect(page.locator('article.item-page')).not.toContainText(waiting, { timeout: 15_000 });
 
     await page.getByRole('button', { name: '← Back' }).click();
     await page.getByRole('button', { name: '＋ New work item' }).click();

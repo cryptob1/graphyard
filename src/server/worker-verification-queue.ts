@@ -7,13 +7,14 @@ import { Refusal } from '../model/refusal.js';
 import type { Services } from './routes.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import { workerVerificationTimeoutMs, type WorkerVerificationInput } from '../merge-writer/worker-verification.js';
+import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 export interface WorkerVerificationJob {
   id: string; host: string; branch: string; work: Work; input: WorkerVerificationInput; baseBranch: string;
 }
 interface Pending {
   job: WorkerVerificationJob; executor?: string;
-  resolve: (result: WorkerVerificationResult) => void; reject: (error: Error) => void;
+  resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
 }
 const queues = new WeakMap<Services, Map<string, Pending>>();
 function queue(services: Services) {
@@ -21,13 +22,13 @@ function queue(services: Services) {
   if (!pending) { pending = new Map(); queues.set(services, pending); }
   return pending;
 }
-export async function dispatchWorkerVerification(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<WorkerVerificationResult> {
+export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
   const pending = queue(services), id = randomUUID();
   let timer: NodeJS.Timeout;
   try {
-    return await new Promise<WorkerVerificationResult>((resolve, reject) => {
+    return await new Promise<Result>((resolve, reject) => {
       timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
-      pending.set(id, { job: { ...job, id }, resolve, reject });
+      pending.set(id, { job: { ...job, id }, resolve: resolve as Pending['resolve'], reject });
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
 }
@@ -44,7 +45,7 @@ export function takeWorkerVerifications(services: Services, actor: Principal, bo
 }
 export function finishWorkerVerification(services: Services, actor: Principal, body: unknown) {
   demand(actor.role === 'coordinator', 'Only the host coordinator returns worker verification', 403);
-  const input = z.object({ id: z.string().uuid(), result: z.custom<WorkerVerificationResult>().optional(), error: z.string().optional() }).strict().parse(body);
+  const input = z.object({ id: z.string().uuid(), result: z.custom<WorkerVerificationResult | WorkerCheckResult>().optional(), error: z.string().optional() }).strict().parse(body);
   const pending = queue(services).get(input.id);
   demand(pending && pending.executor === actor.id, 'No verification assigned to this coordinator', 409);
   demand(!!input.result !== !!input.error, 'Return a result or a runner error', 400);

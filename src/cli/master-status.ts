@@ -7,6 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { profileHealth } from '../daemon/sessions.js';
+import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -21,6 +22,9 @@ import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-spe
 import type { FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
+import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
+import { blockerSince } from '../model/work.js';
+import { formatAge } from '../model/duration.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
@@ -111,6 +115,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const recorded = state?.controlPlane ?? null;
   const controlUpdate = controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now);
   const open = snapshot.work.filter(item => item.stage !== 'done');
+  // GY-3280: every recorded worker blocker is attention the cycle it lands, naming the item, the
+  // blocker and how long it has waited — the master session is prompted the same cycle, and 30
+  // minutes unanswered raises it on the dashboard's Needs you for the owner.
+  const blockerAttention = open.filter(item => item.blocker && !parkedOnHuman(item)).map(item => {
+    const since = blockerSince(item);
+    return { subject: item.key, text: `${item.key}'s blocker${since !== null ? ` has waited ${formatAge(since, now)}` : ''}: ${item.blocker}`,
+      next: `Clear the cause, then graphyard master unblock ${item.key} REASON; ${blockerEscalationMinutes} minutes unanswered raises it on the dashboard's Needs you` };
+  });
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   // GY-3105: delivery speed from the event ledger for the last merged items, computed now.
@@ -129,7 +141,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...blockerAttention, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -162,6 +174,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
     // GY-3146: what the latest verified batch changed and how to try it.
     releaseNote: latestReleaseNote(releaseNotesPath(root)),
+    // GY-3285: worker sessions running of the number the registry worker role allows (master workers N sets it).
+    workers: `${sessions.filter(session => session.kind === 'implementation').length}/${workersAllowed(master, fleet?.roles ? { roles: fleet.roles.map(role => ({ ...role, name: role.role })) } : null)}`,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };

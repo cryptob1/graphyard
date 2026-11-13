@@ -40,6 +40,8 @@ async function executor(label: string) {
 
 test('unit:registry-slot-authority — independent loops racing for the last slot launch once; local names and logs grant no capacity', async () => {
   const configs = await Promise.all([executor('loop-a'), executor('loop-b')]);
+  // One account at concurrency 1 is the role's one slot (GY-3285: a worker role runs its accounts times its concurrency).
+  await registry.mutate(actor, 'role.set', { role: { name: 'worker', accounts: ['account-a'], concurrency: 1 }, reason: 'one slot' }, randomUUID());
   let launches = 0;
   const outcomes = await Promise.allSettled(configs.map(async (config, index) => {
     const selected = await selectAccount(config, 'worker', { name: `worker-${index}`, principal: `worker-${index}` },

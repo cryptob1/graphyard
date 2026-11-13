@@ -197,6 +197,12 @@ export interface Work extends Create {
   /** Required proof names that had no authorized producer when intent was last recorded. */
   proofGaps?: string[];
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
+  /**
+   * GY-3280: when the standing blocker was recorded. Set beside every blocker a worker or the
+   * system writes, cleared beside it; the escalation clock (`blockerSince`) reads it, falling
+   * back to the end of the attempt that recorded the blocker.
+   */
+  blockedAt?: string | null;
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
@@ -216,4 +222,17 @@ export function operatorCapability(actor: Principal, capability: OperatorCapabil
 }
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
+}
+
+/**
+ * GY-3280: when the standing blocker was recorded, in ms — its own `blockedAt` stamp, else the end
+ * of the attempt that recorded it (a worker's `blocked` report ends its attempt in the same
+ * transaction, so the two instants are one). Null with no blocker or nothing recorded: a blocker
+ * older than the stamp never reads as freshly raised.
+ */
+export function blockerSince(work: Pick<Work, 'blocker'> & { blockedAt?: string | null; pipeline?: { attempts?: readonly { endedAt: string | null }[] } | null }): number | null {
+  if (!work.blocker) return null;
+  const recorded = work.blockedAt ?? [...(work.pipeline?.attempts ?? [])].reverse().find(attempt => attempt.endedAt)?.endedAt ?? null;
+  const at = recorded === null ? Number.NaN : Date.parse(recorded);
+  return Number.isFinite(at) ? at : null;
 }

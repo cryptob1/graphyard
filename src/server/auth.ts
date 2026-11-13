@@ -20,7 +20,8 @@ import { signinClaimFromEnv } from './routes/signin.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
- * one-time sign-in link opened (GY-738, `HumanSignIn` below), a live operator-agent credential,
+ * one-time sign-in link opened (GY-738, `HumanSignIn` below), a worker identity the loop minted
+ * (GY-3285), a live operator-agent credential,
  * then an unused durable reviewer launch. A lease command (`method` and `pathname`)
  * authenticates on the lease pool (GY-558), so an exhausted
  * general pool cannot stop a renewal before it reaches its own connections. A tokenless `localRead`
@@ -34,10 +35,30 @@ export async function authenticate(services: Services, authorization: string | u
   const hash = createHash('sha256').update(token).digest();
   const configured = configuredCredential(services, hash);
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
-  const actor = configured?.actor ?? await humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token) ?? await launchTokenActor(services, hash.toString('hex'));
+  const actor = configured?.actor ?? await humanSignIn(services).authenticate(token) ?? await mintedWorker(services, token) ?? await services.operatorAgents.authenticate(token) ?? await launchTokenActor(services, hash.toString('hex'));
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;
+}
+
+/**
+ * GY-3285: the loop mints one worker identity per concurrent worker session, so an install's worker
+ * count follows its registry without an operator writing principals. Minting ID again replaces its
+ * token. Only the coordinator (the loop's own identity) or an admin mints.
+ */
+export async function mintWorkerIdentity(services: Services, actor: Principal, id: unknown) {
+  demand(actor.role === 'coordinator' || actor.role === 'admin', 'Only the coordinator mints worker identities', 403);
+  demand(typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(id), 'A worker identity is 1-100 letters, digits, dots, dashes or underscores', 400);
+  demand(!services.principals.some(entry => entry.actor.id === id), `${id} is a configured principal`, 409);
+  const token = `gyw_${randomBytes(32).toString('base64url')}`;
+  await services.engine.store.pool.query(`INSERT INTO worker_identities (id, token_hash, minted_by, minted_at) VALUES ($1, $2, $3, now())
+    ON CONFLICT (id) DO UPDATE SET token_hash=EXCLUDED.token_hash, minted_by=EXCLUDED.minted_by, minted_at=EXCLUDED.minted_at`, [id, digest(token), actor.id]);
+  return { id, token };
+}
+async function mintedWorker(services: Services, token: string): Promise<Principal | null> {
+  if (!token.startsWith('gyw_')) return null;
+  const { rows } = await services.engine.store.pool.query('SELECT id FROM worker_identities WHERE token_hash=$1', [digest(token)]);
+  return rows[0] ? { id: rows[0].id, role: 'worker' } : null;
 }
 
 /** Whoever reads the dashboard on this machine without signing in: a reader, so every action and human-only decision still needs a signed-in session. */
