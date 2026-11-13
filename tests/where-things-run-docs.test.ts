@@ -102,6 +102,7 @@ test('unit:tests/where-things-run-docs.test.ts — the loop reports its install\
 
   assert.equal(whereLogs('graphyard-master-fixture-shop.service'), 'journalctl --user -u graphyard-master-fixture-shop.service');
   assert.equal(whereLogs('graphyard-fixture-shop-server-1'), 'docker logs graphyard-fixture-shop-server-1');
+  assert.equal(whereLogs(local!.database), null, 'the embedded cluster answers no docker logs command');
 });
 
 test('unit:tests/where-things-run-docs.test.ts — the Setup panel names this install\'s units, containers, port, URL, directories and master pane, and says so while the loop has not reported', () => {

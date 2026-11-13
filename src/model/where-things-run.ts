@@ -63,5 +63,6 @@ export function loopWhereRegistry(owner: object): LoopWhereRegistry {
   return registry;
 }
 
-/** How to read one named part's logs: a systemd user unit from journald, anything else is a container. */
-export const whereLogs = (part: string) => part.endsWith('.service') ? `journalctl --user -u ${part}` : `docker logs ${part}`;
+/** How to read one named part's logs: a systemd user unit from journald, a Compose container from Docker, anything else (the local provider's embedded cluster) none. */
+export const whereLogs = (part: string): string | null =>
+  part.endsWith('.service') ? `journalctl --user -u ${part}` : /^graphyard-[a-z0-9._-]+-(?:server|db)-1$/.test(part) ? `docker logs ${part}` : null;

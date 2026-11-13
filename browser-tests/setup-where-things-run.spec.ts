@@ -64,6 +64,13 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     ]) await expect(section).toContainText(shown, { timeout: 15_000 });
     await expect(section).toContainText('Merge trials');
     await expect(section).toContainText('Agents (workers, reviewers, producers)');
+
+    // The same dashboard's Guide page embeds the README, so the where-things-run diagram renders from the page's own bundle.
+    await page.getByRole('button', { name: 'Help', exact: true }).click();
+    const diagram = page.locator('.guide img.guide-diagram');
+    await expect(diagram).toBeVisible({ timeout: 15_000 });
+    await expect.poll(async () => await diagram.evaluate(img => (img as HTMLImageElement).naturalWidth), { timeout: 15_000 }).toBeGreaterThan(0);
+    await expect(page.locator('.guide')).toContainText('Where things run');
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));
   }

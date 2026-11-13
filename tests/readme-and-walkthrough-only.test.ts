@@ -20,7 +20,7 @@ function mp4Seconds(bytes: Buffer) {
 
 test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough media, its re-render steps and the where-things-run diagram, README is one short page embedding them with setup steps, and the video shows the current roles and delivery flow', () => {
   const tracked = execFileSync('git', ['ls-files', '--', 'docs'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean).sort();
-  assert.deepEqual(tracked, [gif, video, 'docs/walkthrough.md', 'docs/diagrams/where-things-run.svg']);
+  assert.deepEqual(tracked, [gif, video, 'docs/diagrams/where-things-run.svg', 'docs/walkthrough.md']);
 
   const readme = read('README.md');
   assert.ok(readme.split(/\s+/).length < 600, `README is short: ${readme.split(/\s+/).length} words`);
