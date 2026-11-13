@@ -39,18 +39,32 @@ const animationOf = (page: Page, selector: string, pseudo = '') =>
   page.evaluate(([sel, ps]) => getComputedStyle(document.querySelector(sel)!, ps ? (ps as any) : undefined).animationName, [selector, pseudo]);
 const live = { timeout: 15_000 };
 
+/**
+ * The boot's own timers run on the page clock, held still until the test moves it: a loaded
+ * trial machine can spend the veil's whole real second between the page's script and the first
+ * look, and a held clock makes "inside its second" exact instead of a race against the load.
+ */
+async function bootHeld(page: Page) {
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 60_000);
+  await page.goto('/');
+  const boot = page.locator('[data-boot="run"]');
+  await expect(boot).toBeVisible({ timeout: 10_000 });
+  return boot;
+}
+
 test('e2e:night-yard-animation — the boot sequence plays once per browser session, and any key skips it', async ({ page }) => {
   test.setTimeout(60_000);
-  const boot = page.locator('[data-boot="run"]');
-  await page.goto('/');
-  await expect(boot).toBeVisible({ timeout: 5_000 });
-  // The readout types out: part way in, it holds fewer characters than it will.
-  const readout = page.locator('.boot-readout');
-  expect((await readout.textContent())!.length).toBeGreaterThan(0);
-  // Any key skips it at once — the page arrives before its own second is up.
-  await page.waitForTimeout(250);
+  const boot = await bootHeld(page);
+  // The readout types out: a quarter second in, it holds some of its characters but not all.
+  await page.clock.runFor(250);
+  const typed = (await page.locator('.boot-readout').textContent())!.length;
+  expect(typed).toBeGreaterThan(0);
+  await page.clock.runFor(10);
+  expect((await page.locator('.boot-readout').textContent())!.length).toBeGreaterThan(typed);
+  // Any key skips it at once — no clock time passes before the page arrives.
   await page.keyboard.press('Escape');
-  await expect(boot).toHaveCount(0, { timeout: 400 });
+  await expect(boot).toHaveCount(0);
   // Once per browser session: a reload goes straight to the page.
   await page.reload();
   await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible();
@@ -59,10 +73,11 @@ test('e2e:night-yard-animation — the boot sequence plays once per browser sess
 
 test('e2e:night-yard-animation — left alone, the boot hands the page over inside its second', async ({ page }) => {
   test.setTimeout(60_000);
-  const boot = page.locator('[data-boot="run"]');
-  await page.goto('/');
-  await expect(boot).toBeVisible({ timeout: 5_000 });
-  await expect(boot).toHaveCount(0, { timeout: 3_000 });
+  const boot = await bootHeld(page);
+  await page.clock.runFor(900);
+  await expect(boot).toBeVisible();
+  await page.clock.runFor(200);
+  await expect(boot).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible();
 });
 
