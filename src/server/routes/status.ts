@@ -1,3 +1,4 @@
+import { readWorkReplay } from '../work-replay.js';
 import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
@@ -25,6 +26,12 @@ import { snapshotPage } from '../../store/paged-snapshot.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
+  { method: 'GET', path: '/api/work-replay', async handle({ services, url, operatorVisible }) {
+    const hours = Number(url.searchParams.get('hours') ?? 24);
+    demand(hours === 24 || hours === 72, 'Replay window must be 24 or 72 hours', 400);
+    const replay = await readWorkReplay(services.engine.store.pool, hours);
+    return { ...replay, items: operatorVisible(replay.items) };
+  } },
   {
     method: 'GET', path: '/api/status',
     async handle({ actor, req, url, services, operatorVisible }) {

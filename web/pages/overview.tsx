@@ -1,3 +1,4 @@
+import Replay from '../components/work-replay';
 import { isClosed, type Work } from '../../src/model';
 import { mayChangePriority } from '../components/priority';
 import WorkCard from '../components/work-card';
@@ -38,7 +39,7 @@ export function WorkPage(dashboard: Dashboard) {
  * ones the control plane's production observation reports unserved — none where production serves
  * the newest merge, and none claimed where nothing observes production.
  */
-export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy }: Dashboard) {
+export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy, api }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
@@ -96,5 +97,6 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
     </>}
+    <Replay api={api} onOpen={setSelected}/>
   </>;
 }
