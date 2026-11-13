@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Dashboard } from './dashboard';
-import OverviewPage from './overview';
+import { WorkPage } from './overview';
 import NowPage from './now';
 import ShippedPage from './shipped';
 import HumanRequestsPage from './human-requests';
@@ -50,7 +50,7 @@ const role = (dashboard: Dashboard) => dashboard.status?.actor?.role;
 const configured = (value: boolean | null | undefined) => value !== false;
 
 export const views: readonly View[] = [
-  { id: 'work', icon: '▥', label: 'Work', section: 'work', render: dashboard => <OverviewPage {...dashboard}/> },
+  { id: 'work', icon: '▥', label: 'Work', section: 'work', render: dashboard => <WorkPage {...dashboard}/> },
   { id: 'now', icon: '◷', label: 'Now', section: 'work', visible: dashboard => dashboard.status?.actor?.sessionKind === 'human', render: dashboard => <NowPage {...dashboard}/> },
   // What waits on the human (GY-89) is the Work page's Needs you group (GY-161): one place, answered on the item page.
   // This page, the full list with recently answered requests, is opened from that group, not from the navigation.

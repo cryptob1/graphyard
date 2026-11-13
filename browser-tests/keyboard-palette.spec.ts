@@ -53,11 +53,11 @@ test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Ent
   await expect(page.locator('article.item-page')).toContainText('Add dark mode to settings');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
-  // A command by name: Master, then the theme, both without touching the mouse.
+  // A command by name: the Master page — its title is the Chief (AC-5) — then the theme, both without the mouse.
   await page.keyboard.press('Control+k');
   await search(page).fill('Master');
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
   await page.keyboard.press('Control+k');
   await search(page).fill('Daylight');
   await page.keyboard.press('Enter');
@@ -105,7 +105,7 @@ test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? show
   await serve(page);
   await page.keyboard.press('g');
   await page.keyboard.press('m');
-  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
   await page.keyboard.press('g');
   await page.keyboard.press('w');
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
@@ -132,7 +132,7 @@ test('e2e:keyboard-palette — the top bar strip counts the shift, the trials an
   await expect(strip).toHaveAttribute('data-on-shift', '2');
   await expect(strip).toHaveAttribute('data-in-trial', '1');
   await expect(strip).toHaveAttribute('data-shipped-tonight', '1');
-  await expect(strip).toContainText('2 agents on shift');
+  await expect(strip).toContainText('2 runners on shift');
   await expect(strip).toContainText('1 in trial');
   await expect(strip).toContainText('1 shipped tonight');
   // The same numbers the Workers page reads off the same board.

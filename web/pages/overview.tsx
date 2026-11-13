@@ -10,8 +10,19 @@ import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-st
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
 import { BuildLine, Playful, ShippedToday } from '../fun';
+import { useGlide } from '../glide';
 
 const week = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The Work page with its motion (GY-3272 AC-4b): on every render, a row that changed group is
+ * glided to its new place. The page's own body (OverviewPage, the default export below) stays
+ * hook-free — the dashboard's unit tests read it as a plain function, tiles and all.
+ */
+export function WorkPage(dashboard: Dashboard) {
+  useGlide();
+  return OverviewPage(dashboard);
+}
 
 /**
  * The Work page (GY-161) answers "what is happening and what do I do next" on one screen, with

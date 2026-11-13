@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { mergedAt } from './groups';
 import type { Work } from '../src/model';
 
@@ -11,7 +11,11 @@ import type { Work } from '../src/model';
 const KEY = 'graphyard.fun';
 const listeners = new Set<() => void>();
 const readFun = () => { try { return localStorage.getItem(KEY) !== 'off'; } catch { return true; } };
-export function setFun(on: boolean) { try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch { /* private mode: this page only */ } listeners.forEach(listener => listener()); }
+export { readFun };
+const applyFun = (on: boolean) => { document.documentElement.dataset.fun = on ? 'on' : 'off'; };
+export function setFun(on: boolean) { try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch { /* private mode: this page only */ } applyFun(on); listeners.forEach(listener => listener()); }
+/** Once, before the dashboard renders: Fun's state is on `<html>` for the first paint, where the stylesheet can read it. */
+export const bootFun = () => applyFun(readFun());
 export const useFun = () => useSyncExternalStore(listener => { listeners.add(listener); return () => { listeners.delete(listener); }; }, readFun, () => true);
 
 const NAMES = ['Ada', 'Juno', 'Pixel', 'Milo', 'Nova', 'Otto', 'Iris', 'Felix', 'Luna', 'Hugo', 'Wren', 'Theo', 'Mabel', 'Ziggy', 'Pip', 'Rosa', 'Arlo', 'Cleo', 'Basil', 'Echo',
@@ -23,9 +27,9 @@ const NAMES = ['Ada', 'Juno', 'Pixel', 'Milo', 'Nova', 'Otto', 'Iris', 'Felix', 
 const isMaster = (id: string) => /master/.test(id);
 /** Ids that are not an agent account: Graphyard itself and the people who run it keep their own names. */
 const unnamed = (id: string) => id === 'graphyard' || /operator|admin|human/.test(id);
-/** An account's friendly name: the same on every page and every install, from its id alone. The master is always the Foreman. */
+/** An account's friendly name: the same on every page and every install, from its id alone. The master is always the Chief. */
 export function friendlyName(id: string): string | null {
-  if (isMaster(id)) return 'the Foreman';
+  if (isMaster(id)) return 'the Chief';
   if (unnamed(id)) return null;
   let hash = 2166136261;
   for (const char of id) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
@@ -33,7 +37,7 @@ export function friendlyName(id: string): string | null {
 }
 /** An account as the dashboard names it: its friendly name with the account id on hover, or the id itself with Fun off. */
 export function Agent({ id, master, detail }: { id: string; master?: boolean; detail?: string }) {
-  const fun = useFun(), name = fun ? (master ? 'the Foreman' : friendlyName(id)) : null;
+  const fun = useFun(), name = fun ? (master ? 'the Chief' : friendlyName(id)) : null;
   return <span className="agent" data-agent={id} title={detail ? `${id} · ${detail}` : id}>{name ?? id}</span>;
 }
 
@@ -61,12 +65,17 @@ export const LINES = [
   '“Make it work, make it right, make it fast.” — Kent Beck', '“Real artists ship.” — Steve Jobs', '“Done is better than perfect.” — Sheryl Sandberg',
   '“What I cannot create, I do not understand.” — Richard Feynman', '“The details are not the details. They make the design.” — Charles Eames',
 ];
-/** The Work page header's line: a new one per page load, the next one on a tap. Nothing with Fun off. */
+/** The Work page header's line: a new one per page load, the next one on a tap. Nothing with Fun off.
+ *  In Night Yard the line types itself out (GY-3272 AC-4d) — the whole text stays in the page, and
+ *  a clip-path wipes it open one character step at a time; reduced motion and Fun off show it whole. */
 export function BuildLine() {
   const fun = useFun();
   const [index, setIndex] = useState(() => Math.floor(Math.random() * LINES.length));
   if (!fun) return null;
-  return <button type="button" className="build-line" title="Another one" data-fun data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>{LINES[index]}</button>;
+  const line = LINES[index];
+  return <button type="button" className="build-line" title="Another one" data-fun data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
+    <span key={index} className="typed" style={{ '--chars': line.length } as CSSProperties}>{line}</span>
+  </button>;
 }
 
 const day = 24 * 60 * 60 * 1000;

@@ -21,6 +21,10 @@ if (args[0] !== 'terminal' || args[1] !== 'session') process.exit(0);
 const [, , mode, pane] = args;
 let cols = Number(args[args.indexOf('--cols') + 1]), rows = Number(args[args.indexOf('--rows') + 1]);
 const frame = text => process.stdout.write(`${JSON.stringify({ type: 'terminal.frame', seq: 0, encoding: 'ansi', width: cols, height: rows, full: false, bytes: Buffer.from(text).toString('base64') })}\n`);
+// The session record Herdr's stream opens with, read off the same state file the agent list reads:
+// a master at work shows its scan line (GY-3272), one standing idle shows none.
+{ const state = fixture(), master = state.master ?? { account: 'master-agent', runtime: 'claude', agentName: 'master' };
+  process.stdout.write(`${JSON.stringify({ type: 'session', session: { pane, account: master.account ?? null, runtime: master.runtime ?? null, state: state.status ?? 'working' } })}\n`); }
 // Enable bracketed paste as a real TUI does.
 frame(`\x1b[?2004hscreen of ${pane}\r\n`);
 createInterface({ input: process.stdin }).on('line', line => {

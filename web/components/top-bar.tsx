@@ -17,7 +17,7 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
 export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
   const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
   return <p className="city-strip" aria-label="The yard tonight" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
-    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} on shift
+    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> runner{onShift === 1 ? '' : 's'} on shift
     <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
     <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped tonight
   </p>;

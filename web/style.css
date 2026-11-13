@@ -232,6 +232,8 @@ img.mark{width:26px;height:26px}
 .time-legend{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 20px;font-size:var(--type-small)}.time-legend i{width:10px;height:10px;border-radius:2px;margin-right:var(--space-2);vertical-align:-1px}.time-legend .slowest{color:var(--needs-you)}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before{animation:none;transition:none}}
+/* The Fun toggle (GY-3272) turns every animation off with it: the names and the lines are Fun's, and so is the yard's motion. */
+html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,html[data-fun='off'] *,html[data-fun='off'] *::before,html[data-fun='off'] *::after{animation:none!important;transition:none!important}
 @media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.insight-charts{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:200px;min-width:200px}.main{padding:var(--space-5)}}
 /* Phone: the sidebar folds into a menu, tiles become chips, rows become cards. */
@@ -339,27 +341,60 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* ---------------------------------------------------------------------------------------------
    GY-3272 Night Yard: the neo-noir layer. Every rule here keys off html:not([data-theme='daylight'])
    so Daylight — the same dashboard in plain light — carries none of it, and every animation is one
-   the reduced-motion rule above already stops. Colours stay tokens: a tint is a color-mix of one.
+   the reduced-motion rule above already stops and the Fun toggle above turns off. Colours stay
+   tokens: a tint is a color-mix of one. Nothing here animates a layout property: transforms,
+   opacity and clip-path only, so the compositor carries every effect at 60 fps.
    --------------------------------------------------------------------------------------------- */
 /* A condensed display face carries the headings; ids, SHAs and numbers stay monospace. */
 html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3{font-family:var(--font-display);letter-spacing:.2px}
 .tile strong,.kpi strong,.city-strip .mono{font-variant-numeric:tabular-nums}
-/* The street: faint rain drifting down the frame, film grain holding still under it. The rain
-   layer is overscanned and moved by transform — the compositor slides it, so nothing repaints. */
+/* The street: slow rain in two sheets at two depths — the far one fainter and slower still — for
+   parallax. Both sheets are overscanned and moved by transform, so the compositor slides them. */
 html:not([data-theme='daylight']) body::after{content:'';position:fixed;inset:-100px;z-index:60;pointer-events:none;
   background-image:repeating-linear-gradient(36.87deg,transparent 0 64px,color-mix(in srgb,var(--moving) 6%,transparent) 64px 72px,transparent 72px 100px);
-  animation:gy-rain .9s linear infinite}
+  animation:gy-rain 6s linear infinite}
 @keyframes gy-rain{to{transform:translate(60px,-80px)}}
+html:not([data-theme='daylight'])::after{content:'';position:fixed;inset:-130px;z-index:58;pointer-events:none;
+  background-image:repeating-linear-gradient(36.87deg,transparent 0 96px,color-mix(in srgb,var(--moving) 3%,transparent) 96px 108px,transparent 108px 150px);
+  animation:gy-rain-far 11s linear infinite}
+@keyframes gy-rain-far{to{transform:translate(72px,-96px)}}
 html:not([data-theme='daylight']) body::before{content:'';position:fixed;inset:0;z-index:59;pointer-events:none;opacity:.6;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='gy-grain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23gy-grain)'/%3E%3C/svg%3E")}
+/* Headings and new rows flicker in like a neon sign switching on (AC-4e): the animation runs when
+   the element enters the page and never again — React keeps the nodes it already drew. */
+@keyframes gy-flicker-in{0%{opacity:0}16%{opacity:.85}22%{opacity:.15}34%{opacity:1}40%{opacity:.35}52%,100%{opacity:1}}
+html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) .work-row{animation:gy-flicker-in .5s both}
+/* An item in trial carries a light streak running along its row (AC-4c): one bright band sweeping
+   on a transform, clipped to the row, touching nothing. */
+html:not([data-theme='daylight']) .work-row{position:relative}
+html:not([data-theme='daylight']) .work-row.trial{overflow:clip}
+html:not([data-theme='daylight']) .work-row.trial::after{content:'';position:absolute;top:0;bottom:0;left:-45%;width:35%;pointer-events:none;
+  background:linear-gradient(105deg,transparent,color-mix(in srgb,var(--moving) 26%,transparent),transparent);
+  animation:gy-streak 2.8s linear infinite}
+@keyframes gy-streak{to{transform:translateX(420%)}}
+/* The Work page's line types itself out (AC-4d): the whole text stays in the page — a reader, a
+   translator and a test all see it at once — while a clip-path wipes it open a character at a time. */
+html:not([data-theme='daylight']) .build-line .typed{display:inline-block;animation:gy-type .6s steps(var(--chars),end) both}
+@keyframes gy-type{from{clip-path:inset(0 100% 0 0)}}
 /* Neon: the active navigation, the chosen tile and a hovered action glow softly. */
 html:not([data-theme='daylight']) .nav.active,html:not([data-theme='daylight']) .tab.active,html:not([data-theme='daylight']) .tile.selected,html:not([data-theme='daylight']) .work-row:hover{box-shadow:0 0 16px color-mix(in srgb,var(--accent) 20%,transparent)}
-/* A thin scanline veil over the Master terminal. */
+/* A thin scanline veil over the Master terminal, and a scanning line running down it while the
+   master is working (AC-4g) — transform only, over the pane, under the fingers. */
 html:not([data-theme='daylight']) .terminal-host{position:relative}
-html:not([data-theme='daylight']) .terminal-host::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 2px,color-mix(in srgb,var(--text) 4%,transparent) 2px 3px,transparent 3px 4px)}
+html:not([data-theme='daylight']) .terminal-host::after{content:'';position:absolute;inset:0;z-index:1;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 2px,color-mix(in srgb,var(--text) 4%,transparent) 2px 3px,transparent 3px 4px)}
+html:not([data-theme='daylight']) .live-terminal.working .terminal-host::before{content:'';position:absolute;left:0;right:0;top:0;height:44px;z-index:1;pointer-events:none;
+  background:linear-gradient(180deg,transparent,color-mix(in srgb,var(--moving) 10%,transparent) 50%,transparent);
+  animation:gy-scan 4.5s linear infinite}
+@keyframes gy-scan{from{transform:translateY(-44px)}to{transform:translateY(100vh)}}
+/* The boot sequence (AC-4a): the logo flickers in, the readout types, the veil fades to the page
+   inside one second. web/boot.ts removes it; a key or a click removes it sooner. */
+.boot{position:fixed;inset:0;z-index:70;pointer-events:none;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;animation:gy-boot-out 1s forwards}
+.boot-logo{font-family:var(--font-display);font-size:46px;letter-spacing:3px;color:var(--text);text-shadow:0 0 22px color-mix(in srgb,var(--accent) 45%,transparent);animation:gy-flicker-in .55s both}
+.boot-readout{margin:0;min-height:3em;font-family:var(--font-mono);font-size:12px;line-height:1.8;color:var(--text-2)}
+@keyframes gy-boot-out{0%,84%{opacity:1;visibility:visible}100%{opacity:0;visibility:hidden}}
 /* A row whose trial failed flickers: chromatic jitter a few frames at a time, never under reduced motion. */
 @keyframes gy-glitch{0%,86%,100%{text-shadow:none;transform:none}88%{text-shadow:-2px 0 var(--needs-you),2px 0 var(--moving);transform:translateX(-1px)}92%{text-shadow:2px 0 var(--needs-you),-2px 0 var(--moving);transform:translateX(1px)}96%{text-shadow:none;transform:none}}
-.work-row.glitch{animation:gy-glitch 2.2s infinite}
+html:not([data-theme='daylight']) .work-row.glitch{animation:gy-glitch 2.2s infinite}
 /* A ship pulses neon while its toast is up. */
 @keyframes gy-neon{0%,100%{box-shadow:0 0 10px color-mix(in srgb,var(--shipped) 35%,transparent)}50%{box-shadow:0 0 26px color-mix(in srgb,var(--shipped) 80%,transparent)}}
 .toast.pulse{animation:gy-neon 1.6s ease-in-out infinite}
