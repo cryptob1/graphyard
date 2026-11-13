@@ -163,7 +163,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // GY-3146: what the latest verified batch changed and how to try it.
     releaseNote: latestReleaseNote(releaseNotesPath(root)),
     // GY-3285: worker sessions running of the number the registry worker role allows (master workers N sets it).
-    workers: `${sessions.filter(session => session.kind === 'implementation').length}/${workersAllowed(master, fleet ? { roles: fleet.roles.map(role => ({ ...role, name: role.role })) } : null)}`,
+    workers: `${sessions.filter(session => session.kind === 'implementation').length}/${workersAllowed(master, fleet?.roles ? { roles: fleet.roles.map(role => ({ ...role, name: role.role })) } : null)}`,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
