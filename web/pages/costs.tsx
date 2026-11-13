@@ -6,7 +6,7 @@ type Api = (path: string) => Promise<any>;
 const useCosts = (api: Api, path: string, key: unknown) => {
   const [costs, setCosts] = useState<CostSummary | null>(null);
   const [error, setError] = useState('');
-  useEffect(() => { let live = true; api(path).then(next => { if (live) setCosts(next); }, e => { if (live) setError((e as Error).message); }); return () => { live = false; }; }, [key]);
+  useEffect(() => { let live = true; api(path).then(next => { if (live) setCosts(next?.windows ? next : null); }, e => { if (live) setError((e as Error).message); }); return () => { live = false; }; }, [key]);
   return { costs, error };
 };
 
