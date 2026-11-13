@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { delimiter, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { heavyCommand, heavyJobLimit, heldSlots, hostHeavyJobsDirectory, slotsDirectoryVariable, verificationBin, verificationEnvironment, waitStep, withHeavyJob } from '../src/master/verification-slots.js';

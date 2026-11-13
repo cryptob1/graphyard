@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterConfig, type MasterRun } from '../src/master.js';
+import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
@@ -453,7 +453,6 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
  * unit:host-verification-slots bounds heavy verification runs per host.
  */
 
-const GiB = 2 ** 30;
 
 // ---- AC-1 --------------------------------------------------------------------------------------
 
