@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { evaluate } from '../src/model-boundary/gates.js';
-import { mergeCandidateHold } from '../src/merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold } from '../src/merge-writer/executor.js';
 
 const H = 'a'.repeat(40), B = 'b'.repeat(40), at = '2031-01-01T00:00:00Z';
 export function admissionFixture(): Work {
@@ -77,6 +77,7 @@ test('e2e:merge-proof-review-admission actual writer never pushes missing proofs
       merge: async () => ({ mergeSha: 'c'.repeat(40), files: ['package-lock.json'] }),
       trial: async () => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: { 'e2e:fixture': { executed: 1, failed: 0 } } }),
       push: async () => { pushes++; return 'pushed'; }, holds: async () => pushes > 0,
+      holdOpening: async selected => mergeOpeningHold(work, selected),
       hold: async selected => mergeCandidateHold(work, selected),
       record: async (_work, event) => {
         events.push(event);
@@ -84,6 +85,7 @@ test('e2e:merge-proof-review-admission actual writer never pushes missing proofs
       },
     };
     const result = await mergeOne(ports, work);
+    assert.ok(events.some(event => event.kind === 'trial'), 'the real writer trials before enforcing landing admission');
     assert.equal(pushes, missing === 'none' ? 1 : 0);
     assert.equal(result.outcome, missing === 'none' ? 'merged' : 'requeued');
   }
