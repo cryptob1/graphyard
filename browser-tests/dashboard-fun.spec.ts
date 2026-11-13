@@ -2,6 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { LINES, friendlyName } from '../web/fun';
 
+// This spec proves motion, so it asks for it over the suite's reduced-motion default.
+test.use({ reducedMotion: 'no-preference' });
+
 // GY-3268: the dashboard is fun — named agents, a line about building, playful empty states and a
 // small celebration when work ships — and the Fun toggle (or reduced motion, for the confetti) turns it off.
 const builder = 'graphyard-claude-1', master = 'cryptob1-graphyard-master';
@@ -52,19 +55,19 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
   expect(LINES).toContain(await line.textContent());
   await expect(shipped(page)).toHaveAttribute('data-shipped-today', '0');
 
-  // The item history names the same account the same way, and the master as the Foreman.
+  // The item history names the same account the same way, and the master as the Chief.
   await page.getByRole('button', { name: /Change priority from the dashboard.*GY-1/ }).click();
   await page.locator('.full-history > summary').click();
   const history = page.getByRole('region', { name: 'History entries' });
   await expect(history.locator(`[data-agent="${builder}"]`)).toHaveText(name);
-  await expect(history.locator(`[data-agent="${master}"]`)).toHaveText('the Foreman');
+  await expect(history.locator(`[data-agent="${master}"]`)).toHaveText('the Chief');
   await expect(history.locator(`[data-agent="${builder}"]`)).toHaveAttribute('title', builder);
 
-  // The Workers page: the same name for the same account, the master as the Foreman.
+  // The Workers page: the same name for the same account, the master as the Chief.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   const sessions = page.getByRole('table', { name: 'Agent sessions' });
   await expect(sessions.locator(`[data-agent="${builder}"]`).first()).toHaveText(name);
-  await expect(sessions.locator(`[data-agent="${master}"]`).first()).toHaveText('the Foreman');
+  await expect(sessions.locator(`[data-agent="${master}"]`).first()).toHaveText('the Chief');
 
   // GY-1 merges while the page is open: a toast names its builder, confetti runs, and Shipped today counts it.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Work', exact: true }).click();

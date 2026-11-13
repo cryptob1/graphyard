@@ -195,10 +195,11 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });
 
-test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 150 words', () => {
+test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 165 words', () => {
   const page = home();
   const count = words(page).length;
-  assert.ok(count <= 150, `home renders ${count} words excluding item titles: ${text(page)}`);
+  // 165 (GY-3272): the top bar's city strip and the theme control cost the budget a dozen words.
+  assert.ok(count <= 165, `home renders ${count} words excluding item titles: ${text(page)}`);
   for (const gone of ['Delivery slices', 'NO LEAD ASSIGNED', 'ENGINEERING, IN VIEW', 'Every change has an owner', 'Explicit reasons, actionable next steps', 'No delivery requires', 'sessions retain goals', 'leads coordinate only', 'Ownership is explicit', 'Agent fleet'])
     assert.ok(!text(page).includes(gone), `no ${gone}`);
   assert.doesNotMatch(text(page), /\bp50\b|\bp95\b/, 'no percentile microtext by default');
@@ -344,7 +345,7 @@ test('unit:work-page-no-derived-totals — a total that is a sum or subset of th
   assert.equal(sentence, summarySentence(Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as any));
 });
 
-test('integration:work-page-density — every group has one tile, an empty group draws no list, and the page answers what needs you, what is blocked and why, what is moving and what shipped within the 150-word budget', () => {
+test('integration:work-page-density — every group has one tile, an empty group draws no list, and the page answers what needs you, what is blocked and why, what is moving and what shipped within the 165-word budget', () => {
   const page = home();
   const { byGroup } = classify(work, NOW);
   assert.equal(byGroup['needs-you'].length, 0);
@@ -352,5 +353,5 @@ test('integration:work-page-density — every group has one tile, an empty group
   assert.ok(!page.includes('data-group-section="needs-you"'), 'but draws no empty list');
   assert.match(text(page), /A fault blocks it; the master agent clears it/, 'the blocked row says why');
   for (const item of byGroup.moving) assert.ok(page.includes(`data-row="${item.key}"`), item.key);
-  assert.ok(words(page).length <= 150, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
+  assert.ok(words(page).length <= 165, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

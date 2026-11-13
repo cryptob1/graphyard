@@ -129,7 +129,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
     }, () => { if (live) { setReason('xterm.js did not load. Reload to try again.'); setState('refused'); } });
     return () => { live = false; stop(); };
   }, [token]);
-  return <section ref={section} className="live-terminal" aria-label={label} data-terminal={state}>
+  return <section ref={section} className={`live-terminal${session?.state === 'working' ? ' working' : ''}`} aria-label={label} data-terminal={state}>
     <div className="terminal-info" role="status">
       {session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
       <span>{state === 'connecting' ? 'Connecting…' : state === 'reconnecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'read-only: only the operator and maintainers can type into the master' : `refused: ${reason}`}</span>

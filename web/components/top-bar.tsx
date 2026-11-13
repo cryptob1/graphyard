@@ -2,9 +2,28 @@ import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
+import { cityCounts } from '../city';
+import { useFun } from '../fun';
+import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
+
+/**
+ * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
+ * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
+ * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
+ * words against the counts the Workers page and the ledger read. 'Runners on shift' and 'tonight'
+ * are Fun's words; with Fun off the strip says agents working and today, as the rest of the app does.
+ */
+export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
+  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt), fun = useFun();
+  return <p className="city-strip" aria-label={fun ? 'The yard tonight' : 'Activity'} data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
+    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> {fun ? `runner${onShift === 1 ? '' : 's'} on shift` : `agent${onShift === 1 ? '' : 's'} working`}
+    <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
+    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped {fun ? 'tonight' : 'today'}
+  </p>;
+}
 
 /**
  * The board's one release line (GY-1979). A repository that declares a node application
@@ -91,12 +110,18 @@ const meaning = (label: string): GlossaryTerm | null => {
  * An image never runs script, and the same route serves the page's favicon, so one address is the
  * whole feature.
  */
-export default function TopBar(dashboard: Dashboard) {
-  const { view, setView, status, selected } = dashboard;
+export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
+  const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
   const section = viewFor(view).section;
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
-    {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
+    <div className="top-bar-row">
+      {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
+      <div className="top-bar-live">
+        <CityStrip work={work} observedAt={observedAt}/>
+        {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
+      </div>
+    </div>
     {status && <ReleaseLine status={status}/>}
     {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;

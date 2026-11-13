@@ -14,7 +14,14 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { idempotencyKey } from './idempotency-key';
-import { ShippedToast, confetti } from './fun';
+import { ShippedToast, confetti, bootFun } from './fun';
+import { applyTheme } from './theme';
+import { boot } from './boot';
+import KeyboardNav from './keyboard';
+
+applyTheme();
+bootFun();
+boot();
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -53,6 +60,7 @@ function App() {
   const [jobs, setJobs] = useState<IntegrationJob[]>([]);
   const [editingRequirements, setEditingRequirements] = useState(false);
   const [query, setQuery] = useState('');
+  const [palette, setPalette] = useState(false);
   async function api(path: string, data?: unknown) {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(!token && response.status === 401 ? SIGN_IN_NEEDED : body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
@@ -125,9 +133,10 @@ function App() {
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
     <main className="main">{error && <div role="alert" className="notice danger">{error}{error === SIGN_IN_NEEDED && <> <button type="button" onClick={signOut}>Sign in</button></>}</div>}
-      <TopBar {...dashboard}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
+      <TopBar {...dashboard} onPalette={() => setPalette(true)}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
     {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
+    <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

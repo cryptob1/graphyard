@@ -1,0 +1,11 @@
+{
+  "id": "night-yard-theme",
+  "title": "The dashboard wears Night Yard: a neo-noir default theme, a selectable remembered Daylight, WCAG AA text in both, and reduced motion stopping the rain, glitch and pulse",
+  "description": "A real browser on the built dashboard: a fresh visit serves Night Yard (near-black blue, neon status colours, rain over grain); the theme menu offers Daylight, which loads on return (remembered per browser); an automated contrast audit of the Work page, an item page, the command palette and the shortcut sheet finds no text below WCAG AA in either theme; with prefers-reduced-motion the rain, glitch-flicker and ship-pulse animations do not run, and with motion on they do; the glitch and the pulse skip when Fun is off. The playful copy names the master the Chief (the Master page's title reads The Chief) and the agents runners (a builder's row reads like Juno is running GY-3272, the strip counts runners on shift), while plain labels keep their words, and with Fun off the page title is Master and the strip counts agents working.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "theme, contrast audit and reduced motion on the dashboard", "run": "npm run test:browser -- browser-tests/night-yard-theme.spec.ts", "timeoutSeconds": 300 }
+  ]
+}

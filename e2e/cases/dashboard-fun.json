@@ -1,7 +1,7 @@
 {
   "id": "dashboard-fun",
   "title": "The dashboard is fun: named agents, a rotating line, playful empty states and a celebration when work ships",
-  "description": "A real browser on the built dashboard: the same agent account has the same friendly name on the Work page, the item history and the Workers page, with its account id on hover, and the master is the Foreman; the Work page header shows one of the lines and a tap shows another; an empty board shows the playful empty-state line; an item merging while the page is open brings a toast naming its builder, confetti and a higher Shipped today count; with Fun off, or reduced motion set, no confetti runs, and with Fun off the names and lines fall back to the plain text.",
+  "description": "A real browser on the built dashboard: the same agent account has the same friendly name on the Work page, the item history and the Workers page, with its account id on hover, and the master is the Chief; the Work page header shows one of the lines and a tap shows another; an empty board shows the playful empty-state line; an item merging while the page is open brings a toast naming its builder, confetti and a higher Shipped today count; with Fun off, or reduced motion set, no confetti runs, and with Fun off the names and lines fall back to the plain text.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

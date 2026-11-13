@@ -9,6 +9,9 @@ import { delimiter, join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { serveXterm } from './xterm';
 
+// This spec proves motion, so it asks for it over the suite's reduced-motion default.
+test.use({ reducedMotion: 'no-preference' });
+
 const stub = resolve('fixtures/herdr-terminal-stub');
 const settled = { timeout: 15_000 };
 
@@ -40,9 +43,12 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     const { code } = await (await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
     const operator = await browser.newPage(); await serveXterm(operator);
     await operator.goto(`${url}/#sign-in=${code}&master`);
-    await expect(operator.getByRole('heading', { name: 'Master', exact: true })).toBeVisible(settled);
+    await expect(operator.getByRole('heading', { name: 'The Chief', exact: true })).toBeVisible(settled);
     await expect(rows(operator)).toContainText('screen of w1:master', settled);
     await expect(operator.getByRole('status')).toContainText('You can type here', settled);
+    // The master is at work: the terminal carries the scanning line (GY-3272), and the pane stays interactive.
+    await expect(operator.locator('.live-terminal')).toHaveClass(/working/, settled);
+    expect(await operator.locator('.terminal-host').evaluate(host => getComputedStyle(host, '::before').animationName)).toBe('gy-scan');
     // It types a line and sees it echoed back through the WebSocket.
     await operator.locator('.terminal-host').click();
     await operator.keyboard.type('status please');
