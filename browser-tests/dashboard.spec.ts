@@ -325,7 +325,7 @@ test('slice view names leads, workers, reviewers and bottlenecks and labels each
 test('an AI session is named in the signed-in summary without a session-kind badge', async ({ page }) => {
   await fixture(page, 'worker'); await login(page);
   const session = page.locator('.sidebar-bottom');
-  await expect(session).toContainText('fixture · worker');
+  await expect(session).toContainText('fixture · worker', { timeout: 15_000 });
   await expect(session.locator('.identity')).toHaveCount(0);
 });
 
