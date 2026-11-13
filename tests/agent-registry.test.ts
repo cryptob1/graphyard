@@ -277,7 +277,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const recorded: Registry = await ok('agent-registry/document', coordinator);
   const session = recorded.sessions.at(-1)!;
   assert.deepEqual([session.role, session.account, session.runtime, session.model, session.host, session.work, session.principal, session.selectedBy, session.endedAt], ['worker', 'claude-fresh', 'claude', 'opus', HOST, dispatched.work, 'implementer', 'master', null]);
-  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
+  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 10 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
   assert.deepEqual(session.skipped.map(entry => entry.account), ['claude-off', 'claude-spent', 'claude-out', 'claude-remote']);
   const observed = Object.fromEntries(recorded.accounts.map(account => [account.name, account.quota]));
   assert.deepEqual([observed['claude-spent'].state, observed['claude-spent'].source, observed['claude-spent'].observedBy, observed['claude-out'].loggedIn, observed['claude-fresh'].state], ['exhausted', 'probe', 'master', false, 'available']);
@@ -290,6 +290,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const failed = await dispatch(root, config, 'worker-b', probe);
   assert.equal(failed.account!.environment, 'muse-a');
   await ok('agent-registry/accounts', operator, { account: { name: 'claude-fresh', runtime: 'claude', model: 'opus', credential: { host: HOST, home: fresh }, maxSessions: 5 }, reason: 'Raise the limit' });
+  // GY-3285: the worker role runs its accounts times its concurrency, so one account at concurrency 2 is full with the two live sessions.
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-fresh'], concurrency: 2 }, reason: 'two workers at once' });
   await assert.rejects(dispatch(root, config, 'worker-b', probe), /role worker is at its concurrency limit \(2 of 2 live/);
   await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, muse-a on GY-\d+\)/);
   const refused: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
