@@ -45,6 +45,8 @@ const live = { timeout: 15_000 };
  * look, and a held clock makes "inside its second" exact instead of a race against the load.
  */
 async function bootHeld(page: Page) {
+  // The signed-out page answers from a fixture, so no proxy to a control plane that is not there sits in the way.
+  await page.route('**/api/**', route => route.fulfill({ status: 401, json: { error: 'unauthorized' } }));
   await page.clock.install();
   await page.clock.pauseAt(Date.now() + 60_000);
   await page.goto('/');
@@ -64,11 +66,11 @@ test('e2e:night-yard-animation — the boot sequence plays once per browser sess
   expect((await page.locator('.boot-readout').textContent())!.length).toBeGreaterThan(typed);
   // Any key skips it at once — no clock time passes before the page arrives.
   await page.keyboard.press('Escape');
-  await expect(boot).toHaveCount(0);
+  await expect(boot).toHaveCount(0, live);
   // Once per browser session: a reload goes straight to the page.
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible();
-  await expect(boot).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible(live);
+  await expect(page.locator('[data-boot]')).toHaveCount(0);
 });
 
 test('e2e:night-yard-animation — left alone, the boot hands the page over inside its second', async ({ page }) => {
@@ -80,8 +82,8 @@ test('e2e:night-yard-animation — left alone, the boot hands the page over insi
   await page.clock.runFor(900);
   await expect(boot).toBeVisible();
   await page.clock.runFor(200);
-  await expect(boot).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible();
+  await expect(boot).toHaveCount(0, live);
+  await expect(page.getByRole('button', { name: 'Open control plane' })).toBeVisible(live);
 });
 
 test('e2e:night-yard-animation — a stage change glides the row to its new group instead of jumping', async ({ page }) => {
@@ -89,11 +91,16 @@ test('e2e:night-yard-animation — a stage change glides the row to its new grou
   const state = await serve(page);
   const row = page.locator('[data-row="GY-20"]');
   await expect(row).toHaveAttribute('data-group', 'needs-you');
+  // The glide lasts under 600 ms, shorter than a loaded machine's gap between two looks, so the page
+  // itself records the moment it starts: the row transitioning on transform alone to where it belongs.
+  await page.evaluate(() => new MutationObserver(() => {
+    const el = document.querySelector<HTMLElement>('[data-row="GY-20"].glide');
+    if (el) (window as any).glided ??= el.style.transition;
+  }).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style'] }));
   // The operator's decision lands: the row leaves Needs you for the group the board now puts it in.
   state.work = state.work.map(item => item.key === 'GY-20' ? { ...item, humanRequest: null, blocker: null } : item);
   await expect(row).not.toHaveAttribute('data-group', 'needs-you', live);
-  // The glide: the row is set down where it was and transitions — transform only — to where it belongs.
-  await expect.poll(() => row.evaluate(el => el.classList.contains('glide')), { timeout: 2_000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).glided ?? null), live).toMatch(/^transform /);
   await expect.poll(() => row.evaluate(el => el.classList.contains('glide')), { timeout: 3_000 }).toBe(false);
   expect(await row.evaluate(el => el.style.transform)).toBe('');
 });
