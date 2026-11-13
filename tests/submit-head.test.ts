@@ -239,6 +239,7 @@ test('unit:gates-github-snapshot — with source undefined a pull-request-era ob
     build: [],
     review: ['Independent approval of the current commit is required'],
     test: [trialRefusal(sha, base)],
+    acceptance: ['AC-1: unit:gates needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
     merge: [pushRefusal(sha)],
   };
   assert.deepEqual(reasonsOf(submittedWork(undefined)), snapshot);

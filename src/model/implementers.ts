@@ -10,4 +10,3 @@ export function implementerIdentities(work: Work): string[] {
     ...(work.lease ? [work.lease.owner] : []),
   ])];
 }
-
