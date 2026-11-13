@@ -53,6 +53,8 @@ async function fixture(browser: Browser, phone = false) {
 }
 
 test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnect and pane changes', async ({ browser }) => {
+  // Includes server startup, two reconnects and two pane changes under the parallel browser suite.
+  test.setTimeout(60_000);
   const f = await fixture(browser), { page } = f;
   try {
     await expect(page.getByRole('status')).toContainText('test-account · codex · idle · w1:master');
@@ -85,7 +87,8 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     const selected = await page.evaluate(() => (window as any).testTerminal.getSelection());
     await page.keyboard.press('Control+Shift+C');
     expect(selected).not.toBe('');
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(selected);
+    // Copy writes asynchronously; key dispatch can finish before the native clipboard write.
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(selected);
     await page.evaluate(() => navigator.clipboard.writeText('right click paste'));
     await page.locator('.terminal-host').click({ button: 'right' });
     await expect.poll(f.inputs).toContain('\x1b[200~right click paste\x1b[201~');
