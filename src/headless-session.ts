@@ -26,6 +26,8 @@ import { runRecord } from './runner/types.js';
 import { underTestRunner } from './runtime-environment.js';
 import { runtimeAdapter } from './master/runtimes.js';
 import { confinedRuntimeArgs } from './worker-sandbox.js';
+import { runtimeReport } from './model/token-costs.js';
+import { noteRunUsage } from './usage-capture.js';
 
 /**
  * One child run: the confined command line, its directory and environment in; its standard output
@@ -145,6 +147,8 @@ export interface HeadlessSession<T> {
   /** The session name the run is listed under, beside Herdr's panes, while it runs. */
   name: string; work: string; subject: string;
   kind: string; args: string[]; environment: Record<string, string>; directory: string;
+  /** The registry account the run is on, which its token usage is recorded under (GY-3289). */
+  account?: string | null;
   contract?: RegisteredLaunch | null; credentialMask?: CredentialMask; coordinatorRoot?: string;
   /** The session's role text (prepareSessionHarness), which a pane session reads from its role file: here it opens the request. */
   role?: string | null;
@@ -166,7 +170,7 @@ export interface HeadlessSession<T> {
   onRun?: (run: { id: string; kind: string; reason?: string }) => Promise<void>;
 }
 /** What the account a headless run is on decides of its launch. */
-export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'args' | 'environment' | 'contract' | 'credentialMask' | 'role'>;
+export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'account' | 'args' | 'environment' | 'contract' | 'credentialMask' | 'role'>;
 
 /**
  * The run's confined launch on one account: refused when its runtime has no one-task contract, its
@@ -182,7 +186,7 @@ async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, dir
   const wrapper = confinement?.wrapper ?? [], args = wrapper.length ? confinedRuntimeArgs(on.kind, on.args) : on.args;
   // Every session carries the autonomy contract (GY-184), as a pane session's first request does.
   const carried = withAutonomyContract(false, { request: prompt, role: on.role });
-  return { kind: on.kind, contract: on.contract, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
+  return { kind: on.kind, account: on.account ?? null, contract: on.contract, environment: on.environment, wrapper, args, request: carried.role ? `${carried.role} ${carried.request}` : carried.request };
 }
 
 /**
@@ -207,7 +211,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
   const controller = new AbortController(), detached = new AbortController(), startedAt = new Date().toISOString();
   const id = randomUUID(), runDirectory = resolve(headlessRunsDirectory(input.root), id);
   mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
-  const persist = () => writeFileSync(join(runDirectory, sessionFile), JSON.stringify({ id, name: input.name, work: input.work, subject: input.subject, kind: launch.kind, route: input.route, context: input.context, startedAt } satisfies HeadlessSessionRecord), { mode: 0o600 });
+  const persist = () => writeFileSync(join(runDirectory, sessionFile), JSON.stringify({ id, name: input.name, work: input.work, subject: input.subject, kind: launch.kind, account: launch.account, route: input.route, context: input.context, startedAt } satisfies HeadlessSessionRecord), { mode: 0o600 });
   persist();
   let settled!: Promise<T>;
   registerRun({ name: input.name, role: 'reviewer', work: input.work, subject: input.subject, agent: input.kind, run: {
@@ -217,7 +221,9 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
   let ready!: () => void;
   const started = new Promise<void>(resolve => { ready = resolve; });
   settled = (async () => {
-    let refused = '';
+    let refused = '', runs = 0;
+    // What each run's runtime reported of its tokens is noted for the loop's usage report (GY-3289), whatever became of its answer.
+    const noteUsage = () => noteRunUsage(input.root, { id: `${id}:${++runs}`, work: input.work, role: 'reviewer', account: launch.account, runtime: launch.kind, at: new Date().toISOString() }, readText(runFiles(runDirectory).stdout) ?? '');
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const env = runEnvironment(process.env, launch.environment);
@@ -232,12 +238,15 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: headlessRunMs, signal: controller.signal, run: runDirectory, detached: detached.signal });
         startup = setTimeout(ready, headlessStartupMs);
         output = await running.finally(() => clearTimeout(startup));
-        return await input.answer(output);
+        noteUsage();
+        // A runtime asked for its JSON report wraps the answer in it.
+        return await input.answer(runtimeReport(output).reply ?? output);
       } catch (error) {
         clearTimeout(startup);
+        if (output === null && !detached.signal.aborted) noteUsage();
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
-        const printed = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error);
+        const raw = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), printed = runtimeReport(raw).reply ?? raw;
         const notice = detectRuntimeExhaustion(printed, launch.kind, Date.now());
         if (notice) {
           await input.holdAccount?.(notice);
@@ -262,7 +271,7 @@ export const headlessRunsDirectory = (root: string) => resolve(root, '.graphyard
 const sessionFile = 'session.json';
 export type HeadlessRoute = 'review';
 const sessionRecordSchema = z.object({ id: z.string().optional(), name: z.string().min(1).max(200), work: z.string().min(1).max(200), subject: z.string().min(1).max(200), kind: z.string().min(1).max(40),
-  route: z.enum(['review']), context: z.record(z.string(), z.string()), startedAt: z.string().max(40) });
+  account: z.string().max(200).nullable().optional(), route: z.enum(['review']), context: z.record(z.string(), z.string()), startedAt: z.string().max(40) });
 export type HeadlessSessionRecord = z.infer<typeof sessionRecordSchema>;
 /**
  * How a restarted loop finishes a route's run: posts what it printed (a throw refuses it) and then
@@ -294,7 +303,10 @@ export function adoptHeadlessSessions(root: string, adopters: Record<HeadlessRou
       id: session.id ?? name, directory, events: [], onEvent: () => () => {}, cancel: reason => controller.abort(reason), detach: () => detached.abort(),
       result: () => answered.then(payload => ({ ok: true as const, tool: 'answer', payload, payloads: [payload] }), error => ({ ok: false as const, failure: { reason: 'no-payload' as const, detail: String(error?.message ?? error) }, payloads: [] })),
     } }, true);
-    answered = awaitHeadlessRun(directory, { signal: controller.signal, detached: detached.signal }).then(route.answer);
+    answered = awaitHeadlessRun(directory, { signal: controller.signal, detached: detached.signal }).then(output => {
+      noteRunUsage(root, { id: `${session.id ?? name}:adopted`, work: session.work, role: 'reviewer', account: session.account ?? null, runtime: session.kind, at: new Date().toISOString() }, output);
+      return route.answer(runtimeReport(output).reply ?? output);
+    });
     const settled = answered.then(() => null, (error: unknown) => (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400))
       .then(failure => route.settle(failure)).catch(() => {}).then(() => {
         const record = runRecord(session.kind, { events: [] }, null, session.startedAt, new Date().toISOString());
@@ -382,7 +394,7 @@ export function adoptHeadlessWorkers(root: string): AdoptedRun[] {
     return [{ name: record.name, role: 'worker' as const, work: record.work, subject: record.subject, directory, live: true, settled }];
   });
 }
-const readWorkerRecord = (directory: string) => { try { return workerRecordSchema.parse(JSON.parse(readFileSync(join(directory, sessionFile), 'utf8'))); } catch { return null; } };
+export const readWorkerRecord = (directory: string) => { try { return workerRecordSchema.parse(JSON.parse(readFileSync(join(directory, sessionFile), 'utf8'))); } catch { return null; } };
 
 /** The last of what a worker run printed, as text: what its limit notice, login refusal or crash is read from. Null for a run this installation does not hold. */
 export function runLogTail(root: string, id: string, bytes = 4000): string | null {

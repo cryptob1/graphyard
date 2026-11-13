@@ -175,6 +175,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // GY-3199, GY-3233: the control plane's own faults — a stuck upgrade, a stalled step — reported upstream once, and the daily staleness line.
     if (!config.forPerson) await controlPlaneStep(cycle, stalled);
     if (!config.forPerson) await leftoversStep(state, clock, effects.leftoverDisk, log);
+    // GY-3289: what this host's sessions spent, reported at most once a minute; a failed report is made again.
+    if (!config.forPerson) await effects.usage?.(state.master.continuity?.current ?? null).catch(error => log(`[graphyard-master] token usage was not reported and is reported again: ${message(error)}`));
   });
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: read.snapshot.work.filter(item => item.stage !== 'done').length, actions: performed.length, steps });
   state.metrics.push(metrics);

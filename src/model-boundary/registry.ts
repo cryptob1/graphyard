@@ -57,14 +57,16 @@ export const runtimeSchema = z.object({
   description: text(300).optional(),
   launch: launchContractSchema,
 }).strict();
+const perMTok = z.number().min(0).max(100_000).nullable();
 /** A model an account runs: what it costs and what it is good for, so role order can weigh both. */
 export const modelSchema = z.object({
   name: entryName,
   provider: text(100).optional(),
   /** The identifier handed to the runtime's model flag; null runs the account's own default. */
   id: z.string().trim().min(1).max(200).refine(notSecret, 'A model id is a name, never a credential').nullable().default(null),
-  /** US dollars per million tokens; null when the account is a flat subscription or unknown. */
-  cost: z.object({ inputPerMTok: z.number().min(0).max(100_000).nullable().default(null), outputPerMTok: z.number().min(0).max(100_000).nullable().default(null) }).strict().prefault({}),
+  /** The price sheet (GY-3289): the provider's public US dollars per million tokens and the day they were read; null is a price nobody recorded, shown as 'price unknown'. */
+  cost: z.object({ inputPerMTok: perMTok.default(null), outputPerMTok: perMTok.default(null), cacheReadPerMTok: perMTok.optional(), cacheWritePerMTok: perMTok.optional(),
+    asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'A price is as of a day, YYYY-MM-DD').optional() }).strict().prefault({}),
   capability: z.object({ tier: z.enum(capabilityTiers).default('strong'), contextTokens: z.number().int().min(1000).max(100_000_000).nullable().default(null), notes: text(300).optional() }).strict().prefault({}),
 }).strict();
 export const usageSchema = z.object({ window: text(40), percent: z.number().min(0).max(1000), resetsAt: z.string().datetime().nullable() }).strict();
@@ -108,6 +110,8 @@ export const accountSchema = z.object({
   enabled: z.boolean().default(true),
   maxSessions: z.number().int().min(1).max(100).nullable().default(null),
   plan: text(100).optional(),
+  /** What the account's flat plan costs a month in US dollars (GY-3289): its real spend, beside the API-equivalent figure of its tokens. */
+  monthlyFee: z.number().min(0).max(1_000_000).optional(),
   note: text(300).optional(),
 }).strict();
 /**

@@ -14,6 +14,7 @@ import { deliveryTables } from './tables/delivery.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { planeLivenessTables } from './tables/plane-liveness.js';
 import { registryRefusalTables } from './tables/registry-refusals.js';
+import { sessionUsage } from './tables/session-usage.js';
 
 /**
  * Every table, in an order a restore can insert without violating references: a table
@@ -22,7 +23,7 @@ import { registryRefusalTables } from './tables/registry-refusals.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers, loopState, productBrief,
+  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, sessionUsage, humanSignInSessions, teamMembers, loopState, productBrief,
 ];
 
 /** Tables retired from the schema and logical backups. */
