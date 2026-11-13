@@ -2,8 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import { demand } from '../model.js';
-import { Sent, defineRoutes } from './routes.js';
+import { Next, Sent, defineRoutes } from './routes.js';
 import { previewSitePathSchema, previewSiteUrl } from '../project-previews.js';
+import { readEmblem } from '../model/emblem.js';
 
 const plain = (res: ServerResponse, status: number, text: string) => { res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(`${text}\n`); return Sent; };
 
@@ -57,6 +58,20 @@ export const staticRoutes = defineRoutes('static', [
       else { res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'none'"); res.setHeader('Access-Control-Allow-Origin', '*'); }
       res.writeHead(200, { 'Content-Type': found.media_type, 'Cache-Control': 'no-store' });
       res.end(req.method === 'HEAD' ? undefined : found.bytes);
+      return Sent;
+    },
+  },
+  {
+    // The project's emblem (GY-3273) at the path the page's icon link and the top bar's <img>
+    // already read: the newest emblem the master drew, served as an image so it never runs
+    // script. Without one the route passes the request on, and the built default mark serves.
+    method: '*', path: '/favicon.svg',
+    async handle({ req, res, services }) {
+      demand(req.method === 'GET' || req.method === 'HEAD', 'Method not allowed', 405);
+      const emblem = await readEmblem(services.engine.store.pool);
+      if (emblem === null) return Next;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
+      res.end(req.method === 'HEAD' ? undefined : emblem);
       return Sent;
     },
   },
