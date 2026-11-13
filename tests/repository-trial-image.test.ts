@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, rmSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
@@ -11,9 +11,11 @@ import { trialImage } from '../src/merge-writer/trial-container.js';
 import { trialImageFaultItem } from '../src/daemon/control-plane.js';
 
 // GY-3275: a managed repository commits graphyard.trial.Dockerfile to extend the trial image with
-// its own toolchain. The merge writer builds it from the base tip — never the candidate — caches it
-// by the file's digest and the base image, and runs that repository's trials in it; a repository
-// without the file changes nothing, and a build failure is a trial-host fault, not a red head.
+// its own toolchain. The merge writer builds it from the base tip, caches it by the file's digest and
+// the base image, and runs that repository's trials in it; a repository without the file changes
+// nothing, and a base tip's build failure is a trial-host fault. A head that edits the file builds
+// its own copy first: a broken copy is that head's red verdict, and a head that fixes a broken base
+// copy runs in its own image, so the fix lands through an ordinary merge.
 
 const identity = { GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.com', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
@@ -43,7 +45,7 @@ const head = (root: string, message: string, change: (root: string) => void) => 
   return git(root, 'rev-parse', 'HEAD');
 };
 
-/** A docker stub first on the trial's PATH: it records every call, answers `image inspect` from what it has built, and fails builds while `failMarker` exists. */
+/** A docker stub first on the trial's PATH: it records every call, answers `image inspect` from what it has built, and fails builds while `failMarker` exists or whose Dockerfile runs `RUN false`. */
 async function dockerStub(failMarker: string) {
   const stub = await temporaryDirectory('trial-image-docker'), dockerLog = join(stub, 'docker.log'), gofakeLog = join(stub, 'gofake.log');
   writeFileSync(join(stub, 'docker'), `#!/bin/sh
@@ -53,6 +55,8 @@ if [ "$1" = image ] && [ "$2" = inspect ]; then
   echo "No such image: $3" >&2; exit 1
 fi
 if [ "$1" = build ] && [ -e '${failMarker}' ]; then echo 'failed to solve: the stub refuses to build' >&2; exit 1; fi
+eval context=\\\${$#}
+if [ "$1" = build ] && grep -q 'RUN false' "$context/${trialDockerfile}"; then echo 'process "/bin/sh -c false" did not complete successfully' >&2; exit 1; fi
 exit 0
 `, { mode: 0o755 });
   writeFileSync(join(stub, 'gofake'), `#!/bin/sh
@@ -125,7 +129,7 @@ test('unit:tests/repository-trial-image.test.ts — a first build checks out the
   assert.equal(build[7], built);
   const worktreeAdd = calls.find(([command, , , first, second]) => command === 'git' && first === 'worktree' && second === 'add');
   assert.ok(worktreeAdd, 'the build context is a worktree of the tip');
-  assert.equal(worktreeAdd![7], fixture.tip, 'the context is the base tip, never the candidate');
+  assert.equal(worktreeAdd![7], fixture.tip, 'the context is the tip it was given');
   assert.equal(existsSync(worktreeAdd![6]!), false, 'the context worktree is removed after the build');
   assert.ok(calls.some(([command, , , first, second]) => command === 'git' && first === 'worktree' && second === 'remove'), 'the worktree is unregistered');
   assert.deepEqual(steps, ['install: repository image']);
@@ -151,10 +155,11 @@ test('unit:tests/repository-trial-image.test.ts — a build that fails is a tria
 });
 
 // AC-1: the real merge-trial path with a stub docker and a stub gofake standing in for the tool the
-// image adds. Two trials of one base build the image once; a candidate that edits the Dockerfile
-// still runs the base tip's image; a repository without the file builds nothing and runs the
-// standard image; a build that fails is a trial-host fault the head is not refused for.
-test('e2e:repository-trial-image — a fixture with graphyard.trial.Dockerfile passes its merge trial in its own image, built once for two trials; a candidate edit keeps the base tip\'s image; a repository without the file builds nothing; a failing build is a trial-host fault', { timeout: 300_000 }, async () => {
+// image adds. Two trials of one base build the image once; a candidate that edits the Dockerfile is
+// built and still runs the base tip's image, a broken edit is refused; a repository without the file
+// builds nothing and runs the standard image; a base tip build that fails is a trial-host fault the
+// head is not refused for, unless the head fixes the file, which then passes in its own image.
+test('e2e:repository-trial-image — a fixture with graphyard.trial.Dockerfile passes its merge trial in its own image, built once for two trials; a candidate edit is built yet keeps the base tip\'s image; a broken edit is refused; a repository without the file builds nothing; a failing base build is a trial-host fault; a head fixing a broken base copy passes in its own image', { timeout: 300_000 }, async () => {
   const failMarker = join(await temporaryDirectory('trial-image-fail'), 'fail');
   const stub = await dockerStub(failMarker);
   const execPath = process.execPath;
@@ -164,8 +169,8 @@ test('e2e:repository-trial-image — a fixture with graphyard.trial.Dockerfile p
     const fixture = await repository({ [trialDockerfile]: baseDockerfile, gofake, 'graphyard.json': policy(), 'README.md': 'base\n' });
     const expected = repositoryTrialImageTag(fixture.root, trialImage(), baseDockerfile);
     const wrappers: (readonly string[])[] = [];
-    const trial = (mergeSha: string, onStep?: (step: string) => void) => runTrial({ root: fixture.root, base: fixture.base, mergeSha, baseTip: fixture.tip,
-      changedFiles: ['README.md'], timeoutMs: 120_000, key: 'GY-3275', retries: 0, environment: { PATH: process.env.PATH! }, run: recordingRun(wrappers), ...(onStep ? { onStep } : {}) });
+    const trial = (mergeSha: string, onStep?: (step: string) => void, changedFiles = ['README.md']) => runTrial({ root: fixture.root, base: fixture.base, mergeSha, baseTip: fixture.tip,
+      changedFiles, timeoutMs: 120_000, key: 'GY-3275', retries: 0, environment: { PATH: process.env.PATH! }, run: recordingRun(wrappers), ...(onStep ? { onStep } : {}) });
 
     // Two trials of one base: the first builds the image, the second reuses it.
     const steps: string[] = [];
@@ -181,12 +186,23 @@ test('e2e:repository-trial-image — a fixture with graphyard.trial.Dockerfile p
     assert.equal(confined.length, 2, `two trials, one confined child each: ${wrappers.length} recorded`);
     for (const wrapper of confined) assert.ok(runsIn(wrapper, expected), 'the trial\'s children run in the repository\'s image');
 
-    // A candidate that edits the Dockerfile still runs the base tip's image: no second build, the same tag.
-    const edited = await trial(head(fixture.root, 'edits the dockerfile', root => writeFileSync(join(root, trialDockerfile), 'ARG GRAPHYARD_TRIAL_IMAGE\nFROM ${GRAPHYARD_TRIAL_IMAGE}\nRUN false\n')));
+    // A candidate that edits the Dockerfile builds its own copy, yet its checks still run in the base tip's image.
+    const editedDockerfile = `${baseDockerfile}# the head's edit\n`, editedTag = repositoryTrialImageTag(fixture.root, trialImage(), editedDockerfile);
+    const editedWrappers = wrappers.length;
+    const edited = await trial(head(fixture.root, 'edits the dockerfile', root => writeFileSync(join(root, trialDockerfile), editedDockerfile)), undefined, [trialDockerfile]);
     assert.deepEqual(edited.tests, { passed: 1, failed: [], files: 1 }, edited.logTail);
     const builds = stub.lines(stub.dockerLog).filter(line => line.startsWith('build '));
-    assert.equal(builds.length, 1, 'the candidate\'s edit of the Dockerfile builds nothing');
-    assert.ok(builds[0]!.includes(`--tag ${expected}`), 'the built image is still the base tip\'s');
+    assert.equal(builds.length, 2, 'the candidate\'s edit of the Dockerfile is built before it can merge');
+    assert.ok(builds[1]!.includes(`--tag ${editedTag}`), 'the second build is the head\'s own copy');
+    const editedConfined = confinedWrappers(wrappers.slice(editedWrappers));
+    assert.equal(editedConfined.length, 1);
+    assert.ok(runsIn(editedConfined[0]!, expected), 'its checks run in the base tip\'s image');
+
+    // A candidate whose Dockerfile does not build is refused: a red verdict on that head, not a trial-host fault.
+    const breaking = await trial(head(fixture.root, 'breaks the dockerfile', root => writeFileSync(join(root, trialDockerfile), `${baseDockerfile}RUN false\n`)), undefined, [trialDockerfile]);
+    assert.equal(breaking.build, 'fail', breaking.logTail);
+    assert.deepEqual(breaking.tests.failed, [trialDockerfile]);
+    assert.match(breaking.logTail, /did not complete successfully/);
     const beforeBare = stub.lines(stub.dockerLog).length;
 
     // A repository without the file runs the standard image and builds nothing.
@@ -209,6 +225,17 @@ test('e2e:repository-trial-image — a fixture with graphyard.trial.Dockerfile p
     assert.ok(fault instanceof TrialRepositoryImageError, `a trial-host fault, not a red verdict: ${String(fault)}`);
     assert.match(fault.message, /failed to solve: the stub refuses to build/);
     assert.equal(attempts, 1, 'a build fault is not retried');
+
+    rmSync(failMarker);
+    // A base tip whose Dockerfile no longer builds does not freeze the repository: a head that fixes the file runs in its own image and passes.
+    const frozen = await repository({ [trialDockerfile]: `${baseDockerfile}RUN false\n`, gofake, 'graphyard.json': policy() });
+    const fixWrappers: (readonly string[])[] = [];
+    const fixed = await runTrial({ root: frozen.root, base: frozen.base, mergeSha: head(frozen.root, 'fixes the dockerfile', root => writeFileSync(join(root, trialDockerfile), baseDockerfile)),
+      baseTip: frozen.tip, changedFiles: [trialDockerfile], timeoutMs: 120_000, key: 'GY-3275', retries: 0, environment: { PATH: process.env.PATH! }, run: recordingRun(fixWrappers) });
+    assert.deepEqual(fixed.tests, { passed: 1, failed: [], files: 1 }, fixed.logTail);
+    const fixConfined = confinedWrappers(fixWrappers);
+    assert.equal(fixConfined.length, 1);
+    assert.ok(runsIn(fixConfined[0]!, repositoryTrialImageTag(frozen.root, trialImage(), baseDockerfile)), 'the fixing head\'s checks run in its own image');
   } finally { process.execPath = execPath; }
 });
 

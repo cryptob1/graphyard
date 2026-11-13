@@ -64,7 +64,7 @@ export function trialImageFaultItem(repository: string) {
     title: `Merge trials cannot build ${repository}'s trial image`.slice(0, 200),
     type: 'bug' as const,
     priority: 1,
-    description: `A merge trial on the install for ${repository} could not build the repository's graphyard.trial.Dockerfile image, so the trial host's Docker cannot build what the repository's base branch declares. The head was neither refused nor reworked and stays queued; the trial record carries the build's output. Fix the Dockerfile on the base branch, or what on the trial host kept Docker from building it, and let the queued head retry.`,
+    description: `A merge trial on the install for ${repository} could not build the repository's graphyard.trial.Dockerfile image, so the trial host's Docker cannot build what the repository's base branch declares. The head was neither refused nor reworked and stays queued; the trial record carries the build's output. Fix what on the trial host kept Docker from building it, or land a head that fixes the Dockerfile (it is trialled in its own image), and let the queued head retry.`,
     dependencies: [],
     criteria: [{ id: 'AC-1', text: `A merge trial builds ${repository}'s graphyard.trial.Dockerfile image; a new test pins the cause and fails without the fix`, proofs: ['unit:trial-image-builds'] }],
     reason: 'Filed by the master loop from a trial-host fault (GY-3275)',

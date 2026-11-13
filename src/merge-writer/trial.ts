@@ -22,7 +22,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
-import { repositoryTrialImage, TrialRepositoryImageError } from './repository-trial-image.js';
+import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 
@@ -896,17 +896,39 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
-    // GY-3275: a repository that commits graphyard.trial.Dockerfile runs its trials in its own image,
-    // built from the base tip (never the candidate, whose edits apply only once they merge) over the
-    // image the trials would otherwise run in. A repository without the file changes nothing.
+  };
+  // GY-3275: a repository that commits graphyard.trial.Dockerfile runs its trials in its own image,
+  // built from the base tip over the image the trials would otherwise run in; a candidate's edits to
+  // the file apply only once they merge. A head that changes the file builds its own copy first: a
+  // build that fails is that head's red verdict, and when the base tip's copy cannot build the head
+  // that replaces it runs in its own image, so a fix always lands through an ordinary merge.
+  const image = async (): Promise<TrialRun | undefined> => {
+    const build = (tip: string) => repositoryTrialImage({ root: input.root, tip, scratch: temporary!, env, run, timeoutMs: remaining(),
+      log: line => log.push(line), onStep: label => enterStep(label) });
+    const changed = input.changedFiles.includes(trialDockerfile);
+    let own: string | null = null;
+    if (changed) {
+      try { own = await build(input.mergeSha); }
+      catch (error) {
+        if (!(error instanceof TrialRepositoryImageError)) throw error;
+        log.push(`this head's ${trialDockerfile} does not build: ${error.detail}`);
+        enter('build');
+        return finish('fail', { passed: 0, failed: [trialDockerfile], files: 0 });
+      }
+    }
     let imageTip = input.baseTip ?? null;
     if (imageTip === null) {
       try { imageTip = String(await run('git', ['-C', input.root, 'rev-parse', '--verify', '--quiet', `${input.mergeSha}^1`], { timeoutMs: remaining() })).trim().toLowerCase() || null; }
       catch { imageTip = null; } // a root commit names no base to read the file from
     }
-    const image = imageTip ? await repositoryTrialImage({ root: input.root, tip: imageTip, scratch: temporary!, env, run, timeoutMs: remaining(),
-      log: line => log.push(line), onStep: label => enterStep(label) }) : null;
-    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'), image ?? undefined);
+    let chosen: string | null = null;
+    try { chosen = imageTip ? await build(imageTip) : null; }
+    catch (error) {
+      if (!changed || !(error instanceof TrialRepositoryImageError)) throw error;
+      log.push(`the base tip's ${trialDockerfile} does not build and this head replaces it: the trial runs in this head's image`);
+      chosen = own;
+    }
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'), chosen ?? undefined);
     wrapper = boundary();
   };
   const log: string[] = [];
@@ -1263,6 +1285,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const trial = async (): Promise<TrialRun> => {
     try {
       await prepare();
+      const imaged = await image();
+      if (imaged) return imaged;
       const scanned = await scan();
       if (scanned) return scanned;
       const built = await build();

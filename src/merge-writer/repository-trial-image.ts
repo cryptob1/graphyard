@@ -1,8 +1,8 @@
 // Concern: GY-3275 — a managed repository extends the trial image with its own toolchain.
 // A repository may commit `graphyard.trial.Dockerfile`, whose `FROM` names the build arg
 // `GRAPHYARD_TRIAL_IMAGE`: it layers the repository's toolchain over the image Graphyard runs
-// trials in. The merge writer builds it from the trial's base tip — never the candidate, whose
-// edits apply only once they merge — and caches the built image by the file's digest and the base
+// trials in. The merge writer builds it from the trial's base tip (and a head that edits the file
+// from that head too, see runTrialAttempt) and caches the built image by the file's digest and the base
 // image, so two trials of one base build it once (a change the file does not name, a COPY the
 // Dockerfile leaves untouched, rides a later edit of the file).
 import { createHash } from 'node:crypto';
@@ -36,17 +36,17 @@ export const trialRepositoryImageFault = (error: unknown): string | null => {
 };
 
 /**
- * The image this repository's trials run in (GY-3275): its `graphyard.trial.Dockerfile` at the
- * trial's `tip` — the base tip, never the candidate — built over the base trial image through the
+ * The image this repository's trials run in (GY-3275): its `graphyard.trial.Dockerfile` at `tip`
+ * built over the base trial image through the
  * build arg `GRAPHYARD_TRIAL_IMAGE` and tagged by the file's digest and the base image, so a second
  * trial of the same base reuses the built image (`docker image inspect`). A repository that commits
- * no file runs the standard image (null) and nothing is built. A build that fails is the trial
- * host's fault (`TrialRepositoryImageError`), never the head's.
+ * no file runs the standard image (null) and nothing is built. A build that fails throws
+ * `TrialRepositoryImageError`: the trial host's fault for the base tip, the head's own for its edit.
  */
 export async function repositoryTrialImage(input: {
   /** The coordinator checkout whose object store holds the tip. */
   root: string;
-  /** The base tip the Dockerfile and its build context are read from. */
+  /** The commit the Dockerfile and its build context are read from: the base tip, or a head that edits the file. */
   tip: string;
   /** The trial's scratch, where the build's context worktree goes. */
   scratch: string;
