@@ -363,7 +363,7 @@ html:not([data-theme='daylight']) body::before{content:'';position:fixed;inset:0
 /* Headings and new rows flicker in like a neon sign switching on (AC-4e): the animation runs when
    the element enters the page and never again — React keeps the nodes it already drew. */
 @keyframes gy-flicker-in{0%{opacity:0}16%{opacity:.85}22%{opacity:.15}34%{opacity:1}40%{opacity:.35}52%,100%{opacity:1}}
-html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) .work-row{animation:gy-flicker-in .5s both}
+html:not([data-theme='daylight']) :is(h1,h2,h3),html:not([data-theme='daylight']) .work-row{animation:gy-flicker-in .5s both}
 /* An item in trial carries a light streak running along its row (AC-4c): one bright band sweeping
    on a transform, clipped to the row, touching nothing. */
 html:not([data-theme='daylight']) .work-row{position:relative}

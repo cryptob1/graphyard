@@ -13,16 +13,18 @@ const useGlideEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffe
  * input: the row is interactive for the whole 450 ms.
  */
 export function useGlide() {
-  const were = useRef(new Map<string, DOMRect>());
+  const were = useRef(new Map<string, { left: number; top: number }>());
   useGlideEffect(() => {
+    // Document-relative places, so a scroll between two renders is never mistaken for a move.
+    const place = (row: HTMLElement) => { const rect = row.getBoundingClientRect(); return { left: rect.left + scrollX, top: rect.top + scrollY }; };
     const rows = [...document.querySelectorAll<HTMLElement>('.work-row')];
-    const now = new Map(rows.map(row => [row.dataset.row!, row.getBoundingClientRect()]));
+    const now = new Map(rows.map(row => [row.dataset.row!, place(row)]));
     if (readFun() && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      for (const [key, rect] of were.current) {
+      for (const [key, was] of were.current) {
         const row = rows.find(candidate => candidate.dataset.row === key);
         const fresh = row ? now.get(key) : undefined;
         if (!row || !fresh) continue;
-        const dx = rect.left - fresh.left, dy = rect.top - fresh.top;
+        const dx = was.left - fresh.left, dy = was.top - fresh.top;
         if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
         row.classList.add('glide');
         row.style.transition = 'none';
