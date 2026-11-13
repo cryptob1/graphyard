@@ -14,6 +14,8 @@ import { closeFailedLaunch, launchStartMs, type RequestDelivery, deliverPrompt, 
 import { type HerdrAgent, herdrCall, herdrSessionPaths, observeHerdrAgents, type HerdrInstance } from './herdr.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
+import { readProjectMemory, type ProjectMemory } from '../project-memory.js';
+import { masterBriefSection, masterLessonsSection } from '../model/project-memory.js';
 import type { MasterConfig } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { masterCredentialMask } from './confinement.js';
@@ -46,8 +48,9 @@ export function masterHandover(input: { work: Work[]; cliPath: string }) {
     `- Your open items: ${input.work.filter(item => item.stage !== 'done').map(item => `${item.key}: ${item.title} [priority ${item.priority}; ${item.stage}; candidate ${item.candidate?.sha ?? 'none'}; merge ${item.mergeLedger?.state ?? 'not started'}; delivery ${item.delivery?.mergeSha ?? 'pending'}]`).join('; ').slice(0, 2000) || 'none'}`,
   ].join('\n');
 }
-/** The session's first request: the shared master prompt, the simplicity paragraph, then the handover. */
-export const masterRequest = (config: MasterConfig, handover: string) => `${masterPrompt(config)} ${simplicityParagraph}${handover}`;
+/** The session's first request: the shared master prompt, the simplicity paragraph, the product brief, the master's own recorded lessons (GY-3274), then the handover. */
+export const masterRequest = (config: MasterConfig, handover: string, memory?: ProjectMemory | null) =>
+  `${masterPrompt(config)} ${simplicityParagraph}${masterBriefSection(memory)}${masterLessonsSection(memory)}${handover}`;
 
 export interface MasterLaunch { agentName: string; pane: string; runtime: string; account: string | null; session: string | null; delivery: RequestDelivery; continuity?: Continuity }
 /**
@@ -92,7 +95,9 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   };
   try {
     const context = current ? await continuationContext(current) : { handover: 'Previous master conversation: no recovered record supplied. Last unanswered person message: unknown unless established by the handover.', input: null };
-    const request = await graphyardInput(origins, 'launch', masterRequest(config, `${handover}\n${context.handover}`));
+    // The lessons the master recorded for itself (GY-3274), read from the file the master session writes.
+    const lessons = await readProjectMemory(root).catch(() => null);
+    const request = await graphyardInput(origins, 'launch', masterRequest(config, `${handover}\n${context.handover}`, lessons));
     // The same harness the human launch writes (master start): the master's own commands, and the
     // deny rules that keep it from borrowing another identity — never a worker or producer credential.
     await writeHarnessPermissions(root, masterHarness(root, config, kind), true);

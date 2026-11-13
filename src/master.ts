@@ -21,6 +21,8 @@ export { sessionAccount, holdRepeatedLimitAccount, repeatedLimitAccount, repeate
 export { dispatchReservationDirectory, DispatchReservedError, dispatchReserved } from './master/dispatch-reservation.js';
 // GitHub merges: the guarded merge is gone; the merge writer's record delivers.
 export { setupAutonomy, agentToken, intentInput, attestationExercise, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
+export { lessonCommand, lessonUsage, type LessonDependencies } from './master/lessons.js';
+export { runBriefCommand, briefUsage, type BriefDependencies } from './master/brief.js';
 export { restartMasterLoop } from './master/loop-restart.js';
 export { promoteCommand, promotionReason, promotionAuditFile, promotionPreconditions, PromotionRefusedError, promoteToAutonomy, assertPromotionRoute, ghLogin, type PromotionStep, type PromotionDependencies } from './master/promotion.js';
 

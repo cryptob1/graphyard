@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { type MasterConfig } from '../master/profiles.js';
-import { emptyProjectMemory } from '../model/project-memory.js';
+import { boundMemoryNotes, emptyProjectMemory } from '../model/project-memory.js';
 import { projectMemorySchema } from '../model-boundary/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './merge-writer-state.js';
 import { continuitySchema } from '../master/conversation.js';
@@ -357,7 +357,8 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
   if (state.projectMemory) {
-    state.projectMemory.notes = (state.projectMemory.notes ?? []).slice(0, 50);
+    // Each kind keeps its own retention (GY-3274): 40 master lessons beside 20 ordinary notes.
+    state.projectMemory.notes = boundMemoryNotes(state.projectMemory.notes ?? []);
     state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
   }
   return state;
