@@ -390,11 +390,11 @@ html:not([data-theme='daylight']) .live-terminal.working .terminal-host::before{
   animation:gy-scan 4.5s linear infinite}
 @keyframes gy-scan{from{transform:translateY(-44px)}to{transform:translateY(100vh)}}
 /* The boot sequence (AC-4a): the logo flickers in, the readout types, the veil fades to the page
-   inside one second. web/boot.ts removes it; a key or a click removes it sooner. */
-.boot{position:fixed;inset:0;z-index:70;pointer-events:none;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;animation:gy-boot-out 1s forwards}
+   inside one second. web/boot.ts times the fade and the removal; a key or a click removes it sooner. */
+.boot{position:fixed;inset:0;z-index:70;pointer-events:none;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;transition:opacity .2s}
+.boot.leaving{opacity:0}
 .boot-logo{font-family:var(--font-display);font-size:46px;letter-spacing:3px;color:var(--text);text-shadow:0 0 22px color-mix(in srgb,var(--accent) 45%,transparent);animation:gy-flicker-in .55s both}
 .boot-readout{margin:0;min-height:3em;font-family:var(--font-mono);font-size:12px;line-height:1.8;color:var(--text-2)}
-@keyframes gy-boot-out{0%,84%{opacity:1;visibility:visible}100%{opacity:0;visibility:hidden}}
 /* A row whose trial failed flickers: chromatic jitter a few frames at a time, never under reduced motion. */
 @keyframes gy-glitch{0%,86%,100%{text-shadow:none;transform:none}88%{text-shadow:-2px 0 var(--needs-you),2px 0 var(--moving);transform:translateX(-1px)}92%{text-shadow:2px 0 var(--needs-you),-2px 0 var(--moving);transform:translateX(1px)}96%{text-shadow:none;transform:none}}
 html:not([data-theme='daylight']) .work-row.glitch{animation:gy-glitch 2.2s infinite}

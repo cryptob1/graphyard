@@ -35,6 +35,7 @@ export function boot() {
   const skip = () => { clearInterval(typing); clearTimeout(done); veil.remove(); };
   addEventListener('keydown', skip, { capture: true, once: true });
   document.addEventListener('pointerdown', skip, { capture: true, once: true });
-  // The stylesheet ends the veil's own animation (the fade to the page) at one second.
+  // The page's own timers fade the veil out (opacity only) and remove it inside the second.
+  setTimeout(() => veil.classList.add('leaving'), 850);
   setTimeout(() => { veil.remove(); removeEventListener('keydown', skip, { capture: true }); document.removeEventListener('pointerdown', skip, { capture: true }); }, 1050);
 }

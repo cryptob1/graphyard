@@ -74,6 +74,9 @@ test('e2e:night-yard-animation — the boot sequence plays once per browser sess
 test('e2e:night-yard-animation — left alone, the boot hands the page over inside its second', async ({ page }) => {
   test.setTimeout(60_000);
   const boot = await bootHeld(page);
+  // A loaded machine: more than the veil's real second passes before the next look. The veil
+  // answers to the page clock alone, so it is still up until the clock moves.
+  await page.waitForTimeout(1_500);
   await page.clock.runFor(900);
   await expect(boot).toBeVisible();
   await page.clock.runFor(200);
