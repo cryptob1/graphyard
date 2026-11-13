@@ -6,8 +6,8 @@ import { riskOf } from './model-boundary/risk-class.js';
 import { postDeployProof } from './model/post-merge-proofs.js';
 
 /** Read the saved admission facts, never the cached gate verdicts or later attestations. */
-export function auditAdmission(work: Work, at: string, all: Work[] = [work]) {
-  const verdict = evaluateLandability(work, all, new Date(at));
+export function auditAdmission(work: Work, at: string) {
+  const verdict = evaluateLandability(work, [work], new Date(at));
   const missingProofs = verdict.verdict === 'refused' ? verdict.reasons.filter(r => r.gate === 'acceptance').map(r => r.reason) : [];
   const approval = exactApproval(work) ?? carriedApproval(work);
   const recordedRisk = work.mergeLedger?.risk;
@@ -39,22 +39,25 @@ export async function auditInstalls(installs: AuditInstall[]) {
       for (const item of merged) {
         try {
           const work: Work = await install.read(`work/${encodeURIComponent(item.id)}`);
+          const mergeSha = work.delivery?.mergeSha ?? work.observation?.mergeSha;
+          if (!mergeSha) { report.externalBlockers.push(`${work.key}: merged commit unavailable`); continue; }
           const params = new URLSearchParams({ work: work.id, kind: 'merge-writer.pushed', view: 'page', payload: 'full', order: 'desc', limit: '100' });
           let saved: { payload: { work: Work }; created_at: string } | undefined;
           for (;;) {
             const page = await install.read(`events?${params}`);
-            saved = page.events.find((e: any) => e.payload?.work?.mergeLedger?.mergeSha === work.delivery?.mergeSha);
+            saved = page.events.find((e: any) => e.payload?.work?.mergeLedger?.mergeSha === mergeSha);
             if (saved || !page.page.nextCursor) break;
             params.set('cursor', page.page.nextCursor);
           }
           if (!saved) { report.externalBlockers.push(`${work.key}: admission snapshot unavailable; current display cannot establish historical safety`); continue; }
-          report.findings.push(auditAdmission(saved.payload.work, saved.created_at, snapshot.work));
+          report.findings.push(auditAdmission(saved.payload.work, saved.created_at));
           report.audited++;
         } catch { report.externalBlockers.push(`${item.key}: item or admission history could not be read`); }
       }
     } catch { report.externalBlockers.push('Install unavailable or identity cannot enumerate work'); }
   }
-  return { coverage, limitations: ['Risk comes from the saved merge intent; when absent, the current repository policy is only an estimate requiring separate inspection.',
+  return { coverage, scope: 'Declared criterion proofs and independent review at the recorded push', limitations: ['Risk comes from the saved merge intent; when absent, the current repository policy is only an estimate requiring separate inspection.',
+    'Historical peer snapshots are not reconstructed; inherited bootstrap obligations need separate historical inspection.',
     'Admission snapshots are evaluated at their recorded time. Missing history is a coverage gap, never a clean finding.',
     'Read-only: remediation keys must be filed separately; this audit never changes delivered history.'] };
 }

@@ -1,3 +1,4 @@
+import { proveFixtureCase } from './helpers/ledger-delivery.js';
 import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,6 +70,7 @@ async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observ
   w = await engine.observe(w.id, w.revision, observation(w, extra));
   if (evidence) w = await engine.execute(producer, 'evidence', w.id, { proof: PROOF, sha: head(w), baseSha: base, policyRevision: w.policyRevision, result: evidence, executed: 3, skipped: 0,
     ...(evidence === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, id());
+  if (evidence === 'pass') w = await proveFixtureCase(engine, w);
   return engine.observe(w.id, (await reload(w)).revision, observation(w, extra));
 }
 async function staleWait() {

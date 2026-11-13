@@ -103,6 +103,7 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
       const reads = mergeWriterReads(config, checkout, fixtureRun, {
           base: join(directory, 'managed'),
           hold: production.mergeWriter!.hold,
+          holdOpening: production.mergeWriter!.holdOpening,
           trial: async input => {
             trials++;
             if (trials === 1) { started(); await resume; }

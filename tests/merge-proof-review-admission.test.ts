@@ -47,6 +47,10 @@ test('e2e:merge-proof-review-admission binds proof and review to head, diff base
       const record = kind === 'proof' ? changed.evidence[0] : changed.observation!.reviews[0];
       Object.assign(record, { [field]: field === 'policyRevision' ? 99 : 'd'.repeat(40) });
       assert.ok(mergeCandidateHold(changed), `${kind} with wrong ${field} is refused`);
+      if (kind === 'review') {
+        reconcileReviewConflict(changed, new Date(at));
+        assert.deepEqual(changed.reviewVerdicts!.verdicts, [], 'the display must not rebind stale review evidence');
+      }
     }
   }
 });
@@ -147,7 +151,7 @@ test('e2e:merge-proof-review-admission audit distinguishes absent proof from emp
   work.evidence = [];
   assert.equal(auditAdmission(work, at).classification, 'missing-admission-evidence');
   const audit = await auditInstalls([{ name: 'hwd-backend', url: 'http://inaccessible' },
-    { name: 'history-gap', url: 'http://fixture', read: async path => path === 'work-snapshot' ? { work: [{ ...work, delivery: { mergeSha: 'c'.repeat(40) } }] } : path.startsWith('events?') ? { events: [], page: {} } : work }]);
+    { name: 'history-gap', url: 'http://fixture', read: async path => path === 'work-snapshot' ? { work: [{ ...work, delivery: { mergeSha: 'c'.repeat(40) } }] } : path.startsWith('events?') ? { events: [], page: {} } : { ...work, delivery: { mergeSha: 'c'.repeat(40) } } }]);
   assert.deepEqual(audit.coverage[0].requiredItems, ['GY-3', 'GY-4']);
   assert.equal(audit.coverage[0].externalBlockers.length, 1);
   assert.equal(audit.coverage[1].audited, 0);
