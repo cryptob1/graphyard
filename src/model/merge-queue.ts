@@ -104,7 +104,7 @@ export function awaitsMerge(item: Work, ledger: Readonly<Record<string, MergeLed
   if (!gate(item, 'build') || item.blocker?.startsWith(readOnlyTrialBlocker)) return false;
   const state = ledger[item.key];
   // GY-3164: the trial already passed; only the review gate still stands between the head and its landing.
-  if (keptTrialAheadOfReview(candidate, state)) return gate(item, 'review');
+  if (keptTrialAheadOfReview(candidate, state)) return gate(item, 'review') && item.gates.find(g => g.name === 'acceptance')?.passed !== false;
   if (trialRefusalHeld(candidate, state)) return false;
   if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
   if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;

@@ -117,7 +117,7 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
     if (review.sha !== candidate!.sha || !Number.isSafeInteger(review.id)) continue;
     const known = record.verdicts.find(verdict => verdict.id === review.id);
     if (review.state === 'DISMISSED') { if (known) known.dismissed = true; continue; }
-    if (!conflictingVerdictStates.includes(review.state) || known || !reviewerIdentity(review.reviewer)) continue;
+    if (!conflictingVerdictStates.includes(review.state) || known || !(review.source === 'control-plane' || reviewerIdentity(review.reviewer))) continue;
     record.verdicts.push({ id: review.id!, reviewer: review.reviewer, state: review.state, submittedAt: review.submittedAt ?? null, observedAt: at, requestId });
   }
   record.verdicts = record.verdicts.slice(-verdictHistoryLimit);

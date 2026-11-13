@@ -3,6 +3,7 @@ import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
 import { dbCommands } from './db.js';
 import { masterCommands } from './master.js';
+import { admissionAuditCommands } from './merge-admission-audit.js';
 import { workCommands } from './work.js';
 import { policyCommands } from './policy.js';
 import { deliveryCommands } from './delivery.js';
@@ -20,7 +21,7 @@ import { upgradeCommands } from './upgrade.js';
  * one module, or adds a module here; nothing else in the launcher changes.
  */
 export const commands: readonly CliCommand[] = [
-  ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
+  ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...admissionAuditCommands, ...policyCommands,
   ...deliveryCommands, ...scenarioCommands,
   ...operatorAgentCommands, ...leaseCommands, ...workspaceCommands,
   ...reviewCommands, ...guideCommands, ...versionCommands, ...upgradeCommands,

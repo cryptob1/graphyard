@@ -1,6 +1,5 @@
 import type { Work } from '../model/work.js';
 import { type LandabilityReason, controlPlaneObserved, type LandabilityVerdict, buildFamily, strayProofFailure, LANDABILITY_VERSION, inputsOf } from '../model/landability.js';
-import { riskOf } from './risk-class.js';
 import { postDeployProof } from '../model/post-merge-proofs.js';
 import { currentEvidence, evidenceIndependenceRefusals } from '../model/evidence.js';
 import { evidenceProves, attestedProof } from '../model/mechanical-proofs.js';
@@ -12,13 +11,11 @@ import type {  } from './merge-ledger.js';
  * judge of the tests, not a producer: each criterion's `unit:`/`integration:`/`e2e:` proof needs
  * executed > 0 and failed = 0 in `work.mergeLedger.trial.proofs` for the current head (GY-2965: an
  * `e2e:` proof's counts are its bound case's run against the served head; a missing or failing case
- * refuses the head at the trial itself); a `manual:` attestation is required only of a sensitive
- * change (`riskOf`); and producer evidence is ignored, so no independence refusal is read.
+ * refuses the head at the trial itself); a declared merge-time `manual:` attestation is always required; and producer evidence is ignored, so no independence refusal is read.
  */
 function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
   const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
   const tried = !!head && trial?.head.toLowerCase() === head ? trial : null;
-  const sensitive = controlPlaneObserved(work) && riskOf(work).risk === 'sensitive';
   const refusal = (proof: string): string | null => {
     // A declared post-deploy proof (GY-1660) is observed on the serving release after delivery, never gating the merge.
     if (postDeployProof(proof)) return null;
@@ -30,9 +27,8 @@ function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (Landabilit
       return `${proof} needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; ${seen}`;
     }
     if (family === 'manual') {
-      if (!sensitive) return null;
       const evidence = currentEvidence(work, proof, now);
-      return evidence && evidenceProves(proof, evidence) ? null : `${proof} needs a trusted passing attestation for this candidate and policy, since the change is sensitive`;
+      return evidence && evidenceProves(proof, evidence) ? null : `${proof} needs a trusted passing attestation for this candidate and policy`;
     }
     // `e2e:` runs in release validation; any other family was a producer's, whose evidence this mode ignores.
     return null;

@@ -34,15 +34,14 @@ function item(head = sha, overrides: Partial<Work> = {}): Work {
   } as unknown as Work;
 }
 
-test('unit:unproduced-manual-proof-owned-by-loop — an unproduced manual proof is never a human step: re-evaluated it gates nothing, and a stored request is still the loop\'s', () => {
+test('unit:unproduced-manual-proof-owned-by-loop — an unproduced manual proof is never a human step: re-evaluated it requires attestation, and a stored request is still the loop\'s', () => {
   const work = item(), now = new Date(clock);
   assert.deepEqual(unproducedManualProofs(work, [work], now), [proof]);
-  // GitHub delivery is the only mode (GY-1235): re-evaluated, the record carries no acceptance gate,
-  // so the unproduced proof holds nothing and nobody — person or loop — is owed a step for it.
+  // Missing merge-time proof remains a visible acceptance refusal.
   const result = evaluate(work, [work], now);
-  assert.equal(result.gates.some(gate => gate.name === 'acceptance'), false, 'no acceptance gate');
+  assert.equal(result.gates.find(gate => gate.name === 'acceptance')?.passed, false, 'manual proof gates acceptance');
   const current = { ...work, stage: result.stage, gates: result.gates } as Work;
-  assert.deepEqual(unproducedManualProofs(current, [current], now), [], 'nothing waits on the proof');
+  assert.deepEqual(unproducedManualProofs(current, [current], now), [], 'this fixture still owes its build and independent review before attestation');
   const account = actionAccount(current, [current], now);
   assert.notEqual(account.action?.kind, 'attention', 'no escalation to a person');
   const stored = { ...current, nextAction: account.action } as Work;

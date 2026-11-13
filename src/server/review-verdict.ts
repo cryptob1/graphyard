@@ -148,7 +148,7 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
     }
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
-    const launch: ControlPlaneReviewLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, head: data.head, baseTip: data.baseTip, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, postMerge: data.postMerge, ...(data.product ? { product: true } : {}), verdict: null };
+    const launch: ControlPlaneReviewLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, head: data.head, baseTip: data.baseTip, policyRevision: work!.policyRevision, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, postMerge: data.postMerge, ...(data.product ? { product: true } : {}), verdict: null };
     work!.reviewLaunch = launch;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, reviewLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
     await save(db, work!, actor.id, `${reviewLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer, head: launch.head, postMerge: launch.postMerge });
@@ -176,6 +176,10 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     demand(!launch!.refused, `${work!.key}'s launch was refused: ${launch!.refused?.reason}`, 403);
     demand(Date.parse(launch!.expiresAt) > now.getTime(), `${work!.key}'s review launch expired at ${launch!.expiresAt}; the loop launches the review again`, 403);
     demand(data.sha === launch!.head, headRefusal(data.sha, launch!.head), 409);
+    demand(launch!.policyRevision === undefined || launch!.policyRevision === work!.policyRevision, 'Review policy changed since launch; a fresh review is required', 409);
+    if (!launch!.postMerge) {
+      demand(work!.candidate?.sha === launch!.head && (work!.observation?.mergeBase ?? work!.candidate?.baseSha) === launch!.baseTip, 'Review head or diff base changed since launch; a fresh review is required', 409);
+    }
     // Independence is identity: the reviewer is none of the item's implementers and not the launch's requester.
     const how = implementerIdentities(work!).includes(launch!.reviewer) ? 'implemented' : launch!.reviewer === launch!.requester ? 'requested' : null;
     if (how) {
@@ -197,10 +201,10 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     // head's merge base with the base branch, so the verdict itself — in the ledger event, the
     // observation.reviews entry and the launch's verdict record — says which commits were in scope,
     // even after a relaunch replaces the launch record.
-    const baseSha = launch!.baseTip;
-    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, product ? productReviewVerdictEvent : reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, product, source: 'control-plane', baseSha })]);
+    const baseSha = launch!.baseTip, policyRevision = work!.policyRevision;
+    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, product ? productReviewVerdictEvent : reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, product, source: 'control-plane', baseSha, policyRevision })]);
     const reviewId = Number(inserted.rows[0]?.seq);
-    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId, baseSha };
+    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId, baseSha, policyRevision };
     // The verdict stands where GitHub's review would: `exactApproval` finds an APPROVED of the exact
     // candidate head by someone other than its author, and the review gate reads a change request.
     // Every verdict carries its body; a change request also carries its BLOCKING findings, as a
@@ -214,7 +218,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
           reviewIds: (observation.reviews ?? []).map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0)
         };
       }
-      observation.reviews = [...(observation.reviews ?? []), { reviewer: launch!.reviewer, sha: data.sha, state, id: reviewId, submittedAt, body: data.body, baseSha, ...(state === 'CHANGES_REQUESTED' ? { blocking: blockingFindings(data.body) } : {}), source: 'control-plane' } as (typeof observation.reviews)[number]];
+      observation.reviews = [...(observation.reviews ?? []), { reviewer: launch!.reviewer, sha: data.sha, state, id: reviewId, submittedAt, body: data.body, baseSha, policyRevision, ...(state === 'CHANGES_REQUESTED' ? { blocking: blockingFindings(data.body) } : {}), source: 'control-plane' } as (typeof observation.reviews)[number]];
       observation.reviewIds = [...(observation.reviewIds ?? []), reviewId];
     }
     work!.reviewLaunch = { ...launch!, verdict };
