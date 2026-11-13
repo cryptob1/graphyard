@@ -293,7 +293,7 @@ export interface FleetAccountView {
   /** The roles it is held from after runs that ended without a result, and why. */
   held: { role: FleetRoleName; reason: string }[];
 }
-export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; live: number; next: string | null; blocked: string | null; policy: RolePolicy }
+export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; /** Sessions the role runs at once (`roleLimit`). */ limit?: number; live: number; next: string | null; blocked: string | null; policy: RolePolicy }
 export interface FleetView {
   revision: number; updatedAt: string | null; configured: boolean; host: string | null;
   runtimes: FleetRuntime[]; models: FleetModel[]; accounts: FleetAccountView[]; roles: FleetRoleView[];
@@ -332,7 +332,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     const first = host ? choice?.account?.name ?? null : role.accounts.find(servesHere) ?? null;
     const running = live.filter(session => session.role === role.name).length;
     const blocked = host ? (choice!.account ? null : choice!.reason) : running >= roleLimit(role) ? `role ${role.name} is at its concurrency limit (${running} of ${roleLimit(role)} live)` : first ? null : `no eligible account for ${role.name}`;
-    return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
+    return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, limit: roleLimit(role), live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
   const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => name === 'master'

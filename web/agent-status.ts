@@ -112,7 +112,7 @@ export function roleLaunch(role: FleetRoleView, fleet: Pick<FleetView, 'accounts
   const accounts = role.accounts.map(name => ({ name, view: fleet.accounts.find(account => account.name === name) ?? null }));
   // The account the registry's own choice would take: the first eligible one the role does not hold out.
   const ready = accounts.find(({ view }) => view && view.eligible && !view.held.some(entry => entry.role === role.role));
-  if (role.live >= role.concurrency) return result(false, `none can launch — at its concurrency limit (${role.live} of ${role.concurrency} live); next: ${ready ? `${ready.name} ` : ''}when one of its sessions ends`, null, null);
+  if (role.live >= (role.limit ?? role.concurrency)) return result(false, `none can launch — at its concurrency limit (${role.live} of ${role.limit ?? role.concurrency} live); next: ${ready ? `${ready.name} ` : ''}when one of its sessions ends`, null, null);
   if (ready) return result(true, `can launch now — next: ${ready.name} now${launchFailure(ready.view!, fleet, now) ? ' (its last launch failed)' : ''}`, ready.name);
   // Every account is out: group them by what keeps them out, and find the earliest one back by itself.
   const groups = new Map<string, string[]>();

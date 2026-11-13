@@ -266,7 +266,7 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
     {/* Each role's launch verdict reads above; its preference order and launch policy are one click away (GY-1325). */}
     <MoreDetails summary={`Roles (${fleet.roles.length}): preference order and launch policy`}>
       <PageSection title="Roles" count={fleet.roles.length}>
-        {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
+        {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.limit ?? role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
         {!fleet.roles.length && <p>No role is configured.</p>}
       </PageSection>
     </MoreDetails>
