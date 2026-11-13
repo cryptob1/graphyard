@@ -1,6 +1,7 @@
 // Concern: one adapter record per agent runtime kind — everything Graphyard knows of a runtime, in one place (GY-3034).
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { asksNothing, trustAgyFolder, trustClaudeFolder, trustCodexFolder, verifyClaudeTrust, verifyCodexTrust, type LaunchRecipe } from '../harness.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
@@ -23,6 +24,7 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
  * - `home`: the login-home variable an account home is set on, and the runtime's own default home: the environment kinds.
  * - `usage`: reads an account home's login and provider quota; `sharedPlan` when its accounts share a Z.AI plan.
  * - `identity`: the login file whose provider ids name the subscription an account home is logged in to.
+ * - `state`: the XDG base directories (with their defaults under HOME) the runtime keeps its session state in, and its own directory in each (GY-3303).
  */
 export interface RuntimeAdapter {
   kind: string;
@@ -38,6 +40,7 @@ export interface RuntimeAdapter {
   usage?: (environment: ProbedHome, probe: EnvironmentProbe, context: { plan: string | null; now: number }) => Promise<AccountReading>;
   sharedPlan?: boolean;
   identity?: { file: string; ids: (login: any) => unknown[] };
+  state?: { variables: Record<string, string>; directory: string };
 }
 
 /** The usage-limit messages the provider APIs themselves return, in a runtime's error output. */
@@ -147,6 +150,8 @@ const builtInAdapters = {
     request: reference => reference,
     // Muse is the one runtime whose listing reports an exit rather than dropping the session.
     endedStates: [...endedRuntimeStates, 'exited-error', 'terminated'],
+    // Muse locks and writes its sessions under `$XDG_DATA_HOME/muse` and its settings lock under `$XDG_CONFIG_HOME/muse`.
+    state: { variables: { XDG_DATA_HOME: '.local/share', XDG_CONFIG_HOME: '.config' }, directory: 'muse' },
   },
   // Google Antigravity CLI (agy 1.2+): one flag auto-approves every tool permission request; no
   // flag skips its workspace-trust prompt, so the folder is recorded trusted first (trustAgyFolder).
@@ -176,6 +181,21 @@ export const runtimeAdapter = (kind: string | null | undefined): RuntimeAdapter 
 export const runtimeAdapters = (): RuntimeAdapter[] => [...adapters.values()];
 /** Adds or replaces one runtime's adapter: every launch, resume and usage lookup reads it from then on. */
 export function registerRuntimeAdapter(adapter: RuntimeAdapter) { adapters.set(adapter.kind, adapter); }
+/**
+ * GY-3303: where a confined session of `kind` keeps its own state: each XDG base directory its
+ * adapter names, from the launch environment or under HOME, and the runtime's own directory in
+ * each — only those directories are writable to it, never the whole base directory.
+ */
+export function runtimeStateRoots(kind: string, environment: NodeJS.ProcessEnv): { variables: Record<string, string>; writable: string[] } {
+  const state = runtimeAdapter(kind)?.state;
+  if (!state) return { variables: {}, writable: [] };
+  const home = environment.HOME || homedir();
+  const variables = Object.fromEntries(Object.entries(state.variables).map(([name, fallback]) => {
+    const value = environment[name];
+    return [name, value && isAbsolute(value) ? value : join(home, fallback)];
+  }));
+  return { variables, writable: Object.values(variables).map(root => join(root, state.directory)) };
+}
 /** The login-home variable of every adapter that names one. */
 export const runtimeHomeVariables = () => runtimeAdapters().flatMap(adapter => adapter.home ? [adapter.home.variable] : []);
 
