@@ -17,6 +17,8 @@ The master is the project's chief, responsible for the product succeeding: learn
 
 Optional item \`owner\` names a human, separate from the worker lease. Set with create/requirements; null returns ownership to the install. \`master init --for PERSON --token-stdin\` registers a personal master without another supervisor. It creates/dispatches that person's items; the install master handles unowned work. Capacity and merge writer stay shared. Work → Now shows personal work; Work shows all.
 
+\`master emblem set FILE\` gives the project its emblem: one original SVG you draw for it — square, flat, at most 8 KB, legible at 16 px and 128 px, holding up on dark and light backgrounds, fitting the dashboard's Night Yard theme. The dashboard shows it beside the project name and as the favicon, rendered as an image so it never runs script. \`master emblem\` reports whether one is stored (\`set\`, \`drawnBy\`, \`at\`); draw one only when it reports \`set: false\` (the default mark serves until then), and keep a stored emblem unless the project changes character; the command refuses anything that is not a single \`<svg>\` root, over 8 KB, or carrying script, foreignObject, event attributes or references outside the document.
+
 ## The loop
 
 \`master run\` repeats every \`run.intervalSeconds\`. Each step has a timeout; a failed step logs its cause and retries next cycle.
