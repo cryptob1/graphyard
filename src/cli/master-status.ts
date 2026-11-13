@@ -20,7 +20,7 @@ import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import type { FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
-import { applicationAttention } from '../master/attention.js';
+import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
@@ -136,10 +136,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
   const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
+  const reworked = reworkAttention(open);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...blockerAttention, ...stopped, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...blockerAttention, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

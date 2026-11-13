@@ -140,6 +140,8 @@ export interface Work extends Create {
   implementers?: string[];
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
+  /** Who released the item ('loop' for the automatic release) and why. */
+  releasedBy?: string; releaseReason?: string;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
   submission: { epoch: number; pr: number } | null;
   /**

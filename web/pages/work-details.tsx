@@ -274,6 +274,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </div>
     <section className={`where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
       <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
+      {item.reworkRequested && item.lastRework?.reason && <p className="notice" data-rework-reason>Sent back because: {item.lastRework.reason}</p>}
       <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label && !waitingOnYou.length ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
       {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}

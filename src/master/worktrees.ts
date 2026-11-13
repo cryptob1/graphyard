@@ -3,7 +3,7 @@ import { writeFailure } from '../disk-space.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, chmod, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig } from './profiles.js';
@@ -44,6 +44,7 @@ export async function removeAttemptWorktree(root: string, path: string, run: Chi
   await stopProcessesUnder(target);
   for (const name of dependencyDirectories) if ((await lstat(resolve(target, name)).catch(() => null))?.isSymbolicLink()) await unlink(resolve(target, name));
   await writableDirectories(target);
+  await preserveDetachedHead(root, target, run);
   try { await Promise.resolve(run('git', ['-C', root, 'worktree', 'remove', ...(force ? ['--force'] : []), target])); }
   catch (error) {
     // Git no longer registers the directory (an earlier partial removal or prune): nothing else will remove it.
@@ -51,6 +52,23 @@ export async function removeAttemptWorktree(root: string, path: string, run: Chi
     await rm(target, { recursive: true, force: true });
   }
   return true;
+}
+
+/** Where a removed worktree's commits that no branch or remote held stay reachable (GY-3279): `<KEY>-<ATTEMPT>`, the worktree's own name. */
+export const preservedRefPrefix = 'refs/graphyard/preserved/';
+/** A worktree's HEAD is the only name its detached commits have: before the tree goes, a HEAD on no branch and no remote gets a ref of its own. */
+async function preserveDetachedHead(root: string, target: string, run: ChildRun): Promise<void> {
+  const git = async (...args: string[]) => String(await run('git', ['-C', target, ...args])).trim();
+  try {
+    if (await git('rev-parse', '--abbrev-ref', 'HEAD') !== 'HEAD') return;
+    const head = await git('rev-parse', 'HEAD');
+    if (!await git('for-each-ref', '--count=1', '--contains', head, 'refs/heads', 'refs/remotes')) await git('update-ref', `${preservedRefPrefix}${basename(target)}`, head);
+  } catch { /* no readable HEAD: nothing to keep */ }
+}
+/** The next attempt's handoff for commits an earlier attempt's removed worktree left on no branch: the refs that keep them. */
+export async function preservedWorkNote(root: string, key: string, run: ChildRun): Promise<string> {
+  const refs = String(await Promise.resolve(run('git', ['-C', root, 'for-each-ref', '--format=%(refname)', `${preservedRefPrefix}${key}-*`])).catch(() => '')).trim().split('\n').filter(Boolean);
+  return refs.length ? `Earlier attempts left commits on no branch, kept at ${refs.join(', ')}. Read them with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. ` : '';
 }
 
 /** Give the owner write access to `directory` and every directory below it; a symlink is never followed. */

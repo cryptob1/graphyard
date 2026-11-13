@@ -1,6 +1,25 @@
 import { defineScenario, recordCaseRun, scenarios, trackedCases } from '../../scenarios.js';
 import { runHistory } from '../../test-runs.js';
+import { caseDirectory } from '../../e2e/case.js';
+import type { Engine } from '../../engine.js';
+import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { defineRoutes, parseJson } from '../routes.js';
+import { gateRecordPath, readGateRecord } from '../../batch-gate.js';
+
+/** The case ids with a file under e2e/cases/ on the base branch the checkout serves, or null with no checkout to read (GY-3278). */
+async function mainCases(engine: Engine): Promise<Set<string> | null> {
+  if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+  if (!engine.gitRunner) return null;
+  const listed = await engine.gitRunner(['ls-tree', '--name-only', `refs/remotes/origin/${engine.baseBranch}`, `${caseDirectory}/`]);
+  if (listed.status !== 0) return null;
+  return new Set(listed.stdout.split('\n').filter(name => name.endsWith('.json')).map(name => name.slice(caseDirectory.length + 1, -'.json'.length)));
+}
+
+/** The batch gate's record in the checkout the control plane serves (GY-3278 AC-3), when it gates this repository: the Main and Nightly columns. */
+function servedGate(repository: string | null | undefined) {
+  const record = readGateRecord(gateRecordPath(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd()));
+  return record && record.repository?.toLowerCase() === repository?.toLowerCase() ? record : null;
+}
 
 /**
  * The versioned E2E test-case registry, and its run history (GY-162): every case with its latest
@@ -14,6 +33,6 @@ export const scenarioRoutes = defineRoutes('scenarios', [
   { method: 'GET', path: '/api/scenarios', handle: ({ services }) => scenarios(services.engine.store, services.repository) },
   { method: 'POST', path: '/api/scenarios', handle: async context => defineScenario(context.services.engine.store, context.actor, await parseJson(context), context.idempotencyKey(), context.services.engine.operatorAuthorizer) },
   { method: 'POST', path: /^\/api\/scenarios\/([^/]+)\/runs$/, handle: async (context, [id]) => recordCaseRun(context.services.engine.store, context.actor, decodeURIComponent(id), await parseJson(context), context.services.engine.operatorAuthorizer, context.services.repository) },
-  { method: 'GET', path: '/api/tests', handle: ({ services }) => trackedCases(services.engine.store.pool, services.repository) },
+  { method: 'GET', path: '/api/tests', handle: async ({ services }) => trackedCases(services.engine.store.pool, services.repository, await mainCases(services.engine), servedGate(services.repository)) },
   { method: 'GET', path: /^\/api\/tests\/([^/]+)\/runs$/, handle: ({ services, url }, [id]) => runHistory(services.engine.store.pool, decodeURIComponent(id), url.searchParams) },
 ]);

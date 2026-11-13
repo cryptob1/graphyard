@@ -26,6 +26,8 @@ export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   /** One plain sentence a person can read first on the item page (GY-2011); optional on master create, set from a plan item's `plain` at release. */
   summary: z.string().trim().min(1).max(400).optional(),
+  /** Held items stay in backlog, out of dispatch, until someone releases them (`ready`). */
+  hold: z.boolean().optional(),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
   dependencies: z.array(z.string().uuid()).max(50).default([]),

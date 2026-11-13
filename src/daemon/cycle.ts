@@ -528,7 +528,7 @@ async function releaseBacklog(cycle: Cycle) {
   let slots = config.workers.length - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
   const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;
   const candidates = snapshot.work
-    .filter(item => item.criteria.length > 0 && item.stage !== 'done' && !item.ready && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
+    .filter(item => item.criteria.length > 0 && item.stage !== 'done' && !item.ready && !item.hold && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
       && item.dependencies.every(dep => snapshot.work.find(entry => entry.id === dep)?.stage === 'done'))
     .sort((a, b) => Number(!!b.yardRepair) - Number(!!a.yardRepair) || a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const item of candidates) {
