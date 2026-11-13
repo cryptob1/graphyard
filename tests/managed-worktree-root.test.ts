@@ -517,7 +517,8 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     await Promise.all(Array.from({ length: 4 }, async (_, index) => {
       const slot = await acquireVerificationSlot({ directory, slots: 2, label: `run ${index}`, pollMs: 5, onWait: line => lines.push(line) });
       held++; most = Math.max(most, held);
-      await new Promise(done => setTimeout(done, 30));
+      // Held until a second run joins it, however slowly a loaded host takes the lock.
+      for (const deadline = Date.now() + 20_000; most < 2 && Date.now() < deadline;) await new Promise(done => setTimeout(done, 5));
       held--; slot.release();
     }));
     assert.equal(most, 2);
