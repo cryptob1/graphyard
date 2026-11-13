@@ -102,6 +102,11 @@ const meaning = (label: string): GlossaryTerm | null => {
  * no page shares a label with a sidebar entry (a test holds the registry to that), they list only
  * the pages under the entry the sidebar has selected, and a section with a single page draws none
  * at all. An open item keeps the repository and release line, with its own Back control.
+ *
+ * The project's emblem (GY-3273) rides beside the repository name through an `<img>` of
+ * `/favicon.svg`: the master's drawing once one is stored, the default Graphyard mark until then.
+ * An image never runs script, and the same route serves the page's favicon, so one address is the
+ * whole feature.
  */
 export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
   const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
@@ -109,7 +114,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
     <div className="top-bar-row">
-      {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
+      {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
         <CityStrip work={work} observedAt={observedAt}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}

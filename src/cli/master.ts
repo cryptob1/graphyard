@@ -10,6 +10,7 @@ import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
+import { emblemCommand } from './master/emblem.js';
 import { confinedMaster, operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
 
@@ -41,6 +42,9 @@ export const masterCommands = defineCommands([
       '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); credential paths stay operator-only',
+      '  master emblem [set FILE]     Show whether the project has an emblem (who drew it, when), or',
+      '                                store its SVG (one <svg> root, at most 8 KB), shown beside',
+      '                                the project name and as the favicon',
       '  master run [--once] [--interval SECONDS]',
       '                                The durable coordination loop: snapshot, close, dispatch,',
       '                                merge writer, persist',
@@ -69,7 +73,7 @@ export const masterCommands = defineCommands([
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.
-      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand];
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, emblemCommand, operationsCommand, loopCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
