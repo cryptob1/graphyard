@@ -65,16 +65,17 @@ export async function repositoryTrialImage(input: {
   const docker = (args: string[]) => input.run('docker', args, { env: dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }), timeoutMs: input.timeoutMs });
   try { await docker(['image', 'inspect', tag]); return tag; } catch { /* not built yet: built below */ }
   const context = await mkdtemp(join(input.scratch, 'trial-image-'));
-  await input.run('git', ['-C', input.root, 'worktree', 'add', '--detach', context, input.tip], { timeoutMs: input.timeoutMs });
   input.onStep?.('install: repository image');
   input.log?.(`building ${trialDockerfile} of ${input.tip.slice(0, 12)} as ${tag} over ${base}`);
+  await input.run('git', ['-C', input.root, 'worktree', 'add', '--detach', context, input.tip], { timeoutMs: input.timeoutMs });
   try {
     await docker(['build', '--build-arg', `GRAPHYARD_TRIAL_IMAGE=${base}`, '--file', trialDockerfile, '--tag', tag, context]);
     return tag;
   } catch (error) {
+    if ((error as { timedOut?: boolean }).timedOut) throw error; // the trial's deadline ended it, not the Dockerfile
     const failed = error as { stdout?: unknown; stderr?: unknown; message?: string };
     const output = `${failed.stdout ?? ''}${failed.stderr ?? ''}`.trim().slice(-600) || failed.message || String(error);
-    throw new TrialRepositoryImageError(`${output}`);
+    throw new TrialRepositoryImageError(output);
   } finally {
     try { await input.run('git', ['-C', input.root, 'worktree', 'remove', '--force', context], { timeoutMs: input.timeoutMs }); } catch { /* the context goes with the trial's scratch anyway */ }
     try { await input.run('git', ['-C', input.root, 'worktree', 'prune'], { timeoutMs: input.timeoutMs }); } catch { /* best effort */ }
