@@ -1,7 +1,7 @@
 import { demand } from '../../model.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
-import { humanSignIn } from '../auth.js';
+import { humanSignIn, mintWorkerIdentity } from '../auth.js';
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle. */
 export const operatorAgentRoutes = defineRoutes('operator-agents', [
@@ -17,6 +17,8 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
         leases: leased.filter(work => work.lease!.owner === principal.id).map(work => work.key) })) };
     },
   },
+  // GY-3285: the loop mints a worker identity for each worker session its registry allows.
+  { method: 'POST', path: '/api/worker-identities', handle: async context => mintWorkerIdentity(context.services, context.actor, (await parseJson(context) as { id?: unknown }).id) },
   { method: 'GET', path: '/api/operator-agents', handle: ({ actor, services }) => services.operatorAgents.list(actor) },
   { method: 'POST', path: '/api/operator-agents', handle: async context => context.services.operatorAgents.setup(context.actor, await parseJson(context), context.idempotencyKey()) },
   {

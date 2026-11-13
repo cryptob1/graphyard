@@ -213,6 +213,12 @@ export interface RoleFailover { role: FleetRoleName; account: string; reason: st
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[]; failover: RoleFailover | null }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
+ * How many live sessions a role runs at once (GY-3285): the worker role's concurrency is per
+ * account, so its accounts times its concurrency (an account's own cap is its maxSessions); every
+ * other role's concurrency is its total.
+ */
+export const roleLimit = (role: { name: string; accounts: readonly string[]; concurrency: number }) => role.name === 'worker' ? role.accounts.length * role.concurrency : role.concurrency;
+/**
  * The session an action runs on: the first account of the role, in the role's own order, whose runtime the role can run, that is
  * placed on the asking host, logged in, within quota and under its session limit, provided the
  * role itself is under its concurrency limit. Concurrent launches spread across provider plans
@@ -229,8 +235,9 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
   const running = liveSessions(registry).filter(session => session.role === role.name && (role.name !== 'master' || (session.group ?? null) === (request.group ?? null)));
-  if (running.length >= role.concurrency) return { account: null, skipped: [],
-    reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${role.concurrency} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
+  const limit = roleLimit(role);
+  if (running.length >= limit) return { account: null, skipped: [],
+    reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${limit} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
   const occupied = running.find(session => request.work && session.work === request.work
     && (request.role !== 'producer' || (session.group ?? null) === (request.group ?? null)));
   if (occupied) return { account: null, skipped: [], reason: `role ${role.name} already reserved for ${occupied.work ?? occupied.principal}` };
@@ -242,7 +249,7 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
     const model = registry.models.find(entry => entry.name === (policy.model ?? account.model)) ?? registry.models.find(entry => entry.name === account.model)!;
     const own = role.accounts.includes(account.name), passedOwn = passed.filter(entry => role.accounts.includes(entry.account));
     const failover = own ? null : { role: role.name, account: account.name, reason: passedOwn.map(entry => entry.reason).join('; ') || `role ${role.name}'s own accounts cannot serve it` };
-    return { account, runtime, model, policy, skipped: passed, failover, reason: `${account.name} is the first eligible account for ${role.name} (${own ? `preference ${index + 1} of ${order.length}` : `failing over: none of the role's own ${role.accounts.length} accounts can serve it`}; ${running.length + 1} of ${role.concurrency} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
+    return { account, runtime, model, policy, skipped: passed, failover, reason: `${account.name} is the first eligible account for ${role.name} (${own ? `preference ${index + 1} of ${order.length}` : `failing over: none of the role's own ${role.accounts.length} accounts can serve it`}; ${running.length + 1} of ${limit} concurrent)${note}${passed.length ? ` — passed over ${passed.map(entry => entry.reason).join('; ')}` : ''}` };
   }; // the spread trails plans already holding a live session (GY-2943); a diverse reviewer's trial keeps GY-1496's order, which records its shared-provider passes itself; past the role's own accounts the fleet's fallback takes any account the preference leaves standing (GY-3092)
   // A role's own account whose window is about to reset with quota unused goes first, so that quota is spent before it is wasted (GY-3197).
   const expiring = new Map(order.flatMap(name => { const account = registry.accounts.find(entry => entry.name === name), window = account && expiringWindow(account, now); return window ? [[name, window] as const] : []; }));
@@ -324,7 +331,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     const servesHere = (name: string) => accounts.find(account => account.name === name)?.eligible && !roleRuntimeRefusal(registry, registry.accounts.find(account => account.name === name)!, role.name);
     const first = host ? choice?.account?.name ?? null : role.accounts.find(servesHere) ?? null;
     const running = live.filter(session => session.role === role.name).length;
-    const blocked = host ? (choice!.account ? null : choice!.reason) : running >= role.concurrency ? `role ${role.name} is at its concurrency limit (${running} of ${role.concurrency} live)` : first ? null : `no eligible account for ${role.name}`;
+    const blocked = host ? (choice!.account ? null : choice!.reason) : running >= roleLimit(role) ? `role ${role.name} is at its concurrency limit (${running} of ${roleLimit(role)} live)` : first ? null : `no eligible account for ${role.name}`;
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
@@ -345,7 +352,8 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
  */
 function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
   if (!role.blocked) return [];
-  if (!role.concurrency || role.live < role.concurrency) return [role.blocked];
+  const limit = roleLimit({ name: role.role, accounts: role.accounts, concurrency: role.concurrency });
+  if (!role.concurrency || role.live < limit) return [role.blocked];
   const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
-  return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
+  return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${limit} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }

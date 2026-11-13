@@ -13,7 +13,7 @@ import { readCredentialFile } from './private-file.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -259,7 +259,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
     return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
-  const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
+  const full = running >= roleLimit(definition) ? `role ${role} is at its concurrency limit (${running} of ${roleLimit(definition)} live)` : null;
   // With none of its own accounts healthy, the role still launches when another registry account can serve it (GY-3092).
   const failover = definition.accounts.length && !accounts.some(account => account.healthy) ? fleetOrder(fleet.registry, definition, null).find(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name)!;

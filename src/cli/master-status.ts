@@ -7,6 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { profileHealth } from '../daemon/sessions.js';
+import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -161,6 +162,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
     // GY-3146: what the latest verified batch changed and how to try it.
     releaseNote: latestReleaseNote(releaseNotesPath(root)),
+    // GY-3285: worker sessions running of the number the registry worker role allows (master workers N sets it).
+    workers: `${sessions.filter(session => session.kind === 'implementation').length}/${workersAllowed(master, fleet ? { roles: fleet.roles.map(role => ({ ...role, name: role.role })) } : null)}`,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
