@@ -6,6 +6,7 @@ import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
 import { freeBytes } from '../master/worktrees.js';
 import { trialContainerImage, trialImage } from '../merge-writer/trial-container.js';
+import { repositoryTrialImageRepository } from '../merge-writer/repository-trial-image.js';
 import { diskFloorBytes } from '../merge-writer/trial-load.js';
 import { reclaimTrialCheckouts, trialCheckoutPrefix, trialCheckoutRoots, trialTemporaryPrefix, trialTemporaryRoots } from '../merge-writer/trial.js';
 import { record } from './effects.js';
@@ -107,9 +108,11 @@ export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporar
   const removed = await reclaimJobLeftovers(run, roots);
   const docker = async (args: string[]) => String(await run('docker', args, { timeoutMs: 20_000 })).split('\n').map(line => line.trim()).filter(Boolean);
   try {
-    // The image built here and the published one an install pulled (GY-3214) each have their own repository.
+    // The image built here and the published one an install pulled (GY-3214) each have their own repository;
+    // a repository's extended trial images (GY-3275) are cache, rebuilt from their Dockerfile's digest when
+    // pruned, so below the floor every one not in use goes (never forced: Docker keeps an image a container uses).
     const current = trialImage();
-    for (const repository of new Set([trialContainerImage.split(':')[0]!, current.slice(0, current.lastIndexOf(':'))])) {
+    for (const repository of new Set([trialContainerImage.split(':')[0]!, current.slice(0, current.lastIndexOf(':')), repositoryTrialImageRepository])) {
       for (const image of await docker(['images', repository, '--format', '{{.Repository}}:{{.Tag}}'])) {
         if (image === current || !image.startsWith(`${repository}:`) || image.endsWith(':<none>')) continue;
         try { await docker(['image', 'rm', image]); removed.push(`image ${image}`); } catch { /* in use, or already gone */ }

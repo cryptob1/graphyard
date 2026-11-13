@@ -58,7 +58,18 @@ To set Graphyard up or find what its setup is missing, follow the setup steps in
 - Herdr: \`herdr --version\` (\`up\` installs it if absent).
 - systemd user manager: \`systemctl --user status\`.
 
-Sign in with \`gh auth login --scopes repo\`. No GitHub App is needed: \`up\` registers the merge writer's deploy key with the gh login, and it alone pushes. Where the organization disallows deploy keys, pipe a fine-grained token (Contents read/write on the one repository) to \`--merge-token-stdin\` instead — or install with \`--push-auth gh\`, which pushes with the gh login itself (\`gh auth token\` answers git at the moment of each push, so no key or token is stored). A SAML organization that refuses the SSH fetch is named by preflight with its exact fix: an https fetch URL with the SSH push URL kept (\`install --apply\` sets both), or \`--push-auth gh\`. Preview \`up\`'s checks with \`npx @cryptob1/graphyard install --repo OWNER/NAME --plan\` (\`--provider local\` for local mode).`,
+Sign in with \`gh auth login --scopes repo\`. No GitHub App is needed: \`up\` registers the merge writer's deploy key with the gh login, and it alone pushes. Where the organization disallows deploy keys, pipe a fine-grained token (Contents read/write on the one repository) to \`--merge-token-stdin\` instead — or install with \`--push-auth gh\`, which pushes with the gh login itself (\`gh auth token\` answers git at the moment of each push, so no key or token is stored). A SAML organization that refuses the SSH fetch is named by preflight with its exact fix: an https fetch URL with the SSH push URL kept (\`install --apply\` sets both), or \`--push-auth gh\`. Preview \`up\`'s checks with \`npx @cryptob1/graphyard install --repo OWNER/NAME --plan\` (\`--provider local\` for local mode).
+
+A managed repository can extend the trial image with its own toolchain: commit a \`graphyard.trial.Dockerfile\` whose \`FROM\` names the build arg \`GRAPHYARD_TRIAL_IMAGE\` (the image merge trials run in). The merge writer builds it from the base branch's copy of the file — a candidate's edits apply only once they merge — caches it by the file's digest and the base image, and runs that repository's trials in it. A repository without the file runs the standard image, and a build that fails is a trial-host fault, never a red head. A Go service whose merge gate is \`make verify\` extends the image like this:
+
+\`\`\`dockerfile
+ARG GRAPHYARD_TRIAL_IMAGE
+FROM \${GRAPHYARD_TRIAL_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends curl make \\
+ && curl -fsSL https://go.dev/dl/go1.27.linux-amd64.tar.gz | tar -C /usr/local -xzf - \\
+ && rm -rf /var/lib/apt/lists/*
+ENV PATH=/usr/local/go/bin:$PATH
+\`\`\``,
   publishing: `When a verified commit deploys, Graphyard pushes its \`vYYYY.M.D-<sha12>\` tag. GitHub Actions then publishes \`@cryptob1/graphyard\` with npm OIDC provenance, and both GHCR images (\`graphyard\`, \`graphyard-trial\`) with \`GITHUB_TOKEN\`; the host holds no publish token. Publishing runs apart from merge and deploy, and \`graphyard master status\` shows npm's latest version.
 
 One-time owner setup:

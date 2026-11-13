@@ -1,0 +1,16 @@
+{
+  "id": "repository-trial-image",
+  "title": "A repository's graphyard.trial.Dockerfile runs its merge trials in its own image",
+  "description": "A fixture repository commits graphyard.trial.Dockerfile (ARG GRAPHYARD_TRIAL_IMAGE, FROM it, a stub gofake copied in) and a preMerge check 'gofake verify'. With a stub docker first on PATH, the real merge trial builds the image from the base tip once and passes its check in it; a second trial reuses the built image, a candidate that edits the Dockerfile still runs the base tip's image, a repository without the file builds nothing and runs the standard image, and a build that fails is a trial-host fault, not a red head.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "real trials build the repository's image from the base tip once and run their checks in it",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:repository-trial-image tests/repository-trial-image.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

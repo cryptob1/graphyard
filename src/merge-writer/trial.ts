@@ -22,6 +22,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
+import { repositoryTrialImage, TrialRepositoryImageError } from './repository-trial-image.js';
 import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 
@@ -835,7 +836,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -894,9 +895,19 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
-    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'));
-    wrapper = boundary();
     await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
+    // GY-3275: a repository that commits graphyard.trial.Dockerfile runs its trials in its own image,
+    // built from the base tip (never the candidate, whose edits apply only once they merge) over the
+    // image the trials would otherwise run in. A repository without the file changes nothing.
+    let imageTip = input.baseTip ?? null;
+    if (imageTip === null) {
+      try { imageTip = String(await run('git', ['-C', input.root, 'rev-parse', '--verify', '--quiet', `${input.mergeSha}^1`], { timeoutMs: remaining() })).trim().toLowerCase() || null; }
+      catch { imageTip = null; } // a root commit names no base to read the file from
+    }
+    const image = imageTip ? await repositoryTrialImage({ root: input.root, tip: imageTip, scratch: temporary!, env, run, timeoutMs: remaining(),
+      log: line => log.push(line), onStep: label => enterStep(label) }) : null;
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'), image ?? undefined);
+    wrapper = boundary();
   };
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
