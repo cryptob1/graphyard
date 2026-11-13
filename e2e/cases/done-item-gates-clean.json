@@ -1,0 +1,60 @@
+{
+  "id": "done-item-gates-clean",
+  "title": "A delivered item's page and row show the merge gate passed and no proof gap",
+  "description": "Against the head served by e2e-serve, drive one fixture item through the real merge writer's flight — claim, submit, an independent review, the trial that executes its proofs, the push and its reconciliation — with proofs no principal in that plane is authorized to produce. The delivered work row and the item page then show the merge gate passed with the pushed sha, no pending gate and no proof gap, instead of the merge writer's stale push refusal.",
+  "tags": ["api", "dashboard", "delivery"],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "deliver a fixture item and read its gates and proof gaps",
+      "run": "node --import tsx scripts/e2e-done-item-gates.mjs {{token}} {{run}}",
+      "timeoutSeconds": 180
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/?sign-in"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the Shipped page, where the delivered row lives",
+      "action": "click",
+      "role": "button",
+      "text": "Shipped"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "text": "E2E case done-item-gates-clean run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "unfold the technical details, where the gate decisions fold",
+      "action": "click",
+      "text": "Technical details"
+    },
+    {
+      "kind": "browser",
+      "name": "the merge gate reads passed, never 'merge writer has not pushed'",
+      "action": "expectText",
+      "text": "✓ merge"
+    }
+  ]
+}
