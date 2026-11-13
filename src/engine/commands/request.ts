@@ -30,7 +30,7 @@ export function run(c: Ctx) {
       decider: deciderFor(work.key, data), releasedLease: false, state: 'open' };
     // Each type projects onto the state the gates and the existing machinery already read,
     // so a typed request is the same fact as the command it replaces, with a decider named.
-    if (data.type === 'blocker') { work.blocker = data.reason; recordIntervention(work, 'blocked'); }
+    if (data.type === 'blocker') { work.blocker = data.reason; work.blockedAt = now.toISOString(); recordIntervention(work, 'blocked'); }
     // A note is a record; every other type is a hand-off, so the attempt ends here rather
     // than holding the item while its session waits for an answer.
     const release = data.release ?? data.type !== 'note';

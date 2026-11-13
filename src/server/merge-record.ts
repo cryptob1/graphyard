@@ -217,7 +217,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, mergeRecordKinds[event.kind], JSON.stringify(payload)]);
     work!.mergeLedger = await foldItemLedger(db, work!, data);
     // GY-3229: a trial that could not write a read-only file system is the host's fault: one blocker naming the path, never a rework.
-    if (data.kind === 'trial' && data.outcome === 'host-failure' && data.reason.startsWith(readOnlyTrialBlocker) && !work!.blocker) work!.blocker = data.reason;
+    if (data.kind === 'trial' && data.outcome === 'host-failure' && data.reason.startsWith(readOnlyTrialBlocker) && !work!.blocker) { work!.blocker = data.reason; work!.blockedAt = now.toISOString(); }
     // GY-2965: the trial is a trusted producer of its E2E case runs. Every case that ran is recorded on the
     // item as trusted evidence bound to the merge commit it ran against — a pass and a fail both keep their
     // run in the case's Tests-page history; only a pass can stand behind the proof, and only through the
