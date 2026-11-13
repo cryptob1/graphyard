@@ -153,7 +153,7 @@ test('integration:hold-and-message-worker — a held item is skipped by dispatch
   const state = emptyDaemonState(config);
   const historyBefore = (await call(token(operator.id), 'GET', `events?work=${item.id}&view=rows`)).length;
   for (let cycle = 0; cycle < 3; cycle++) await runCycle(config, state, effects);
-  assert.deepEqual(dispatched, [], 'three cycles dispatch neither held item');
+  assert.equal(dispatched.length, 0, 'three cycles dispatch neither held item');
   const skipped = await reload(item.id);
   assert.equal(skipped.hold, true); assert.equal(skipped.workspaces.length, 1, 'the workspace is kept');
   assert.equal((await reload(submitted.id)).candidate?.sha, built.head, 'the candidate is kept');
