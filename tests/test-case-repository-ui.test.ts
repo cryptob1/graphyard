@@ -121,7 +121,7 @@ test('unit:test-case-repository-ui — the Tests page lists every case with its 
   const never = summary({ id: 'login-works', title: 'Signing in works', links: [] });
   const orphan = summary({ id: 'retired-case', title: null, revision: null, changed: null, latest: at(7, 'pass'), runs: 1, history: [at(7, 'pass')] });
   const data = { window: 20, cases: [flaky, steady, never, orphan] };
-  const render = (filter: 'all' | 'fail' | 'flaky' | 'never' = 'all') => renderToStaticMarkup(createElement(TestsView, { data, error: '', loading: false, filter, setFilter: noop, retry: noop, api: async () => ({}), canEdit: true, setView: noop }));
+  const render = (filter: 'all' | 'fail' | 'flaky' | 'never' = 'all') => renderToStaticMarkup(createElement(TestsView, { data, view: 'cases', error: '', loading: false, filter, setFilter: noop, retry: noop, api: async () => ({}), canEdit: true, setView: noop }));
   const html = render();
   const row = (id: string) => text(new RegExp(`<tr data-case="${id}">([\\s\\S]*?)</tr>`).exec(html)![1]);
   assert.deepEqual([...html.matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['checkout-pays', 'retired-case', 'refund-issued', 'login-works'], 'every case is listed, failing first, then passing');

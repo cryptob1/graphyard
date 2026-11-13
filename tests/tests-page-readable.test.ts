@@ -70,7 +70,7 @@ test('e2e:tests-page-readable — each proof shows its item and criterion; unwri
   assert.equal(response.status, 200);
   const data = await response.json() as any;
   const opened: string[] = [];
-  const html = renderToStaticMarkup(createElement(TestsView, { data, error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false, openItem: (id: string) => opened.push(id) }));
+  const html = renderToStaticMarkup(createElement(TestsView, { data, view: 'cases', error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false, openItem: (id: string) => opened.push(id) }));
   const row = (id: string) => new RegExp(`<tr data-case="${id}">([\\s\\S]*?)</tr>`).exec(html)?.[1] ?? assert.fail(`no row for ${id}`);
 
   // Each row names its item key and title, linking to the item, and the criterion's own words.

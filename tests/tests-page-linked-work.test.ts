@@ -13,7 +13,7 @@ const run = { seq: 7, result: 'pass', sha: 'a'.repeat(40), pr: 12, workKey: 'GY-
 const entry = (links: number) => ({ id: 'fixture-static-home', title: 'The home page renders', purpose: null, testPath: 'e2e/cases/fixture-static-home.json', environment: null,
   revision: 2, changed: { at, by: 'operator' }, latest: run, staleRevision: false, runs: 1, failures: 0, lastFailure: null, flaky: false, flakyReason: null, passRate: 1, history: [run],
   onMain: true, links: Array.from({ length: links }, (_, i) => ({ id: `w${i + 1}`, key: `GY-${i + 1}`, title: `Item ${i + 1}`, stage: 'done', criteria: [{ id: 'AC-1', text: 'The home page renders' }] })) });
-const render = (links: number) => renderToStaticMarkup(createElement(TestsView, { data: { window: 20, cases: [entry(links) as any] }, error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false }));
+const render = (links: number) => renderToStaticMarkup(createElement(TestsView, { data: { window: 20, cases: [entry(links) as any] }, view: 'cases', error: '', loading: false, filter: 'all', setFilter: noop, retry: noop, api: async () => ({}), canEdit: false }));
 const cells = (html: string) => html.split('<tbody>')[1].match(/<t[hd][ >][\s\S]*?<\/t[hd]>(?=<t[hd][ >]|<\/tr>)/g)!;
 
 test('unit:tests/tests-page-linked-work.test.ts — a case linked by 400 items shows the count, the latest three and the rest collapsed', () => {

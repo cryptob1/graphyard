@@ -17,7 +17,7 @@ export async function recordScenarioRun(db: Queryable, work: Pick<Work, 'id' | '
 }
 
 /** Evidence withdrawn after its run was recorded: the run stays in history, marked, and never decides a result. */
-async function withdrawnEvidence(db: Queryable): Promise<Set<string>> {
+export async function withdrawnEvidence(db: Queryable): Promise<Set<string>> {
   const rows = (await db.query(`SELECT e->>'id' AS id FROM work_items, jsonb_array_elements(document->'evidence') e WHERE e->>'proof' LIKE 'e2e:%' AND e ? 'revocation'`)).rows;
   return new Set(rows.map(row => row.id));
 }
