@@ -36,7 +36,7 @@ const name = (value: unknown) => typeof value === 'string' && value.trim() && va
 /** The where-facts a loop read names, or null when it names none or one that does not parse. */
 export function loopWhere(header: string | string[] | undefined): WhereThingsRun | null {
   const value = Array.isArray(header) ? header[0] : header;
-  if (!value || value.length > 2_000) return null;
+  if (!value || value.length > 4_000) return null;
   try {
     const parsed = JSON.parse(decodeURIComponent(value));
     const port = Number(parsed?.port);
