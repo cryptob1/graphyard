@@ -16,8 +16,8 @@ import type { Work } from './model/work.js';
 
 export const itemPreviewStates = ['starting', 'running', 'failed', 'cleaned'] as const;
 export type ItemPreviewState = (typeof itemPreviewStates)[number];
-/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, the loop that served it restarted, the server did not confirm its record, or it ran its configured lifetime. */
-export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted', 'unconfirmed', 'expired'] as const;
+/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, the loop that served it restarted, the server did not confirm its record, it ran its configured lifetime, or nobody used it for the idle period (GY-3291; opening its link restarts it). */
+export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted', 'unconfirmed', 'expired', 'idle'] as const;
 export type PreviewEndReason = (typeof previewEndReasons)[number];
 /** How many ended previews an item keeps beside its current one, newest last. */
 export const previewHistoryLimit = 5;
@@ -48,6 +48,8 @@ export const itemPreviewSchema = z.object({
   detail: z.string().max(1000),
   startedAt: instant, readyAt: instant.nullable(), cleanedAt: instant.nullable(),
   endReason: z.enum(previewEndReasons).nullable(),
+  /** GY-3291: when its link was last opened, written by the server: renews a running preview, and on an idle one asks the loop to restart it. */
+  lastUsedAt: instant.optional(),
   /** GY-1903: the preview's own state identity and database (null: a static site has none), and the credentials it was given — always none. */
   instance: z.string().max(200).optional(), database: z.string().max(200).nullable().optional(), secrets: z.array(z.string().max(200)).max(0).optional(),
 }).strict().superRefine((preview, context) => {
@@ -93,8 +95,10 @@ export function applyPreviewRecord(work: Work, preview: ItemPreview): string | n
   if (preview.path !== previewPath(work.key)) return `${work.key}'s preview is served at ${previewPath(work.key)}, not ${preview.path}`;
   const current = work.preview ?? null;
   if (current && current.id === preview.id) {
-    if (previewEnded(current) && JSON.stringify(current) !== JSON.stringify(preview)) return `${work.key}'s preview ${preview.id} already ended ${current.state}; a new head or restart starts a new preview`;
-    work.preview = preview;
+    // The link's last use is the server's own field: the loop's record neither carries nor clears it.
+    const { lastUsedAt, ...held } = current;
+    if (previewEnded(current) && JSON.stringify(held) !== JSON.stringify({ ...preview, lastUsedAt: undefined })) return `${work.key}'s preview ${preview.id} already ended ${current.state}; a new head or restart starts a new preview`;
+    work.preview = lastUsedAt ? { ...preview, lastUsedAt } : preview;
     return null;
   }
   if (preview.state !== 'starting') return `${work.key}'s current preview is ${current?.id ?? 'none'}, not ${preview.id}; only a starting preview replaces it`;
@@ -121,6 +125,10 @@ export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDel
   if (!application) return null;
   return { application, cases: cited.filter(id => delivery.cases[id] === application.id), omitted: cited.filter(id => delivery.cases[id] !== application.id && delivery.applications.some(entry => entry.id === delivery.cases[id])) };
 }
+
+/** Whether `preview` stopped idle and its link was opened since: the loop then starts it again (GY-3291). */
+export const previewRequested = (preview: ItemPreview | null | undefined) =>
+  preview?.endReason === 'idle' && !!preview.lastUsedAt && !!preview.cleanedAt && Date.parse(preview.lastUsedAt) > Date.parse(preview.cleanedAt);
 
 /** Why an item no longer wants its preview, or null while it does. */
 export function previewEndReason(work: Pick<Work, 'stage' | 'closure'>, wanted: boolean): PreviewEndReason | null {

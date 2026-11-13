@@ -3,8 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { resolve, extname } from 'node:path';
 import { demand } from '../model.js';
 import { Next, Sent, defineRoutes } from './routes.js';
-import { previewSitePathSchema, previewSiteUrl } from '../project-previews.js';
+import { previewRequested, previewSitePathSchema, previewSiteUrl } from '../project-previews.js';
 import { readEmblem } from '../model/emblem.js';
+import { save } from '../store.js';
+import { lockedWork } from '../store/locked-read.js';
+import type { Services } from './routes.js';
 
 const plain = (res: ServerResponse, status: number, text: string) => { res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(`${text}\n`); return Sent; };
 
@@ -20,6 +23,18 @@ export function previewOrigin(environment: NodeJS.ProcessEnv = process.env): URL
 }
 const onPreviewHost = (req: IncomingMessage, origin: URL | null) => !!origin && String(req.headers.host ?? '').toLowerCase() === origin.host;
 
+/** How often a running preview's use is written: its idle period is measured in minutes. */
+const previewUseInterval = 60_000;
+/** Records that `key`'s preview `id` was opened now (`lastUsedAt`), unless it was within `interval`. */
+async function notePreviewUse(services: Services, key: string, id: string, interval: number) {
+  await services.engine.store.transaction(async (db, now) => {
+    const work = (await lockedWork(db, [key])).find(item => item.key === key), preview = work?.preview;
+    if (!preview || preview.id !== id || (preview.lastUsedAt && now.getTime() - Date.parse(preview.lastUsedAt) < interval)) return;
+    work!.preview = { ...preview, lastUsedAt: now.toISOString() };
+    await save(db, work!, 'preview-link', 'preview.used', now, { preview: { id } });
+  });
+}
+
 /**
  * The built dashboard under dist/, with index.html standing in for client-side routes; ahead of it,
  * an item's running preview (GY-1902, project-previews.ts) at `/preview/KEY/`: the built site the
@@ -32,7 +47,8 @@ const onPreviewHost = (req: IncomingMessage, origin: URL | null) => !!origin && 
  * served, so no dashboard credential ever lives on that origin. Without one it is served sandboxed,
  * an opaque origin that cannot read the dashboard's storage or call its API as the viewer, its files
  * readable cross-origin so the site still loads its own data; storage is then unavailable to it.
- * An item with no running preview answers 404.
+ * An item with no running preview answers 404, except one stopped idle (GY-3291): opening its link
+ * records the request and answers a page that reloads until the loop has started it again.
  */
 export const staticRoutes = defineRoutes('static', [
   {
@@ -43,7 +59,15 @@ export const staticRoutes = defineRoutes('static', [
       if (origin && !separate) { res.writeHead(308, { Location: `${origin.origin}${url.pathname}${rest === undefined ? '/' : ''}${url.search}` }); res.end(); return Sent; }
       if (rest === undefined) { res.writeHead(308, { Location: `${previewSiteUrl(key!)}${url.search}` }); res.end(); return Sent; }
       const work = await services.engine.store.workDocument(key!), preview = work?.key === key ? work.preview : null;
+      if (preview?.endReason === 'idle') {
+        if (!previewRequested(preview)) await notePreviewUse(services, key!, preview.id, 0);
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '15' });
+        res.end(`<!doctype html><meta http-equiv="refresh" content="15"><title>${key} preview restarting</title><p>${key}'s preview stopped after going unused. It is starting again; this page reloads until it is ready.</p>\n`);
+        return Sent;
+      }
       if (preview?.state !== 'running') return plain(res, 404, `${key} has no running preview`);
+      // Every asset of the page is a request: only one a minute is written.
+      if (!preview.lastUsedAt || Date.now() - Date.parse(preview.lastUsedAt) >= previewUseInterval) await notePreviewUse(services, key!, preview.id, previewUseInterval);
       let path: string;
       try { path = decodeURIComponent(rest.slice(1)); } catch { return plain(res, 400, 'Invalid path'); }
       const file = async (name: string) => (await services.engine.store.pool.query('SELECT media_type, bytes FROM item_preview_files WHERE preview_id=$1 AND path=$2', [preview.id, name])).rows[0] as { media_type: string; bytes: Buffer } | undefined;

@@ -247,9 +247,10 @@ const bare = (html: string) => unexplainedWords(html)
   .map((word: string) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}:]+$/gu, ''))
   .filter((word: string) => cannotGuess.some(pattern => pattern.test(word)));
 
-test('plain-language support for manual:plain-language-review — every visible technical term has a hover definition from the shared glossary; the guide is under 300 words; the create form explains proofs', () => {
+test('plain-language support for manual:plain-language-review — every visible technical term has a hover definition from the shared glossary; the guide is under 550 words; the create form explains proofs', () => {
+  // GY-3295: the guide became the newcomer's Docs page (who decides, a first item, two diagrams); its FAQ and reference stay folded.
   const guide = markup(createElement(GuidePage));
-  assert.ok(words(guide).length <= 300, `guide is ${words(guide).length} words`);
+  assert.ok(words(guide).length <= 550, `guide is ${words(guide).length} words`);
   const form = markup(createElement(CreateWork, dashboard({ creating: true })));
   const screens: [string, string][] = [
     ['How Graphyard works', guide],
