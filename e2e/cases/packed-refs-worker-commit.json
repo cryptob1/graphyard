@@ -1,0 +1,8 @@
+{
+  "id": "packed-refs-worker-commit",
+  "title": "A worker moves its branch after git packs refs, and unsubmitted commits survive",
+  "description": "In a repository whose graphyard/* refs are packed and whose refs/heads/graphyard directory is absent, a confined worker commits on its assigned branch and completes even after a later pack; a head detached at a descendant of the branch completes and moves the branch; a closed attempt's commits on no branch stay reachable from refs/graphyard/preserved/<key>-<attempt>, which the next attempt's prompt names.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "packed refs, detached head and preserved commits", "run": "node --import tsx tests/helpers/run-tests.ts tests/packed-refs-worker-commit.test.ts", "timeoutSeconds": 600 }]
+}
