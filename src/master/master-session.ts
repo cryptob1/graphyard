@@ -48,9 +48,9 @@ export function masterHandover(input: { work: Work[]; cliPath: string }) {
     `- Your open items: ${input.work.filter(item => item.stage !== 'done').map(item => `${item.key}: ${item.title} [priority ${item.priority}; ${item.stage}; candidate ${item.candidate?.sha ?? 'none'}; merge ${item.mergeLedger?.state ?? 'not started'}; delivery ${item.delivery?.mergeSha ?? 'pending'}]`).join('; ').slice(0, 2000) || 'none'}`,
   ].join('\n');
 }
-/** The session's first request: the shared master prompt, the simplicity paragraph, the master's own recorded lessons (GY-3274), then the handover. */
+/** The session's first request: the shared master prompt, the simplicity paragraph, the product brief, the master's own recorded lessons (GY-3274), then the handover. */
 export const masterRequest = (config: MasterConfig, handover: string, memory?: ProjectMemory | null) =>
-  `${masterPrompt(config)} ${simplicityParagraph}${masterLessonsSection(memory)}${handover}`;
+  `${masterPrompt(config)} ${simplicityParagraph}${masterBriefSection(memory)}${masterLessonsSection(memory)}${handover}`;
 
 export interface MasterLaunch { agentName: string; pane: string; runtime: string; account: string | null; session: string | null; delivery: RequestDelivery; continuity?: Continuity }
 /**

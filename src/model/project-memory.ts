@@ -1,5 +1,5 @@
 import type { z } from 'zod';
-import type { memoryNoteSchema, memoryChangeSchema, projectMemorySchema } from '../model-boundary/project-memory.js';
+import type { memoryNoteSchema, memoryChangeSchema, productBriefSchema, productBriefChangeSchema, projectMemorySchema } from '../model-boundary/project-memory.js';
 import type { Work } from './work.js';
 import { docsWords } from './documentation.js';
 export const retainedMemoryNotes = 20;
@@ -16,8 +16,20 @@ export type MemoryNote = z.infer<typeof memoryNoteSchema>;
 export type MemoryChange = z.infer<typeof memoryChangeSchema>; // not strict: a memory written before GY-2873 carries `pitfalls`, and one before GY-2874 its retired records, which parsing drops
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 
+/** The install's one product brief, kept in project memory (GY-3274). */
+export const productBriefWordLimit = 800;
+export const retainedProductBriefChanges = 20;
+/** The brief's required Markdown sections, in order. */
+export const productBriefHeadings = ['Problem', 'Users', 'What success looks like', 'Current bets', 'Open questions'] as const;
+/** The sections worker and reviewer prompts carry, so they build and judge for the user. */
+export const productBriefWorkingHeadings = ['Problem', 'Users', 'What success looks like'] as const;
+/** How many words of each working section a worker or reviewer prompt carries. */
+export const productBriefSectionWords = 100;
+export type ProductBrief = z.infer<typeof productBriefSchema>;
+export type ProductBriefChange = z.infer<typeof productBriefChangeSchema>;
+
 export function emptyProjectMemory(now: string): ProjectMemory {
-  return { version: 1, updatedAt: now, notes: [], changes: [] };
+  return { version: 1, updatedAt: now, notes: [], changes: [], brief: null };
 }
 
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
@@ -94,6 +106,54 @@ export function masterLessonsSection(memory: ProjectMemory | null | undefined): 
   return `Master lessons, your own recorded experience, newest first: ${lessons.map(lesson => `- ${lesson.text}`).join(' ')} `;
 }
 
+/** One `## Heading` section of the brief's Markdown, or null when the brief lacks it. */
+function briefSection(markdown: string, heading: string): string | null {
+  const section = new RegExp(`^##+\\s+${heading}\\s*$`, 'im').exec(markdown);
+  if (!section) return null;
+  const rest = markdown.slice(section.index! + section[0].length);
+  const next = rest.search(/^##+\s+/m);
+  return (next < 0 ? rest : rest.slice(0, next)).trim();
+}
+
+/**
+ * Set the install's one product brief (GY-3274): Markdown of at most 800 words whose sections are
+ * exactly the required ones, each change kept in history with who and why, newest first.
+ */
+export function setProductBrief(memory: ProjectMemory, input: { markdown: string; by: string; why: string; at?: string }): ProductBrief {
+  const markdown = input.markdown.trim();
+  const why = input.why.trim();
+  if (!why) throw new Error('master brief set needs a REASON; every agent decision is attributable');
+  const missing = productBriefHeadings.filter(heading => briefSection(markdown, heading) === null);
+  if (missing.length) throw new Error(`The product brief needs a ${missing.map(heading => `## ${heading}`).join(', ')} section`);
+  const words = docsWords(markdown);
+  if (words > productBriefWordLimit) throw new Error(`The product brief is ${words} words, over the ${productBriefWordLimit}-word limit`);
+  const at = input.at ?? new Date().toISOString();
+  const previous = memory.brief;
+  const change: ProductBriefChange = { at, by: input.by, why, words };
+  const brief: ProductBrief = { markdown, updatedAt: at, by: input.by, why, history: [change, ...(previous?.history ?? [])].slice(0, retainedProductBriefChanges) };
+  memory.brief = brief;
+  memory.updatedAt = at;
+  return brief;
+}
+
+/** The whole brief as the master's launch prompt carries it, before its lessons. */
+export function masterBriefSection(memory: ProjectMemory | null | undefined): string {
+  const brief = memory?.brief;
+  return brief ? `Product brief for this install (updated ${brief.updatedAt} by ${brief.by}): ${brief.markdown} ` : '';
+}
+
+/** The brief's problem, users and success sections as worker and reviewer prompts carry them, each trimmed. */
+export function productBriefExcerpt(memory: ProjectMemory | null | undefined): string {
+  const brief = memory?.brief;
+  if (!brief) return '';
+  const trim = (text: string) => {
+    const words = text.split(/\s+/).filter(Boolean);
+    return words.length <= productBriefSectionWords ? text : `${words.slice(0, productBriefSectionWords).join(' ')}…`;
+  };
+  const sections = productBriefWorkingHeadings.flatMap(heading => { const text = briefSection(brief.markdown, heading); return text ? [`${heading}: ${trim(text)}`] : []; });
+  return sections.length ? `Product brief — ${sections.join(' ')} ` : '';
+}
+
 /** Record a verified merge in project memory. */
 export function recordChangeInMemory(memory: ProjectMemory, change: { key: string; sha: string; baseSha?: string | null; files: string[]; mergedAt: string }): boolean {
   if (!change.sha || !change.key) return false;
@@ -156,6 +216,10 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   });
   // The lessons the master marked for the workers it dispatches (GY-3274); no other role reads them.
   const lessons = role === 'worker' ? masterLessons(memory).filter(lesson => lesson.forWorkers) : [];
+  // The product brief's problem, users and success sections reach the roles that build and judge
+  // for the user (GY-3274): standing product context with its own fixed bound, not news against the
+  // notes-and-merges budget.
+  const brief = role === 'worker' || role === 'reviewer' ? productBriefExcerpt(memory) : '';
 
   // Filter changes: if baseSha provided, those since session base (or all recent in window)
   const baseSha = options?.baseSha;
@@ -166,9 +230,12 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (baseMerge) changes = changes.filter(c => c.sha !== baseMerge.sha && Date.parse(c.mergedAt) > Date.parse(baseMerge.mergedAt));
   changes.sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 
-  if (!notes.length && !changes.length && !lessons.length) return '';
+  if (!notes.length && !changes.length && !lessons.length && !brief) return '';
 
   const parts: string[] = ['Shared project memory:'];
+
+  // The product brief leads: it is what the work is for, before any news of it.
+  if (brief) parts.push(brief.trim());
 
   // Add notes
   if (notes.length) {

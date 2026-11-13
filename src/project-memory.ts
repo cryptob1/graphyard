@@ -5,8 +5,8 @@ import { emptyProjectMemory, masterLessons, updateProjectMemoryFromWork, type Me
 import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
 
-export { emptyProjectMemory, isNoteRoleRelevant, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterLessons, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type SessionRole } from './model/project-memory.js';
-export { projectMemorySchema } from './model-boundary/project-memory.js';
+export { emptyProjectMemory, isNoteRoleRelevant, masterBriefSection, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, productBriefExcerpt, productBriefHeadings, productBriefSectionWords, productBriefWordLimit, productBriefWorkingHeadings, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterLessons, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, retainedProductBriefChanges, setProductBrief, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type ProductBrief, type ProductBriefChange, type SessionRole } from './model/project-memory.js';
+export { projectMemorySchema, productBriefSchema, productBriefChangeSchema } from './model-boundary/project-memory.js';
 
 export const projectMemoryPath = (root: string) => resolve(root, '.graphyard', 'project-memory.json');
 

@@ -16,7 +16,7 @@ import { masterCredentialMask } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { readProjectMemory } from '../project-memory.js';
-import { masterLessonsSection } from '../model/project-memory.js';
+import { masterBriefSection, masterLessonsSection } from '../model/project-memory.js';
 import { accountLaunch } from './environments.js';
 import { type RequestDelivery, launchSession } from './launch.js';
 import { type HerdrAgent, herdrSessionPaths, stopCreatedHerdrTab } from './herdr.js';
@@ -233,16 +233,21 @@ export function masterPrompt(config: MasterConfig): string {
   // GY-1501: a supervised install has no operator-agent identity by design; that is its mode, not an onboarding fault.
   const supervised = config.supervision === 'supervised';
   const supervisedInstruction = `This install is supervised: an agent reviewer reviews each head and the control plane merges it, but supervised mode provisions no operator-agent identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identity. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
-  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}.${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status; guide master holds the loop's own procedure. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on system-driven items. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`}`;
+  // GY-3274: the master is the project's chief — it owns the product's success, learns the problem
+  // and the users before acting, keeps the product brief, ranks work by its success signals and
+  // re-checks those signals after each deploy; the owner's stated mission and priorities override that ranking.
+  const founder = `You are the dedicated Graphyard master agent for ${config.repository} and this project's chief, responsible for the product succeeding: learn the problem and users first (repository, docs, the running app, owner messages, item history), write and revise the product brief, turn it into goals and work items ranked by impact on its success signals, re-check them after each deploy, and record lessons; the owner's stated mission and priorities override that ranking.`;
+  const prompt = `${founder}${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Never implement, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, node ${config.cliPath} master guide and master status; guide master holds its procedure. Leave dispatch, review, proofs and merge to node ${config.cliPath} master run; workers claim for themselves; the CLI refuses them on system-driven items. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run master autonomy --admin-token-stdin --apply.`}`}`;
   const reviewInstruction = supervised
     ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no other session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
-    : `Independent review and proof collection start on their own: master run launches them for each candidate's exact head. Read findings and route rework; never launch or perform a review yourself, and never submit evidence.`;
+    : `Independent review and proof collection start on their own: master run launches them for each candidate's exact head. Read findings and route rework; never review yourself, never submit evidence.`;
   return `${prompt} ${reviewInstruction}`;
 }
 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: ChildRun) {
   if (!kind) throw new Error('Choose a supported master agent kind');
   const config = await loadMasterConfig(root);
+  const memory = await readProjectMemory(root).catch(() => null);
   const masterRetry = `graphyard master start ${kind}, once masterAgentName in .graphyard/master.json is a name Herdr can launch`;
   const name = nameForLaunch(masterRetry, () => config.masterAgentName);
   if (agents.some(agent => agent.name === name)) throw new Error(`Master agent ${name} is already visible in Herdr; the loop supervises the live master session (master status, daemon.master) — close it there or in Herdr before starting another`);
@@ -268,11 +273,11 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
     // shared master prompt (GY-898), the same one the loop's launch carries with its handover,
-    // with the master's own recorded lessons (GY-3274) after it.
+    // with the product brief and then the master's own recorded lessons (GY-3274) after it.
     // The master is confined like every other launched session (GY-1658): its configuration,
     // administration and browser-flow commands run from the coordinator root with the checkout
     // read-only, its managed .graphyard state writable; a host that cannot confine it refuses.
-    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config) + masterLessonsSection(await readProjectMemory(root).catch(() => null)), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)), herdrPaths: herdrSessionPaths(config) } }));
+    ({ delivery } = await launchSession({ name, kind, args: launch.args, text: masterPrompt(config) + masterBriefSection(memory) + masterLessonsSection(memory), workspace: config.herdrWorkspace, label: `Graphyard master · ${config.repository}`, environment: { GRAPHYARD_MASTER: '1', ...launch.environment }, run, onPane: (nextPane, nextTab) => { pane = nextPane; tabId = nextTab; }, start: { directory: root, confirm: 'follow', retry: masterRetry, environment: launch.environment, confinement: 'master', masterStateDirectory: dirname(config.credentialFile), stateDirectories, credentialMask: masterCredentialMask(config, runtimeLoginHomes(launch.environment)), herdrPaths: herdrSessionPaths(config) } }));
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     if (pane || tabId || malformedTab) try { await stopCreatedHerdrTab(pane, tabId ?? malformedTab, run); }

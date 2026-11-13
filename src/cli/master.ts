@@ -12,6 +12,7 @@ import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
 import { confinedMaster, operationsCommand } from './master/operations.js';
 import { lessonsCommand } from './master/lessons.js';
+import { briefCommand } from './master/brief.js';
 import { loopCommand } from './master/loop.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
@@ -43,6 +44,9 @@ export const masterCommands = defineCommands([
       '  master lesson add TEXT [--for workers] | remove ID | list',
       '                                Record a durable lesson the master reads on every launch;',
       '                                --for workers also carries it in worker prompts',
+      '  master brief set FILE REASON | show',
+      '                                Keep the product brief (problem, users, success signals, bets,',
+      '                                open questions; at most 800 words) the master prompt carries',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); credential paths stay operator-only',
       '  master run [--once] [--interval SECONDS]',
@@ -73,7 +77,7 @@ export const masterCommands = defineCommands([
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.
-      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, lessonsCommand, operationsCommand, loopCommand];
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, lessonsCommand, briefCommand, operationsCommand, loopCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },
