@@ -138,12 +138,60 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
 }
 
 type Invitation = { principal: string; role: string; expiresAt: string };
+type ShareLink = { url: string; savedAt: string; expiresAt: string; state: 'ok' | 'refresh' | 'expired' };
+type TeamAccess = { summary: string; port: string; installUrl: string | null; tailnet: boolean; mode: 'api' | 'reusable'; shareLink: ShareLink | null; guidance: string | null; acl: string };
+
+const day = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleDateString()}</time>;
+
+/**
+ * GY-3294: the machine's Tailscale access every install on it shares (src/team-access.ts): the share
+ * link pasted once for the machine, or the optional API token, and the ACL that keeps a shared visitor
+ * on this install's port.
+ */
+function MachineAccess({ api, access, setAccess }: Pick<Dashboard, 'api'> & { access: TeamAccess; setAccess(value: TeamAccess): void }) {
+  const [error, setError] = useState('');
+  const save = (path: string, body: object) => async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setError('');
+    const form = event.currentTarget;
+    try { setAccess(await api(path, body)); form.reset(); } catch (e) { setError((e as Error).message); }
+  };
+  const [link, setLink] = useState(''), [token, setToken] = useState('');
+  const share = access.shareLink;
+  return <div aria-label="Team access on this machine" role="group">
+    <p>{access.summary}</p>
+    <p>{access.installUrl ? <>This install: <a href={access.installUrl}>{access.installUrl}</a> (port {access.port}).</> : <>Tailscale is not serving this machine, so this install (port {access.port}) is reachable here only. Install Tailscale and rerun <code>graphyard up</code> to share it.</>}</p>
+    {share ? <p data-share-state={share.state} className={share.state === 'ok' ? undefined : 'amber'}>
+      Machine share link: <a href={share.url}>{share.url}</a> <CopyButton text={share.url} label="Copy share link"/>. Tailscale expires it {day(share.expiresAt)}.
+      {share.state === 'refresh' && ' It expires within seven days: make a fresh one and paste it below.'}
+      {share.state === 'expired' && ' It has expired: make a fresh one and paste it below before inviting anyone.'}
+    </p> : <p className="amber" data-share-state="missing">{access.guidance}</p>}
+    <form onSubmit={save('team-access/share-link', { url: link })}>
+      <label>Tailscale share link<input name="link" value={link} onChange={event => setLink(event.target.value)} required placeholder="https://login.tailscale.com/…"/></label>
+      <button>Save for this machine</button>
+    </form>
+    <MoreDetails summary="Optional: a single-use Tailscale invite per person">
+      <p>Save a Tailscale API access token and each invite makes its own single-use device invite instead of the reusable link. It is saved on this machine only (owner-only file) and never shown again.</p>
+      <p>{access.mode === 'api' ? 'A token is saved: invites make single-use Tailscale links.' : 'No token is saved: invites use the machine share link.'}</p>
+      <form onSubmit={save('team-access/tailscale-token', { token })}>
+        <label>Tailscale API token<input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)}/></label>
+        <button>{token ? 'Save token' : 'Remove token'}</button>
+      </form>
+    </MoreDetails>
+    <MoreDetails summary="Optional: keep shared people on this install's port">
+      <p>Add this grant to your tailnet policy so people you share the machine with reach port {access.port} only:</p>
+      <pre aria-label="ACL example">{access.acl}</pre>
+    </MoreDetails>
+    {error && <p role="alert" className="amber">{error}</p>}
+  </div>;
+}
 
 function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
   const [invites, setInvites] = useState<Invitation[]>([]);
-  const [latest, setLatest] = useState<(Invitation & { url: string }) | null>(null);
+  const [latest, setLatest] = useState<(Invitation & { url: string; message: string }) | null>(null);
+  const [access, setAccess] = useState<TeamAccess | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  useEffect(() => { api('team-access').then(setAccess, () => setAccess(null)); }, [api]);
   async function revoke(name: string) {
     setBusy(true); setError('');
     try {
@@ -154,16 +202,17 @@ function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
     finally { setBusy(false); }
   }
   return <PageSection title="Invite someone" label="Invite someone">
-    <p>Send a one-time sign-in link. Viewers can read the yard; maintainers can also file work.</p>
+    {access && <MachineAccess api={api} access={access} setAccess={setAccess}/>}
+    <p>Invite makes one message with both links: the machine's Tailscale link and a one-time sign-in link for this install, valid 24 hours. Viewers can read the yard; maintainers can also file work.</p>
     <form onSubmit={async event => {
       event.preventDefault();
       const form = event.currentTarget, data = new FormData(form);
       setBusy(true); setError('');
       try {
-        const { principal, role, expiresAt, code } = await api('invites', { name: String(data.get('name')).trim(), role: data.get('role') });
+        const { principal, role, expiresAt, link, message } = await api('invites', { name: String(data.get('name')).trim(), role: data.get('role'), origin: location.origin });
         const invitation = { principal, role, expiresAt };
         setInvites(rows => [...rows, invitation]);
-        setLatest({ ...invitation, url: `${location.origin}/#sign-in=${code}` });
+        setLatest({ ...invitation, url: link, message });
         form.reset();
       } catch (e) { setError((e as Error).message); }
       finally { setBusy(false); }
@@ -175,6 +224,7 @@ function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
     {error && <p role="alert" className="amber">{error}</p>}
     {latest && <div role="status">
       <p>One-time sign-in link for {latest.principal} ({latest.role}). Link expires <time dateTime={latest.expiresAt}>{new Date(latest.expiresAt).toLocaleString()}</time>.</p>
+      <label>Invitation message<textarea readOnly rows={6} value={latest.message}/></label> <CopyButton text={latest.message} label="Copy message"/>
       <label>Sign-in link<input readOnly value={latest.url}/></label> <CopyButton text={latest.url} label="Copy"/>
     </div>}
     <h3>Invited from this page</h3>

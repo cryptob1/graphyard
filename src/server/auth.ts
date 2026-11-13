@@ -17,6 +17,7 @@ import { Next, type Route, type RouteContext, type RouteModule, type Services } 
 import { leaseCommandRequest } from './routes/work.js';
 import { launchTokenActor } from './review-verdict.js';
 import { signinClaimFromEnv } from './routes/signin.js';
+import { defaultTailscaleApi } from '../team-access.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
@@ -167,6 +168,8 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  * sign-ins until an existing session expires or signs out.
  */
 export const signInLinkTtlMs = 10 * 60_000;
+/** GY-3294: a teammate's invite link stays redeemable for 24 hours (the operator's own sign-in link for 10 minutes). */
+export const inviteLinkTtlMs = 24 * 3_600_000;
 export const signInSessionTtlMs = 90 * 86_400_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
@@ -198,14 +201,22 @@ export class HumanSignIn {
    * session: role reader, so it reads everything; a maintainer also files work.
    */
   async invite(issuer: Principal, configured: string[], name: string, team: string) {
+    this.checkInvite(issuer, configured, name, team);
+    await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
+      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(this.clock())]);
+    return { ...this.link({ id: name, role: 'reader', team: team as TeamRole, displayName: name }, inviteLinkTtlMs), role: team };
+  }
+
+  /** The checks an invite passes before anything is made for it (GY-3294: before a Tailscale device invite too). */
+  checkInvite(issuer: Principal, configured: string[], name: string, team: string) {
     operatorOnly(issuer, configured.includes(issuer.id));
     demand(typeof name === 'string' && /^[^\s\u0000-\u001f\u007f]{1,100}$/.test(name), 'NAME is a label of 1-100 characters without spaces, such as an email or GitHub login', 400);
     demand((teamRoles as readonly string[]).includes(team), `--role is one of ${teamRoles.join(', ')}`, 400);
     demand(!configured.includes(name), `${name} is a configured principal; invite a teammate under a name of their own`, 409);
-    await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
-      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(this.clock())]);
-    return { ...this.link({ id: name, role: 'reader', team: team as TeamRole, displayName: name }), role: team };
   }
+
+  /** GY-3294: only the operator's human session reads or changes the machine's team access. */
+  checkOperator(issuer: Principal, configured: string[]) { operatorOnly(issuer, configured.includes(issuer.id)); }
 
   /** GY-3215: revoking a teammate removes them, their unopened links and every session they hold, at once. */
   async revoke(issuer: Principal, configured: string[], name: string) {
@@ -217,11 +228,11 @@ export class HumanSignIn {
     return { revoked: name, sessionsEnded: sessions.rowCount ?? 0 };
   }
 
-  private link(principal: Principal) {
+  private link(principal: Principal, ttl = signInLinkTtlMs) {
     const now = this.prune(), code = randomBytes(32).toString('base64url');
     bounded(this.links, maxSignInLinks - 1);
-    this.links.set(digest(code), { principal, expiresAt: now + signInLinkTtlMs });
-    return { code, principal: principal.id, expiresAt: new Date(now + signInLinkTtlMs).toISOString() };
+    this.links.set(digest(code), { principal, expiresAt: now + ttl });
+    return { code, principal: principal.id, expiresAt: new Date(now + ttl).toISOString() };
   }
 
   /** Redeem a link once: it is gone whether or not it was still valid, and a live one opens a human session for its principal. */
@@ -264,7 +275,7 @@ export class HumanSignIn {
   }
 }
 
-/** Drop the entries nearest expiry until at most `room` remain. Every entry of a table has the same lifetime, so insertion order is expiry order. */
+/** Drop the oldest entries until at most `room` remain. */
 function bounded(table: Map<string, { expiresAt: number }>, room: number) {
   for (const key of table.keys()) { if (table.size <= room) break; table.delete(key); }
 }
@@ -273,7 +284,7 @@ const signIns = new WeakMap<Services, HumanSignIn>();
 /** The sign-in table of one assembled control plane. */
 export function humanSignIn(services: Services) {
   let table = signIns.get(services);
-  if (!table) signIns.set(services, table = new HumanSignIn(services.engine.store));
+  if (!table) signIns.set(services, table = new HumanSignIn(services.engine.store, services.clock));
   return table;
 }
 
@@ -283,7 +294,7 @@ export function humanSignIn(services: Services) {
  * ran with (the seeded proof-grant roster, deciding whether an over-limit roster warns or
  * refuses), the environment the limits are read from, the deployment watch, and the responder.
  */
-export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
+export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null; clock?: () => number }
 
 /** Wire the engine, its integrations and the principals into the shared services. */
 export function assembleServices(engine: Engine, credentials: Credential[], options: ServerOptions = {}): Services {
@@ -301,5 +312,8 @@ export function assembleServices(engine: Engine, credentials: Credential[], opti
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
   // Proof authority is the roster's: each principal may prove exactly the --proof patterns its entry carries.
   engine.principals = credentials.map(({ token, ...actor }) => actor);
-  return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env),
+    ...(options.clock ? { clock: options.clock } : {}),
+    // GY-3294: the machine directory every install on this host shares (team-access.ts), the Tailscale API, and the port the dashboard is published on.
+    teamAccess: { machineDir: env.GRAPHYARD_MACHINE_DIR || null, tailscaleApi: env.GRAPHYARD_TAILSCALE_API || defaultTailscaleApi, port: env.GRAPHYARD_LOCAL_VIEW_PORT || null } };
 }
