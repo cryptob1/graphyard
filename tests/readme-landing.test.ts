@@ -9,7 +9,7 @@ const read = (path: string) => readFileSync(new URL(path, root), 'utf8');
 test('unit:tests/readme-landing.test.ts — README is a short landing page naming AI coding agents, Claude Code and Codex, with Why, Where things run, Quick start and Learn more sections', () => {
   const readme = read('README.md');
   const words = readme.trim().split(/\s+/).length;
-  assert.ok(words <= 500, `README is at most 500 words: ${words}`);
+  assert.ok(words <= 460, `README is at most 460 words: ${words}`);
 
   const [title, , pitch] = readme.split('\n');
   assert.equal(title, '# Graphyard', 'README opens with an H1');
