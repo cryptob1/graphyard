@@ -28,7 +28,7 @@ import { liveRun } from '../runner/registry.js';
 import { runTranscript } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
-import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
+import { cycleBaseTip, dependencyDirectories, failureText, preservedWorkNote, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
@@ -366,7 +366,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // GY-2956: the prompt reads the claimed document when the preparer returned it, not the
     // snapshot the dispatch chose from — an attempt preserved in the same cycle is in the claim's
     // record, and a handoff built from the older copy would send the worker back to the shared base.
-    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework, diagnosis);
+    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework, diagnosis + await preservedWorkNote(root, work.key, defaultChildRun));
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;

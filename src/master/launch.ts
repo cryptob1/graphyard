@@ -164,7 +164,10 @@ export const launcherRootUndetermined = (argv1: string | undefined = process.arg
 export function prepareConfinedGitPaths(root: string): void {
   const gitDir = checkoutGitDirectory(root);
   if (!existsSync(gitDir)) return;
-  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
+  // GY-3279: the `.keep` directory holds `refs/heads/graphyard` in place. Git removes that directory
+  // when a pack leaves it empty, which unmounts it from every running session and leaves the
+  // read-only `refs/heads` above it, so no worker could commit; Git reads no ref from a dot name.
+  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard', '.keep'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
   const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
