@@ -149,7 +149,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
-  for (const page of ['Test cases', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
+  for (const page of ['Test cases', 'Operator automation', 'Agents', 'Product']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
@@ -157,8 +157,8 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
-  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now', 'Product'], 'a signed-in person has a Now page and the product brief beside Work');
+  assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents', 'Product']);
+  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
   agent.actor = { ...agent.actor, sessionKind: 'ai' };
   assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), [], 'a section with one page draws no tab row');
@@ -166,15 +166,15 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
   const configured = { validation: true, releases: true, automation: true };
-  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'scenarios'), ['Test cases', 'Agents']);
-  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'scenarios'), []);
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'scenarios'), ['Test cases', 'Agents', 'Product']);
+  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'scenarios'), ['Test cases', 'Product']);
   for (const role of ['reader', 'worker']) assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
   // A feature with nothing configured is hidden, not rendered as an empty explainer; an unknown one stays.
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
-  assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents']);
+  assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents', 'Product']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: false, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.

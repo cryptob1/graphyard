@@ -56,9 +56,6 @@ export const views: readonly View[] = [
   // What waits on the human (GY-89) is the Work page's Needs you group (GY-161): one place, answered on the item page.
   // This page, the full list with recently answered requests, is opened from that group, not from the navigation.
   { id: 'needs-you', icon: '☝', label: 'Needs you', render: dashboard => <HumanRequestsPage {...dashboard}/> },
-  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274):
-  // what the product is for, beside the work that serves it.
-  { id: 'product', icon: '◎', label: 'Product', section: 'work', render: dashboard => <ProductPage api={dashboard.api}/> },
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
@@ -74,6 +71,8 @@ export const views: readonly View[] = [
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
   { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt} onOpenSetup={role(dashboard) === 'admin' ? () => dashboard.setView('setup') : undefined}/> },
+  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for.
+  { id: 'product', icon: '◎', label: 'Product', section: 'settings', render: dashboard => <ProductPage api={dashboard.api}/> },
   // The first-run checklist (GY-1419), for the admin who sets Graphyard up: the sign-in link `graphyard up` prints opens it,
   // and Settings → Agents links to it, so it is not a navigation entry of its own.
   { id: 'setup', icon: '✔', label: 'Setup', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
