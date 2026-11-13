@@ -394,9 +394,9 @@ export async function composeLeftovers(project: string, options: { docker?: Dock
 
 /**
  * The restart recovery (GY-1903): every preview Compose project on the daemon whose owner process is
- * gone — or that names no owner, or one this reader cannot judge and older than
- * `tmpReclaimMinAgeMs` — removed with its volumes and networks. A project whose owner still runs is
- * left serving. Answers the removed projects.
+ * gone — or one this reader cannot judge and older than `tmpReclaimMinAgeMs` — removed with its
+ * volumes and networks. A project whose owner still runs is left serving, and one naming no owner is
+ * not known to be Graphyard's, so it is left alone (GY-3291). Answers the removed projects.
  */
 export async function sweepComposePreviews(options: { docker?: Docker; env?: Record<string, string>; procRoot?: string; now?: () => number } = {}): Promise<string[]> {
   const docker = options.docker ?? defaultDocker, env = options.env ?? dockerEnvironment({ PATH: process.env.PATH ?? '' }), procRoot = options.procRoot ?? '/proc';
@@ -419,6 +419,7 @@ export async function sweepComposePreviews(options: { docker?: Docker; env?: Rec
   }
   const removed: string[] = [], failed: string[] = [], now = (options.now ?? Date.now)();
   for (const [project, list] of [...owners].sort(([a], [b]) => a < b ? -1 : 1)) {
+    if (!list.length) continue;
     const live = list.some(owner => !tempOwnerGone(owner, procRoot) && (tempOwnerJudgeable(owner, procRoot) || now - Date.parse(owner.at) < tmpReclaimMinAgeMs));
     if (live) continue;
     try { await removeComposeProject(project, { docker, env }); removed.push(project); } catch (error) { failed.push(error instanceof Error ? error.message : String(error)); }
