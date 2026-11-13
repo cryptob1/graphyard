@@ -2,6 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
 
+// This spec proves motion, so it asks for it over the suite's reduced-motion default.
+test.use({ reducedMotion: 'no-preference' });
+
 // GY-3272 AC-4: the yard moves. A one-second boot sequence plays once per browser session and any
 // key or click skips it; a stage change glides the row to its new group instead of jumping; an
 // item in trial carries a light streak along its row; the rain falls in two parallax sheets, the

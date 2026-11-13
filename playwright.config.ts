@@ -9,6 +9,8 @@ export default defineConfig({
   // GY-3267: under an e2e command step the trial names E2E_SCREENSHOTS_DIR; each test's last page is captured
   // there, and the newest becomes the case's screenshot on the item page.
   ...(process.env.E2E_SCREENSHOTS_DIR ? { outputDir: process.env.E2E_SCREENSHOTS_DIR } : {}),
-  use: { baseURL: `http://127.0.0.1:${port}`, headless: true, screenshot: process.env.E2E_SCREENSHOTS_DIR ? 'on' : 'off' },
+  // GY-3272: Night Yard's ambient motion (rain, streaks, the boot veil) would run on every page of
+  // every test; the suite runs with reduced motion, and the specs that prove the motion ask for it.
+  use: { baseURL: `http://127.0.0.1:${port}`, headless: true, reducedMotion: 'reduce', screenshot: process.env.E2E_SCREENSHOTS_DIR ? 'on' : 'off' },
   webServer: { command: `${vite('build')} && ${vite(`preview --host 127.0.0.1 --port ${port} --strictPort`)}`, url: `http://127.0.0.1:${port}`, reuseExistingServer: false },
 });

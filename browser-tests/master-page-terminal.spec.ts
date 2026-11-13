@@ -9,6 +9,9 @@ import { delimiter, join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { serveXterm } from './xterm';
 
+// This spec proves motion, so it asks for it over the suite's reduced-motion default.
+test.use({ reducedMotion: 'no-preference' });
+
 const stub = resolve('fixtures/herdr-terminal-stub');
 const settled = { timeout: 15_000 };
 

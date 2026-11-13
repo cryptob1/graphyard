@@ -2,6 +2,9 @@ import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { LINES, friendlyName } from '../web/fun';
 
+// This spec proves motion, so it asks for it over the suite's reduced-motion default.
+test.use({ reducedMotion: 'no-preference' });
+
 // GY-3268: the dashboard is fun — named agents, a line about building, playful empty states and a
 // small celebration when work ships — and the Fun toggle (or reduced motion, for the confetti) turns it off.
 const builder = 'graphyard-claude-1', master = 'cryptob1-graphyard-master';
