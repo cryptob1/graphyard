@@ -90,19 +90,30 @@ test('e2e:merge-proof-review-admission transactional push refuses missing eviden
   try {
     const engine = new Engine(store, 120, 'fixture/admission');
     engine.gitRunner = async () => ({ status: 0, stdout: '', stderr: '' });
-    for (const missing of ['proof', 'review', 'none']) {
-      const work = admissionFixture(); work.id = randomUUID(); work.key = `GY-${missing === 'proof' ? 1 : missing === 'review' ? 2 : 3}`;
+    let index = 0;
+    for (const missing of ['proof', 'review', 'none', 'proof-sha', 'proof-baseSha', 'proof-policyRevision', 'review-sha', 'review-baseSha', 'review-policyRevision']) {
+      const work = admissionFixture(); work.id = randomUUID(); work.key = `GY-${++index}`;
       Object.assign(work, { revision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, priority: 1 });
       if (missing !== 'proof') attest(work);
       if (missing !== 'review') approve(work);
+      if (missing.includes('-')) {
+        const [kind, field] = missing.split('-');
+        Object.assign(kind === 'proof' ? work.evidence[0] : work.observation!.reviews[0], { [field]: field === 'policyRevision' ? 99 : 'd'.repeat(40) });
+      }
       await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
       const record = (body: unknown) => recordMergeEvent({ engine } as Services, { id: 'writer', role: 'coordinator' }, work.id, body, randomUUID());
       await record({ kind: 'intent', head: H, baseTip: B, mergeSha: 'c'.repeat(40), risk: 'sensitive', at });
       await record({ kind: 'trial', head: H, baseTip: B, mergeSha: 'c'.repeat(40), outcome: 'verdict', build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: [], proofs: { 'e2e:fixture': { executed: 1, failed: 0 } }, durationMs: 1, attempts: [] });
       const push = () => record({ kind: 'pushed', mergeSha: 'c'.repeat(40), pushedAt: at });
-      if (missing === 'none') await push();
-      else {
+      const reconcile = () => record({ kind: 'reconciled', mergeSha: 'c'.repeat(40), observedTip: 'c'.repeat(40) });
+      if (missing === 'none') {
+        await push(); await reconcile();
+        const delivered = (await store.workDocument(work.id))!;
+        assert.equal(delivered.stage, 'done');
+        assert.deepEqual(delivered.criteria[1].proofs, ['manual:post-deploy/audit']);
+      } else {
         await assert.rejects(push, /merge admission refused/);
+        await assert.rejects(reconcile, /merge admission refused/);
         const rows = await store.pool.query("SELECT seq FROM events WHERE work_id=$1 AND kind='merge.pushed'", [work.id]);
         assert.equal(rows.rowCount, 0, 'refusal rolls back the history mutation');
       }
@@ -141,4 +152,54 @@ test('e2e:merge-proof-review-admission audit distinguishes absent proof from emp
   assert.equal(audit.coverage[0].externalBlockers.length, 1);
   assert.equal(audit.coverage[1].audited, 0);
   assert.match(audit.coverage[1].externalBlockers[0], /admission snapshot unavailable/);
+});
+
+import { awaitsMerge } from '../src/model/merge-queue.js';
+import { unproducedManualProofs } from '../src/model/unproduced-attestation.js';
+test('e2e:merge-proof-review-admission missing attestation stays actionable without retrial each cycle', () => {
+  const work = admissionFixture(); approve(work);
+  work.mergeLedger!.state = 'refused';
+  work.mergeLedger!.refusal = { kind: 'merge', reason: mergeCandidateHold(work)! };
+  Object.assign(work, evaluate(work, [work], new Date(at)));
+  assert.equal(work.stage, 'acceptance');
+  assert.deepEqual(unproducedManualProofs(work, [work], new Date(at)), ['manual:checked']);
+  for (let i = 0; i < 20; i++) assert.equal(awaitsMerge(work, { [work.key]: work.mergeLedger! }, Date.parse(at) + i * 60_000), false);
+  attest(work);
+  Object.assign(work, evaluate(work, [work], new Date(at)));
+  assert.equal(awaitsMerge(work, { [work.key]: work.mergeLedger! }, Date.parse(at)), true);
+});
+
+import { recordReviewLaunch, recordReviewVerdict, tokenHashOf } from '../src/server/review-verdict.js';
+test('e2e:merge-proof-review-admission launched verdict persists its policy and refuses a changed binding', async () => {
+  const store = await withDatabase('admission-review-binding'); await store.init();
+  try {
+    const engine = new Engine(store, 120, 'fixture/review');
+    const services = { engine } as Services;
+    let index = 20;
+    for (const change of ['none', 'head', 'base', 'policy']) {
+      const work = admissionFixture(); work.id = randomUUID(); work.key = `GY-${++index}`;
+      Object.assign(work, { revision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, priority: 1 });
+      await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
+      const token = 'f'.repeat(64);
+      await recordReviewLaunch(services, { id: 'launcher', role: 'coordinator' }, work.id,
+        { reviewer: 'independent', head: H, baseTip: B, tokenHash: tokenHashOf(token), expiresAt: new Date(Date.now() + 60_000).toISOString() }, randomUUID());
+      if (change !== 'none') {
+        const current = (await store.workDocument(work.id))!;
+        if (change === 'policy') current.policyRevision++;
+        if (change === 'head') current.candidate!.sha = 'd'.repeat(40);
+        if (change === 'base') current.observation!.mergeBase = 'd'.repeat(40);
+        await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(current)]);
+      }
+      const post = () => recordReviewVerdict(services, { id: 'independent', role: 'reader' }, work.id,
+        { sha: H, event: 'APPROVE', body: 'The fixture meets its criteria.', token }, randomUUID());
+      if (change !== 'none') await assert.rejects(post, /changed since launch/);
+      else {
+        await post();
+        const recorded = (await store.workDocument(work.id))!;
+        assert.equal(recorded.observation!.reviews[0].policyRevision, 1);
+        assert.equal(recorded.reviewVerdicts!.verdicts[0].reviewer, 'independent');
+        assert.equal(recorded.reviewLaunch!.verdict!.policyRevision, 1);
+      }
+    }
+  } finally { await store.close(); }
 });

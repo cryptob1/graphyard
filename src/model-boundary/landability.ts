@@ -11,7 +11,8 @@ import type {  } from './merge-ledger.js';
  * judge of the tests, not a producer: each criterion's `unit:`/`integration:`/`e2e:` proof needs
  * executed > 0 and failed = 0 in `work.mergeLedger.trial.proofs` for the current head (GY-2965: an
  * `e2e:` proof's counts are its bound case's run against the served head; a missing or failing case
- * refuses the head at the trial itself); a declared merge-time `manual:` attestation is always required; and producer evidence is ignored, so no independence refusal is read.
+ * refuses the head at the trial itself); a declared merge-time `manual:` attestation is always required.
+ * Mechanical producer evidence is ignored; manual evidence retains its binding and independence checks.
  */
 function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
   const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
@@ -28,7 +29,7 @@ function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (Landabilit
     }
     if (family === 'manual') {
       const evidence = currentEvidence(work, proof, now);
-      return evidence && evidenceProves(proof, evidence) ? null : `${proof} needs a trusted passing attestation for this candidate and policy`;
+      return evidence && evidenceProves(proof, evidence) ? null : `${proof} needs trusted passing evidence, with skipped = 0, for this candidate and policy`;
     }
     // `e2e:` runs in release validation; any other family was a producer's, whose evidence this mode ignores.
     return null;

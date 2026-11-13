@@ -50,13 +50,13 @@ test('unit:landability-control-plane-ledger-proofs — a control-plane candidate
   assert.deepEqual(acceptance(untried), [
     `AC-1: unit:item-works needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
     `AC-1: integration:item-holds needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
-    'AC-1: manual:item-looks needs a trusted passing attestation for this candidate and policy',
+    'AC-1: manual:item-looks needs trusted passing evidence, with skipped = 0, for this candidate and policy',
     `AC-1: e2e:item-ships needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
   ], 'normal risk still needs its declared manual attestation; the e2e case is the trial\'s too');
   const passed = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } }) });
-  assert.deepEqual(acceptance(passed), ['AC-1: manual:item-looks needs a trusted passing attestation for this candidate and policy']);
+  assert.deepEqual(acceptance(passed), ['AC-1: manual:item-looks needs trusted passing evidence, with skipped = 0, for this candidate and policy']);
   const failing = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 1 }, 'integration:item-holds': { executed: 0, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } }) });
-  assert.deepEqual(acceptance(failing).map(reason => reason.replace(/^.*; /, '')), ['the trial ran 2 and 1 failed', 'the trial ran 0 and 0 failed', 'AC-1: manual:item-looks needs a trusted passing attestation for this candidate and policy']);
+  assert.deepEqual(acceptance(failing).map(reason => reason.replace(/^.*; /, '')), ['the trial ran 2 and 1 failed', 'the trial ran 0 and 0 failed', 'AC-1: manual:item-looks needs trusted passing evidence, with skipped = 0, for this candidate and policy']);
   const stale = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 } }, sha('older-head')) });
   assert.equal(acceptance(stale).length, 4, 'a trial of another head proves nothing for this one');
   // Sensitive: the manual attestation is required; trusted producer evidence for the unit proof changes nothing.

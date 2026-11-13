@@ -10,9 +10,12 @@ export function auditAdmission(work: Work, at: string, all: Work[] = [work]) {
   const verdict = evaluateLandability(work, all, new Date(at));
   const missingProofs = verdict.verdict === 'refused' ? verdict.reasons.filter(r => r.gate === 'acceptance').map(r => r.reason) : [];
   const approval = exactApproval(work) ?? carriedApproval(work);
-  const missingReview = riskOf(work).risk === 'sensitive' && !approval;
+  const recordedRisk = work.mergeLedger?.risk;
+  const risk = recordedRisk === 'sensitive' || recordedRisk === 'normal' ? recordedRisk : riskOf(work).risk;
+  const missingReview = risk === 'sensitive' && !approval;
   const displayOnly = !!approval && !work.reviewVerdicts?.verdicts.length;
   return { key: work.key, head: work.candidate?.sha ?? null, base: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision,
+    risk, riskSource: recordedRisk === 'sensitive' || recordedRisk === 'normal' ? 'merge-intent' : 'current-policy-estimate',
     classification: missingProofs.length || missingReview ? 'missing-admission-evidence' : displayOnly ? 'display-only' : 'satisfied',
     missingProofs, missingReview, approval, carry: carriedApproval(work) ? currentCarry(work) : null,
     deferred: work.criteria.flatMap(c => c.proofs.filter(postDeployProof)), remediation: [] as string[] };
@@ -51,7 +54,7 @@ export async function auditInstalls(installs: AuditInstall[]) {
       }
     } catch { report.externalBlockers.push('Install unavailable or identity cannot enumerate work'); }
   }
-  return { coverage, limitations: ['Risk is evaluated with the audit process repository policy; historical repository policy changes require separate inspection.',
+  return { coverage, limitations: ['Risk comes from the saved merge intent; when absent, the current repository policy is only an estimate requiring separate inspection.',
     'Admission snapshots are evaluated at their recorded time. Missing history is a coverage gap, never a clean finding.',
     'Read-only: remediation keys must be filed separately; this audit never changes delivered history.'] };
 }

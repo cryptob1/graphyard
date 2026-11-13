@@ -72,7 +72,9 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
  * head carries a different `head`, so the same marker on it never applies.
  */
 export const trialAheadOfReviewPrefix = 'trial passed ahead of review';
-export const trialAheadOfReviewReason = (key: string) => `${trialAheadOfReviewPrefix}: ${key}'s review gate has not passed for this head; the trial that passed is kept and the head lands once the same head is approved`;
+export const trialAheadOfReviewReason = (key: string, proofs?: string[]) => proofs
+  ? `${trialAheadOfReviewPrefix}: ${key}'s acceptance gate awaits ${proofs.join('; ')}; the passing trial is kept until the missing proof is recorded`
+  : `${trialAheadOfReviewPrefix}: ${key}'s review gate has not passed for this head; the trial that passed is kept and the head lands once the same head is approved`;
 /**
  * The trial this head already passed ahead of its review, kept on its ledger (the settle's refusal
  * marker plus the fold's kept trial for the same head), or null. Only a flight that found no

@@ -57,7 +57,7 @@ export function mergeCandidateHold(current: Work | undefined, selected: Work = c
   const gates = evaluate(current!, all, now).gates;
   if (!gate(current!, 'review') || !gates.find(g => g.name === 'review')?.passed) return trialAheadOfReviewReason(current!.key);
   const acceptance = gates.find(g => g.name === 'acceptance');
-  return acceptance?.passed ? null : `${trialAheadOfReviewReason(current!.key)}; ${acceptance?.reasons.join('; ')}`;
+  return acceptance?.passed ? null : trialAheadOfReviewReason(current!.key, acceptance?.reasons);
 }
 
 

@@ -14,11 +14,12 @@ export const admissionAuditCommands = defineCommands([{
     '                                After verified deployment, file remediation for unsafe merges and attach the report to',
     '                                manual:post-deploy/merge-admission-audit; live isolated-item checks still need execution.'],
   async run(context) {
+    let discoveryGap: string | undefined;
     let configured: { name: string; url: string; credentialFile?: string }[];
     if (context.id) configured = JSON.parse(await readFile(context.id, 'utf8'));
     else {
       let installs: Record<string, { url: string }> = {};
-      try { installs = JSON.parse(await readFile(join(homedir(), '.config/herdr/plugins/config/graphyard/config.json'), 'utf8')).installs ?? {}; } catch { /* The current connection remains available without a runtime plugin. */ }
+      try { installs = JSON.parse(await readFile(join(homedir(), '.config/herdr/plugins/config/graphyard/config.json'), 'utf8')).installs ?? {}; } catch { discoveryGap = 'Configured install list unavailable; only the current connection could be discovered. Supply an installs.json inventory to audit other installs.'; }
       configured = Object.entries(installs).map(([name, install]) => ({ name, url: install.url }));
       if (!configured.some(i => i.url === context.base)) configured.unshift({ name: 'current', url: context.base });
     }
@@ -35,6 +36,7 @@ export const admissionAuditCommands = defineCommands([{
         } });
       } catch { targets.push({ ...install, unavailable: 'Agent credential file is inaccessible' }); }
     }
+    if (discoveryGap) targets.push({ name: 'install-discovery', url: 'local configuration', unavailable: discoveryGap });
     context.print(await auditInstalls(targets));
   },
 }]);
