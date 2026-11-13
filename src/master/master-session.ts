@@ -15,7 +15,7 @@ import { type HerdrAgent, herdrCall, herdrSessionPaths, observeHerdrAgents, type
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import { readProjectMemory, type ProjectMemory } from '../project-memory.js';
-import { masterLessonsSection } from '../model/project-memory.js';
+import { masterBriefSection, masterLessonsSection } from '../model/project-memory.js';
 import type { MasterConfig } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { masterCredentialMask } from './confinement.js';

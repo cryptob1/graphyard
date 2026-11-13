@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ProductBrief } from '../../src/model-boundary/project-memory';
+import type { ProductBrief } from '../../src/model/project-memory';
 
 /** The dashboard's Product page (GY-3274): the install's one product brief, shown read-only. */
 export default function ProductPage({ api }: { api: (path: string) => Promise<any> }) {

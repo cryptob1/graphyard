@@ -24,7 +24,7 @@ import { removeAttemptWorktree, worktreesDirectory } from '../master/worktrees.j
 import { stopOrphansOfRemovedWorktrees } from '../session-processes.js';
 import { recordObservedExhaustion } from '../master/environments.js';
 import { type DaemonState, writeDaemonState } from './state.js';
-import { writeProjectMemory, recordedMasterLessons } from '../project-memory.js';
+import { writeProjectMemory, recordedMasterMemory } from '../project-memory.js';
 import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
 import { runServedPreviewCases } from '../merge-writer/served-previews.js';
@@ -96,8 +96,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       void verifyWorkers().catch(() => {});
       return snapshot;
     },
-    // GY-3274: the master lessons the session wrote straight to the file, adopted each cycle.
-    recordedLessons: () => recordedMasterLessons(root),
+    // GY-3274: the lessons and product brief the master session wrote straight to the file, adopted each cycle.
+    recordedMasterMemory: () => recordedMasterMemory(root),
     sessionHistory: deps.sessionHistory,
     inventory: () => sessionInventory(run),
     agents: () => listHerdrAgents(run).catch(() => []),

@@ -1,24 +1,24 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { emptyProjectMemory, masterLessons, updateProjectMemoryFromWork, type MemoryNote, type ProjectMemory } from './model/project-memory.js';
+import { emptyProjectMemory, masterLessons, updateProjectMemoryFromWork, type MemoryNote, type ProductBrief, type ProjectMemory } from './model/project-memory.js';
 import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
 
-export { emptyProjectMemory, isNoteRoleRelevant, masterBriefSection, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, productBriefExcerpt, productBriefHeadings, productBriefSectionWords, productBriefWordLimit, productBriefWorkingHeadings, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterLessons, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, retainedProductBriefChanges, setProductBrief, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type ProductBrief, type ProductBriefChange, type SessionRole } from './model/project-memory.js';
+export { emptyProjectMemory, isNoteRoleRelevant, masterBriefSection, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, productBriefExcerpt, productBriefHeadings, productBriefSectionWords, productBriefWordLimit, productBriefWorkingHeadings, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterMemory, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, retainedProductBriefChanges, setProductBrief, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type ProductBrief, type ProductBriefChange, type SessionRole } from './model/project-memory.js';
 export { projectMemorySchema, productBriefSchema, productBriefChangeSchema } from './model-boundary/project-memory.js';
 
 export const projectMemoryPath = (root: string) => resolve(root, '.graphyard', 'project-memory.json');
 
 /**
- * The master lessons recorded in `.graphyard/project-memory.json`, or null when that file is absent
- * or unreadable (GY-3274): the master session writes them directly, so the loop reads them back
- * from the file rather than trusting its own older copy.
+ * What the master session wrote to `.graphyard/project-memory.json` (GY-3274) — its lessons and the
+ * product brief — or null when that file is absent or unreadable: the loop reads them back from the
+ * file rather than trusting its own older copy.
  */
-export async function recordedMasterLessons(root: string): Promise<MemoryNote[] | null> {
+export async function recordedMasterMemory(root: string): Promise<{ lessons: MemoryNote[]; brief: ProductBrief | null } | null> {
   try {
-    const raw = await readFile(projectMemoryPath(root), 'utf8');
-    return masterLessons(projectMemorySchema.parse(JSON.parse(raw)));
+    const memory = projectMemorySchema.parse(JSON.parse(await readFile(projectMemoryPath(root), 'utf8')));
+    return { lessons: masterLessons(memory), brief: memory.brief };
   } catch { return null; }
 }
 

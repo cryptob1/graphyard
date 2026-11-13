@@ -14,8 +14,8 @@ import { masterConfinementVariable } from '../src/master/confinement.js';
 import { lessonCommand } from '../src/master/lessons.js';
 import { masterConfigSchema } from '../src/master/profiles.js';
 import { workerPrompt } from '../src/master/dispatch.js';
-import { emptyProjectMemory, masterLessons, recordNoteInMemory, reconcileMasterLessons } from '../src/model/project-memory.js';
-import { readProjectMemory, recordedMasterLessons } from '../src/project-memory.js';
+import { emptyProjectMemory, masterLessons, recordNoteInMemory, reconcileMasterMemory } from '../src/model/project-memory.js';
+import { readProjectMemory, recordedMasterMemory } from '../src/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3274: the master keeps durable lessons in project memory. `master lesson add` stores one the
@@ -75,7 +75,7 @@ test('e2e:master-lessons — lesson add stores a lesson the next master launch p
       // A pane shell would evaluate the launch command; so does this one, running the fixture runtime.
       const pane = panes.get(args[2])!;
       pane.child = spawn('/bin/sh', ['-c', args[3]], { cwd: root, env: pane.env });
-      pane.child.stderr.on('data', () => {});
+      pane.child.stderr!.on('data', () => {});
       return json({});
     }
     if (args[0] === 'agent' && args[1] === 'get') {
@@ -161,7 +161,7 @@ test('e2e:master-lessons — the 41st lesson drops the oldest, remove deletes by
   const state = emptyProjectMemory('2026-11-12T07:00:00Z');
   recordNoteInMemory(state, { id: 'note-1', key: 'GY-1', kind: 'human-answer', text: 'An operator answer', by: 'operator', at: '2026-11-12T07:00:00Z' });
   const stale = { ...state, notes: [...state.notes, { id: 'gone', key: 'master', kind: 'master-lesson', text: 'A lesson the master removed', by: 'lessons-master', at: '2026-11-12T06:00:00Z' }] };
-  const reconciled = reconcileMasterLessons(stale, await recordedMasterLessons(root));
+  const reconciled = reconcileMasterMemory(stale, await recordedMasterMemory(root));
   assert.deepEqual(masterLessons(reconciled), masterLessons(await readProjectMemory(root)), 'the file is the lessons\' truth, removals included');
   assert.ok(!reconciled.notes.some(note => note.id === 'gone'), 'a lesson removed from the file leaves the loop\'s copy');
   assert.ok(reconciled.notes.some(note => note.id === 'note-1'), 'the loop\'s own notes survive');
