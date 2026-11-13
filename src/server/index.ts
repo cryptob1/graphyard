@@ -15,6 +15,7 @@ import { delegationRoutes } from './routes/delegation.js';
 import { validationRoutes } from './routes/validation.js';
 import { deliveryRoutes } from './routes/delivery.js';
 import { emblemRoutes } from './routes/emblem.js';
+import { usageRoutes } from './routes/usage.js';
 import { scenarioRoutes } from './routes/scenarios.js';
 import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
@@ -34,7 +35,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes]
 export const apiRoutes: readonly RouteModule[] = [
   operatorAgentRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, emblemRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes, productBriefRoutes,
+  loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, emblemRoutes, usageRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes, productBriefRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {

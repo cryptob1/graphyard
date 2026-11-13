@@ -10,6 +10,7 @@ import FleetPage from './fleet';
 import SetupPage from './setup';
 import WorkersPage from './workers';
 import MasterPage from './master';
+import CostsPage from './costs';
 import ScenarioLibrary from '../scenarios';
 import ReleasesView from '../releases';
 import TestsPage from './tests';
@@ -73,6 +74,8 @@ export const views: readonly View[] = [
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
   { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt} onOpenSetup={role(dashboard) === 'admin' ? () => dashboard.setView('setup') : undefined}/> },
+  // What the agents spent (GY-3289): tokens and cost from the price sheet, beside the accounts and models that spent them.
+  { id: 'costs', icon: '$', label: 'Costs', section: 'settings', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
   // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for.
   { id: 'product', icon: '◎', label: 'Product', section: 'settings', render: dashboard => <ProductPage api={dashboard.api}/> },
   // The first-run checklist (GY-1419), for the admin who sets Graphyard up: the sign-in link `graphyard up` prints opens it,

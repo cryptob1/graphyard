@@ -1,0 +1,14 @@
+{
+  "id": "project-token-costs",
+  "title": "The project shows the tokens its agents spent and what they cost",
+  "description": "On a fixture install whose stub runtimes report usage as the real ones do — a Codex worker, a Claude Code reviewer on a flat plan, the master session's transcript on an unpriced model, and a Muse worker that reports nothing — the Costs section, the item page and 'master usage' show the token totals and cost by role, model and account, the cost per shipped item, 'price unknown' for the unpriced model, and 'API-equivalent' with the plan's monthly fee for the flat-plan account.",
+  "tags": ["api", "dashboard", "cli"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "project token costs",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/project-token-costs.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

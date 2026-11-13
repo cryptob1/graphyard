@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ItemCosts } from './costs';
 import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
 import { sessionSummary, transcriptRun, type SessionHandle } from '../../src/model/sessions';
 import { handleEpoch } from '../../src/model/session-launch-window';
@@ -310,6 +311,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <HumanChecksPanel item={item} token={token}/>
     <WorkerRunsPanel item={item} token={token}/>
     <TestCases item={item} api={api}/>
+    <ItemCosts item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
       <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import type { MasterConfig } from '../master.js';
 import { discoverHostLogins, installDirectory, proposeFleet } from '../fleet.js';
+import { seedPrices } from '../model/price-sheet.js';
 import { emptyRolePolicy, quotaStates, registryRoles, roleLimit, rolePolicy, type AgentRegistry } from '../model/registry.js';
 
 export const registryHelp = [
@@ -13,9 +14,13 @@ export const registryHelp = [
   '                                and roles for them; --apply stores it as a registry revision',
   '  master registry runtime set NAME|@FILE [--kind K] [--arg=A]… [--headless-arg=A]… [--home-variable VAR]',
   '              [--model-flag=FLAG] [--tools-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
-  '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
-  '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
-  '  master registry account set NAME|@FILE --runtime R --model M [--plan PLAN] [--home PATH] [--host HOST]',
+  '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD] [--output-cost USD]',
+  '              [--cache-read-cost USD] [--cache-write-cost USD] [--as-of YYYY-MM-DD]',
+  '              [--tier frontier|strong|fast] [--context TOKENS] --reason R',
+  '                                The price sheet: US dollars per million tokens from the provider\'s public',
+  '                                price page, as of the day read (today unless --as-of); check monthly',
+  '  master registry model seed --reason R   Add the built-in price sheet\'s models and fill unpriced ones',
+  '  master registry account set NAME|@FILE --runtime R --model M [--plan PLAN] [--monthly-fee USD] [--home PATH] [--host HOST]',
   '              [--max-sessions N] [--disable|--enable] [--note TEXT] [--key-file FILE --key-variable VAR|--no-key] --reason R',
   '                                --key-file names the provider key file in the login home (mode 0600) that a',
   '                                headless run reads into VAR at launch; the registry stores the reference only.',
@@ -83,6 +88,19 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     if (!name || !(quotaStates as readonly string[]).includes(state ?? '') || !values.reason) throw new Error(`Use master registry account quota NAME ${quotaStates.join('|')} [--resets-at ISO] --reason REASON`);
     return api.write(`agent-registry/accounts/${encodeURIComponent(name)}/quota`, { quota: { state, resetsAt: values['resets-at'] ? new Date(values['resets-at']).toISOString() : null }, reason: values.reason });
   }
+  if (collection === 'model' && action === 'seed') {
+    const { values } = parseArgs({ args: rest, options: { reason: { type: 'string' } } });
+    if (!values.reason) throw new Error('Use master registry model seed --reason REASON');
+    const { models }: AgentRegistry = await api.read('agent-registry/document');
+    const seeded: string[] = [];
+    for (const price of seedPrices) {
+      const existing = models.find(model => model.id === price.id || model.name === price.id);
+      if (existing && existing.cost.inputPerMTok !== null && existing.cost.outputPerMTok !== null) continue;
+      await api.write('agent-registry/models', { model: { ...existing, name: existing?.name ?? price.id, id: price.id, provider: existing?.provider ?? price.provider, cost: price.cost }, reason: values.reason });
+      seeded.push(price.id);
+    }
+    return { seeded, next: 'Models the sheet does not know keep no price and show as price unknown: name each with master registry model set NAME --id ID --input-cost USD --output-cost USD' };
+  }
   if (action !== 'set') throw new Error(`Use master registry ${collection} set … or master registry ${collection} remove NAME --reason REASON`);
   const current: AgentRegistry = await api.read('agent-registry/document');
   if (collection === 'runtime') {
@@ -95,17 +113,18 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     return api.write('agent-registry/runtimes', { runtime: { ...defined({ description: values.description ?? existing?.description }), name: positionals[0], launch }, reason: values.reason });
   }
   if (collection === 'model') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, provider: { type: 'string' }, id: { type: 'string' }, 'input-cost': { type: 'string' }, 'output-cost': { type: 'string' }, tier: { type: 'string' }, context: { type: 'string' }, notes: { type: 'string' } } });
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, provider: { type: 'string' }, id: { type: 'string' }, 'input-cost': { type: 'string' }, 'output-cost': { type: 'string' }, 'cache-read-cost': { type: 'string' }, 'cache-write-cost': { type: 'string' }, 'as-of': { type: 'string' }, tier: { type: 'string' }, context: { type: 'string' }, notes: { type: 'string' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry model set NAME|@FILE [--id ID] [--input-cost USD] [--output-cost USD] [--tier T] --reason REASON');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/models', { model: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.models.find(model => model.name === positionals[0]);
+    const price = defined({ inputPerMTok: number(values['input-cost'], '--input-cost'), outputPerMTok: number(values['output-cost'], '--output-cost'), cacheReadPerMTok: number(values['cache-read-cost'], '--cache-read-cost'), cacheWritePerMTok: number(values['cache-write-cost'], '--cache-write-cost') });
     const model = { ...existing, name: positionals[0], ...defined({ provider: values.provider, id: values.id }),
-      cost: { ...existing?.cost, ...defined({ inputPerMTok: number(values['input-cost'], '--input-cost'), outputPerMTok: number(values['output-cost'], '--output-cost') }) },
+      cost: { ...existing?.cost, ...price, ...(Object.keys(price).length || values['as-of'] ? { asOf: values['as-of'] ?? new Date().toISOString().slice(0, 10) } : {}) },
       capability: { ...existing?.capability, ...defined({ tier: values.tier, contextTokens: number(values.context, '--context'), notes: values.notes }) } };
     return api.write('agent-registry/models', { model, reason: values.reason });
   }
   if (collection === 'account') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, plan: { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' },
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, plan: { type: 'string' }, 'monthly-fee': { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' },
       'key-file': { type: 'string' }, 'key-variable': { type: 'string' }, 'no-key': { type: 'boolean' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST] --reason REASON');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/accounts', { account: await fromFile(positionals[0]), reason: values.reason });
@@ -117,7 +136,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     const existingKey = existing?.credential.key;
     const key = values['no-key'] ? undefined : values['key-file'] ? { file: values['key-file'], variable: values['key-variable']! } : existingKey;
     const plan = values.plan === 'none' ? undefined : values.plan;
-    const account = { ...kept, name: positionals[0], ...(values.plan === 'none' ? { plan: undefined } : {}), ...defined({ runtime: values.runtime, model: values.model, plan, note: values.note, maxSessions: number(values['max-sessions'], '--max-sessions'), enabled: values.disable ? false : values.enable ? true : undefined }),
+    const account = { ...kept, name: positionals[0], ...(values.plan === 'none' ? { plan: undefined } : {}), ...defined({ runtime: values.runtime, model: values.model, plan, monthlyFee: number(values['monthly-fee'], '--monthly-fee'), note: values.note, maxSessions: number(values['max-sessions'], '--max-sessions'), enabled: values.disable ? false : values.enable ? true : undefined }),
       // The credential stays where the runtime put it: the registry holds only where that is.
       credential: { host: values.host ?? existing?.credential.host ?? master.hostId, home: values.home ?? existing?.credential.home ?? null, ...(key ? { key } : {}) } };
     return api.write('agent-registry/accounts', { account, reason: values.reason });

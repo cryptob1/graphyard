@@ -15,6 +15,7 @@ import { confinedMaster, operationsCommand } from './master/operations.js';
 import { lessonsCommand } from './master/lessons.js';
 import { briefCommand } from './master/brief.js';
 import { loopCommand } from './master/loop.js';
+import { usageCommand } from './master/usage.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -53,6 +54,9 @@ export const masterCommands = defineCommands([
       '  master emblem [set FILE]     Show whether the project has an emblem (who drew it, when), or',
       '                                store its SVG (one <svg> root, at most 8 KB), shown beside',
       '                                the project name and as the favicon',
+      '  master usage [--days N]       The tokens the project\'s agents spent and their cost at the price',
+      '                                sheet\'s rates: today, 7 days, 30 days, all time; by role, model',
+      '                                and account; per shipped item; flat plans as API-equivalent',
       '  master run [--once] [--interval SECONDS]',
       '                                The durable coordination loop: snapshot, close, dispatch,',
       '                                merge writer, persist',
@@ -81,7 +85,7 @@ export const masterCommands = defineCommands([
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.
-      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, emblemCommand, lessonsCommand, briefCommand, operationsCommand, loopCommand];
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, emblemCommand, usageCommand, lessonsCommand, briefCommand, operationsCommand, loopCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },

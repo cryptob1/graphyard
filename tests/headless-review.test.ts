@@ -127,7 +127,7 @@ test('integration:headless-review — a review request is one headless run whose
   const token = JSON.parse(await readFile(join(running!.sessionDirectory, reviewBindingFile), 'utf8')).verdictToken as string;
   const [child] = fake.runs;
   assert.equal(child!.command, 'claude');
-  assert.equal(child!.args.at(-2), '-p', 'print mode, the request its last argument');
+  assert.deepEqual(child!.args.slice(-4, -1), ['-p', '--output-format', 'json'], 'print mode with its JSON report, the request its last argument');
   const prompt = child!.args.at(-1)!;
   assert.match(prompt, /\[AC-1\] The flag reads headless/, 'the request names the criteria');
   assert.ok(prompt.includes(`git diff ${base} ${head}`) && prompt.includes('+export const flag = "headless-diff-marker";'), 'the request carries the exact diff');
@@ -186,8 +186,8 @@ test('integration:headless-review — a malformed answer is run once more with t
 });
 
 test('integration:headless-review — each runtime runs its one-shot form, and the host exec returns a child\'s output or refuses a failed one naming its error', async () => {
-  assert.deepEqual(headlessArgs('codex', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '--add-dir', '/x'], 'REQUEST'), ['exec', '--sandbox', 'workspace-write', '--add-dir', '/x', '--skip-git-repo-check', 'REQUEST'], 'codex exec takes no approval flag: it never asks');
-  assert.deepEqual(headlessArgs('claude', ['--permission-mode', 'bypassPermissions'], 'REQUEST'), ['--permission-mode', 'bypassPermissions', '-p', 'REQUEST']);
+  assert.deepEqual(headlessArgs('codex', ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '--add-dir', '/x'], 'REQUEST'), ['exec', '--sandbox', 'workspace-write', '--add-dir', '/x', '--skip-git-repo-check', '--json', 'REQUEST'], 'codex exec takes no approval flag: it never asks');
+  assert.deepEqual(headlessArgs('claude', ['--permission-mode', 'bypassPermissions'], 'REQUEST'), ['--permission-mode', 'bypassPermissions', '-p', '--output-format', 'json', 'REQUEST']);
   assert.deepEqual(headlessArgs('pi', ['--model', 'm', '{request}'], 'REQUEST'), ['--model', 'm', 'REQUEST', '-p'], 'a registry contract places the request itself');
   assert.equal(headlessKind('gemini'), false, 'a runtime with no built-in form requires an explicit contract');
   assert.deepEqual(headlessArgs('muse', [], 'REQUEST'), ['exec', 'REQUEST']);

@@ -1006,11 +1006,11 @@ export async function launchReview(root: string, work: Work, profileName: string
           const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
             const moved = accountLaunch(profile, next.account, { writable, headless: true });
             const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
-            return { kind: moved.kind!, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
+            return { kind: moved.kind!, account: next.account?.name ?? null, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
               credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
           });
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
-          ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
+          ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, account: on.current.account?.name ?? profileAccount(profile.name), args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
             contract: launch.contract, coordinatorRoot: dependencies.coordinatorRoot, credentialMask, role: harness.role, exec: headless, moveAccount,
             onRun: async run => {
               headlessContext!.kind = run.kind;

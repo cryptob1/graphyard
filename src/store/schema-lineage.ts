@@ -50,6 +50,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:85493afad035ef44abc73d285087957a50ecd7b0645f115e74333d7cd0afe6c5',
   // GY-3285: the worker identities the loop mints (worker_identities).
   'sha256:1bce790a9dbe36be15e441fb9078bf11c59fc23e9f6f53b953764f467cd4795c',
+  // GY-3289: the tokens each agent session's runtime reported.
+  'sha256:d5e9402af9e1d919297126a126306a2a4b4cfa3882f8e6ebe8e5fd34465832ce',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

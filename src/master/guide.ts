@@ -71,6 +71,8 @@ The four roles are worker, reviewer, producer and master. Retired assignments ar
 
 Provider exhaustion is reported directly as a registry observation. Every executor skips that account until its reset, even if a fresh provider probe reports available quota. The local environment log records diagnostics and launch attribution, never exhaustion holds. A failed report is an error, not a local fallback.
 
+Costs: master usage [--days N] and the dashboard's Costs page show the tokens every session's runtime reported, priced from the registry's models. Once a month, check each price against its provider's public price page: master registry model set NAME --input-cost USD --output-cost USD --cache-read-cost USD --cache-write-cost USD --reason R (model seed adds the built-in sheet). A model without a price reads price unknown. Mark a subscription account with account set NAME --plan PLAN --monthly-fee USD: its figures read API-equivalent.
+
 The loop reads a neutral session inventory from Herdr and headless runners. An unreadable inventory is a gap. When a submitted attempt's matching implementation handle is finished and no pane backs it, reconciliation ends its registry reservation, even within launch grace. Live leases and running handles remain reserved; the submitted candidate is preserved and queued work can take the freed slot.
 
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record \`dispatch.abandoned\`. Producer APIs remain for integrations, but these candidates launch no producer sessions.

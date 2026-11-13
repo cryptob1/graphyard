@@ -1,3 +1,4 @@
+import type { Conversation } from '../master/conversation.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import type { SessionInventory } from '../session-inventory.js';
 // Concern: the effects a cycle acts through — their interface and cursor records; the production wiring lives beside it in ./effects-production.ts.
@@ -96,6 +97,8 @@ export interface DaemonEffects {
   reclaimJobLeftovers?: () => Promise<string[]>;
   /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
   leftoverDisk?: () => Promise<LeftoverDisk>;
+  /** Reports the token usage this host's sessions' runtimes printed (GY-3289, usage-capture.ts); `master` is the master session's conversation. */
+  usage?: (master: Conversation | null) => Promise<unknown>;
   /**
    * `diagnosis` is the prompt section a run of repeated equal failures asks for (GY-3104); empty otherwise.
    * GY-3103: `canaries` are the newer runtime versions this launch may run as their canary (the
