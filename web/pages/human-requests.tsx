@@ -31,11 +31,14 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
   // words the rule carries, so a session it refuses is shown the refusal instead of the form.
   const refusalFor = (row: HumanRequestRow) => humanOnlyRefusal(row.rule, status?.actor ?? {});
   const actor = status?.actor;
+  // GY-3299: worker-pool growth the loop could not do caps how many items run at once until its cause is fixed.
+  const growth: string | null = typeof status?.setup?.workerGrowth === 'string' ? status.setup.workerGrowth : null;
   return <>
-    <div className="page-heading"><h1>Needs you <span className="count" title="Open actions only you may take">{requests.length}</span></h1></div>
+    <div className="page-heading"><h1>Needs you <span className="count" title="Open actions only you may take">{requests.length + (growth ? 1 : 0)}</span></h1></div>
     {actor && <p className="muted signed-in-as">Signed in as <strong>{actor.displayName ?? actor.id}</strong> · {signedInAs(actor)}</p>}
     <p className="muted">Agents decide everything except goals and priorities, spending money or opening third-party accounts, issuing credentials to people, and authorizing what no agent identity may authorize. An item that reaches one of those waits here without holding a worker; everything else keeps moving.</p>
-    {requests.length === 0 ? <p className="muted">Nothing is waiting on you.</p>
+    {growth && <div className="card human-request" data-worker-growth><div className="card-top"><strong>Worker pool cannot grow</strong></div><p>{growth}</p></div>}
+    {requests.length === 0 ? !growth && <p className="muted">Nothing is waiting on you.</p>
       : <div className="cards">{requests.map(row => <RequestCard key={row.request.id} row={row} refusal={refusalFor(row)} busy={busy} open={() => setSelected(row.id)} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}</div>}
     {answered.length > 0 && <section className="work-list" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={request.id}>
