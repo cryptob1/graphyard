@@ -112,7 +112,7 @@ test('e2e:tests-page-matrix — the matrix shows each case\'s result per place, 
   // A place with no record is neutral; the trial cell links to the item whose trial ran it; the served failure names its step.
   assert.match(row(html, 'case-a'), /<td data-column="nightly" class="matrix-cell result-none">/);
   assert.match(row(html, 'case-a'), new RegExp(`<a href="#${work.key}">✓ passed</a>`));
-  assert.match(row(html, 'case-a'), /title="opens the dashboard: status 500"/);
+  assert.match(row(html, 'case-a'), /title="opens the dashboard: status 500"><a href="#case-case-a">× failed<\/a>/, 'the served failure opens the case\'s run history');
   // Grouped by first tag, each group with its pass/fail count.
   assert.deepEqual([...html.matchAll(/<tbody data-category="([^"]+)">/g)].map(match => match[1]), ['dashboard', 'review']);
   const group = (markup: string, category: string) => text(new RegExp(`<tbody data-category="${category}"><tr class="matrix-group">([\\s\\S]*?)</tr>`).exec(markup)![1]);

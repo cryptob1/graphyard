@@ -156,12 +156,14 @@ const caseState = (entry: TrackedCase, columns: readonly MatrixColumn[]) => colu
 const count = (cells: (MatrixCell | undefined)[], result: MatrixCell['result']) => cells.filter(cell => cell?.result === result).length;
 const tally = (cells: (MatrixCell | undefined)[]) =>
   [`${count(cells, 'pass')} passed`, `${count(cells, 'fail')} failed`, ...count(cells, 'skipped') ? [`${count(cells, 'skipped')} skipped`] : []].join(' · ');
-function Cell({ column, cell, openItem }: { column: MatrixColumn; cell: MatrixCell | undefined; openItem: OpenItem }) {
+function Cell({ id, column, cell, openItem, showHistory }: { id: string; column: MatrixColumn; cell: MatrixCell | undefined; openItem: OpenItem; showHistory?(id: string): void }) {
   if (!cell) return <td data-column={column} className="matrix-cell result-none">not run here</td>;
   const r = resultLabel[cell.result], label = <>{r.mark} {r.word}</>, link = cell.link;
   return <td data-column={column} className={`matrix-cell result-${r.tone}`} title={cell.detail ?? undefined}>
     {link && 'url' in link ? <a href={link.url} target="_blank" rel="noopener noreferrer">{label}</a>
-      : link ? <a href={`#${link.key}`} onClick={event => { if (openItem) { event.preventDefault(); openItem(link.item); } }}>{label}</a> : label}
+      : link ? <a href={`#${link.key}`} onClick={event => { if (openItem) { event.preventDefault(); openItem(link.item); } }}>{label}</a>
+      // A run with no output of its own kept elsewhere opens the case's run history, where its failing step is.
+      : showHistory && (column === 'trial' || column === 'served') ? <a href={`#case-${id}`} onClick={() => showHistory(id)}>{label}</a> : label}
     <small> {ago(cell.at)}</small></td>;
 }
 const Chip = ({ on, onClick, children }: { on: boolean; onClick(): void; children: React.ReactNode }) =>
@@ -181,7 +183,7 @@ function CoverageGrid({ cases, categories, filter, setFilter }: { cases: Tracked
     })}</tr>)}</tbody></table>;
 }
 
-export function MatrixView({ cases, filter, setFilter, collapsed, toggle, openItem }: { cases: TrackedCase[]; filter: MatrixFilter; setFilter(filter: MatrixFilter): void; collapsed: ReadonlySet<string>; toggle(category: string): void; openItem: OpenItem }) {
+export function MatrixView({ cases, filter, setFilter, collapsed, toggle, openItem, showHistory }: { cases: TrackedCase[]; filter: MatrixFilter; setFilter(filter: MatrixFilter): void; collapsed: ReadonlySet<string>; toggle(category: string): void; openItem: OpenItem; showHistory?(id: string): void }) {
   const columns = filter.column === 'all' ? matrixColumns : [filter.column];
   const required = filter.required ?? 'all';
   const kept = cases.filter(entry => required === 'all' || (required === 'required') === !!entry.e2e?.required);
@@ -206,7 +208,7 @@ export function MatrixView({ cases, filter, setFilter, collapsed, toggle, openIt
         return <tbody key={category} data-category={category}>
           <tr className="matrix-group"><th scope="rowgroup" colSpan={columns.length + 1}><button type="button" className="text-button" aria-expanded={open} onClick={() => toggle(category)}>{open ? '▾' : '▸'} {category}</button> <span className="muted">{state.filter(s => s === 'pass').length} passing · {state.filter(s => s === 'fail').length} failing</span></th></tr>
           {open && members.map(entry => <tr key={entry.id} data-case={entry.id}><th scope="row"><span className="mono">{entry.id}</span>{entry.title ? <><br/><small>{entry.title}</small></> : null}</th>
-            {columns.map(column => <Cell key={column} column={column} cell={entry.matrix?.[column]} openItem={openItem}/>)}</tr>)}
+            {columns.map(column => <Cell key={column} id={entry.id} column={column} cell={entry.matrix?.[column]} openItem={openItem} showHistory={showHistory}/>)}</tr>)}
         </tbody>; })}
     </table> : <p className="muted">No test case matches this filter.</p>}</>;
 }
@@ -236,7 +238,7 @@ export function TestsView({ data, error, loading, filter, setFilter, item = '', 
     {data && !cases.length && !manual.length && <div className="empty"><span>◇</span><h2>No test cases yet.</h2><p>Add a case as <code>e2e/cases/ID.json</code> in the repository, register it with <code>graphyard e2e sync</code>, and <code>graphyard e2e run</code> records its runs here.</p></div>}
     {(cases.length > 0 || manual.length > 0) && <div className="case-filters" role="group" aria-label="View">{([['matrix', 'Where each case runs'], ['cases', 'By item and criterion']] as const).map(([id, label]) =>
       <button key={id} type="button" className={view === id ? 'chip active' : 'chip'} aria-pressed={view === id} onClick={() => setTestsView(id)}>{label}</button>)}</div>}
-    {view === 'matrix' && (cases.length > 0 || manual.length > 0) && <Matrix cases={cases.filter(entry => !notBuilt(entry))} filter={matrix} setFilter={setMatrix} openItem={openItem}/>}
+    {view === 'matrix' && (cases.length > 0 || manual.length > 0) && <Matrix cases={cases.filter(entry => !notBuilt(entry))} filter={matrix} setFilter={setMatrix} openItem={openItem} showHistory={() => setTestsView('cases')}/>}
     {view === 'cases' && (cases.length > 0 || manual.length > 0) && <>
       <div className="case-filters" role="group" aria-label="Filter test cases">{filters.map(f => <button key={f.id} type="button" className={filter === f.id ? 'chip active' : 'chip'} aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>{f.label} <span className="count">{count(f.id)}</span></button>)}
         <input type="search" aria-label="Filter by item" placeholder="Filter by item" value={item} onChange={event => setItem(event.target.value)}/></div>
