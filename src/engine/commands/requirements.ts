@@ -75,6 +75,6 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   work.lease = liveLease ? work.lease : null;
   work.observation = null; work.mergeAuthorization = null;
   // A submitted implementation must be explicitly reconsidered for changed intent.
-  if (work.submission) work.reworkRequested = true;
+  if (work.submission) { work.reworkRequested = true; work.lastRework = { reason: `Requirements revised: ${data.reason}`, binding: null, at: now.toISOString() }; }
 
 }

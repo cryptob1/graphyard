@@ -32,7 +32,7 @@ async function fixture(page: Page, role = 'admin') {
 const cardSelect = (page: Page) => page.getByRole('button', { name: /Browser fixture.*GY-1/ });
 
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
-// The one navigation (GY-161): the sidebar holds Work, Workers, Shipped, Tests and
+// The one navigation (GY-161): the sidebar holds Work, Master, Workers, Shipped, Tests and
 // Settings; the other pages are sub-page links under one of them. On a phone the sidebar folds into
 // a Menu button. An open work item is a page of its own, left with "← Back".
 const workHeading = (page: Page) => page.getByRole('heading', { name: 'Work', exact: true, level: 1 });
@@ -325,7 +325,7 @@ test('slice view names leads, workers, reviewers and bottlenecks and labels each
 test('an AI session is named in the signed-in summary without a session-kind badge', async ({ page }) => {
   await fixture(page, 'worker'); await login(page);
   const session = page.locator('.sidebar-bottom');
-  await expect(session).toContainText('fixture · worker');
+  await expect(session).toContainText('fixture · worker', { timeout: 15_000 });
   await expect(session.locator('.identity')).toHaveCount(0);
 });
 
