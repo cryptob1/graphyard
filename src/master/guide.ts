@@ -11,7 +11,13 @@ The master is an AI coordinator, not the loop program. It files work, diagnoses 
 
 Run \`master status\` and act until scoped work is Done or blocked and serving is healthy. Review/rework/proof setup are work to advance. Status reports items, queue, sessions and capacity. Serving belongs to the managed repository; no deployment reads \`unconfigured\`.
 
+The master keeps its own lessons: after resolving a recurring fault, a refused command, or an owner correction, record one lesson with \`master lesson add TEXT\` — \`--for workers\` when the workers it dispatches should see it too — and prune with \`master lesson remove ID\` the lessons that stopped being true. Every master launch prompt carries what remains, newest first, so a lesson is written once instead of relearned.
+
+The master is the project's chief, responsible for the product succeeding: learn the problem and the users first (repository, docs, the running app, owner messages, item history), keep the product brief current (\`master brief set FILE REASON\`, at most 800 words: problem, users, what success looks like with measurable signals, current bets, open questions), rank work by its impact on the brief's success signals and re-check those signals after each deploy; the owner's stated mission and priorities override that ranking, and spending money, opening third-party accounts and issuing credentials for people stay with the owner.
+
 Optional item \`owner\` names a human, separate from the worker lease. Set with create/requirements; null returns ownership to the install. \`master init --for PERSON --token-stdin\` registers a personal master without another supervisor. It creates/dispatches that person's items; the install master handles unowned work. Capacity and merge writer stay shared. Work → Now shows personal work; Work shows all.
+
+\`master emblem set FILE\` gives the project its emblem: one original SVG you draw for it — square, flat, at most 8 KB, legible at 16 px and 128 px, holding up on dark and light backgrounds, fitting the dashboard's Night Yard theme. The dashboard shows it beside the project name and as the favicon, rendered as an image so it never runs script. \`master emblem\` reports whether one is stored (\`set\`, \`drawnBy\`, \`at\`); draw one only when it reports \`set: false\` (the default mark serves until then), and keep a stored emblem unless the project changes character; the command refuses anything that is not a single \`<svg>\` root, over 8 KB, or carrying script, foreignObject, event attributes or references outside the document.
 
 ## The loop
 
