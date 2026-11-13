@@ -780,6 +780,12 @@ test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:i
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { ...body, baseTip: currentTip, mergeSha }, 'k-intent')).status, 200, 'a retried key replays');
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { ...body, baseTip: currentTip, mergeSha: sha('other') }, 'k-intent')).status, 409, 'a key reused with other input is refused');
   assert.equal((await ledgerKinds(w.id)).filter(kind => kind === 'merge.intent').length, 1);
+  // The trial the flight really records between the intent and its push (GY-1528), executing both
+  // proofs nobody in this plane is authorized to produce: the item's proof gaps name them here.
+  doc = await document(w.id);
+  assert.deepEqual(doc.proofGaps, ['unit:app-works', 'e2e:fixture'], 'no principal is authorized for the proofs, so the filed item carries the gaps');
+  assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'trial', head: heads[5], baseTip: currentTip, mergeSha, outcome: 'verdict', build: 'pass',
+    tests: { passed: 1, failed: [], files: 1 }, files: ['tests/app.test.ts'], proofs: { 'unit:app-works': { executed: 1, failed: 0 }, 'e2e:fixture': { executed: 1, failed: 0 } }, durationMs: 5, attempts: [] })).status, 200);
   assert.equal(await reads.push(mergeSha, currentTip), 'pushed');
   assert.equal(await reads.fetch(), mergeSha);
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'pushed', mergeSha, pushedAt: iso(start + minute) })).status, 200);
@@ -798,6 +804,14 @@ test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:i
   assert.deepEqual(rows.slice(before), ['merge.reconciled', deliveredReason], 'the ledger row and the delivered save are the one transaction\'s only writes');
   assert.equal(doc.mergeLedger?.state, 'reconciled');
   assert.deepEqual(mergeLedgerRefusals(doc.mergeLedger, doc.candidate!), { test: [], merge: [] }, 'the ledger now answers both control-plane gates');
+  // GY-3281: the delivered save re-read the gates against the reconciled ledger, so the done item's
+  // own document shows the merge gate passed with the pushed sha — not the `pushed` save's stale
+  // refusal, which nothing would ever evaluate again.
+  const merge = doc.gates.find(gate => gate.name === 'merge')!;
+  assert.deepEqual([merge.passed, merge.reasons], [true, []], `the delivered item's gates: ${JSON.stringify(doc.gates)}`);
+  assert.ok(doc.gates.every(gate => gate.passed), 'a done item shows no pending gate');
+  assert.equal(doc.delivery?.mergeSha, mergeSha, 'the pushed sha is the delivery the row shows');
+  assert.deepEqual(doc.proofGaps, [], 'a done item shows no proof gap');
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha, observedTip: mergeSha }, 'k-reconciled')).status, 200, 'replayed under its key');
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha, observedTip: mergeSha })).body.stage, 'done', 'a lost receipt is answered as the item stands, delivering nothing twice');
   assert.equal((await store.pool.query("SELECT count(*)::int AS n FROM events WHERE work_id=$1 AND kind='merge.reconciled'", [w.id])).rows[0].n, 1);
