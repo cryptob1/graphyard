@@ -10,7 +10,8 @@ import { hostPassthrough } from '../e2e/steps.js';
 import { serveHead } from './serve-head.js';
 import { projectCaseSuite, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeLeftovers, composeProjectName, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
-import { previewDatabase, previewDemand, previewEnded, previewEndReason, previewInstance, previewPath, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
+import { previewIdleMs, stopIdleStacks, type PreviewActivity } from '../idle-stacks.js';
+import { previewDatabase, previewDemand, previewEnded, previewEndReason, previewInstance, previewPath, previewRequested, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
 import type { Application, ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
@@ -280,6 +281,8 @@ export interface LivePreview {
   failures: number;
   /** GY-1903: the Compose project serving it, when its application is a Compose one. */
   compose?: string;
+  /** GY-3291: stopped unused, its containers and volumes kept and its record ended `idle`, until its link is opened or the item moves on. */
+  idle?: boolean;
 }
 /** What the step reads and writes: the loop's delivery declaration, its checkout and the server. */
 export interface ItemPreviewPorts {
@@ -293,7 +296,11 @@ export interface ItemPreviewPorts {
   slots?: ReturnType<typeof previewSlots>; procRoot?: string;
   open?: typeof openPreview;
   docker?: Docker;
+  /** GY-3291: how long a Compose preview may go unused (`previewIdleMs`). */
+  idleMs?: number;
 }
+/** When each live map last reconciled idle stacks: once a minute at most. */
+const reconciledAt = new WeakMap<Map<string, LivePreview>, number>();
 /** Whether this process swept abandoned Compose previews yet (GY-1903): once, before its first. */
 let composeSwept = false;
 /**
@@ -392,7 +399,7 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
   // preview is read as that record (by key): it is not stale, and a failed commit is not started again.
   const endedNow = new Map<string, ItemPreview>();
   for (const entry of [...live.values()]) {
-    if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record)) { live.delete(entry.key); endedNow.set(entry.key, entry.record); }
+    if (await settleRecords(entry, ports) && entry.opened && previewEnded(entry.record) && !entry.idle) { live.delete(entry.key); endedNow.set(entry.key, entry.record); }
   }
   const ended = (record: ItemPreview, reason: PreviewEndReason, detail: string) => endedRecord(record, reason, detail, at());
   const end = async (entry: LivePreview, reason: PreviewEndReason) => {
@@ -412,7 +419,31 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     try { for (const project of await sweepComposePreviews({ docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env) })) notes.push(`Removed the abandoned Compose preview ${project}`); composeSwept = true; }
     catch (error) { notes.push(`Could not sweep abandoned Compose previews: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  const composing = () => [...live.values()].filter(entry => entry.compose && !entry.ending).length;
+  // GY-3291: once a minute, a served Compose preview unused for the idle period, and a Graphyard stack whose owner is gone, are stopped (idle-stacks.ts).
+  const now = (ports.now ?? Date.now)();
+  if (delivery?.applications.some(application => application.kind === 'compose') && now - (reconciledAt.get(live) ?? -Infinity) >= 60_000) {
+    reconciledAt.set(live, now);
+    const activity = new Map<string, PreviewActivity>();
+    for (const entry of live.values()) {
+      if (!entry.compose || !entry.opened || entry.ending || entry.idle || entry.record.state !== 'running') continue;
+      const item = work.find(candidate => candidate.key === entry.key), used = item?.preview?.id === entry.record.id ? item.preview.lastUsedAt : undefined;
+      activity.set(entry.compose, { key: entry.key, lastUsedAt: Math.max(Date.parse(entry.record.readyAt ?? entry.record.startedAt), used ? Date.parse(used) : 0),
+        inUse: !!item?.sessions?.some(session => session.kind === 'review' && session.state === 'running') });
+    }
+    const idleMs = ports.idleMs ?? previewIdleMs(ports.hostEnvironment ?? process.env);
+    try {
+      for (const stopped of await stopIdleStacks(activity, { now, idleMs, docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env), procRoot: ports.procRoot })) {
+        const line = `Stopped ${stopped.project} (${stopped.reason}); its containers and volumes are kept`;
+        console.log(line); notes.push(line);
+        const entry = [...live.values()].find(candidate => candidate.compose === stopped.project);
+        if (!entry) continue;
+        entry.idle = true;
+        owe(entry, ended(entry.record, 'idle', `${entry.record.detail ? `${entry.record.detail}; ` : ''}stopped after ${Math.round(idleMs / 60_000)} minutes unused: open the preview link to restart it`));
+        await settleRecords(entry, ports);
+      }
+    } catch (error) { notes.push(`Could not stop idle stacks: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  const composing = () => [...live.values()].filter(entry => entry.compose && !entry.ending && !entry.idle).length;
   let tip: string | null | undefined;
   for (const item of work) {
     const demand = previewDemand(item, delivery), reason = previewEndReason(item, !!demand);
@@ -420,6 +451,13 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     let entry = live.get(item.key);
     // The server already holds this preview ended, as an owed terminal record whose reply was lost leaves it: that record is confirmed.
     if (entry?.opened && previewEnded(entry.record) && item.preview?.id === entry.record.id && previewEnded(item.preview)) entry.owed = [];
+    // A preview stopped idle restarts once its link is opened, and is removed once its item moves on.
+    if (entry?.idle) {
+      if (!reason && !previewRequested(item.preview) && !(head && entry.record.sha !== head)) continue;
+      if (!await settleRecords(entry, ports)) continue;
+      try { await entry.opened!.close(); } catch (error) { notes.push(`${item.key}'s stopped preview was not removed, retried next step: ${error instanceof Error ? error.message : String(error)}`); continue; }
+      live.delete(item.key); endedNow.set(item.key, entry.record); entry = undefined;
+    }
     // A Compose preview serves for its configured lifetime at most.
     const expired = entry?.compose && entry.record.state === 'running' && entry.record.readyAt && (ports.now ?? Date.now)() - Date.parse(entry.record.readyAt) > bounds.lifetimeMs;
     if (entry && (reason || entry.ending || expired || (head && entry.record.sha !== head))) {
@@ -443,7 +481,7 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     }
     if (reason || !demand) continue;
     const sha = head ?? (tip === undefined ? (tip = await ports.baseTip().then(value => value.toLowerCase(), () => null)) : tip);
-    if (!sha || (recorded?.sha === sha && (recorded.state === 'failed' || recorded.endReason === 'expired'))) continue;
+    if (!sha || (recorded?.sha === sha && (recorded.state === 'failed' || recorded.endReason === 'expired' || (recorded.endReason === 'idle' && !previewRequested(item.preview))))) continue;
     if (demand.application.kind === 'compose' && composing() >= bounds.concurrent) { notes.push(`${item.key}'s Compose preview waits: ${bounds.concurrent} already run`); continue; }
     await start(item, sha, head ? 'head' : 'base', demand);
     notes.push(`Started ${item.key}'s preview of ${sha.slice(0, 12)} (${demand.application.id}: ${demand.cases.join(', ')})`);
