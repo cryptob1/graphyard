@@ -9,13 +9,14 @@ const readmeLink = (href?: string) => !href || /^(https?:|#|\/)/.test(href) ? hr
 /**
  * "How Graphyard works" in under 300 words, opened from Help at the foot of the sidebar. It uses
  * the dashboard's own words — the five groups and the six pull-request steps — and nothing else.
- * The walkthrough video and the README follow, loaded once the page is open.
+ * The walkthrough video, the where-things-run diagram and the README follow, loaded once the page
+ * is open: the diagram is bundled with the page, so the README's relative image embeds as itself.
  */
 export default function GuidePage() {
-  const [media, setMedia] = useState<{ video: string; readme: string } | null>(null);
+  const [media, setMedia] = useState<{ video: string; diagram: string; readme: string } | null>(null);
   useEffect(() => {
-    Promise.all([import('../../docs/diagrams/how-graphyard-works.mp4?url'), import('../../README.md?raw')])
-      .then(([video, readme]) => setMedia({ video: video.default, readme: readme.default.split('\n').filter(line => !line.includes('how-graphyard-works.gif')).join('\n') }));
+    Promise.all([import('../../docs/diagrams/how-graphyard-works.mp4?url'), import('../../docs/diagrams/where-things-run.svg?url'), import('../../README.md?raw')])
+      .then(([video, diagram, readme]) => setMedia({ video: video.default, diagram: diagram.default, readme: readme.default.split('\n').filter(line => !line.includes('how-graphyard-works.gif')).join('\n') }));
   }, []);
   return <article className="guide">
     <div className="page-heading"><h1>How Graphyard works</h1></div>
@@ -40,6 +41,9 @@ export default function GuidePage() {
       <li><strong>Merge</strong>: it joins the main branch.</li>
     </ol>
     <p>Open any item to see its step, why it is there and who acts next.</p>
-    {media && <ReactMarkdown components={{ a: ({ href, children }) => <a href={readmeLink(href)}>{children}</a> }}>{media.readme}</ReactMarkdown>}
+    {media && <ReactMarkdown components={{
+      a: ({ href, children }) => <a href={readmeLink(href)}>{children}</a>,
+      img: ({ src, alt }) => <img className="guide-diagram" src={String(src) === 'docs/diagrams/where-things-run.svg' ? media.diagram : String(src)} alt={alt ?? ''}/>,
+    }}>{media.readme}</ReactMarkdown>}
   </article>;
 }

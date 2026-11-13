@@ -12,7 +12,7 @@ export const guideCommands = defineCommands([
     readsConnection: () => false,
     help: [
       '  guide TOPIC                   Print one procedure topic',
-      '                                (topics: claim, sync, complete, park, blocked, review, proof, upgrade, master, setup, publishing, runtimes);',
+      '                                (topics: claim, sync, complete, park, blocked, review, proof, upgrade, master, setup, infra, publishing, runtimes);',
       '                                guide with no topic lists them; guide master says how',
       '                                Railway deploys apps from git and Graphyard observes each versionUrl',
     ],

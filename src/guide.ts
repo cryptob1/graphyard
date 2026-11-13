@@ -59,6 +59,19 @@ To set Graphyard up or find what its setup is missing, follow the setup steps in
 - systemd user manager: \`systemctl --user status\`.
 
 Sign in with \`gh auth login --scopes repo\`. No GitHub App is needed: \`up\` registers the merge writer's deploy key with the gh login, and it alone pushes. Where the organization disallows deploy keys, pipe a fine-grained token (Contents read/write on the one repository) to \`--merge-token-stdin\` instead — or install with \`--push-auth gh\`, which pushes with the gh login itself (\`gh auth token\` answers git at the moment of each push, so no key or token is stored). A SAML organization that refuses the SSH fetch is named by preflight with its exact fix: an https fetch URL with the SSH push URL kept (\`install --apply\` sets both), or \`--push-auth gh\`. Preview \`up\`'s checks with \`npx @cryptob1/graphyard install --repo OWNER/NAME --plan\` (\`--provider local\` for local mode).`,
+  infra: `Everything runs on one Linux host. \`OWNER-NAME\` below is the repository's slug in every name the install owns; an install from before per-install names keeps the legacy \`graphyard-master.service\` and \`graphyard-deploy.service\`. The Setup page's 'Where things run' panel shows this install's own values.
+
+| Part | Runs as | Where | Port | Logs |
+| --- | --- | --- | --- | --- |
+| The loop (dispatch, merge writer, batch gate) | systemd user unit | \`graphyard-master-OWNER-NAME.service\` on the host | — | \`journalctl --user -u graphyard-master-OWNER-NAME.service\` |
+| The deploy watch | systemd user unit | \`graphyard-deploy-OWNER-NAME.service\` on the host | — | \`journalctl --user -u graphyard-deploy-OWNER-NAME.service\` |
+| Control-plane server (API and dashboard) | Docker container | \`graphyard-OWNER-NAME-server-1\` | 4310 on 127.0.0.1 | \`docker logs graphyard-OWNER-NAME-server-1\` |
+| Postgres 17 | Docker container | \`graphyard-OWNER-NAME-db-1\`, on the server's own network | — | \`docker logs graphyard-OWNER-NAME-db-1\` |
+| Merge trials | one short-lived \`graphyard-trial-…\` container per trial, beside any compose services a check declares | the host's Docker | — | the item page carries each trial's output |
+| The master and agent sessions | Herdr panes and headless runs confined by bubblewrap/Landlock | the host, in worktrees under the checkout | — | the item pages |
+| Graphyard's files | — | the checkout's \`.graphyard/\` and \`~/.config/graphyard/<install>/\` (credentials 0600, CLI releases) | — | — |
+
+With \`--provider local\` the server and its Postgres run on the host itself under the unit \`graphyard-local-OWNER-NAME.service\` (embedded Postgres under the install directory, no Docker for the control plane); merge trials still use Docker. Outside the host there is GitHub (every part fetches; only the merge writer pushes, by its deploy key or the operator's gh login), the agent providers the accounts call, npm and GHCR (published by GitHub Actions, never by the host), and your browser over localhost or the tailnet.`,
   publishing: `When a verified commit deploys, Graphyard pushes its \`vYYYY.M.D-<sha12>\` tag. GitHub Actions then publishes \`@cryptob1/graphyard\` with npm OIDC provenance, and both GHCR images (\`graphyard\`, \`graphyard-trial\`) with \`GITHUB_TOKEN\`; the host holds no publish token. Publishing runs apart from merge and deploy, and \`graphyard master status\` shows npm's latest version.
 
 One-time owner setup:

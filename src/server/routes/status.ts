@@ -4,6 +4,7 @@ import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { loopAlerts, loopAlertsHeader, loopCheckoutTrust, loopCheckoutTrustHeader, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, reportedLoopMerger } from '../../model/loop-presence.js';
+import { loopWhere, loopWhereHeader, loopWhereRegistry } from '../../model/where-things-run.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
 import { humanOnlySubjects } from '../waits.js';
@@ -81,7 +82,9 @@ export const statusRoutes = defineRoutes('status', [
           // GY-3225: and the standing checkout-trust refusal the live loop raised (an untrusted checkout carrying repository Claude configuration), for the Setup checklist's one item.
           checkoutTrust: loopRegistry(engine).live(observedAt)?.checkoutTrust ?? null,
           // and the pane server its agents run in as that loop last named it (GY-1511).
-          panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null },
+          panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null,
+          // GY-3277: and where this install's parts run as it last named them — units, containers, port, URL, directories, CLI — for the Setup page's panel.
+          where: loopRegistry(engine).live(observedAt) ? loopWhereRegistry(engine).latest : null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },
@@ -113,6 +116,7 @@ export const statusRoutes = defineRoutes('status', [
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
       if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]), alerts: loopAlerts(req.headers[loopAlertsHeader.toLowerCase()]), checkoutTrust: loopCheckoutTrust(req.headers[loopCheckoutTrustHeader.toLowerCase()]) ?? undefined }, new Date());
       if (loopInterval !== null) loopPanesRegistry(services.engine).observe(loopPanes(req.headers[loopPanesHeader.toLowerCase()]));
+      if (loopInterval !== null) loopWhereRegistry(services.engine).observe(loopWhere(req.headers[loopWhereHeader.toLowerCase()]));
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
