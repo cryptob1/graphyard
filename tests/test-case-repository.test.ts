@@ -75,7 +75,7 @@ test('unit:test-case-repository — a test case is stored with a stable id, titl
   const entry = await summary(id);
   assert.equal(entry.id, id); assert.equal(entry.title, `Booking ${id} sends an SMS`); assert.equal(entry.purpose, 'A confirmed booking texts the customer');
   assert.equal(entry.revision, 1); assert.equal(entry.changed.by, operator.id);
-  assert.deepEqual(entry.links, [{ key: work.key, title: work.title, stage: work.stage, criteria: ['AC-1'] }], 'the criterion that names e2e:ID links the case to its item');
+  assert.deepEqual(entry.links, [{ id: work.id, key: work.key, title: work.title, stage: work.stage, criteria: [{ id: 'AC-1', text: 'Bookings text the customer' }] }], 'the criterion that names e2e:ID links the case to its item');
   assert.equal(entry.latest, null); assert.equal(entry.runs, 0);
   // The id is stable: a new revision keeps it, and the case reads as last changed by that revision.
   const revised = await call('scenarios', operator, { id, title: 'Booking texts the customer', purpose: 'Revised behaviour', steps: ['Book'], expected: ['An SMS arrives'], environment: 'staging', runner: 'Playwright', testPath: `tests/e2e/${id}.spec.ts`, expectedRevision: 1 });

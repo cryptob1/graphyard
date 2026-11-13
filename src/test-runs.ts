@@ -30,7 +30,8 @@ export interface CaseSummary {
   revision: number | null;
   /** The latest definition: when it changed and who published it. */
   changed: { at: string; by: string } | null;
-  links: { key: string; title: string; stage: string; criteria: string[] }[];
+  /** The items whose criteria name this case, closed-unmerged items left out: each item and the criteria, with their text, that need it. */
+  links: ProofLink[];
   latest: ScenarioRun | null;
   /** Whether the latest run measured an older revision than the case now defines. */
   staleRevision: boolean;
@@ -40,6 +41,38 @@ export interface CaseSummary {
   history: ScenarioRun[];
 }
 export const historyWindow = flakyWindow;
+/** An item a proof belongs to: its id (to open it), key, title, stage and the criteria naming the proof. */
+export interface ProofLink { id: string; key: string; title: string; stage: string; criteria: { id: string; text: string }[] }
+/** A manual or closed-question proof (GY-3278): its item and criterion, and the latest trusted record of it, or null while it waits. */
+export interface JudgedProof { proof: string; link: ProofLink; record: { result: 'pass' | 'fail'; producer: string; at: string } | null }
+
+/** Items' criteria naming proofs of a kind, closed items left out: one row per item, criterion and proof. */
+const criterionRows = (db: Queryable, where: string, evidence = false) => db.query(`SELECT p AS proof, document->>'id' AS id, document->>'key' AS key, document->>'title' AS title, document->>'stage' AS stage, c->>'id' AS criterion, c->>'text' AS text${evidence ? `, document->'evidence' AS evidence` : ''}
+  FROM work_items, jsonb_array_elements(document->'criteria') c, jsonb_array_elements_text(c->'proofs') p
+  WHERE COALESCE(document->'closure', 'null'::jsonb) = 'null'::jsonb AND (${where}) ORDER BY number`);
+/** Group criterion rows by item, one link per item. */
+function linksOf(rows: { id: string; key: string; title: string; stage: string; criterion: string; text: string }[]): ProofLink[] {
+  const byWork = new Map<string, ProofLink>();
+  for (const row of rows) {
+    const entry = byWork.get(row.key) ?? { id: row.id, key: row.key, title: row.title, stage: row.stage, criteria: [] };
+    if (!entry.criteria.some(criterion => criterion.id === row.criterion)) entry.criteria.push({ id: row.criterion, text: row.text });
+    byWork.set(row.key, entry);
+  }
+  return [...byWork.values()];
+}
+
+/** Every manual: proof and every proof answered as a closed question, with its item, criterion and state (GY-3278). */
+export async function judgedProofs(db: Queryable): Promise<JudgedProof[]> {
+  const rows = (await criterionRows(db, `p LIKE 'manual:%' OR p IN (SELECT q->>'proof' FROM jsonb_array_elements(COALESCE(document->'closedQuestions', '[]'::jsonb)) q)`, true)).rows;
+  const proofs = new Map<string, JudgedProof>();
+  for (const row of rows) {
+    const id = `${row.key} ${row.proof}`, existing = proofs.get(id);
+    if (existing) { existing.link.criteria.push({ id: row.criterion, text: row.text }); continue; }
+    const latest = ((row.evidence ?? []) as Evidence[]).filter(record => record.proof === row.proof && record.trusted && !record.revocation).at(-1);
+    proofs.set(id, { proof: row.proof, link: linksOf([row])[0], record: latest ? { result: latest.result, producer: latest.producer, at: latest.at } : null });
+  }
+  return [...proofs.values()];
+}
 
 /** Every test case with its latest result, last change, failure history and flakiness: the Tests page. */
 export async function testSummary(db: Queryable): Promise<{ window: number; cases: CaseSummary[] }> {
@@ -50,8 +83,7 @@ export async function testSummary(db: Queryable): Promise<{ window: number; case
   const excluded = [...withdrawn];
   const totals = (await db.query(`SELECT scenario, count(*) AS runs, count(*) FILTER (WHERE document->>'result' = 'fail' AND NOT (document->>'evidenceId' = ANY($1::text[]))) AS failures FROM scenario_runs GROUP BY scenario`, [excluded])).rows;
   const lastFailures = (await db.query(`SELECT DISTINCT ON (scenario) seq, scenario, document FROM scenario_runs WHERE document->>'result' = 'fail' AND NOT (document->>'evidenceId' = ANY($1::text[])) ORDER BY scenario, seq DESC`, [excluded])).rows;
-  const links = (await db.query(`SELECT substr(p, 5) AS scenario, document->>'key' AS key, document->>'title' AS title, document->>'stage' AS stage, c->>'id' AS criterion
-    FROM work_items, jsonb_array_elements(document->'criteria') c, jsonb_array_elements_text(c->'proofs') p WHERE p LIKE 'e2e:%' ORDER BY number`)).rows;
+  const links = (await criterionRows(db, `p LIKE 'e2e:%'`)).rows.map(row => ({ ...row, scenario: row.proof.slice(4) }));
   // A case work links to is listed even before its definition is synced or it has run (GY-3194).
   const ids = [...new Set([...definitions.map(d => d.id), ...recent.map(row => row.scenario as string), ...links.map(row => row.scenario as string)])].sort();
   const cases: CaseSummary[] = [];
@@ -63,14 +95,8 @@ export async function testSummary(db: Queryable): Promise<{ window: number; case
     const lastFailure = failure ? toRun(failure, withdrawn) : null;
     const failures = Number(total?.failures ?? 0);
     const latest = history.find(run => !run.withdrawn) ?? null;
-    const byWork = new Map<string, CaseSummary['links'][number]>();
-    for (const link of links.filter(row => row.scenario === id)) {
-      const entry = byWork.get(link.key) ?? { key: link.key, title: link.title, stage: link.stage, criteria: [] as string[] };
-      if (!entry.criteria.includes(link.criterion)) entry.criteria.push(link.criterion);
-      byWork.set(link.key, entry);
-    }
     cases.push({ id, title: definition?.title ?? null, purpose: definition?.purpose ?? null, testPath: definition?.testPath ?? null, environment: definition?.environment ?? null,
-      revision: definition?.revision ?? null, changed: definition ? { at: definition.createdAt, by: definition.createdBy } : null, links: [...byWork.values()],
+      revision: definition?.revision ?? null, changed: definition ? { at: definition.createdAt, by: definition.createdBy } : null, links: linksOf(links.filter(row => row.scenario === id)),
       latest, staleRevision: !!latest && !!definition && latest.scenarioRevision !== null && latest.scenarioRevision < definition.revision,
       runs: Number(total?.runs ?? 0), failures, lastFailure, ...(({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(history)), history });
   }

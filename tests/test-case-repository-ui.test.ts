@@ -112,7 +112,7 @@ test('integration:item-tests-panel — a Tests panel lists every criterion proof
 const at = (seq: number, result: ScenarioRun['result'], sha = head, extra: Partial<ScenarioRun> = {}): ScenarioRun => ({ seq, scenarioId: 'checkout-pays', proof: 'e2e:checkout-pays', result, scenarioRevision: 1, environment: 'staging', executed: 4, skipped: result === 'skipped' ? 1 : 0,
   sha, baseSha: base, policyRevision: 1, workId: 'w', workKey: 'GY-162', pr: 162, run: { kind: 'github-actions', id: String(9000 + seq), attempt: 1, url: `https://example.test/${seq}` }, evidenceId: `e${seq}`, producer: 'e2e-producer', at: iso(-seq * 60_000), ...extra });
 const summary = (overrides: Partial<CaseSummary>): CaseSummary => ({ id: 'checkout-pays', title: 'Checkout takes payment', purpose: 'Paying completes an order.', testPath: 'tests/e2e/checkout.spec.ts', environment: 'staging', revision: 2,
-  changed: { at: iso(-3_600_000), by: 'operator' }, links: [{ key: 'GY-162', title: 'Tests page', stage: 'review', criteria: ['AC-1'] }], latest: null, staleRevision: false, runs: 0, failures: 0, lastFailure: null, flaky: false, flakyReason: null, history: [], ...overrides });
+  changed: { at: iso(-3_600_000), by: 'operator' }, links: [{ id: 'w', key: 'GY-162', title: 'Tests page', stage: 'review', criteria: [{ id: 'AC-1', text: 'The Tests page lists every case' }] }], latest: null, staleRevision: false, runs: 0, failures: 0, lastFailure: null, flaky: false, flakyReason: null, history: [], ...overrides });
 
 test('unit:test-case-repository-ui — the Tests page lists every case with its latest result, last change and failure history, and flags flaky cases', () => {
   const flaky = summary({ latest: at(3, 'fail'), staleRevision: true, runs: 25, failures: 2, lastFailure: at(3, 'fail'), flaky: true, flakyReason: `passed and failed on commit ${head.slice(0, 8)}`,
@@ -124,7 +124,7 @@ test('unit:test-case-repository-ui — the Tests page lists every case with its 
   const render = (filter: 'all' | 'fail' | 'flaky' | 'never' = 'all') => renderToStaticMarkup(createElement(TestsView, { data, error: '', loading: false, filter, setFilter: noop, retry: noop, api: async () => ({}), canEdit: true, setView: noop }));
   const html = render();
   const row = (id: string) => text(new RegExp(`<tr data-case="${id}">([\\s\\S]*?)</tr>`).exec(html)![1]);
-  assert.deepEqual([...html.matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['checkout-pays', 'refund-issued', 'login-works', 'retired-case'], 'every case is listed');
+  assert.deepEqual([...html.matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['checkout-pays', 'retired-case', 'refund-issued', 'login-works'], 'every case is listed, failing first, then passing');
   // Latest result, bound to its commit and pull request; the revision it measured when the case has since changed.
   assert.match(row('checkout-pays'), new RegExp(`× failed ${head.slice(0, 8)} · PR #162`));
   assert.match(row('checkout-pays'), /measured v1; the case is now v2/);
@@ -138,10 +138,10 @@ test('unit:test-case-repository-ui — the Tests page lists every case with its 
   assert.match(html, /Show older runs/, 'older runs page from the run ledger');
   assert.match(row('checkout-pays'), /flaky: passed and failed on commit aaaaaaaa/);
   assert.match(text(html), /changed result twice or more in its last 20 runs/, 'the flaky window is named');
-  assert.match(row('checkout-pays'), /GY-162 AC-1/, 'linked work items');
+  assert.match(row('checkout-pays'), /GY-162 Tests page AC-1: The Tests page lists every case/, 'the item and criterion each case proves');
   assert.match(row('refund-issued'), /◌ skipped/); assert.match(row('refund-issued'), /none/);
   assert.match(row('login-works'), /○ never run/);
-  assert.match(row('retired-case'), /not in the registry/);
+  assert.doesNotMatch(row('retired-case'), /not in the registry/, 'a case with runs is never flagged missing from the registry (GY-3278)');
   // Filters narrow to failing, flaky and never-run cases, each with its count.
   assert.match(text(html), /All 4 Failing 1 Flaky 1 Never run 1/);
   assert.deepEqual([...render('never').matchAll(/<tr data-case="([^"]+)"/g)].map(match => match[1]), ['login-works']);

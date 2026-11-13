@@ -1,0 +1,13 @@
+{
+  "id": "tests-page-readable",
+  "title": "The Tests page shows each proof with its item and criterion, and honest states",
+  "description": "On a fixture install with a merged item whose case passed, a merged item missing its case file, a backlog item with an unwritten case and an item with a manual proof, the served /api/tests read renders each row with its item key, title and criterion; the backlog row is neutral and folded; only the merged-without-case row alarms; failing rows come first; the manual proof is listed with its state.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "tests page readable",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/tests-page-readable.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
