@@ -40,7 +40,7 @@ export const commands = {
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional(), by: z.literal('loop').optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, description: createSchema.shape.description.optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
-  rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
+  rework: z.object({ reason: z.string().trim().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
   // GY-3266: a heartbeat may carry the policy revision the worker has synced — the worker's sync
   // sends it to acknowledge a requirements revision recorded under its live lease, which complete

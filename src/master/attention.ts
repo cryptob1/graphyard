@@ -142,3 +142,7 @@ export function applicationAttention(applications: ApplicationRelease[]) {
     text: app.state === 'lagging' ? `Application ${app.id} lags main: ${app.reason}` : `Application ${app.id}'s versionUrl failed: ${app.reason}`,
     next: `Check the ${app.id} deploy on its host (Railway deploys it from git); Graphyard only reads its versionUrl` }));
 }
+
+/** A rework carries the reviewer's reason onto an attention line until a new head answers it. */
+export const reworkAttention = (items: readonly Pick<Work, 'key' | 'reworkRequested' | 'lastRework'>[]) => items.filter(item => item.reworkRequested && item.lastRework?.reason)
+  .map(item => ({ subject: item.key, text: `Sent back for rework: ${item.lastRework!.reason}`, next: `graphyard status ${item.key}; the next worker's request carries this reason` }));

@@ -1,0 +1,15 @@
+{
+  "id": "rework-reason-visible",
+  "title": "A rework carries the reviewer's reason and raises attention",
+  "description": "Applies a rework to a fixture item in Postgres: the item keeps the reason (shown by status and the item page), the next worker's brief contains it, an attention line names it, and a rework without a reason is refused.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "rework reason on item, brief and attention",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/rework-reason-visible.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

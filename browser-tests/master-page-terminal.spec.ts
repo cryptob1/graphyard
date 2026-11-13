@@ -73,7 +73,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await reader.close();
 
     // The operator leaves for Workers: the page detaches, Herdr is released, and no pane is closed.
-    await operator.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: 'Workers', exact: true }).click();
+    await operator.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
     await expect.poll(async () => (await calls()).some(entry => entry.pane === 'w1:master' && entry.command?.type === 'terminal.release'), settled).toBe(true);
     expect((await calls()).some(entry => entry.args?.[0] === 'pane' && entry.args?.[1] === 'close')).toBe(false);
 

@@ -245,6 +245,15 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       work!.violations = work!.violations.filter(entry => !entry.startsWith(reconciliationRefusalPrefix));
       work!.stage = 'done'; work!.stageEnteredAt = now.toISOString();
       work!.delivery = { mergedAt, mergeSha: data.mergeSha, authorizationRevision: work!.revision };
+      // GY-3281: the delivered document's gates read the reconciled ledger. The last evaluation
+      // before this one wrote the `pushed` save, whose merge gate refuses the push it had not yet
+      // seen reconciled; a settled delivery is never evaluated again, so without this re-read a
+      // done item shows a pending merge gate forever.
+      Object.assign(work!, evaluate(work!, all, now));
+      // Proof gaps count proofs executed in the merged trial (GY-3281): the trial is the producer
+      // the acceptance gate already read, so the delivered item owes no authority it cannot show.
+      const executed = new Set(Object.entries(work!.mergeLedger?.trial?.proofs ?? {}).filter(([, counts]) => counts.executed > 0).map(([proof]) => proof));
+      if (executed.size && work!.proofGaps?.length) work!.proofGaps = work!.proofGaps.filter(proof => !executed.has(proof));
       // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
       settleDelivered(work!, all, now);
       await save(db, work!, actor.id, deliveredReason, now, { mergeSha: data.mergeSha, observedTip: data.observedTip, mergedAt });
