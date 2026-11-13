@@ -31,7 +31,7 @@ test('unit:readme-and-walkthrough-only — docs/ holds only the walkthrough medi
   assert.deepEqual([...readme.matchAll(/\]\((docs\/[^)]*\.md)/g)].map(match => match[1]), ['docs/walkthrough.md'], 'README links only the walkthrough re-render page');
 
   const seconds = mp4Seconds(readFileSync(new URL(video, root)));
-  assert.ok(seconds >= 60 && seconds <= 105, `the video runs ${seconds} s`);
+  assert.ok(seconds >= 60 && seconds <= 100, `the video runs ${seconds} s`);
   assert.equal(readFileSync(new URL(gif, root)).subarray(0, 6).toString(), 'GIF89a');
 
   const html = read('scripts/walkthrough/how-graphyard-works.html');

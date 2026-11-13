@@ -50,7 +50,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
     // GY-3101: and names whether it alerts the operator directly (run.alertUrl) and after how many minutes, for the same page.
     // GY-3225: and names the standing checkout-trust refusal (an untrusted checkout carrying repository Claude configuration), for the Setup checklist's one item.
-    // GY-3277: and names where this install's parts run — its units, containers, port, URL, directories and CLI — for the Setup page's panel.
+    // GY-3277: and names where this install's parts run — its units, containers, port, URL and directories — for the Setup page's panel.
     const where = await loopWhereReport(root, master);
     const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });

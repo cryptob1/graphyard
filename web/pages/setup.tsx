@@ -4,7 +4,7 @@ import { whereLogs, type WhereThingsRun } from '../../src/model/where-things-run
 import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
 import { CopyButton } from './workers';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
-import { PageHeader, PageSection } from '../components/page-layout';
+import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
 
 /**
@@ -96,31 +96,21 @@ export function AlertsLine({ status }: { status: any }) {
 }
 
 /**
- * Where every part of this install runs (GY-3277), as its loop named it (`setup.where`): the units,
- * the containers, the port and URL, the directories and the CLI, each beside the command that reads
- * its logs. The master's Herdr pane (`setup.panes`) rides along, so one panel answers where the
- * loop, the server, the trials and the agents each live. Nothing shows until the loop has named
- * them, the same as the pane server beside it.
+ * Where this install's parts run (GY-3277), as its loop named them (`setup.where`): the units and
+ * containers beside the command that reads their logs, then the URL, the master's Herdr pane and the
+ * directories. Collapsed at the foot of the page: onboarding does not need it, operating does.
+ * `graphyard guide infra` explains each part; this shows only this install's own names.
  */
 export function WhereThingsRunPanel({ where, panes }: { where: WhereThingsRun | null; panes: { session: string | null; master?: string | null } | null }) {
-  if (!where) return <p data-where-things-run="unknown" className="muted">Where every part runs is not known yet: the loop names it once it runs. Start the loop on the host with graphyard master run.</p>;
-  const rows: { part: string; name: string; logs: string | null }[] = [
-    { part: 'Loop (dispatch, merge writer, batch gate)', name: where.loopUnit, logs: whereLogs(where.loopUnit) },
-    { part: 'Deploy watch', name: where.deployUnit, logs: whereLogs(where.deployUnit) },
-    { part: 'Control-plane server', name: where.server, logs: whereLogs(where.server) },
-    { part: 'Database', name: where.database, logs: whereLogs(where.database) },
-    { part: 'This dashboard', name: `${where.url} · port ${where.port}`, logs: null },
-    { part: 'Merge trials', name: 'a short-lived container per trial, beside any compose services a check declares', logs: null },
-    { part: 'Agents (workers, reviewers, producers)', name: `headless on the host, confined in worktrees under ${where.checkout}`, logs: null },
-    { part: 'Master session', name: panes?.session ? `Herdr session ${panes.session}${panes.master ? ` · master pane ${panes.master}` : ''}` : 'Herdr', logs: null },
-    { part: 'Checkout', name: where.checkout, logs: null },
-    { part: 'Install directory (credentials, CLI releases)', name: where.installDirectory, logs: null },
-    { part: 'CLI release', name: where.cliPath, logs: null },
-  ];
-  return <table className="sessions-table" data-where-things-run="known" aria-label="Where things run">
-    <thead><tr><th scope="col">Part</th><th scope="col">Runs at</th><th scope="col">Logs</th></tr></thead>
-    <tbody>{rows.map(row => <tr key={row.part}><th scope="row">{row.part}</th><td data-label="Runs at">{row.name}</td><td data-label="Logs">{row.logs ? <code>{row.logs}</code> : <span className="muted">—</span>}</td></tr>)}</tbody>
-  </table>;
+  if (!where) return <p data-where-things-run="unknown" className="muted">Not known yet: the loop names these once it runs (graphyard master run).</p>;
+  const rows: [string, string][] = [['The loop', where.loopUnit], ['Deploy watch', where.deployUnit], ['Server and dashboard', where.server], ['Database', where.database]];
+  return <div data-where-things-run="known">
+    <table className="sessions-table" aria-label="Where things run">
+      <thead><tr><th scope="col">Part</th><th scope="col">Runs as</th><th scope="col">Logs</th></tr></thead>
+      <tbody>{rows.map(([part, name]) => { const logs = whereLogs(name); return <tr key={part}><th scope="row">{part}</th><td data-label="Runs as">{name}</td><td data-label="Logs">{logs ? <code>{logs}</code> : <span className="muted">—</span>}</td></tr>; })}</tbody>
+    </table>
+    <p className="muted">Dashboard {where.url} (port {where.port}){panes?.session ? ` · Herdr session ${panes.session}${panes.master ? `, master pane ${panes.master}` : ''}` : ''} · checkout {where.checkout} · install directory {where.installDirectory}. <code>graphyard guide infra</code> explains each part.</p>
+  </div>;
 }
 
 /**
@@ -141,9 +131,9 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
     <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
-    <PageSection title="Where things run" label="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
+    <section aria-label="Where things run"><MoreDetails summary="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></MoreDetails></section>
   </>;
 }
 

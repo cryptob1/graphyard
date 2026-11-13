@@ -44,7 +44,7 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     const configHome = join(home, 'config'), at = '2030-04-01T00:00:00.000Z';
     mkdirSync(join(configHome, 'fixture-shop'), { recursive: true });
     writeFileSync(join(configHome, 'fixture-shop', 'install.json'), JSON.stringify({ version: 1, installId: 'fixture-shop', repository: 'fixture/shop', provider: 'compose', baseBranch: 'main', createdAt: at, updatedAt: at }));
-    const where = await loopWhereReport(checkout, { repository: 'fixture/shop', url, cliPath: join(configHome, 'fixture-shop', 'deploy/build/.graphyard/cli-releases/abc/bin/graphyard.mjs') }, configHome);
+    const where = await loopWhereReport(checkout, { repository: 'fixture/shop', url }, configHome);
     expect(where).not.toBeNull();
     const read = await fetch(`${url}/api/work-snapshot`, { headers: {
       Authorization: 'Bearer test-loop',
@@ -60,14 +60,14 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     await page.goto(`${baseURL}/#sign-in=${code}&setup`);
     const section = page.getByRole('region', { name: 'Where things run', exact: true });
     await expect(section).toBeVisible({ timeout: 15_000 });
+    // Collapsed at the foot of the page until the operator opens it.
+    await section.getByText('Where things run', { exact: true }).click();
     for (const shown of [
       where!.loopUnit, where!.deployUnit, where!.server, where!.database,
-      String(where!.port), where!.url, where!.checkout, where!.installDirectory, where!.cliPath,
+      String(where!.port), where!.url, where!.checkout, where!.installDirectory,
       'graphyard-master-fixture-shop', 'master pane 3',
       `journalctl --user -u ${where!.loopUnit}`, `docker logs ${where!.server}`,
     ]) await expect(section).toContainText(shown, { timeout: 15_000 });
-    await expect(section).toContainText('Merge trials');
-    await expect(section).toContainText('Agents (workers, reviewers, producers)');
 
     // The same dashboard's Guide page embeds the README, so the where-things-run diagram renders from the page's own bundle.
     await page.getByRole('button', { name: 'Help', exact: true }).click();

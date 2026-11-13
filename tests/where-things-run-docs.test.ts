@@ -13,14 +13,14 @@ import { WhereThingsRunPanel } from '../web/pages/setup.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3277: the docs, the walkthrough video and the Setup page show where every part of Graphyard
-// runs — one diagram embedded in the README and the dashboard Guide, one README section and guide
-// topic `infra` carrying its every unit, container, port and log command, and the Setup page's
-// panel naming this install's own values as its loop reports them.
+// runs — one diagram embedded in the README section and the dashboard Guide, the guide topic `infra`
+// listing its every unit, container, port and log command, and the Setup page's panel naming this
+// install's own values as its loop reports them.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => readFileSync(join(root, path), 'utf8');
 
-/** Every unit, container, port and log command the diagram carries: what the README section and `guide infra` must each list. */
+/** Every unit, container, port and log command the diagram carries: what the README section shows through it and `guide infra` lists. */
 const diagramFacts = [
   'graphyard-master-OWNER-NAME.service',
   'journalctl --user -u graphyard-master-OWNER-NAME.service',
@@ -35,12 +35,14 @@ const diagramFacts = [
   '~/.config/graphyard/<install>/',
 ];
 
-test('unit:tests/where-things-run-docs.test.ts — the README\'s Where things run section embeds the diagram and lists every unit, container, port and log command it carries', () => {
+test('unit:tests/where-things-run-docs.test.ts — the README\'s Where things run section embeds the diagram, whose every unit, container, port and log command shows there, and points to guide infra', () => {
   const readme = read('README.md');
   const section = readme.split('\n## Where things run\n')[1]?.split('\n## ')[0] ?? '';
   assert.ok(section, 'README carries a Where things run section');
   assert.ok(section.includes('](docs/diagrams/where-things-run.svg)'), 'the section embeds the diagram');
-  for (const fact of diagramFacts) assert.ok(section.includes(fact), `the README section lists ${fact}`);
+  assert.ok(section.includes('`graphyard guide infra`'), 'the section points to guide infra rather than copying its table');
+  const shown = read('docs/diagrams/where-things-run.svg').replace(/<[^>]+>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ');
+  for (const fact of diagramFacts) assert.ok(shown.includes(fact), `the embedded diagram lists ${fact}`);
 });
 
 test('unit:tests/where-things-run-docs.test.ts — guide infra prints the same facts as a table of part, runs-as, port and log commands', () => {
@@ -61,7 +63,7 @@ test('unit:tests/where-things-run-docs.test.ts — the diagram SVG exists, names
   assert.ok(guidePage.includes('guide-diagram'), 'the Guide renders the README\'s diagram through its bundled copy');
 });
 
-test('unit:tests/where-things-run-docs.test.ts — the loop reports its install\'s units, containers, port, directories and CLI, and the header carries them to the control plane', async () => {
+test('unit:tests/where-things-run-docs.test.ts — the loop reports its install\'s units, containers, port and directories, and the header carries them to the control plane', async () => {
   const home = await temporaryDirectory('where-things-run');
   const checkout = join(home, 'checkout');
   mkdirSync(join(checkout, '.graphyard'), { recursive: true });
@@ -70,14 +72,14 @@ test('unit:tests/where-things-run-docs.test.ts — the loop reports its install\
   const install = join(configHome, 'fixture-shop');
   mkdirSync(install, { recursive: true });
   const at = '2030-04-01T00:00:00.000Z';
-  const master = { repository: 'fixture/shop', url: 'http://127.0.0.1:4310', cliPath: join(install, 'deploy/build/.graphyard/cli-releases/abc/bin/graphyard.mjs') };
+  const master = { repository: 'fixture/shop', url: 'http://127.0.0.1:4310' };
   writeFileSync(join(install, 'install.json'), JSON.stringify({ version: 1, installId: 'fixture-shop', repository: 'fixture/shop', provider: 'compose', baseBranch: 'main', createdAt: at, updatedAt: at }));
 
   const where = await loopWhereReport(checkout, master, configHome);
   assert.deepEqual(where, {
     loopUnit: 'graphyard-master-fixture-shop.service', deployUnit: 'graphyard-deploy-fixture-shop.service',
     server: composeContainer('fixture-shop', 'server'), database: composeContainer('fixture-shop', 'db'),
-    port: 4310, url: master.url, checkout, installDirectory: install, cliPath: master.cliPath,
+    port: 4310, url: master.url, checkout, installDirectory: install,
   } satisfies WhereThingsRun);
   assert.equal(where!.server, 'graphyard-fixture-shop-server-1');
   assert.equal(where!.database, 'graphyard-fixture-shop-db-1');
@@ -110,7 +112,6 @@ test('unit:tests/where-things-run-docs.test.ts — the Setup panel names this in
     loopUnit: 'graphyard-master-fixture-shop.service', deployUnit: 'graphyard-deploy-fixture-shop.service',
     server: 'graphyard-fixture-shop-server-1', database: 'graphyard-fixture-shop-db-1',
     port: 4310, url: 'http://127.0.0.1:4310', checkout: '/home/op/fixture-shop', installDirectory: '/home/op/.config/graphyard/fixture-shop',
-    cliPath: '/home/op/.config/graphyard/fixture-shop/deploy/build/.graphyard/cli-releases/abc/bin/graphyard.mjs',
   };
   const status = { setup: { where, panes: { configHome: '/home/op/.config/herdr', session: 'graphyard-master-fixture-shop', host: 'host-a', running: true, master: '3' } } };
   const html = renderToStaticMarkup(createElement(WhereThingsRunPanel, { where: status.setup.where, panes: status.setup.panes }));
@@ -122,5 +123,5 @@ test('unit:tests/where-things-run-docs.test.ts — the Setup panel names this in
     'graphyard-master-fixture-shop', 'master pane 3', 'journalctl --user -u graphyard-master-fixture-shop.service',
   ]) assert.ok(html.includes(shown), `the panel shows ${shown}`);
   const unknown = renderToStaticMarkup(createElement(WhereThingsRunPanel, { where: null, panes: null }));
-  assert.match(unknown, /not known yet/, 'with no report the panel says so instead of guessing');
+  assert.match(unknown, /Not known yet/, 'with no report the panel says so instead of guessing');
 });

@@ -20,8 +20,6 @@ export interface WhereThingsRun {
   /** The checkout the loop runs from, and the install's own directory under ~/.config/graphyard. */
   checkout: string;
   installDirectory: string;
-  /** The CLI release every session of this install runs. */
-  cliPath: string;
 }
 
 /**
@@ -41,8 +39,8 @@ export function loopWhere(header: string | string[] | undefined): WhereThingsRun
     const parsed = JSON.parse(decodeURIComponent(value));
     const port = Number(parsed?.port);
     if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
-    const facts: WhereThingsRun = { loopUnit: '', deployUnit: '', server: '', database: '', port, url: '', checkout: '', installDirectory: '', cliPath: '' };
-    for (const field of ['loopUnit', 'deployUnit', 'server', 'database', 'url', 'checkout', 'installDirectory', 'cliPath'] as const) {
+    const facts: WhereThingsRun = { loopUnit: '', deployUnit: '', server: '', database: '', port, url: '', checkout: '', installDirectory: '' };
+    for (const field of ['loopUnit', 'deployUnit', 'server', 'database', 'url', 'checkout', 'installDirectory'] as const) {
       const text = name(parsed?.[field]);
       if (!text) return null;
       facts[field] = text;

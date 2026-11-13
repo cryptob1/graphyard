@@ -13,11 +13,11 @@ export const composeContainer = (installId: string, service: 'server' | 'db') =>
 /**
  * The install's where-facts, as the loop runs them: the units its checkout records, the
  * containers its provider started (or the local provider's unit and embedded cluster), the URL it
- * talks to, its checkout, its install directory and its CLI release. Null when its own records do
+ * talks to, its checkout and its install directory. Null when its own records do
  * not name them — a broken units record or install record, or a URL that does not parse — so the
  * panel says so rather than guess a name that may be another install's.
  */
-export async function loopWhereReport(root: string, master: { repository: string; url: string; cliPath: string }, configHome?: string): Promise<WhereThingsRun | null> {
+export async function loopWhereReport(root: string, master: { repository: string; url: string }, configHome?: string): Promise<WhereThingsRun | null> {
   let loopUnit: string;
   try { loopUnit = readInstallUnits(root).master; } catch { return null; }
   let url: URL;
@@ -31,6 +31,6 @@ export async function loopWhereReport(root: string, master: { repository: string
     loopUnit, deployUnit: deployUnitOf({ master: loopUnit }),
     server: record.provider === 'local' ? localUnit(installId) : composeContainer(installId, 'server'),
     database: record.provider === 'local' ? `embedded Postgres (${directory}/postgres)` : composeContainer(installId, 'db'),
-    port, url: master.url, checkout: root, installDirectory: directory, cliPath: master.cliPath,
+    port, url: master.url, checkout: root, installDirectory: directory,
   };
 }

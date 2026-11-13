@@ -110,14 +110,14 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
         <button class="poster" id="poster" type="button" aria-label="Play the walkthrough">
           <div class="big" aria-hidden="true"></div>
           <strong>How Graphyard works</strong>
-          <span>11 short scenes · 99 seconds</span>
+          <span>11 short scenes · 95 seconds</span>
         </button>
       </div>
       <div class="caption" id="caption" aria-live="polite">Press play to follow one goal from a sentence to production.</div>
       <div class="controls">
         <button type="button" id="play">Play</button>
-        <input type="range" id="scrub" min="0" max="99" step="0.1" value="0" aria-label="Position in the walkthrough">
-        <span id="clock">0:00 / 1:30</span>
+        <input type="range" id="scrub" min="0" max="95" step="0.1" value="0" aria-label="Position in the walkthrough">
+        <span id="clock">0:00 / 1:35</span>
       </div>
       <div class="chapters" id="chapters"></div>
     </div>
@@ -128,7 +128,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
 (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const stage = document.getElementById('stage');
-  const DURATION = 99;
+  const DURATION = 95;
   const objs = [], updaters = [];
 
   function el(tag, attrs, parent) {
@@ -270,26 +270,10 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
   A(card(360, 60, 'Master diagnoses, files a repair', 'a worker builds it · every gate stays', 'steel')).at(84, 480, 330).out(90.5);
   A(label('AGENTS CHECK AGENTS · THE HUMAN KEEPS THREE DECISIONS', 't-scene')).at(85.6, 480, 440).out(90.5);
 
-  // 11 · Where things run (90–99): the diagram's facts, one host and what sits outside it.
-  const host = el('g', {});
-  el('rect', { x: -310, y: -215, width: 620, height: 430, rx: 14, class: 'v-bar-bg', opacity: 0.35 }, host);
-  text(host, -290, -187, 't-label', 'ONE LINUX HOST', 'start');
-  A(host).at(90.3, 330, 285).out(98.5);
-  A(card(290, 76, 'The loop', 'graphyard-master-OWNER-NAME.service', 'hl')).at(90.9, 175, 175).out(98.5);
-  A(card(290, 76, 'Server + dashboard', 'graphyard-OWNER-NAME-server-1 · :4310', 'steel')).at(91.3, 485, 175).out(98.5);
-  A(card(290, 76, 'The deploy watch', 'graphyard-deploy-OWNER-NAME.service')).at(91.7, 175, 263).out(98.5);
-  A(card(290, 76, 'Postgres', 'graphyard-OWNER-NAME-db-1')).at(92.1, 485, 263).out(98.5);
-  A(card(290, 76, 'Merge trials', 'graphyard-trial-… per merge')).at(92.5, 175, 351).out(98.5);
-  A(card(290, 76, 'Agents in worktrees', 'workers · reviewers · producers')).at(92.9, 485, 351).out(98.5);
-  A(card(430, 66, 'Herdr', 'the master pane')).at(93.3, 330, 440).out(98.5);
-  A(card(250, 78, 'GitHub', 'fetch · merge writer pushes')).at(93.7, 790, 140).out(98.5);
-  A(card(250, 78, 'Agent providers', 'the accounts call them')).at(94, 790, 290).out(98.5);
-  A(card(250, 78, 'npm + GHCR', 'published by GitHub Actions')).at(94.3, 790, 400).out(98.5);
-  A(card(250, 78, 'Your browser', 'localhost or tailnet · :4310', 'ok')).at(94.6, 790, 498).out(98.5);
-  A(line([[175, 136], [175, 110], [790, 110], [790, 134]])).at(95.4, 0, 0).out(98.5);
-  A(line([[632, 330], [660, 330], [660, 290], [786, 290]])).at(95.8, 0, 0).out(98.5);
-  A(line([[663, 486], [663, 205], [632, 205]])).at(96.2, 0, 0).out(98.5);
-  A(label('ONE HOST · THE SETUP PAGE NAMES THIS INSTALL\u2019S OWN VALUES', 't-scene')).at(96.8, 480, 520).out(98.5);
+  // 11 · Where things run (90–95): the README's diagram itself closes the story — one host, and what sits outside it.
+  const where = el('g', {});
+  el('image', { href: '../../docs/diagrams/where-things-run.svg', x: -480, y: -270, width: 960, height: 540 }, where);
+  A(where).at(90.2, 480, 284, 0.9).out(94.6);
 
   const captions = [
     [0, 9, 'The human sets goals. The master (AI) decides. The loop (plain code) acts. Workers build. The merge writer is the only writer of main.'],
@@ -303,7 +287,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
     [63, 72, 'The loop deploys main and checks health and required end-to-end cases. Normal changes get a post-merge review.'],
     [72, 81, 'If a required live case fails, the merge writer reverts the merge automatically and files a re-land item.'],
     [81, 90, 'Any failure goes to the master, which diagnoses it and files a repair. Agents check agents; gates never relax.'],
-    [90, 99, 'Everything runs on one Linux host: systemd units for the loop and deploy watch, containers for the server on port 4310 and Postgres, a container per merge trial, agents confined in worktrees, Herdr for the master. Outside: GitHub, the providers, npm and GHCR by Actions, and your browser.'],
+    [90, 95, 'It all runs on one Linux host. graphyard guide infra lists each part and its logs.'],
   ];
   const capEl = document.getElementById('caption');
   const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub');
