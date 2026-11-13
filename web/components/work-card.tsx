@@ -11,7 +11,7 @@ import Priority from './priority';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
-import { Agent } from '../fun';
+import { Agent, failedTrial, useFun } from '../fun';
 
 /** The plain sentence without its leading "Stuck: ": the group already says it is blocked. */
 const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
@@ -46,7 +46,9 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
-  return <div className={`work-row group-${group} tone-${status.tone}${timed && held.overdue ? ' overdue' : ''}`} data-row={item.key} data-group={group} onClick={() => onOpen(item.id)}>
+  // GY-3272: a row whose trial failed flickers — a Fun effect, and never under reduced motion (the stylesheet stops it).
+  const fun = useFun();
+  return <div className={`work-row group-${group} tone-${status.tone}${timed && held.overdue ? ' overdue' : ''}${fun && failedTrial(item) ? ' glitch' : ''}`} data-row={item.key} data-group={group} onClick={() => onOpen(item.id)}>
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>

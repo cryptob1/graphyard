@@ -195,10 +195,11 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });
 
-test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 150 words', () => {
+test('integration:dashboard-word-budget — the home page answers what needs you, what is blocked, what is moving and what shipped on one screen in at most 170 words', () => {
   const page = home();
   const count = words(page).length;
-  assert.ok(count <= 150, `home renders ${count} words excluding item titles: ${text(page)}`);
+  // 170 (GY-3272): the top bar's city strip and the theme control cost the budget a dozen words.
+  assert.ok(count <= 170, `home renders ${count} words excluding item titles: ${text(page)}`);
   for (const gone of ['Delivery slices', 'NO LEAD ASSIGNED', 'ENGINEERING, IN VIEW', 'Every change has an owner', 'Explicit reasons, actionable next steps', 'No delivery requires', 'sessions retain goals', 'leads coordinate only', 'Ownership is explicit', 'Agent fleet'])
     assert.ok(!text(page).includes(gone), `no ${gone}`);
   assert.doesNotMatch(text(page), /\bp50\b|\bp95\b/, 'no percentile microtext by default');
@@ -352,5 +353,5 @@ test('integration:work-page-density — every group has one tile, an empty group
   assert.ok(!page.includes('data-group-section="needs-you"'), 'but draws no empty list');
   assert.match(text(page), /A fault blocks it; the master agent clears it/, 'the blocked row says why');
   for (const item of byGroup.moving) assert.ok(page.includes(`data-row="${item.key}"`), item.key);
-  assert.ok(words(page).length <= 150, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
+  assert.ok(words(page).length <= 170, `home renders ${words(page).length} words excluding item titles: ${text(page)}`);
 });

@@ -2,9 +2,26 @@ import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
+import { cityCounts } from '../city';
+import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
+
+/**
+ * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
+ * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
+ * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
+ * words against the counts the Workers page and the ledger read.
+ */
+export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
+  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
+  return <p className="city-strip" aria-label="The yard tonight" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
+    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} on shift
+    <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
+    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped tonight
+  </p>;
+}
 
 /**
  * The board's one release line (GY-1979). A repository that declares a node application
@@ -86,12 +103,18 @@ const meaning = (label: string): GlossaryTerm | null => {
  * the pages under the entry the sidebar has selected, and a section with a single page draws none
  * at all. An open item keeps the repository and release line, with its own Back control.
  */
-export default function TopBar(dashboard: Dashboard) {
-  const { view, setView, status, selected } = dashboard;
+export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
+  const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
   const section = viewFor(view).section;
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
-    {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
+    <div className="top-bar-row">
+      {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
+      <div className="top-bar-live">
+        <CityStrip work={work} observedAt={observedAt}/>
+        {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
+      </div>
+    </div>
     {status && <ReleaseLine status={status}/>}
     {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;
