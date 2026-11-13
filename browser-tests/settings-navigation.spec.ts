@@ -42,10 +42,18 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(tabs(page).getByText('Advanced', { exact: true })).toBeVisible();
     await expect(tabs(page).getByRole('button', { name: 'Operator automation', includeHidden: true })).toBeHidden();
     for (const everyday of ['Product', 'Costs', 'Test cases']) await expect(tabs(page).getByRole('button', { name: everyday, exact: true })).toHaveCount(0);
+    // The same destinations by click.
+    await tabs(page).getByRole('button', { name: 'Setup', exact: true }).click();
+    await heading(page, 'Set up Graphyard');
+    await tabs(page).getByText('Advanced', { exact: true }).click();
+    await tabs(page).getByRole('button', { name: 'Operator automation' }).click();
+    await heading(page, 'Operator automation');
 
     // Product beside the Chief, Costs beside Workers, Test cases beside Tests: clicks.
     await menu(page);
     await primary(page).locator('[data-nav="master"]').click();
+    // The Chief's own tab reads as its sidebar entry does.
+    await expect(tabs(page).getByRole('button').first()).toHaveText(await page.getByRole('main').getByRole('heading', { level: 1 }).innerText());
     await tabs(page).getByRole('button', { name: 'Product', exact: true }).click();
     await heading(page, 'Product');
     await entry(page, 'Workers');
