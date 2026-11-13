@@ -215,7 +215,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['account', 'quota', 'aider-a', 'exhausted', '--resets-at', resetsAt, '--reason', 'Plan exhausted'], cli);
   const view: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
   assert.equal(view.configured, true);
-  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, live: 0, next: 'claude-a', blocked: null, policy: { args: [], tools: [], model: null } });
+  assert.deepEqual(view.roles.find(role => role.role === 'worker'), { role: 'worker', accounts: ['claude-a', 'codex-a', 'aider-a'], concurrency: 3, limit: 9, live: 0, next: 'claude-a', blocked: null, policy: { args: [], tools: [], model: null } });
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
@@ -277,7 +277,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const recorded: Registry = await ok('agent-registry/document', coordinator);
   const session = recorded.sessions.at(-1)!;
   assert.deepEqual([session.role, session.account, session.runtime, session.model, session.host, session.work, session.principal, session.selectedBy, session.endedAt], ['worker', 'claude-fresh', 'claude', 'opus', HOST, dispatched.work, 'implementer', 'master', null]);
-  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
+  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 10 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
   assert.deepEqual(session.skipped.map(entry => entry.account), ['claude-off', 'claude-spent', 'claude-out', 'claude-remote']);
   const observed = Object.fromEntries(recorded.accounts.map(account => [account.name, account.quota]));
   assert.deepEqual([observed['claude-spent'].state, observed['claude-spent'].source, observed['claude-spent'].observedBy, observed['claude-out'].loggedIn, observed['claude-fresh'].state], ['exhausted', 'probe', 'master', false, 'available']);
@@ -290,6 +290,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const failed = await dispatch(root, config, 'worker-b', probe);
   assert.equal(failed.account!.environment, 'muse-a');
   await ok('agent-registry/accounts', operator, { account: { name: 'claude-fresh', runtime: 'claude', model: 'opus', credential: { host: HOST, home: fresh }, maxSessions: 5 }, reason: 'Raise the limit' });
+  // GY-3285: the worker role runs its accounts times its concurrency, so one account at concurrency 2 is full with the two live sessions.
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-fresh'], concurrency: 2 }, reason: 'two workers at once' });
   await assert.rejects(dispatch(root, config, 'worker-b', probe), /role worker is at its concurrency limit \(2 of 2 live/);
   await assert.rejects(selectAccount(config, 'worker', config.workers[0], { ...probe, work: 'GY-777' }), /role worker is at its concurrency limit \(2 of 2 live: claude-fresh on GY-\d+, muse-a on GY-\d+\)/);
   const refused: FleetView = await ok(`agent-registry?host=${HOST}`, auditor);
@@ -512,7 +514,7 @@ test('unit:registry-visibility — the fleet view and the dashboard show each ac
   // Dashboard: the page renders the same view.
   const page = renderToStaticMarkup(createElement(FleetOverview, { fleet: view }));
   for (const shown of ['claude-b · claude · opus (claude-opus-5) · ineligible', `Ineligible: claude-b quota is exhausted until ${resetsAt} (weekly window spent)`, 'worker (2 of 3), reviewer (2 of 2), producer (1 of 1)', 'Quota: exhausted — 7d 100%', 'worker on GY-5 since', '(limit 1)', 'Ineligible: codex-out is not logged in', 'Login: logged out', 'Ineligible: codex-a is placed on build-host-2', '$15 in / $75 out per MTok', 'Capability: frontier',
-    'worker · 1 of 4 running · next: none', 'claude-a → claude-b → codex-a', 'role producer is paused (concurrency 0)', 'Credential by reference: /agents/claude-a on build-host-1', 'CLAUDE_CONFIG_DIR'])
+    'worker · 1 of 12 running · next: none', 'claude-a → claude-b → codex-a', 'role producer is paused (concurrency 0)', 'Credential by reference: /agents/claude-a on build-host-1', 'CLAUDE_CONFIG_DIR'])
     assert.ok(page.includes(shown.replaceAll('\'', '&#x27;')), shown);
   assert.ok(page.includes(new Date(resetsAt).toLocaleString()), 'the reset time');
 });

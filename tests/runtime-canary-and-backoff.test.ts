@@ -36,7 +36,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
 const runtime = (version: string): FleetRuntime => ({ name: 'opencode', launch: { kind: 'opencode', args: [], environment: { PATH: `${join(installs, version, 'bin')}:/usr/bin:/bin`, MISE_NO_CONFIG: '1' }, homeVariable: 'XDG_DATA_HOME', modelFlag: null, login: null, loginFile: null } } as unknown as FleetRuntime);
 const registryOf = (runtimes: FleetRuntime[]): Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'> => ({ runtimes: [...runtimes, { name: 'claude', launch: { kind: 'claude', environment: {} } } as unknown as FleetRuntime],
   accounts: [{ name: 'oc-a', runtime: 'opencode' }, { name: 'cl-a', runtime: 'claude' }] as AgentRegistry['accounts'],
-  roles: [{ name: 'worker', accounts: ['oc-a', 'cl-a'] }] as AgentRegistry['roles'] });
+  roles: [{ name: 'worker', accounts: ['oc-a', 'cl-a'], concurrency: 5 }] as AgentRegistry['roles'] });
 function work(id: string, key: string, overrides: Partial<Work> = {}): Work {
   return workFixture({ id, key, priority: 1, createdAt: iso(t0 - 3_600_000), updatedAt: iso(t0), stageEnteredAt: iso(t0),
      ...overrides });
@@ -133,7 +133,7 @@ test('unit:runtime-canary-and-backoff — a failed canary keeps the pinned versi
 test('unit:runtime-canary-and-backoff — launch failures back off per runtime and item: 1 min doubling to 30 min, nine profiles count as one, a useful launch of the runtime resets it for the item', async () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 12].map(launchBackoffMs), [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000, 1_800_000]);
   const items = [work('x', 'GY-10')];
-  const run = harness(items, { ...registryOf([runtime('2.2.5')]), roles: [{ name: 'worker', accounts: ['oc-a'] }] as AgentRegistry['roles'] });
+  const run = harness(items, { ...registryOf([runtime('2.2.5')]), roles: [{ name: 'worker', accounts: ['oc-a'], concurrency: 9 }] as AgentRegistry['roles'] });
   run.behave.dispatch = async (_item, _profile, _agents, _snapshot, launch) => { launch?.onRuntime?.('opencode'); throw new Error('opencode TUI exited'); };
   let at = t0;
   const attempts = () => run.launches.filter(launch => launch.key === 'GY-10').length;

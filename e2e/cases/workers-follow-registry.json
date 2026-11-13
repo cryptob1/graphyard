@@ -1,0 +1,11 @@
+{
+  "id": "workers-follow-registry",
+  "title": "An install runs as many workers as its registry's worker role allows",
+  "description": "One worker profile and a registry worker role of three accounts at concurrency 2: a real loop cycle, control plane and headless dispatch run six ready items as six concurrent worker sessions, each under a worker identity the control plane minted for the loop; master workers 1 limits the next six items to three, and master status shows workers running/allowed.",
+  "tags": ["dispatch", "workers"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "six workers from one profile, then three", "run": "node --import tsx tests/helpers/run-tests.ts tests/workers-follow-registry.test.ts", "timeoutSeconds": 600 }
+  ]
+}

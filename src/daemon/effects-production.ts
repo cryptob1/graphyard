@@ -8,6 +8,7 @@ import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
 import { fleetRequest } from '../fleet.js';
+import { growWorkerPool } from '../master/worker-pool.js';
 import { endRegistrySlot, endRegistrySessionById, liveMasterSessions } from '../master/registry-slot.js';
 import { dispatchEffects } from '../dispatch/effects.js';
 import { readDispatchCursor, type DispatchCursor } from '../dispatch/cursor.js';
@@ -174,6 +175,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     dispatch: (work, profile, _agents, snapshot, launch) => dispatchWork(root, work, profile, { allWork: snapshot.work, observedAt: snapshot.now, coordinatorRoot: deps.coordinatorRoot, headless: deps.headless, capacity: event => mutate(`work/${work.id}/capacity`, event, randomUUID()), ...launch }),
     registry: () => fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'),
+    growWorkers: (config, allowed) => growWorkerPool(root, config, allowed, id => fleetRequest(config as Parameters<typeof fleetRequest>[0], 'worker-identities', { body: { id } })),
     // GY-3225: the checkout's folder-trust refusals (an untrusted checkout carrying repository
     // Claude configuration), read from the registry document and this host's account configs.
     checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),

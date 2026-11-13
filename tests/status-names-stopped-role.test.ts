@@ -36,7 +36,7 @@ function registry(refusedFor: { master: number; reviewer: number }): AgentRegist
   const document = { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: null }],
     accounts: [account('codex-master'), account('codex-review', spent), account('codex-a'), account('codex-b')],
     roles: [{ name: 'master', accounts: ['codex-master'], concurrency: 1, policy: {} }, { name: 'reviewer', accounts: ['codex-review'], concurrency: 2, policy: {} },
-      { name: 'worker', accounts: ['codex-a', 'codex-b'], concurrency: 2, policy: {} }],
+      { name: 'worker', accounts: ['codex-a', 'codex-b'], concurrency: 1, policy: {} }],
     sessions: [session('orphan', 'master', 'codex-master', null, clock - minutes(600)), session('w1', 'worker', 'codex-a', 'GY-1', clock - minutes(20)), session('w2', 'worker', 'codex-b', 'GY-2', clock - minutes(10))],
     refusals: [
       { at: iso(clock - refusedFor.master), role: 'master', host: HOST, work: null, by: 'coordinator', reason: masterRefusal, skipped: [] },

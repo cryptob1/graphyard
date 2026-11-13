@@ -8,6 +8,7 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
+import { workersAllowed } from '../master/worker-pool.js';
 import { assertDispatchable, HeadlessWorkerExit, workerRunHandle, type WorkerRun } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
@@ -441,7 +442,15 @@ async function untrustedCheckoutRoles(cycle: Cycle): Promise<ReadonlySet<string>
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
-  if (effects.release) await releaseBacklog(cycle);
+  // GY-3285: the install runs as many workers as its registry's worker role allows; the loop adds
+  // the worker profiles, each under an identity the control plane mints, the first cycle it is short.
+  const registry = effects.registry ? await effects.registry().catch(() => null) : null;
+  const allowed = workersAllowed(config, registry);
+  if (registry && effects.growWorkers) try {
+    const added = await effects.growWorkers(config, allowed);
+    if (added.length) await note(cycle, `workers:${allowed}`, 'config', null, 'done', `Added worker profile${added.length === 1 ? '' : 's'} ${added.map(profile => profile.name).join(', ')}: the registry worker role allows ${allowed} workers`);
+  } catch (error) { await note(cycle, 'workers:grow', 'attention', null, 'failed', `Could not add worker profiles for the ${allowed} workers the registry worker role allows: ${message(error)}`); }
+  if (effects.release) await releaseBacklog(cycle, allowed);
   advanceFailureRuns(state, snapshot.work, accountNames(config.workers));
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
@@ -449,8 +458,7 @@ async function dispatchStep(cycle: Cycle) {
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   const launched: Work[] = [];
-  const registry = !state.diskHeadroom && effects.registry ? await effects.registry().catch(() => null) : null;
-  let offers = registry ? await runtimeCanaries(cycle, registry.runtimes) : [];
+  let offers = registry && !state.diskHeadroom ? await runtimeCanaries(cycle, registry.runtimes) : [];
   // GY-3149: a freed worker slot goes to the highest-priority waiting item. An item whose launch last waited
   // for a slot holds every lower-priority item back, and a launch waits for the higher-priority launches
   // of this cycle to settle before it asks the registry for a slot.
@@ -471,7 +479,7 @@ async function dispatchStep(cycle: Cycle) {
     const key = dispatchKey(item);
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     if (item.priority > slotHeldAbove) continue;
-    const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
+    const free = health.filter(entry => entry.busy || taken.has(entry.profile.name)).length < allowed ? health.find(entry => entry.healthy && !taken.has(entry.profile.name)) : undefined;
     if (!free) break;
     // GY-3103: a runtime whose launches of this item failed backs off for this item only; its accounts are excluded from the selection.
     const held = backedOffAccounts(state, registry, free.profile, item, clock);
@@ -513,8 +521,8 @@ async function dispatchStep(cycle: Cycle) {
 
 /**
  * The loop keeps the pipeline full itself (GY-2991): while fewer items occupy it — claimed,
- * submitted, in review or merge, or released and not yet done — than its concurrency (one slot per
- * configured worker profile), it releases the backlog item with the highest priority, oldest first
+ * submitted, in review or merge, or released and not yet done — than its concurrency (the workers
+ * the registry worker role allows, `workersAllowed`), it releases the backlog item with the highest priority, oldest first
  * on ties, whose dependencies are all done, recording the release decision under the loop's own
  * identity with the reason. A parked item — any standing blocker — never releases, nor an
  * owner-held or loop-owned item, whose release the control plane refuses, nor one sharing an
@@ -523,9 +531,9 @@ async function dispatchStep(cycle: Cycle) {
  * for an out-of-order pull. Each release takes its response's document, so the same cycle's
  * dispatch offers the item.
  */
-async function releaseBacklog(cycle: Cycle) {
+async function releaseBacklog(cycle: Cycle, allowed: number) {
   const { config, effects, snapshot, clock } = cycle;
-  let slots = config.workers.length - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
+  let slots = allowed - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
   const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;
   const candidates = snapshot.work
     .filter(item => item.criteria.length > 0 && item.stage !== 'done' && !item.ready && !item.hold && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
@@ -540,15 +548,15 @@ async function releaseBacklog(cycle: Cycle) {
     try {
       const overCap = !!item.yardRepair && slots <= 0;
       const reason = overCap
-        ? `${item.key} is a yard repair, so the loop releases it past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency of ${item.key} is done`
-        : `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`;
+        ? `${item.key} is a yard repair, so the loop releases it past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency of ${item.key} is done`
+        : `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed}, every dependency of ${item.key} is done, and backlog means work this next`;
       const released = await effects.release!(item, reason) as Work | undefined;
       const index = snapshot.work.findIndex(entry => entry.id === item.id);
       if (index >= 0 && released && typeof released === 'object' && 'ready' in released) snapshot.work[index] = released;
       if (!item.yardRepair) slots -= 1;
       await note(cycle, key, 'judgement', item.key, 'done', overCap
-        ? `Released yard repair ${item.key} past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`
-        : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`, config.operatorAgent?.id ?? null);
+        ? `Released yard repair ${item.key} past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`
+        : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`, config.operatorAgent?.id ?? null);
     }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
   }

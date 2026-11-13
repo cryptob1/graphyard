@@ -3,6 +3,7 @@ import { loopState } from './tables/loop-state.js';
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
 import { humanSignInSessions, teamMembers } from './tables/human-sign-in.js';
+import { workerIdentities } from './tables/worker-identities.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
 import { mergesTables } from './tables/merges.js';
@@ -22,7 +23,7 @@ import { registryRefusalTables } from './tables/registry-refusals.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers, loopState, productBrief,
+  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, humanSignInSessions, teamMembers, workerIdentities, loopState, productBrief,
 ];
 
 /** Tables retired from the schema and logical backups. */
