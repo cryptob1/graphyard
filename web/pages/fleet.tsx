@@ -427,12 +427,14 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
         <label>Audit reason<input name="reason" required placeholder="Adding the Muse runtime"/></label>
         <button disabled={busy}>Save runtime</button>
       </form>
-      <form className="grant-form" aria-label="Add or change a model" onSubmit={submit(() => 'agent-registry/models', form => ({ model: { name: field(form, 'name'), id: optional(form, 'id'), ...(field(form, 'provider') ? { provider: field(form, 'provider') } : {}), cost: { inputPerMTok: amount(form, 'input'), outputPerMTok: amount(form, 'output') }, capability: { tier: field(form, 'tier') || 'strong', contextTokens: amount(form, 'context') } }, reason: field(form, 'reason') }))}>
+      <form className="grant-form" aria-label="Add or change a model" onSubmit={submit(() => 'agent-registry/models', form => ({ model: { name: field(form, 'name'), id: optional(form, 'id'), ...(field(form, 'provider') ? { provider: field(form, 'provider') } : {}), cost: { inputPerMTok: amount(form, 'input'), outputPerMTok: amount(form, 'output'), cacheReadPerMTok: amount(form, 'cacheRead'), cacheWritePerMTok: amount(form, 'cacheWrite'), ...(amount(form, 'input') === null ? {} : { asOf: new Date().toISOString().slice(0, 10) }) }, capability: { tier: field(form, 'tier') || 'strong', contextTokens: amount(form, 'context') } }, reason: field(form, 'reason') }))}>
         <label>Model<input name="name" required placeholder="opus"/></label>
         <label>Identifier passed to the runtime<input name="id" placeholder="claude-opus-5"/></label>
         <label>Provider<input name="provider" placeholder="Anthropic"/></label>
         <label>Input cost (USD per MTok)<input name="input" type="number" min="0" step="any"/></label>
         <label>Output cost (USD per MTok)<input name="output" type="number" min="0" step="any"/></label>
+        <label>Cache read cost (USD per MTok)<input name="cacheRead" type="number" min="0" step="any"/></label>
+        <label>Cache write cost (USD per MTok)<input name="cacheWrite" type="number" min="0" step="any"/></label>
         <label>Capability<select name="tier" defaultValue="strong">{capabilityTiers.map(tier => <option key={tier}>{tier}</option>)}</select></label>
         <label>Context tokens<input name="context" type="number" min="1000" step="1"/></label>
         <label>Audit reason<input name="reason" required placeholder="Recording the model and its price"/></label>

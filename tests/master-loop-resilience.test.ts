@@ -431,7 +431,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const cursorCalls: string[][] = []; let cursorArgs: string[] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { headless: (command, args, options) => { cursorArgs = args; return pendingHeadless(command, args, options); }, run: herdr(cursorCalls), probe: fleet('cursor'), registerLaunch });
     assert.equal(cursorCalls.some(args => args[0] === 'pane'), false);
-    assert.deepEqual(cursorArgs.slice(0, -1), ['--force', '--trust', '-p']);
+    assert.deepEqual(cursorArgs.slice(0, -1), ['--force', '--trust', '-p', '--output-format', 'json']);
     assert.ok(cursorArgs.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`));
 
   } finally { await cleanup(); }

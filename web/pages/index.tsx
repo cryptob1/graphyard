@@ -10,6 +10,7 @@ import FleetPage from './fleet';
 import SetupPage from './setup';
 import WorkersPage from './workers';
 import MasterPage from './master';
+import CostsPage from './costs';
 import ScenarioLibrary from '../scenarios';
 import ReleasesView from '../releases';
 import TestsPage from './tests';
@@ -61,6 +62,8 @@ export const views: readonly View[] = [
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
+  // What the agents spent (GY-3289): tokens and cost, beside the sessions that spent them.
+  { id: 'costs', icon: '$', label: 'Costs', section: 'workers', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
   // The master agent's live terminal (GY-3211).
   { id: 'master', icon: '▶', label: 'Master', section: 'master', render: dashboard => <MasterPage token={dashboard.token}/> },
   // What waits on a release, beside what shipped.
