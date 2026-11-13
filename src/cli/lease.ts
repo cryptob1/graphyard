@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { defineCommands, workMutation } from './registry.js';
 import { verifyCommand } from './verify.js';
+import { checkCommand } from './check.js';
 import { completeCommand } from './complete.js';
 
 /**
@@ -131,6 +132,7 @@ export const leaseCommands = defineCommands([
     },
   },
   verifyCommand,
+  checkCommand,
   completeCommand,
   {
     name: 'evidence',

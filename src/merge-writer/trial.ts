@@ -694,6 +694,8 @@ export interface RunTrialInput {
   hidden?: readonly string[];
   /** GY-3209: starts a check's declared Compose services; `startCheckServices` unless a test injects a fake. */
   services?: typeof startCheckServices;
+  /** GY-3283: run only the declared check of this name, whatever paths it is limited to (a worker's `graphyard check NAME`). */
+  only?: string;
 }
 const tailLength = 4000;
 /**
@@ -1300,7 +1302,12 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         preMerge = declared.preMerge;
       }
-      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts, manager: { test: testArgv(manager, affected), run: manager.name === 'pnpm' ? pnpm(manager.version, 'run') : ['npm', 'run'] } }));
+      const checks = repositoryTrialChecks({ preMerge, scripts: packageScripts, manager: { test: testArgv(manager, affected), run: manager.name === 'pnpm' ? pnpm(manager.version, 'run') : ['npm', 'run'] } });
+      if (input.only === undefined) return await runChecks(checks);
+      const named = checks.find(entry => entry.check === input.only);
+      if (!named) throw new Error(`No pre-merge check named ${input.only}; this head declares: ${checks.map(entry => entry.check).join(', ') || 'none'}`);
+      const { paths: _paths, ...only } = named;
+      return await runChecks([only]);
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);

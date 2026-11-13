@@ -4,9 +4,11 @@ import { lockedWork } from '../store/locked-read.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';
 import { dispatchWorkerVerification } from './worker-verification-queue.js';
+import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 const schema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/), epoch: z.number().int().positive(),
-  mode: z.enum(['verify', 'complete']), preserves: z.array(z.string()).max(1000).optional() }).strict();
+  mode: z.enum(['verify', 'complete', 'check']), preserves: z.array(z.string()).max(1000).optional(),
+  check: z.string().min(1).max(200).optional() }).strict().refine(input => (input.mode === 'check') === !!input.check, 'A check request names exactly one check');
 
 /** The lease holder requests only its recorded criteria, never arbitrary host commands. */
 export async function workerVerification(services: Services, actor: Principal, id: string, body: unknown) {
@@ -22,9 +24,10 @@ export async function workerVerification(services: Services, actor: Principal, i
   const workspace = work.workspaces.find(entry => entry.owner === actor.id && entry.epoch === input.epoch);
   demand(workspace, 'The lease has no assigned worktree', 409);
   // The server's /repo and private filesystem are not Docker host paths.
-  const result = await dispatchWorkerVerification(services, {
-    host: workspace!.host, branch: workspace!.branch, work, input, baseBranch: services.engine.baseBranch,
-  });
+  const job = { host: workspace!.host, branch: workspace!.branch, work, input, baseBranch: services.engine.baseBranch };
+  // GY-3283: a declared check's run is the worker's own feedback, not proof: answered, never recorded.
+  if (input.mode === 'check') return dispatchWorkerVerification<WorkerCheckResult>(services, job);
+  const result = await dispatchWorkerVerification(services, job);
   demand(result.record.head === input.head, 'Verification returned a different head', 409);
   await services.engine.store.transaction(async (db, now) => {
     const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id)!;
