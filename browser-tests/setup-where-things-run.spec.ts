@@ -53,7 +53,11 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     } });
     expect(read.status).toBe(200);
 
-    await page.goto(baseURL! + '/#setup');
+    // Sign in as the fixture operator: the preview proxy cannot use local-viewer reads.
+    const signIn = await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } });
+    expect(signIn.status).toBe(200);
+    const { code } = await signIn.json() as { code: string };
+    await page.goto(`${baseURL}/#sign-in=${code}&setup`);
     const section = page.getByRole('region', { name: 'Where things run', exact: true });
     await expect(section).toBeVisible({ timeout: 15_000 });
     for (const shown of [
