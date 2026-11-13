@@ -9,6 +9,7 @@ export function run(c: Ctx) {
   const { actor, data, now, work } = c;
   activeLease(work, actor, data.epoch, now);
   work.blocker = data.reason;
+  work.blockedAt = data.reason ? now.toISOString() : null;
   if (data.reason) {
     recordIntervention(work, 'blocked');
     // GY-1008: recording a blocker ends the attempt in this same transaction, so a blocked

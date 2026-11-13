@@ -2,7 +2,8 @@ import type { z } from 'zod';
 import type { humanChoiceSchema } from '../model-boundary/human-request.js';
 import { hostDoableAsk, hostDoableRefusal, HostDoableAsk, parkRefusal as classifiedParkRefusal } from './park-refusal.js';
 import type { HumanAnswer } from './human-answer.js';
-import type { Work } from './work.js';
+import { blockerSince, type Work } from './work.js';
+import { formatAge } from './duration.js';
 import { humanProofRows } from './human-proof.js';
 // ------------------------------------------------------------
 // Decisions only a human may make, as typed state (GY-89).
@@ -200,10 +201,40 @@ export const humanProofRule: HumanOnlyRule = {
 };
 
 /**
+ * GY-3280: how long a recorded worker blocker waits with no master action before the dashboard
+ * raises it on Needs you for the owner. The master session is prompted the cycle the blocker lands
+ * and the attention line names it on every `master status`; past this bound with the blocker still
+ * standing, nobody but the owner is left to nudge.
+ */
+export const blockerEscalationMinutes = 30;
+/** The Needs you rows of one item's escalated blocker (GY-3280): the blocker text, how long it has waited, and the unblock that clears it. */
+export function blockerEscalationRows(work: Work, refusal: string, now: number): HumanRequestRow[] {
+  const since = blockerSince(work);
+  if (!work.blocker || parkedOnHuman(work) || since === null || now - since < blockerEscalationMinutes * 60_000) return [];
+  return [{
+    rule: 'blocker-escalation', work: work.key, id: work.id, title: work.title,
+    request: { id: `blocker:${work.id}`, kind: 'blocker-escalation', epoch: work.epoch, at: new Date(since).toISOString(), requestedBy: 'the item\'s worker',
+      ask: `A worker's blocker has waited ${formatAge(since, now)} with no master action`,
+      needed: work.blocker, reason: `Recorded by ${work.key}'s worker; the master session is prompted at once and master status carries it as attention`,
+      why: `The master agent clears blockers itself; after ${blockerEscalationMinutes} minutes it has not, so you are the one to act.` },
+    waitedMs: Math.max(0, now - since), decision: 'an unresolved worker blocker', refusal,
+    answer: { cli: `graphyard master unblock ${work.key} REASON`, decline: `graphyard master unblock ${work.key} REASON`, dashboard: 'Work → Needs you', api: `POST /api/work/${work.key}/unblock`,
+      post: { command: 'unblock', body: { expectedRevision: work.revision }, field: 'reason', submit: `Unblock ${work.key} with this reason…`, decline: null } },
+  }];
+}
+/** A worker blocker the master has not cleared for `blockerEscalationMinutes` (GY-3280): raised on Needs you for the owner, cleared by any unblock. */
+export const blockerEscalationRule: HumanOnlyRule = {
+  kind: 'blocker-escalation',
+  refuse: actor => actor.role !== 'admin' ? 'The master session clears a blocker itself, so this Needs you alert is the owner\'s alone'
+    : declaredKind(actor) !== 'human' ? `A blocker escalation is acted on from the operator\'s own human session; ${actor.id} is ${declaredKind(actor)}` : null,
+  open: (subject, now) => blockerEscalationRows(subject.work, blockerEscalationRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!, now),
+};
+
+/**
  * Every rule, in the order the surface lists them. Enforcement reads this table and so does the
  * page: adding a rule here is the one change a new human-only action needs.
  */
-export const humanOnlyRules: HumanOnlyRule[] = [parkRule, humanProofRule];
+export const humanOnlyRules: HumanOnlyRule[] = [parkRule, humanProofRule, blockerEscalationRule];
 export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.find(rule => rule.kind === kind) ?? null;
 /**
  * Why this session may not answer a row of that rule, or null when it may. A rule this reader

@@ -4,6 +4,9 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern } from './gates.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 import { humanRequestBlocker } from './human-request.js';
+// GY-3280: the escalation clock of a recorded blocker (model/work.ts `blockedAt`), re-exported
+// beside the blocker's own plain sentences — the one blocker concern readers import.
+export { blockerSince } from './work.js';
 import { deliveryOutcome, shortShas } from './format.js';
 import { isFilingRefusal } from './user-facing.js';
 

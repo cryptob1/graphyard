@@ -12,4 +12,5 @@ export function run(c: Ctx) {
   demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; its worker defers it with defer GY-N EPOCH NOT-BEFORE REASON`, 409);
   observationHold(work, data.notBefore, now, 'operator-hold', `${actor.id} held it until then: ${data.reason}`);
   work.blocker = null;
+  work.blockedAt = null;
 }

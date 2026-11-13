@@ -81,7 +81,7 @@ export function settleOpenRequests(work: Work, closure: Closure, now: Date) {
     withdrawn = { ...work.humanRequest, answer: { by: closure.by, at, outcome: 'withdrawn', text: 'withdrawn: item closed', waitedMs: Math.max(0, now.getTime() - Date.parse(work.humanRequest.at)) } };
     work.humanRequests = [...(work.humanRequests ?? []), withdrawn].slice(-retainedHumanRequests);
     work.humanRequest = null;
-    if (work.blocker?.startsWith(humanRequestBlocker)) work.blocker = null;
+    if (work.blocker?.startsWith(humanRequestBlocker)) { work.blocker = null; work.blockedAt = null; }
   }
   let agentRequests = 0;
   for (const request of work.agentRequests ?? []) {

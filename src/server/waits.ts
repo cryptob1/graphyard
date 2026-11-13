@@ -80,6 +80,7 @@ export async function requestHumanDecision(services: Services, actor: Principal,
       ...(data.choices ? { choices: data.choices } : {}), ...(data.sealTo ? { sealTo: data.sealTo } : {}) };
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
+    work!.blockedAt = now.toISOString();
     recordIntervention(work!, 'blocked');
     await endLease(services, db, work!, all, data.epoch, now, 'human.requested');
     return commit(services, db, now, work!, all, actor, 'human.requested', { request, decision: humanDecisionLabel[request.kind], leaseEnded: { owner: actor.id, epoch: data.epoch } });
@@ -112,7 +113,7 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
       ...(resolved.choice ? { choice: resolved.choice, note: resolved.note } : {}), ...(sealed ? { sealed } : {}) } };
     work!.humanRequests = [...(work!.humanRequests ?? []), answered].slice(-retainedHumanRequests);
     work!.humanRequest = null;
-    if (work!.blocker?.startsWith(humanRequestBlocker)) work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000);
+    if (work!.blocker?.startsWith(humanRequestBlocker)) { work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000); work!.blockedAt = work!.blocker ? now.toISOString() : null; }
     return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' });
   }));
 }
@@ -233,6 +234,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
         if (report.endsBlocker && work!.lease?.epoch === report.epoch && work!.blocker && await blockerRecordedBy(db, work!.id, report.epoch, work!.lease.owner)) {
           endedBlocker = work!.blocker;
           work!.blocker = null;
+          work!.blockedAt = null;
         }
         if (work!.lease?.epoch === report.epoch) await endLease(services, db, work!, all, report.epoch, now, report.cause === 'interrupted' ? 'capacity.interrupted' : 'capacity.exhausted');
       }

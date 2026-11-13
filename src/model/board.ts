@@ -131,7 +131,7 @@ export const timedGroups: ReadonlySet<Group> = new Set(['moving', 'blocked']);
  * what they do, in plain words.
  */
 export function nextActor(work: Work, group: Group | null, now: number, release: ReleaseView = noRelease, all: Work[] = []): { who: string; does: string } {
-  if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(humanAsk(work.humanRequest)) : 'Answer the decision it is waiting on' };
+  if (group === 'needs-you') return { who: 'You', does: work.humanRequest ? shortShas(humanAsk(work.humanRequest)) : work.blocker ? 'A worker\'s blocker has waited with no master action — unblock it' : 'Answer the decision it is waiting on' };
   if (group === 'backlog') {
     const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
     return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready', now).text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };

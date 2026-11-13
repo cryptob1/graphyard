@@ -2,7 +2,7 @@ import type { Work } from '../../src/model';
 import { CandidatePr } from '../candidate';
 import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
-import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
+import { blockerSummary, blockerSince, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
 import { currentMergeStep } from '../../src/model/merge-ledger';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import { queuedSentence, type ActionlessCard, type QueuedBehind } from '../../src/model/actionless';
@@ -45,7 +45,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       : queue ? queuedSentence(queue)
       : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
-  const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
+  const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : group === 'needs-you' && blockerSince(item) !== null ? Math.max(0, now - blockerSince(item)!) : null;
   // GY-3272: a row whose trial failed flickers — a Fun effect, and never under reduced motion (the stylesheet stops it).
   // A row whose merge trial is out carries the light streak (AC-4c); the animation itself is Fun's and motion's to stop.
   const fun = useFun(), trial = item.mergeLedger?.state === 'pushed' && !!item.candidate;
@@ -61,6 +61,6 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       ? fun ? <><Agent id={item.lease.owner}/> is running {item.key}</> : <Agent id={item.lease.owner}/>
       : actor.who}</span>
     <span className="row-time">{timed ? <StatusAge held={held}/> : group === 'needs-you' && waited !== null ? <span className="waited">Waiting {formatDuration(waited / 60000)}</span> : null}</span>
-    {group === 'needs-you' && <button type="button" className="decide" onClick={e => { e.stopPropagation(); onOpen(item.id); }}>Decide</button>}
+    {group === 'needs-you' && <button type="button" className="decide" onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{!item.humanRequest && item.blocker ? 'Unblock' : 'Decide'}</button>}
   </div>;
 }
