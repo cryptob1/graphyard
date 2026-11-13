@@ -3,6 +3,7 @@ import Term from './term';
 import { viewFor, visibleViews } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { cityCounts } from '../city';
+import { useFun } from '../fun';
 import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
@@ -12,14 +13,15 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
  * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
  * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read.
+ * words against the counts the Workers page and the ledger read. 'Runners on shift' and 'tonight'
+ * are Fun's words; with Fun off the strip says agents working and today, as the rest of the app does.
  */
 export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
-  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
-  return <p className="city-strip" aria-label="The yard tonight" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
-    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> runner{onShift === 1 ? '' : 's'} on shift
+  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt), fun = useFun();
+  return <p className="city-strip" aria-label={fun ? 'The yard tonight' : 'Activity'} data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
+    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> {fun ? `runner${onShift === 1 ? '' : 's'} on shift` : `agent${onShift === 1 ? '' : 's'} working`}
     <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
-    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped tonight
+    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped {fun ? 'tonight' : 'today'}
   </p>;
 }
 

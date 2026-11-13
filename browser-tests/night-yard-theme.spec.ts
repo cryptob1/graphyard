@@ -102,8 +102,15 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   await page.getByLabel('Search commands').fill('Master');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
+  // The playful names are Fun's: with Fun off the page is Master again, and the strip and the row use the app's own words.
+  await page.getByRole('button', { name: 'Fun', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
+  await expect(page.locator('.city-strip')).toContainText('agents working');
+  await expect(page.locator('.city-strip')).not.toContainText('runners');
   await page.keyboard.press('g');
   await page.keyboard.press('w');
+  await expect(page.locator('[data-row="GY-14"] .row-who')).not.toContainText('is running');
+  await page.getByRole('button', { name: 'Fun', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
   // The audit covers the page an operator reads most: the Work board, an item page, the palette, the shortcut sheet.
   await expectAA(page, 'the Work page at night');
