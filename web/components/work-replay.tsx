@@ -17,7 +17,7 @@ function ReplayPanel({ api, onOpen }: { api(path: string): Promise<any>; onOpen(
   useEffect(() => {
     let active = true;
     setPlaying(false); setData(null); setError(''); setPosition(1000);
-    request.current(`/work-replay?hours=${hours}`).then(value => { if (!Array.isArray(value?.items)) throw new Error('Replay is unavailable on this server.'); if (active) setData(value); }).catch(reason => { if (active) setError(reason.message); });
+    request.current(`work-replay?hours=${hours}`).then(value => { if (!Array.isArray(value?.items)) throw new Error('Replay is unavailable on this server.'); if (active) setData(value); }).catch(reason => { if (active) setError(reason.message); });
     return () => { active = false; };
   }, [hours]);
   useEffect(() => { if (!motion) { setPlaying(false); setPosition(1000); } }, [motion]);
