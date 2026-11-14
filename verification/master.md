@@ -3,7 +3,7 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 ## Tests
 
 - `tests/dispatch-collision.test.ts`, `tests/dispatch-overlap.test.ts`: dispatch.
-- `tests/headless-workers.test.ts`: headless workers, limit handoff, run logs.
+- `tests/headless-workers.test.ts`, `tests/headless-worker-kinds.test.ts`: headless workers, limit handoff, run logs.
 - `tests/launch-prompt-delivery.test.ts`, `tests/project-memory.test.ts`: session requests.
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
 - `tests/reviewer-session-release.test.ts`, `tests/review-verdict.test.ts`: control-plane review launch/settlement without App credentials.

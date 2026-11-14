@@ -35,6 +35,13 @@ import { hostname } from 'node:os';
 const H = 'a'.repeat(40), B = 'b'.repeat(40), M = 'c'.repeat(40);
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const launcher = new URL('../bin/graphyard.mjs', import.meta.url).pathname;
+// A bounded runner cannot host the 900 s this test declares: its two simulated days run at the
+// loop's own one-minute cadence and its climb to the cursor's attempt clamp is real launch after
+// real launch. It defers the way the slow-tick receipt does (tests/slow-tick-repeat-receipt.test.ts)
+// to a whole-suite run, which names no file and stays unbounded (tests/helpers/run-tests.ts).
+const deferred = Number(process.env.GRAPHYARD_FILE_TIMEOUT_MS ?? Infinity) < 900_000
+  ? `a runner bounding this file at ${process.env.GRAPHYARD_FILE_TIMEOUT_MS} ms leaves the days-long probe soak to a whole-suite run`
+  : false;
 const base = new Date();
 let instantMs = base.getTime();
 const at = (offsetMs = 0) => new Date(instantMs + offsetMs).toISOString();
@@ -63,7 +70,7 @@ const repository = 'owner/project';
 /** The volume read the launch would make on durable storage; the test's directories stand in for the paths. */
 const durable = async (path: string) => ({ probed: path, volatile: null, freeBytes: 200e9 });
 
-test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000 }, async () => {
+test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000, skip: deferred }, async () => {
   // The loop's own root: one reviewer profile, the managed worktree
   // root and credential directory pointed at this run's directories, and the dispatch cursor
   // persisted by the production writer so the schema judges every tick's cursor.
