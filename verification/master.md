@@ -6,23 +6,22 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 - `tests/headless-workers.test.ts`: headless workers, limit handoff, run logs.
 - `tests/launch-prompt-delivery.test.ts`, `tests/project-memory.test.ts`: session requests.
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
-- `tests/reviewer-session-release.test.ts`, `tests/review-verdict.test.ts`: control-plane review launch/settlement without App credentials.
-- `tests/master-config-retired-keys.test.ts`: load legacy `githubAppId`/`mergeMethod` and current files without App IDs.
-- `tests/rework-review-findings.test.ts`: CHANGES_REQUESTED carries BLOCKING findings (else body) into `lastRework` and worker brief.
+- `tests/reviewer-session-release.test.ts`, `tests/review-verdict.test.ts`: review launch/settlement, no App credentials.
+- `tests/master-config-retired-keys.test.ts`: legacy `githubAppId`/`mergeMethod` and current files load without App IDs.
+- `tests/rework-review-findings.test.ts`: CHANGES_REQUESTED carries BLOCKING findings into `lastRework` and worker brief.
 - `tests/five-step-cycle.test.ts`: snapshot, close, dispatch, merge writer, persist.
 - `tests/trial-merge.test.ts`: failed trials trigger candidate rework without base-break refresh waits.
-- `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
-- `tests/main-batch-gate.test.ts`, `tests/publish-verified.test.ts`, `tests/diagnostic-filing-carries-output.test.ts`: batch gate, diagnostic filings (GY-3141).
-- `tests/browser-trial-failure-diagnosis.test.ts`: a failed browser run keeps its failing test and error in the verdict, the revert record and the gate's diagnostic filings through noisy teardown (GY-3305).
-- `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve work and name its commit to the next account; `e2e:worker-credit-handoff`.
+- `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`); the loop restarts onto the tip it serves.
+- `tests/main-batch-gate.test.ts`, `tests/publish-verified.test.ts`, `tests/diagnostic-filing-carries-output.test.ts`, `tests/browser-trial-failure-diagnosis.test.ts`: batch gate, diagnostic filings; a failed browser run's failing test and error survive noisy teardown in verdict, revert and gate records (GY-3305).
+- `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve work, naming the next account's commit; `e2e:worker-credit-handoff`.
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads loop state; tests inject preparers, probes and `tests/helpers/headless-runs.ts`. `master restart` uses `systemctl --user restart` for the install unit (ExecStart: `master run`) when up, stopping or restart-queued; never a second loop.
+`master status` reads loop state; tests inject preparers, probes, `tests/helpers/headless-runs.ts`. `master restart` runs `systemctl --user restart` for the unit (ExecStart: `master run`) when up, stopping or restart-queued; never two loops.
 
 ## Invariants
 
-- Session requests are the first message on the runtime's command line, never pasted.
+- Session requests are the runtime's first command-line message, never pasted.
 - A failed launch releases its claim; run logs outlive runs.
 - Prompts are pure functions: inputs adding nothing leave requests byte-identical.
 - Workers never receive trusted evidence-producer credentials.
@@ -30,6 +29,6 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 
 ## Gotchas
 
-- `tests/barrel-imports.test.ts`: only CLI source may import `src/master.ts`; otherwise import owners directly. Daemon exports live in `src/daemon/*`; `src/master-daemon.ts` is removed.
-- Prompt changes break exact-text assertions; grep the sentence first.
+- `tests/barrel-imports.test.ts`: only CLI source may import `src/master.ts`; import owners directly. Daemon exports live in `src/daemon/*`; `src/master-daemon.ts` is removed.
+- Prompt changes break exact-text assertions; grep first.
 - A generated prompt never names `/tmp`.
