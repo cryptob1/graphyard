@@ -66,15 +66,15 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
-  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
+  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
     {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="row-steps"><StepNames/></span><span>Who acts next</span><span>In step</span></div>}
     <div className="rows">{byGroup[group].map(w => row(w, group))}</div>
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><BuildLine/><ShippedToday work={work}/><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
-      <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
+    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/><ShippedToday work={work}/></div>
+      <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
     {work.length === 0 ? <div className="empty"><h2><Playful plain="No work yet." fun="The yard is quiet. File a goal and wake the crew."/></h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
@@ -86,7 +86,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {section('blocked')}
       {section('moving')}
       {section('up-next')}
-      {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
+      {shown('backlog') && byGroup.backlog.length > 0 && <details className="panel work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
         <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span></summary>
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}

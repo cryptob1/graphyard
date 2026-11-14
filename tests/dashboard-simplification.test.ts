@@ -348,7 +348,7 @@ test('unit:work-page-no-derived-totals — a total that is a sum or subset of th
   assert.ok(!page.includes('aria-label="Open items"'), 'no Open tile');
   assert.ok(!/<span>Open<\/span>/.test(page), 'Open is not a tile label');
   assert.match(page, /<h1>Work<\/h1>/, 'the heading carries no derived count');
-  const sentence = /<p class="summary">([^<]*)<\/p>/.exec(page)![1];
+  const sentence = /<p class="page-fact">([^<]*)<\/p>/.exec(page)![1];
   const { byGroup } = classify(work, NOW);
   assert.equal(sentence, summarySentence(Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as any));
 });
