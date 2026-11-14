@@ -6,6 +6,7 @@ import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { headlessWorkers } from './helpers/headless-workers.js';
+import { liveRun } from '../src/runner/registry.js';
 import { loadMasterConfig } from '../src/master/config.js';
 import { runAutonomyCommand } from '../src/master/autonomy.js';
 import type { Principal, Work } from '../src/model.js';
@@ -76,16 +77,19 @@ test('e2e:lease-survives-message-and-unblock — a headless rework holder syncs 
 test('e2e:lease-survives-message-and-unblock — two headless lease-refusal exits produce one attention line and no third launch', async () => {
   const f = await headlessWorkers('lease-loss-retry');
   try {
-    // The reported failure: a stale epoch is refused, the agent prints that refusal and exits 0.
-    const afterWait = `const refused = await fetch(process.env.GRAPHYARD_URL + '/api/work/' + key + '/heartbeat', {
-      method: 'POST', headers: { Authorization: 'Bearer ' + process.env.GRAPHYARD_TOKEN, 'Content-Type': 'application/json', 'Idempotency-Key': key + ':' + epoch + ':stale' }, body: JSON.stringify({ epoch: Number(epoch) + 1 }) });
+    // End the actual lease before the agent's next heartbeat: the refusal makes it exit 0.
+    const afterWait = `const released = await fetch(process.env.GRAPHYARD_URL + '/api/work/' + key + '/release', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + process.env.GRAPHYARD_TOKEN, 'Content-Type': 'application/json', 'Idempotency-Key': key + ':' + epoch + ':release' }, body: JSON.stringify({ epoch: Number(epoch), cause: 'Fixture ends the lease before the agent exits' }) });
+      if (!released.ok) throw new Error(await released.text());
+      const refused = await fetch(process.env.GRAPHYARD_URL + '/api/work/' + key + '/heartbeat', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + process.env.GRAPHYARD_TOKEN, 'Content-Type': 'application/json', 'Idempotency-Key': key + ':' + epoch + ':stale' }, body: JSON.stringify({ epoch: Number(epoch) }) });
       console.log(await refused.text()); process.exit(0);`;
     await f.configure([{ name: 'lost', kind: 'codex', wait: true, afterWait }]);
     const work = await f.readyItem('GY-9701');
     const config = await loadMasterConfig(f.root);
     let launches = 0;
     let lastRun = '';
-    const launch = async (item: Work) => { launches++; const run = await f.dispatch(item); lastRun = run.run; return run; };
+    const launch = async (item: Work) => { const run = await f.dispatch(item); launches++; lastRun = run.run; return run; };
     const effects: DaemonEffects = {
       agents: () => [], credentials: async () => ({ launch: { available: true, reason: null } }),
       snapshot: async () => ({ work: [await f.stored(work.id)], now: new Date().toISOString() }),
@@ -98,7 +102,7 @@ test('e2e:lease-survives-message-and-unblock — two headless lease-refusal exit
     const end = async () => {
       await writeFile(join(f.homes.get('lost')!, 'release'), '');
       for (let i = 0; i < 300; i++) {
-        if ((await f.runLog(work, lastRun)).body.ended) return;
+        if ((await f.runLog(work, lastRun)).body.ended && !liveRun('eng-a')) return;
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       assert.fail('headless run did not end');
@@ -113,10 +117,11 @@ test('e2e:lease-survives-message-and-unblock — two headless lease-refusal exit
     state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
     for (let i = 0; i < 3; i++) await runCycle(config, state, effects);
     assert.equal(launches, 2, 'the second lease-loss exit stops dispatch, including after restart');
+    assert.equal(state.failureRuns[work.id]?.count, 2, JSON.stringify({ runs: state.failureRuns, actions: state.actions }));
     await writeDaemonState(config, state);
     const report = await masterStatusReport(f.root, config, async path => (await f.api(admin, 'GET', path)).body, async () => '');
     const attention = report.attention.filter(line => line.subject === work.key);
-    assert.equal(attention.length, 1);
+    assert.equal(attention.length, 1, JSON.stringify({ attention: report.attention, runs: state.failureRuns }));
     assert.match(attention[0].text, /GY-9701.*lease loss.*twice/);
     assert.match(attention[0].text, /master rework GY-9701 REASON/);
   } finally { await f.stop(); }
