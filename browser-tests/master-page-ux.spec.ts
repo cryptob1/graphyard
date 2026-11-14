@@ -53,8 +53,6 @@ async function fixture(browser: Browser, phone = false) {
 }
 
 test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnect and pane changes', async ({ browser }) => {
-  // Includes server startup, two reconnects and two pane changes under the parallel browser suite.
-  test.setTimeout(60_000);
   const f = await fixture(browser), { page } = f;
   try {
     await expect(page.getByRole('status')).toContainText('test-account · codex · idle · w1:master');

@@ -15,7 +15,6 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const bytesPerMs = 250;
 
 test('e2e:dashboard-live-new-item — an item filed through the CLI, and its stage change, show on the open dashboard without a reload', async ({ page }) => {
-  test.setTimeout(120_000);
   const database = await signInDatabase();
   const http = await signInProcess(database.url);
   const live = { timeout: 10_000 };

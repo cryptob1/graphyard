@@ -29,8 +29,6 @@ async function containerServer(site: string) {
 }
 
 test('e2e:master-page-compose-install — a server with no herdr streams the master pane through the host supervisor, and typed input reaches it', async ({ browser }) => {
-  // Booting embedded Postgres plus a forked server takes several times the 30 s default under the full parallel suite.
-  test.setTimeout(120_000);
   const site = await mkdtemp(join(tmpdir(), 'graphyard-compose-terminal-'));
   process.env.PATH = `${stub}${delimiter}${process.env.PATH}`; process.env.HERDR_STUB_LOG = join(site, 'herdr.log');
   process.env.GRAPHYARD_HERDR_CONFIG_HOME = ''; process.env.GRAPHYARD_HERDR_SESSION = '';
