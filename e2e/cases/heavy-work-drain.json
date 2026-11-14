@@ -1,0 +1,15 @@
+{
+  "id": "heavy-work-drain",
+  "title": "The Chief drains heavy work for another project's quiet window and resumes it",
+  "description": "graphyard master drain REASON lets a running trial finish while new merge trials, the batch gate, declared checks, host worker verification and session suites wait, and the loop keeps cycling and reporting; a restart keeps the drain with its reason and requester, and master resume admits the waiting jobs with every gate they had.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "drain lets running jobs finish, holds new heavy jobs, survives restart and resumes with all gates",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/heavy-work-drain.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
