@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardApi } from './ui-board';
 
-// GY-3297: Settings holds configuration only. Product sits under Master (the Chief keeps the brief), Costs under Workers and
+// GY-3297: Settings holds configuration only. Product sits under Master (the Master keeps the brief), Costs under Workers and
 // Test cases under Tests; Settings keeps Agents and Setup, with Operator automation behind an
 // Advanced fold for the admin alone. Each is reached by click and by keyboard at 1280px and 390px,
 // the old direct links still open, and the phone menu neither clips nor scrolls sideways.
@@ -49,10 +49,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await tabs(page).getByRole('button', { name: 'Operator automation' }).click();
     await heading(page, 'Operator automation');
 
-    // Product beside the Chief, Costs beside Workers, Test cases beside Tests: clicks.
+    // Product beside the Master, Costs beside Workers, Test cases beside Tests: clicks.
     await menu(page);
     await primary(page).locator('[data-nav="master"]').click();
-    // The Chief's own tab reads as its sidebar entry does.
+    // The Master's own tab reads as its sidebar entry does.
     await expect(tabs(page).getByRole('button').first()).toHaveText(await page.getByRole('main').getByRole('heading', { level: 1 }).innerText());
     await tabs(page).getByRole('button', { name: 'Product', exact: true }).click();
     await heading(page, 'Product');
@@ -91,7 +91,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   });
 }
 
-for (const [hash, name] of [['#setup', 'Set up Graphyard'], ['#master', /Master|The Chief/]] as const) test(`e2e:settings-navigation — the direct link ${hash} still opens its page`, async ({ page }) => {
+for (const [hash, name] of [['#setup', 'Set up Graphyard'], ['#master', 'Master']] as const) test(`e2e:settings-navigation — the direct link ${hash} still opens its page`, async ({ page }) => {
   await open(page, 'admin', hash);
   await heading(page, name);
 });

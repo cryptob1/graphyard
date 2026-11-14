@@ -1,7 +1,7 @@
 {
   "id": "master-in-left-menu",
   "title": "Master is a top-level entry in the left menu, second after Work",
-  "description": "A real browser on the built dashboard: the left menu lists Work, then Master, then Workers; clicking Master opens the master's live page; with Fun on the entry and the page read The Chief, with Fun off both read Master; Workers no longer carries Master as a sub-page.",
+  "description": "A real browser on the built dashboard: the left menu lists Work, then Master, then Workers; clicking Master opens the master's live page, and the entry and the page's heading read Master with Fun on and off; Workers no longer carries Master as a sub-page.",
   "tags": ["dashboard", "master"],
   "target": "any",
   "required": false,

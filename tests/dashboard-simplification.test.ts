@@ -163,7 +163,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>(<abbr[^>]*>)?Operator automation</);
   assert.deepEqual(tabs(dashboard(), 'tests'), ['Tests', 'Test cases']);
   assert.deepEqual(tabs(dashboard(), 'workers'), ['Workers', 'Costs']);
-  assert.deepEqual(tabs(dashboard(), 'master'), ['The Chief', 'Product'], "the Chief's own tab reads as its sidebar entry does");
+  assert.deepEqual(tabs(dashboard(), 'master'), ['Master', 'Product'], "the Master's own tab reads as its sidebar entry does");
   assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
   agent.actor = { ...agent.actor, sessionKind: 'ai' };
