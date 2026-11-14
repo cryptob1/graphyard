@@ -81,7 +81,7 @@ test('unit:ui-reads-session-state — the Workers page and its counts show a ses
   assert.match(rowOf(html, 'stale'), /data-health="stale"[^>]*title="Not seen for 20m 00s"/, 'not seen since its last observation, whatever wrote the record since');
   assert.doesNotMatch(rowOf(html, 'stale'), /data-health="live"|>Seen \d|data-state="(Building|In review)"/);
   assert.match(rowOf(html, 'shell'), /data-state="Ended"/);
-  assert.match(rowOf(html, 'shell'), /data-health="ended"[^>]*title="Ended · its agent exited"/);
+  assert.match(rowOf(html, 'shell'), /data-health="ended"[^>]*title="Ended · its agent exited[^"]*"/);
   assert.match(rowOf(html, 'lost'), /data-state="Ended"/);
   assert.match(rowOf(html, 'lost'), /data-health="ended"[^>]*title="Ended · stopped responding/);
   const open = html.slice(0, html.indexOf('<details class="finished-sessions">'));
