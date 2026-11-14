@@ -183,9 +183,12 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review an
   assert.deepEqual(stamped.contractPaths, [contract]);
 
   assert.deepEqual(requiredProofs(work, await all()), ['unit:supervisor-stop', 'e2e:fixture'], 'the deferred proof is not demanded of this candidate; the remaining criterion still is');
-  // GY-2010: review passes, and only the merge writer's own trial and push stand: nothing else is asked of a bootstrap candidate.
+  // Deferral waives only its named proof; every other criterion still gates admission.
   assert.deepEqual(work.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons.map(reason => `${gate.name}: ${reason.replace(/ [0-9a-f]{12}/g, '')}`)),
-    ['test: merge writer has not trialled on', 'merge: merge writer has not pushed'], 'review and the merge writer are enough for a bootstrap candidate');
+    ['test: merge writer has not trialled on',
+      'acceptance: AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+      'acceptance: AC-99: e2e:fixture needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
+      'merge: merge writer has not pushed'], 'undeferred proofs remain required');
 
   const proven = await prove(work, 'unit:supervisor-stop');
 
@@ -297,6 +300,7 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
 
 /** The merge writer's trial, push and reconcile of a candidate every other gate passed (GY-2010). */
 async function deliver(work: Work) {
+  await prove(work, 'e2e:fixture');
   const ready = await current(work.id);
   assert.deepEqual(ready.gates.filter(gate => !gate.passed && gate.reasons.some(reason => !reason.startsWith('merge writer has not'))).map(gate => gate.name), [], 'the candidate must pass every other gate before delivery');
   await delay(5);

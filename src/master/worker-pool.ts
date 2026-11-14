@@ -2,6 +2,7 @@
 import { dirname, join } from 'node:path';
 import { atomicPrivateText } from '../private-file.js';
 import { roleLimit } from '../model/registry.js';
+import { sessionNameLimit } from '../session-name.js';
 import { saveWorkerProfile } from './config.js';
 import { MAX_WORKER_PROFILES, type MasterConfig, type WorkerProfile } from './profiles.js';
 
@@ -16,6 +17,14 @@ export function workersAllowed(config: Pick<MasterConfig, 'workers'>, registry: 
 }
 
 /**
+ * `value` with `-n` appended inside `limit` characters (GY-3299): a stem too long for the suffix is
+ * cut, so the agent name `inspecthoa-hwd-backend-claude-1` grows `inspecthoa-hwd-backend-claude-2`
+ * rather than a 33-character `inspecthoa-hwd-backend-claude-1-2` Herdr refuses, and each n still
+ * names one profile.
+ */
+const numbered = (value: string, n: number, limit: number) => `${value.slice(0, limit - `-${n}`.length).replace(/[-_.]+$/, '')}-${n}`;
+
+/**
  * Adds launch profiles until `allowed` exist, each a copy of the first under its own worker
  * identity: `mint` asks the control plane for the identity's token, which is written beside the
  * first profile's credential. Profiles are only ever added, so a lowered limit leaves the spare
@@ -26,7 +35,7 @@ export async function growWorkerPool(root: string, config: Pick<MasterConfig, 'w
   const first = config.workers.find(profile => profile.mode === 'launch' && profile.credentialFile);
   const added: WorkerProfile[] = [];
   for (let n = 2; first && config.workers.length < MAX_WORKER_PROFILES && config.workers.filter(profile => profile.mode === 'launch').length < allowed; n++) {
-    const profile: WorkerProfile = { ...first, name: `${first.name}-${n}`, principal: `${first.principal}-${n}`, agentName: `${first.agentName}-${n}` };
+    const profile: WorkerProfile = { ...first, name: numbered(first.name, n, 80), principal: numbered(first.principal, n, 200), agentName: numbered(first.agentName, n, sessionNameLimit) };
     if (config.workers.some(other => other.name === profile.name || other.principal === profile.principal || other.agentName === profile.agentName)) continue;
     profile.credentialFile = join(dirname(first.credentialFile!), `${profile.principal}.token`);
     await atomicPrivateText(profile.credentialFile, (await mint(profile.principal)).token);

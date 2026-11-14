@@ -21,6 +21,7 @@ export interface ControlPlaneVerdict {
   reviewId: number;
   /** GY-2948 AC-2: the base the session judged against — the launch's baseTip, the head's merge base with the base branch — so the verdict itself, not the launch record a relaunch replaces, says which commits were in scope. */
   baseSha: string;
+  policyRevision?: number;
 }
 
 /**
@@ -31,7 +32,7 @@ export interface ControlPlaneVerdict {
  */
 export interface ControlPlaneReviewLaunch {
   id: string; reviewer: string; requester: string; head: string; baseTip: string; tokenHash: string;
-  at: string; expiresAt: string; postMerge: boolean;
+  at: string; expiresAt: string; postMerge: boolean; policyRevision?: number;
   /** GY-2989: a product review's launch; its verdict is recorded on the item's product review, never as a code review. */
   product?: boolean;
   verdict: ControlPlaneVerdict | null;

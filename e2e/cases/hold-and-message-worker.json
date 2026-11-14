@@ -1,0 +1,16 @@
+{
+  "id": "hold-and-message-worker",
+  "title": "The master holds released work and messages the worker that holds it",
+  "description": "A released fixture item held with master hold is skipped by dispatch for several cycles while its lease, history and candidate stay; master message reaches the live worker at its next sync, which acknowledges it, survives a control plane restart before receipt, and carries unread into the successor's prompt; master release resumes dispatch; workers and the coordinator cannot hold, release or message.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "hold, message, sync, restart, successor and release on a fixture install",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/hold-and-message-worker.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

@@ -172,7 +172,8 @@ const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unme
 export function PreviewPanel({ preview }: { preview: ItemPreview }) {
   return <section className="panel item-preview" aria-label="Preview"><h2>Preview <small>{previewWords[preview.state]}</small></h2>
     <dl className="facts">
-      <div><dt>Link</dt><dd>{preview.state === 'running' ? <a href={`${preview.path}/`} target="_blank" rel="noopener noreferrer">{preview.path}/ ↗</a> : <span className="mono">{preview.path}</span>}</dd></div>
+      <div><dt>Link</dt><dd>{preview.state === 'running' || preview.endReason === 'idle' ? <a href={`${preview.path}/`} target="_blank" rel="noopener noreferrer">{preview.path}/ ↗</a> : <span className="mono">{preview.path}</span>}{preview.endReason === 'idle' ? ' · stopped while unused; open it to restart' : ''}</dd></div>
+      {preview.lastUsedAt && <div><dt>Last used</dt><dd>{new Date(preview.lastUsedAt).toLocaleString()}</dd></div>}
       <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
       <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 8)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
       <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>

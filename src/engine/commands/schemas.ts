@@ -40,12 +40,15 @@ export const commands = {
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional(), by: z.literal('loop').optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, description: createSchema.shape.description.optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  // GY-3298: hold a released item out of dispatch (release clears it), and message its worker.
+  hold: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  message: z.object({ text: z.string().trim().min(1).max(4000) }).strict(),
   rework: z.object({ reason: z.string().trim().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
   // GY-3266: a heartbeat may carry the policy revision the worker has synced — the worker's sync
   // sends it to acknowledge a requirements revision recorded under its live lease, which complete
   // refuses until then.
-  heartbeat: z.object({ epoch, syncedPolicyRevision: z.number().int().positive().optional() }).strict(),
+  heartbeat: z.object({ epoch, syncedPolicyRevision: z.number().int().positive().optional(), acknowledgedMessages: z.array(z.string().min(1).max(20)).max(200).optional() }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
   // released — and the ledger keeps the git message, so the failure is on the item without
@@ -115,4 +118,4 @@ export const pullAssignmentSchema = z.object({ host: executorName.optional(), wo
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
 /** What the master's operator-agent identity applies directly, at once, under its own name. */
-export const operatorCommands = new Set<Command>(['create', 'ready', 'priority', 'unblock', 'window', 'requirements', 'rework', 'evidence']);
+export const operatorCommands = new Set<Command>(['create', 'ready', 'hold', 'message', 'priority', 'unblock', 'window', 'requirements', 'rework', 'evidence']);

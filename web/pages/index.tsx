@@ -43,6 +43,8 @@ export interface View {
   /** The primary entry it lives under; a page without one is opened by a link (the guide). */
   section?: Section;
   adminOnly?: boolean;
+  /** Rarely needed: listed under the section's Advanced fold instead of as a tab, and never its sidebar entry. */
+  advanced?: boolean;
   /** Hides the page for some sessions, or while nothing is configured for it. */
   visible?(dashboard: Dashboard): boolean;
   render(dashboard: Dashboard): ReactNode;
@@ -69,18 +71,18 @@ export const views: readonly View[] = [
   // Every test case with its latest trusted result and history (GY-162). It is shown even before the
   // first run, as never run, rather than hidden; operator agents' scoped API refuses its read.
   { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView} openItem={dashboard.setSelected}/> },
-  { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
-  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
-  // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
+  // The library of test cases sits beside their results, under Tests (GY-3297).
+  { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'tests', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
+  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for, beside the master that keeps it.
+  { id: 'product', icon: '◎', label: 'Product', section: 'master', render: dashboard => <ProductPage api={dashboard.api}/> },
+  // What the agents spent (GY-3289): tokens and cost from the price sheet, beside the sessions that spent them.
+  { id: 'costs', icon: '$', label: 'Costs', section: 'workers', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
+  // Settings is configuration only (GY-3297). The agent registry, for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
   { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt} onOpenSetup={role(dashboard) === 'admin' ? () => dashboard.setView('setup') : undefined}/> },
-  // What the agents spent (GY-3289): tokens and cost from the price sheet, beside the accounts and models that spent them.
-  { id: 'costs', icon: '$', label: 'Costs', section: 'settings', render: dashboard => <CostsPage api={dashboard.api} observedAt={dashboard.observedAt}/> },
-  // The product brief, kept by the master in project memory and mirrored here read-only (GY-3274): what the product is for.
-  { id: 'product', icon: '◎', label: 'Product', section: 'settings', render: dashboard => <ProductPage api={dashboard.api}/> },
-  // The first-run checklist (GY-1419), for the admin who sets Graphyard up: the sign-in link `graphyard up` prints opens it,
-  // and Settings → Agents links to it, so it is not a navigation entry of its own.
-  { id: 'setup', icon: '✔', label: 'Setup', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
+  // The first-run checklist (GY-1419), for the admin who sets Graphyard up; the sign-in link `graphyard up` prints opens it.
+  { id: 'setup', icon: '✔', label: 'Setup', section: 'settings', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
+  { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', advanced: true, adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
   // The project's effective delivery defaults and declared applications (GY-1901), opened from the sidebar's foot like the guide.
   { id: 'delivery', icon: '⇉', label: 'Delivery', render: dashboard => <DeliveryDefaults status={dashboard.status}/> },
@@ -94,7 +96,7 @@ export const visibleViews = (dashboard: Dashboard) => views.filter(view => (!vie
  */
 export function primaryEntry(dashboard: Dashboard, view: View) {
   if (!view.section) return null;
-  const first = visibleViews(dashboard).find(page => page.section === view.section);
+  const first = visibleViews(dashboard).find(page => page.section === view.section && !page.advanced);
   return first === view ? { ...sections.find(section => section.id === view.section)!, view } : null;
 }
 /** The sidebar's entries this session may open, in the sidebar's order. */

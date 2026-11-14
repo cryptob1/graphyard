@@ -119,10 +119,10 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
       await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'fixture', path: join(root, branch), branch }, randomUUID());
       item = await engine.execute(worker, 'submit', item.id, { epoch: item.epoch, head }, randomUUID());
       // GY-3164: an unreviewed submission (a sensitive delta, whose review gate holds until an exact
-      // approval) still owes its build-passed head a trial; every other gate but test and merge passes.
+      // approval) still owes its build-passed head a trial; test, acceptance and merge wait on that trial.
       const review = item.gates.find(gate => gate.name === 'review')!;
-      if (options.unreviewed ? review.passed || !item.gates.filter(gate => gate.name !== 'review' && gate.name !== 'test' && gate.name !== 'merge').every(gate => gate.passed)
-        : !item.gates.every(gate => ['test', 'merge'].includes(gate.name) || gate.passed))
+      if (options.unreviewed ? review.passed || !item.gates.filter(gate => !['review', 'test', 'acceptance', 'merge'].includes(gate.name)).every(gate => gate.passed)
+        : !item.gates.every(gate => ['test', 'acceptance', 'merge'].includes(gate.name) || gate.passed))
         throw new Error(`${item.key} is not ready to merge: ${JSON.stringify(item.gates)}`);
       return item;
     },

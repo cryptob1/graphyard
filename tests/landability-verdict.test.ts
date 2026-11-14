@@ -93,10 +93,10 @@ test('unit:landability-verdict-single-function — evaluateLandability returns l
     }
     assert.ok(verdict.reasons.some(entry => entry.gate === gate && reason.test(entry.reason)), `${name}: ${JSON.stringify(verdict.reasons)}`);
     // The build gate is the verdict's build family word for word, in order: nothing is computed
-    // twice; the acceptance family gates nothing since GY-1235.
+    // twice; the acceptance gate enforces the acceptance family too.
     const gates = gatesOf(work, [work]);
     assert.deepEqual(gates.build.reasons, landabilityRefusals(verdict, 'build'), name);
-    assert.equal(gates.acceptance, undefined, name);
+    assert.deepEqual(gates.acceptance?.reasons, landabilityRefusals(verdict, 'acceptance'), name);
   }
 });
 

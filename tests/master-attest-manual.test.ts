@@ -83,7 +83,7 @@ test('integration:master-attest-manual — master attest records the manual: pro
   const item = await submitted();
   assert.deepEqual(item.candidate, { sha: head, baseSha: baseTip, pr: item.submission!.pr, branch: 'graphyard/gy-1-1', author: worker.id });
   const before = acceptance(item);
-  assert.ok(before.some(reason => reason.includes(`${PROOF} needs a trusted passing attestation`)), JSON.stringify(before));
+  assert.ok(before.some(reason => reason.includes(`${PROOF} needs trusted passing evidence`)), JSON.stringify(before));
 
   // The CLI subcommand posts exactly the engine command, with the operator agent's own credential.
   const posted: { path: string; body: any; token: string }[] = [];

@@ -208,6 +208,13 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       if (data.kind === 'reconciled') demand(held, unheldShaRefusal(data.mergeSha, base), 409);
       if (recovering) demand(recoveryHeld, unheldShaRefusal(data.mergeSha, base), 409);
       if (recovering) await demandOrphanRecovery(db, work!, all, ledger!, base, engine, now);
+      // Admission belongs to the push. Reconciliation of a recorded push is historical:
+      // an attestation expiring afterwards cannot undo the merge. A reconcile without a
+      // recorded push still has to establish admission here.
+      if (data.kind === 'pushed' || !ledger?.pushedAt) {
+        const admission = evaluate(work!, all, now).gates.filter(gate => ['ready', 'build', 'review', 'acceptance'].includes(gate.name));
+        demand(admission.every(gate => gate.passed), `${work!.key}: merge admission refused: ${admission.flatMap(gate => gate.reasons).join('; ')}`, 409);
+      }
     }
     const { kind, ...fields } = data;
     const event: MergeRecordEvent = data;
