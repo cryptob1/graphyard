@@ -1,0 +1,11 @@
+{
+  "id": "dashboard-version-label",
+  "title": "The dashboard shows the served Graphyard commit in its bottom-left corner and follows a deploy",
+  "description": "A real browser at 1280 px and at 390 px signs in to a real control plane serving the built dashboard. On the Work page and on the Master page, with its terminal live, a label in the viewport's bottom-left corner shows the short commit /api/status reports, clear of every control and of the terminal. The plane then restarts at a new commit, and the label shows the new commit on the page's next poll, with no reload.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "read the version label on Work and Master across a restart at a new commit", "run": "npm run test:browser -- browser-tests/dashboard-version-label.spec.ts", "timeoutSeconds": 240 }
+  ]
+}

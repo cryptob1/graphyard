@@ -143,6 +143,15 @@ function App() {
     {creating && <CreateWork {...dashboard}/>}
     {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
+    <VersionLabel status={status}/>
   </div>;
+}
+/** GY-3310: the version and serving commit each status poll reports, in the bottom-left corner; nothing until one is known. */
+function VersionLabel({ status }: { status: any }) {
+  const commit: string | undefined = status.build?.commit;
+  const version: string | undefined = status.release?.version && !status.release.version.startsWith('unreleased') ? status.release.version : undefined;
+  const parts = [version && `v${version}`, commit && commit.slice(0, 7)].filter(Boolean);
+  if (!parts.length) return null;
+  return <span className="version-label" title={commit}>Graphyard {parts.join(' · ')}</span>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

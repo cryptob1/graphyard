@@ -65,7 +65,7 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     });
     const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false);
     // The terminal ends at the page's bottom padding: the document never scrolls (GY-3308), so the
-    // gap below it is that padding (32 px on a desktop main) rather than a fixed 12 px.
+    // gap below it is that padding (32 px on a desktop main) rather than a fixed 12 px, and at least the version-label strip (GY-3310).
     expect(before.viewport - before.bottom).toBeLessThan(40);
     await page.setViewportSize({ width: 1050, height: 720 });
     await expect.poll(async () => (await layout()).cols).not.toBe(before.cols);
