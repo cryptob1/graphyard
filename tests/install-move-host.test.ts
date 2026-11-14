@@ -64,7 +64,7 @@ test('e2e:install-move-host — install move copies the database, files and cred
     await atomicPrivateWrite(join(root, '.graphyard/connection.json'), { url: source.url, cliPath: launcher, hostId: 'source-host' });
     await source.ok('agent-registry/apply', { runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'), models: [{ name: 'default', id: null }],
       accounts: [{ name: 'claude-a', runtime: 'claude', model: 'default', credential: { host: 'source-host', home: null } }], roles: [{ name: 'worker', accounts: ['claude-a'], concurrency: 1 }], reason: 'fixture' });
-    const item = await source.ok('work', { title: 'Moves with the install', type: 'chore', priority: 2, criteria: [{ id: 'AC-1', text: 'Moves', proofs: ['unit:move'] }] });
+    const item = await source.ok('work', { title: 'Moves with the install', type: 'chore', priority: 2, criteria: [{ id: 'AC-1', text: 'Moves', proofs: ['e2e:install-move-host'] }] });
     await source.ok(`work/${item.id}/ready`, { reason: 'Ready' });
     const claimed = await source.ok(`work/${item.id}/claim`, {}, tokens.worker);
     const stop = async () => { await source.stop(); running = null; };
