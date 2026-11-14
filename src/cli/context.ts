@@ -51,12 +51,12 @@ export function releaseSkew(cli: ReleaseIdentity, server: { version?: unknown; c
   const serverVersion = typeof server.version === 'string' && server.version.trim() ? server.version.trim() : null;
   if (!serverVersion) return null;
   if (!cli.released) {
-    if (!cli.commit && cli.unreadable) return cli.unreadable;
     const raw = typeof server.commit === 'string' ? server.commit.trim().toLowerCase() : null;
     const serverCommit = raw && commitPattern.test(raw) ? raw : null;
     if (cli.commit && serverCommit) return cli.commit === serverCommit ? null : versionSkewMessage(`commit ${cli.commit}`, `commit ${serverCommit}`);
   }
-  return cli.version === serverVersion ? null : versionSkewMessage(cli.version, serverVersion);
+  if (cli.version === serverVersion) return null;
+  return !cli.released && cli.unreadable ? cli.unreadable : versionSkewMessage(cli.version, serverVersion);
 }
 
 /** This CLI's own release: the same release `graphyard version` reports and /healthz serves (src/release.ts cliRelease), so both sides compare like with like. Its commit is the checkout this file runs from, what an unreleased build compares. */
