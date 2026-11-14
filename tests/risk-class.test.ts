@@ -172,16 +172,9 @@ test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons a
   assert.match(renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work), item: normal })), /<dt>Risk<\/dt><dd class="risk-details">normal<small> · no sensitive path in the merge delta<\/small><\/dd>/);
 });
 
-test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: the policy never imports it, landability reads it only for a control-plane observation (GY-1528), the gates likewise (GY-1525), and the verdict suites stand unmodified', async () => {
+test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: the policy never imports it, declared criterion proofs never depend on risk, while review timing does (GY-1525), and the verdict suites stand unmodified', async () => {
   assert.doesNotMatch(await read('src/model/policy.ts'), /risk-class/, 'src/model/policy.ts does not read the risk class');
-  // GY-1528: a control-plane candidate's manual: attestation (landability) follows the risk class; the read sits on a line that asks for that observation.
-  for (const file of ['src/model-boundary/landability.ts']) {
-    const source = await read(file);
-    assert.doesNotMatch(source, /classifyRisk|withRisk/, `${file} neither classifies a delta itself nor prints the class`);
-    const reads = source.split('\n').filter(line => /\briskOf\(/.test(line));
-    assert.equal(reads.length, 1, `${file} reads the class exactly once`);
-    assert.match(reads[0]!, /source === 'control-plane'|controlPlaneObserved\(work\) &&/, `${file} reads it only for a control-plane observation: github mode never reads it`);
-  }
+  assert.doesNotMatch(await read('src/model-boundary/landability.ts'), /risk-class|riskOf\(/, 'declared criterion proofs are required at every risk level');
   for (const file of ['tests/landability-verdict.test.ts', 'tests/regression-guard.test.ts']) assert.doesNotMatch(await read(file), /risk-class|classifyRisk/, `${file} is untouched by GY-1521`);
   // The gate evaluation reports the lane and never stamps a risk class on the record: the one place
   // it reads the class is the review gate of a head the control plane observed itself (GY-1525 AC-3),

@@ -51,7 +51,7 @@ export function livenessCarry(work: Work, computed: Computed, _all: Work[], now:
  * the derivation once, and the fallback judges that account rather than computing it again.
  */
 export function livenessFallback(work: Work, all: Work[], now: Date, computed?: ActionAccount): NextAction | null {
-  if (work.stage === 'done' || !work.ready) return null;
+  if (work.stage === 'done' || !work.ready || work.hold) return null;
   const account = computed ?? actionAccount(work, all, now);
   if (account.action) return null;
   if (account.defect) return attend(work, 'unaccounted', `${work.key} has no rule naming its next step: ${account.defect}`, account.defect, `liveness:unaccounted:${account.defect}`, account.gate, account.refusal);
@@ -67,7 +67,7 @@ export function livenessFallback(work: Work, all: Work[], now: Date, computed?: 
 /** The one obligation an open item has now, or the violation that says it has none. */
 export function livenessOf(work: Work, all: Work[], now: Date): Liveness {
   const base = { work: work.id, key: work.key };
-  if (work.stage === 'done' || !work.ready) return { ...base, obligation: null, violation: null };
+  if (work.stage === 'done' || !work.ready || work.hold) return { ...base, obligation: null, violation: null };
   const violation = (successor: NextAction | null, detail: string, since = lapsedAt(work, now)): Liveness =>
     ({ ...base, obligation: null, violation: { ...base, class: classify(work, all, now, successor), since, ageMs: Math.max(0, now.getTime() - Date.parse(since)), detail, successor } });
   const owned = (next: NextAction): Liveness | null => {

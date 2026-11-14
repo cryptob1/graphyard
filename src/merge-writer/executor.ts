@@ -1,6 +1,7 @@
 // Concern: the control-plane merge executor (GY-1524) — the queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
+import { evaluate } from '../model-boundary/gates.js';
 import { riskOf } from '../model-boundary/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
@@ -50,9 +51,13 @@ export function mergeOpeningHold(current: Work | undefined, selected: Work = cur
  * passing trial is kept for the head and reused once the same head is approved — and any other
  * failed gate keeps the merge queued as before.
  */
-export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
-  return mergeOpeningHold(current, selected)
-    ?? (!gate(current!, 'review') ? trialAheadOfReviewReason(current!.key) : null);
+export function mergeCandidateHold(current: Work | undefined, selected: Work = current!, all: Work[] = current ? [current] : [], now = new Date()): string | null {
+  const opening = mergeOpeningHold(current, selected);
+  if (opening) return opening;
+  const gates = evaluate(current!, all, now).gates;
+  if (!gate(current!, 'review') || !gates.find(g => g.name === 'review')?.passed) return trialAheadOfReviewReason(current!.key);
+  const acceptance = gates.find(g => g.name === 'acceptance');
+  return acceptance?.passed ? null : trialAheadOfReviewReason(current!.key, acceptance?.reasons);
 }
 
 

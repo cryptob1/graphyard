@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mergeCandidateHold, mergeOne, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold, mergeOne, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
 
 // GY-3151 AC-1: another head merges while this head's trial runs, so the snapshot's candidate.baseSha
@@ -15,7 +15,7 @@ const head = sha('head'), base = sha('base'), moved = sha('moved');
 const item = (baseSha: string): Work => {
   const candidate = { sha: head, baseSha, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' };
   return { id: 'w1', key: 'GY-1', type: 'feature', stage: 'build', epoch: 1, lease: null, policyRevision: 2, reworkRequested: false, submission: { epoch: 1, pr: 1 }, candidate,
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }], policy: { checks: ['test'], review: true }, evidence: [], mergeLedger: null,
+    dependencies: [], workspaces: [], violations: [], ready: true, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }], policy: { checks: ['test'], review: true }, evidence: [], mergeLedger: null,
     observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, at: '2030-01-01T00:00:00.000Z' },
     gates: ['ready', 'build', 'review'].map(name => ({ name, passed: true, reasons: [] })) } as unknown as Work;
 };
@@ -36,8 +36,9 @@ function world(conflictOnMoved = false) {
     },
     push: async (mergeSha, onto) => { if (onto !== tip) return 'rejected'; pushes.push(mergeSha); return 'pushed'; },
     holds: async () => false,
+    holdOpening: async work => mergeOpeningHold(current, work),
     hold: async work => mergeCandidateHold(current, work),
-    record: async (_item, event) => { events.push(event); },
+    record: async (_item, event) => { events.push(event); if (event.kind === 'trial' && event.outcome === 'verdict') current.mergeLedger = { trial: { head: event.head, mergeSha: event.mergeSha, proofs: event.proofs } } as Work['mergeLedger']; },
   };
   return { ports, selected, trials, pushes, events };
 }

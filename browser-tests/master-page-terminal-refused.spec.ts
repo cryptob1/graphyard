@@ -8,6 +8,10 @@ import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { serveXterm } from './xterm';
 
 test('e2e:master-page-terminal-refused — when the terminal cannot start, the Master page says "refused:" with the cause, not "Detached"', async ({ browser }) => {
+  // Its own database and server start cold inside the spec, and the whole suite runs beside it in
+  // parallel, so like its siblings (master-page-ux, master-page-paste) it carries a budget that
+  // load cannot eat; the refusal it asserts is unchanged.
+  test.setTimeout(60_000);
   const site = await temporaryDirectory('refused-terminal');
   await symlink(resolve('.graphyard/browser-dist'), join(site, 'dist'));
   const database = await signInDatabase();
@@ -21,7 +25,7 @@ test('e2e:master-page-terminal-refused — when the terminal cannot start, the M
     let connections = 0;
     page.on('websocket', () => connections++);
     await page.goto(`${url}/#sign-in=${code}&master`);
-    await expect(page.getByRole('status')).toContainText('refused: herdr is not installed', { timeout: 15_000 });
+    await expect(page.getByRole('status')).toContainText('refused: herdr is not installed', { timeout: 25_000 });
     await expect(page.getByRole('status')).not.toContainText('Detached');
     // Longer than the maximum reconnect delay: a refusal must remain stable.
     await page.waitForTimeout(2500);
@@ -39,7 +43,7 @@ test('e2e:master-page-terminal-refused — when the terminal cannot start, the M
     });
     await page.goto(`${url}/#master`);
     await page.reload();
-    await expect(page.getByRole('status')).toContainText('Not available: sign in, and check the session still has a pane.');
+    await expect(page.getByRole('status')).toContainText('Not available: sign in, and check the session still has a pane.', { timeout: 25_000 });
     const afterRefusal = connections;
     await page.waitForTimeout(2500);
     expect(connections).toBe(afterRefusal);

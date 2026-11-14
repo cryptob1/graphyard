@@ -29,8 +29,8 @@ test('e2e:master-in-left-menu — Master is the second left-menu entry, opens th
   await expect(menu.nth(1)).toHaveText('Master');
   await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
 
-  // Workers is its own page again: no sub-page row offering Master beside it.
+  // Workers is its own page again: no sub-page row offering Master beside it (Costs sits there since GY-3297).
   await menu.nth(2).click();
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Pages in this section' })).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: /Master|Chief/ })).toHaveCount(0);
 });

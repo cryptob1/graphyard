@@ -25,7 +25,7 @@ Optional item \`owner\` names a human, separate from the worker lease. Set with 
 
 1. **Snapshot:** read work, headless runs and the master's Herdr pane.
 2. **Close:** end obsolete sessions, preserve uncommitted work from expired attempts for the next worker, reconcile leases and remove ended worktrees.
-3. **Dispatch:** release eligible backlog up to capacity, highest priority first and oldest on ties. Launch workers, reviewers, producers and an absent master session; return unmergeable heads for rework. Parked work stays held.
+3. **Dispatch:** release eligible backlog up to capacity, highest priority first and oldest on ties. Launch workers, reviewers, producers and an absent master session; return unmergeable heads for rework. Parked work stays held, and so does an item on \`master hold GY-N REASON\`: its worker keeps its lease, nothing new is dispatched, and \`master release GY-N REASON\` resumes it. \`master message GY-N TEXT\` reaches the item's worker at its next sync, which acknowledges it; an unread message carries into a successor's prompt.
 4. **Merge writer:** trial up to \`run.mergeWriter.parallel\` submitted heads at once, each alone on main's tip with its affected tests and proofs, starting as soon as each head's build gate passed — beside its review (GY-3164). A passing head lands at once once its review gate has passed for that head; a trial that passes while review stands open is kept for exactly that head and lands without a second trial once the same head is approved. If main moved, the same head is re-merged onto the new tip without another trial; a conflict returns it for rework.
 5. **Persist:** save the loop cursor.
 
