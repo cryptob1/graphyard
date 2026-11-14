@@ -196,9 +196,6 @@ export function runtimeStateRoots(kind: string, environment: NodeJS.ProcessEnv):
   }));
   return { variables, writable: Object.values(variables).map(root => join(root, state.directory)) };
 }
-/** The login-home variable of every adapter that names one. */
-export const runtimeHomeVariables = () => runtimeAdapters().flatMap(adapter => adapter.home ? [adapter.home.variable] : []);
-
 /**
  * The provider login an account home holds (GY-1573), as its kind and a digest of the provider's own
  * ids, so two homes logged in to one subscription read alike and nothing identifying leaves the host.

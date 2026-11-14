@@ -68,7 +68,7 @@ test('e2e:muse-writable-session-state — a confined Muse worker and reviewer lo
     for (const launch of launches) {
       rmSync(join(launch.data, 'muse'), { recursive: true, force: true });
       // The mask and confinement the worker dispatch and the reviewer launch build for this account.
-      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.homeVariable) });
+      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.homeVariable, 'muse') });
       const directory = launch.role === 'worker' ? worktree : reviewCheckout;
       const confinement = await sessionConfinement('muse', ['--approval-mode', 'never', '--trust-workspace'],
         { directory, cwd: directory, environment: launch.environment, ...(launch.role === 'worker' ? { secretsBus: null } : { ownGitHubCredential: true }), credentialMask, maskProbe: hostProbe }, root);
