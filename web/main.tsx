@@ -137,6 +137,13 @@ function App() {
     {creating && <CreateWork {...dashboard}/>}
     {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
+    <VersionLabel status={status}/>
   </div>;
+}
+/** GY-3310: the Graphyard build this dashboard's server runs, in the bottom-left corner, read from each status poll. */
+function VersionLabel({ status }: { status: any }) {
+  const commit: string | undefined = status.build?.commit ?? (status.release?.revision !== 'unknown' ? status.release?.revision : undefined);
+  const version: string | undefined = status.release?.version;
+  return <span className="version-label" title={[version, commit].filter(Boolean).join(' · ')}>Graphyard {commit ? commit.slice(0, 7) : version}</span>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
