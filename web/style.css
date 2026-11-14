@@ -282,8 +282,8 @@ html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,ht
 .sessions-table.workers{table-layout:fixed}
 .sessions-table.workers tr[data-session] th[scope=row],.sessions-table.workers tr[data-session] td{height:44px;padding:0 var(--space-3);vertical-align:middle;white-space:nowrap;overflow-wrap:normal;word-break:keep-all}
 .sessions-table.workers tr[data-session] th[scope=row]{padding-left:var(--space-4)}
-.sessions-table.workers .col-age{width:104px}
-.sessions-table.workers .col-state{width:112px}
+.sessions-table.workers .col-age{width:128px}
+.sessions-table.workers .col-state{width:132px}
 .sessions-table.workers .col-agent{width:21%}
 .sessions-table.workers tr[data-session]{cursor:pointer}
 .sessions-table.workers .agent-name{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%}
