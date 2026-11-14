@@ -4,7 +4,6 @@ import { link, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { machineDirectory } from '../team-access.js';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
@@ -428,8 +427,6 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // onboarding commits the file (the control plane image carries no checkout).
     { name: projectDeliveryVariable, value: projectDeliveryAssignment(session.delivery.policy).value, secret: false },
     ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
-    // GY-3294: the machine directory every install on this host shares for team access (team-access.ts); a Compose server mounts it at /machine.
-    { name: 'GRAPHYARD_MACHINE_DIR', value: local ? machineDirectory(dirname(context.workdir)) : '/machine', secret: false },
   ];
 }
 

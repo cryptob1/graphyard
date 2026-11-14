@@ -123,8 +123,6 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[]): BundleFi
     ...keys.map(key => `"./${key.bundle}:${key.container}:ro"`),
     ...(ctx.repoCheckout ? [`"${ctx.repoCheckout}:/repo"`] : []),
     ...(ctx.repoGitDir ? [`"${ctx.repoGitDir}:${ctx.repoGitDir}"`] : []),
-    // GY-3294: the machine directory every install on this host shares (team-access.ts), beside the install directories.
-    `"../../machine:/machine"`,
   ];
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
@@ -154,8 +152,6 @@ volumes:
   graphyard-data: {}
 ` },
   ];
-  // The machine directory exists before compose mounts it, so Docker does not create it root-owned.
-  files.push({ path: `${ctx.workdir}/../../machine/README`, mode: 0o644, content: 'Tailscale team access shared by every Graphyard install on this machine (GY-3294).\n' });
   for (const key of keys) {
     // A bind mount keeps the host file's owner and mode, so the key must land as 0600 owned
     // by the container user itself: an installer with a different uid would leave it unreadable

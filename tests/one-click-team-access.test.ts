@@ -6,10 +6,12 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { applyTailnetCommand, readTailnet, runUp, type UpDependencies } from '../src/up.js';
+import { applyTailnetCommand, readTailnet, runUp, tailscaleMissingNote, type UpDependencies } from '../src/up.js';
 import { guideTopics as guides } from '../src/guide.js';
 import { credentialMaskFor, masterCredentialMask } from '../src/master/confinement.js';
-import { teamAccessSummary } from '../src/team-access.js';
+import { aclGuidance, teamAccessSummary } from '../src/team-access.js';
+import { syncTeamAccess } from '../src/master/team-access.js';
+import { sealForHost } from '../web/seal.js';
 import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -76,28 +78,33 @@ test('unit:tests/one-click-team-access.test.ts — up serves each install on its
   const local = await up(join(bare, 'c'), 4313, join(bare, 'machine'), join(bare, 'empty'));
   assert.equal(local.reachableUrl, null, 'without Tailscale the install continues on this machine only');
   assert.ok(!local.notes.some(note => /did not finish/.test(note)));
+  assert.ok(local.notes.includes(tailscaleMissingNote), 'a host without Tailscale gets one install instruction');
+  assert.match(tailscaleMissingNote, /install Tailscale \(https:\/\/tailscale\.com\/download\).*rerun graphyard up/);
 });
 
-async function install(label: string, env: NodeJS.ProcessEnv, clock: () => number) {
+const coordinator = (label: string) => `test-loop-coordinator-${label}-credential-0123456789`;
+async function install(label: string, host: string, clock: () => number) {
   const store = await withDatabase(label);
   await store.init();
   const engine = new Engine(store, 120, `owner/${label}`);
   engine.gitRunner = null;
-  const http = server(engine, [{ id: 'operator', role: 'admin', sessionKind: 'human', token: operator }], { env, clock });
+  const http = server(engine, [{ id: 'operator', role: 'admin', sessionKind: 'human', token: operator }, { id: 'loop', role: 'coordinator', token: coordinator(label) }], { clock });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const port = (http.address() as { port: number }).port, base = `http://127.0.0.1:${port}`;
   const call = async (path: string, body?: unknown, token = operator) => {
     const response = await fetch(base + path, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    return { status: response.status, body: await response.json() as any, text: '' };
+    return { status: response.status, body: await response.json() as any };
   };
   const redeem = async (code: string) => {
     const response = await fetch(`${base}/api/sign-in`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
     return { status: response.status, body: await response.json() as any };
   };
-  return { store, http, port, call, redeem, close: async () => { await new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); }); await store.close(); } };
+  const credentialFile = join(host, `${label}.token`);
+  await writeFile(credentialFile, coordinator(label), { mode: 0o600 });
+  return { store, http, port, call, redeem, credentialFile, base, close: async () => { await new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); }); await store.close(); } };
 }
 
-test('unit:tests/one-click-team-access.test.ts — two installs share the machine link, invite with both links, and redeem only where intended within 24 hours', async () => {
+test('unit:tests/one-click-team-access.test.ts — two installs share the machine link through their host loops, invite with both links, and redeem only where intended within 24 hours', async () => {
   const host = await temporaryDirectory('team-access-servers'), machineDir = join(host, 'machine');
   await mkdir(machineDir);
   await writeFile(join(machineDir, 'tailnet.json'), JSON.stringify({ dnsName: 'yard.tail-test.ts.net.', ip: '100.64.0.7', deviceId: 'nFAKE123CNTRL' }));
@@ -110,39 +117,63 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
     res.end(providerStatus === 200 ? JSON.stringify([{ id: 'inv1', multiUse: false, inviteUrl: 'https://login.tailscale.com/admin/invite/single-use-test' }]) : JSON.stringify({ message: 'not authorized' }));
   });
   await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve));
+  const tailscaleApi = `http://127.0.0.1:${(provider.address() as { port: number }).port}`;
   let now = Date.parse('2026-11-13T12:00:00Z');
-  const env = { ...process.env, GRAPHYARD_MACHINE_DIR: machineDir, GRAPHYARD_TAILSCALE_API: `http://127.0.0.1:${(provider.address() as { port: number }).port}` };
   const logged: string[] = [], original = { log: console.log, error: console.error, warn: console.warn };
   for (const name of ['log', 'error', 'warn'] as const) console[name] = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
-  const a = await install('team_access_a', env, () => now), b = await install('team_access_b', env, () => now);
+  const a = await install('team_access_a', host, () => now), b = await install('team_access_b', host, () => now);
+  /** One pass of each install's master loop on the shared host (master/team-access.ts). */
+  const sync = async (...installs: typeof a[]) => { for (const entry of installs) await syncTeamAccess({ url: entry.base, credentialFile: entry.credentialFile }, { machineDir, tailscaleApi }); };
   try {
+    const before = (await a.call('/api/team-access')).body;
+    assert.equal(before.installUrl, null, 'the server never reads the host machine directory itself');
+    assert.match(before.guidance, /Tailscale is not serving this machine.*https:\/\/tailscale\.com\/download/);
+    const local = (await a.call('/api/invites', { name: 'early', role: 'viewer', origin: a.base })).body;
+    assert.equal(local.message, null, 'no tailnet: the message is withheld');
+    assert.match(local.missing, /Tailscale is not serving this machine/);
+
+    await sync(a, b);
     const empty = (await a.call('/api/team-access')).body;
     assert.equal(empty.installUrl, `http://yard.tail-test.ts.net:${a.port}`);
     assert.equal(empty.shareLink, null);
-    assert.match(empty.guidance, /No Tailscale share link is saved for this machine yet.*Share.*paste it here/);
+    assert.match(empty.guidance, /No Tailscale share link is saved for this machine yet, so Invite cannot make a complete message.*Share.*paste it here/);
     assert.match(empty.acl, new RegExp(`"tcp:${a.port}"`));
-    assert.match(empty.acl, /autogroup:shared/);
+    assert.match(empty.acl, /"TEAMMATE@example\.com"/);
+    assert.match(empty.acl, /"100\.64\.0\.7"/);
+    assert.equal(empty.aclGuidance, aclGuidance);
     assert.equal(empty.summary, teamAccessSummary);
     assert.equal((await a.call('/api/team-access', undefined, 'not-a-token')).status, 401);
+    assert.equal((await a.call('/api/team-access', undefined, coordinator('team_access_a'))).status, 403, 'only the operator reads team access');
+    const withheld = (await a.call('/api/invites', { name: 'early', role: 'viewer' })).body;
+    assert.equal(withheld.message, null, 'without a share link no supposedly complete message is made');
+    assert.match(withheld.missing, /No Tailscale share link is saved/);
 
+    // The owner pastes the link on A with the day it was made; B shows it after the host loops' next pass.
     const link = 'https://login.tailscale.com/admin/invite/machine-share-test';
     assert.equal((await a.call('/api/team-access/share-link', { url: 'https://evil.example/x' })).status, 400);
+    assert.equal((await a.call('/api/team-access/share-link', { url: link, createdOn: 'last week' })).status, 400);
     const saved = (await a.call('/api/team-access/share-link', { url: link })).body.shareLink;
-    assert.equal(saved.url, link);
-    assert.equal(saved.expiresAt, new Date(now + 30 * day).toISOString(), 'Tailscale expires the share link 30 days after it was made');
+    assert.deepEqual(saved, { url: link, createdOn: '2026-11-13', expiresAt: '2026-12-13T00:00:00.000Z', state: 'ok' }, 'made today unless the owner says otherwise; Tailscale expires it 30 days later');
+    assert.equal((await b.call('/api/team-access')).body.shareLink, null, 'B learns it from the machine, not from A');
+    await sync(a, b);
+    assert.deepEqual(JSON.parse(await readFile(join(machineDir, 'tailnet.json'), 'utf8')).shareLink, { url: link, createdOn: '2026-11-13', expiresAt: '2026-12-13T00:00:00.000Z' });
     const onB = (await b.call('/api/team-access')).body;
     assert.deepEqual(onB.shareLink, saved, 'install B on the same machine shows the link pasted on A');
     assert.equal(onB.installUrl, `http://yard.tail-test.ts.net:${b.port}`);
     assert.match(onB.acl, new RegExp(`"tcp:${b.port}"`));
+    await sync(a, b);
+    assert.deepEqual((await a.call('/api/team-access')).body.shareLink, saved, 'a later pass does not re-apply or lose it');
 
     const inviteA = (await a.call('/api/invites', { name: 'sam', role: 'viewer' })).body;
     const inviteB = (await b.call('/api/invites', { name: 'kim', role: 'maintainer' })).body;
     for (const [invite, install, name] of [[inviteA, a, 'sam'], [inviteB, b, 'kim']] as const) {
       const url = `http://yard.tail-test.ts.net:${install.port}`;
       assert.equal(invite.link, `${url}/#sign-in=${invite.code}`);
+      assert.equal(invite.missing, null);
       assert.deepEqual(invite.share, { url: link, kind: 'reusable', expiresAt: saved.expiresAt });
-      for (const part of [`Hi ${name}`, url, `port ${install.port} only`, 'Two locks', link, `reusable, Tailscale expires it ${saved.expiresAt.slice(0, 10)}`, invite.link, 'single use, expires in 24 hours', 'One machine runs several Graphyard installs, one port each'])
+      for (const part of [`Hi ${name}`, `${url} as`, `this one is on port ${install.port}`, 'Two locks', `accept this machine share: ${link}`, 'reusable Tailscale share link; Tailscale expires it 2026-12-13', "reach this machine, as far as the owner's tailnet policy allows", invite.link, 'single use, expires in 24 hours', 'does not sign you in to the others', 'One machine runs several Graphyard installs, one port each'])
         assert.ok(invite.message.includes(part), `the message carries ${part}:\n${invite.message}`);
+      assert.doesNotMatch(invite.message, /port \d+ only/, 'the share reaches the machine, not one port');
       assert.equal(invite.expiresAt, new Date(now + day).toISOString());
     }
 
@@ -159,40 +190,72 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
     now += day;
     assert.equal((await a.redeem(late.code)).status, 401, 'an unused invite expires at 24 hours');
 
-    // Reusable link: an older link keeps its real expiry, warns in its last seven days, is replaced for both, and refuses invites once expired.
-    now = Date.parse(saved.savedAt) + 24 * day;
-    assert.equal((await b.call('/api/team-access/share-link', { url: link })).body.shareLink.savedAt, saved.savedAt, 'pasting the same link again keeps its expiry');
-    assert.equal((await a.call('/api/team-access')).body.shareLink.state, 'refresh');
-    now = Date.parse(saved.savedAt) + 30 * day;
-    assert.equal((await b.call('/api/team-access')).body.shareLink.state, 'expired');
+    // An older pasted link keeps its real expiry: made 25 days ago it warns now, and refuses invites five days on.
+    now = Date.parse('2026-11-20T12:00:00Z');
+    const older = (await b.call('/api/team-access/share-link', { url: link, createdOn: '2026-10-26' })).body.shareLink;
+    assert.deepEqual([older.expiresAt, older.state], ['2026-11-25T00:00:00.000Z', 'refresh']);
+    await sync(b, a);
+    assert.equal((await a.call('/api/team-access')).body.shareLink.state, 'refresh', 'the replacement reaches A too');
+    now = Date.parse('2026-11-25T00:00:00Z');
+    assert.equal((await a.call('/api/team-access')).body.shareLink.state, 'expired');
     const refused = await a.call('/api/invites', { name: 'max', role: 'viewer' });
     assert.equal(refused.status, 409);
-    assert.match(refused.body.error, /share link expired .*paste it on Setup/);
+    assert.match(refused.body.error, /share link expired 2026-11-25.*paste it on Setup/);
     const fresh = 'https://login.tailscale.com/admin/invite/fresh-share';
-    await b.call('/api/team-access/share-link', { url: fresh });
-    assert.deepEqual((await a.call('/api/team-access')).body.shareLink, { url: fresh, savedAt: new Date(now).toISOString(), expiresAt: new Date(now + 30 * day).toISOString(), state: 'ok' });
+    await a.call('/api/team-access/share-link', { url: fresh });
+    await sync(a, b);
+    assert.deepEqual((await b.call('/api/team-access')).body.shareLink, { url: fresh, createdOn: '2026-11-25', expiresAt: '2026-12-25T00:00:00.000Z', state: 'ok' });
 
-    // Optional API mode: the owner's token is written 0600 for the machine, never answered back, and each invite asks Tailscale for one single-use device invite.
+    // Optional API mode: the token is sealed to the host in the browser, written 0600 by the host alone, never answered back.
     const token = 'tskey-api-FAKE-not-a-real-token-1234';
-    const savedToken = await a.call('/api/team-access/tailscale-token', { token });
+    assert.equal((await a.call('/api/team-access/tailscale-token', { token })).status, 400, 'a token in the clear is refused');
+    const sealed = await sealForHost((await a.call('/api/team-access')).body.hostKey, token);
+    const savedToken = await a.call('/api/team-access/tailscale-token', { sealed });
     assert.equal(savedToken.status, 200);
     assert.equal(savedToken.body.mode, 'api');
-    assert.equal(((await stat(join(machineDir, 'tailscale-api-token'))).mode & 0o777), 0o600);
+    await sync(a, b);
+    assert.equal(((await stat(join(machineDir, 'tailscale-api.token'))).mode & 0o777), 0o600);
+    assert.equal((await readFile(join(machineDir, 'tailscale-api.token'), 'utf8')).trim(), token);
     assert.equal((await b.call('/api/team-access')).body.mode, 'api', 'the token serves every install on the machine');
-    const apiInvite = await b.call('/api/invites', { name: 'ana', role: 'viewer' });
-    assert.equal(apiInvite.status, 200);
+
+    // Invite someone in API mode: Tailscale's single-use invite first, then the Graphyard invite, one message.
+    const pending = (await b.call('/api/invites', { name: 'ana', role: 'viewer' })).body;
+    assert.match(pending.pending, /^[0-9a-f-]{36}$/);
+    assert.equal(pending.message, undefined);
+    assert.equal((await b.call(`/api/team-access/device-invites/${pending.pending}`)).body.state, 'pending');
+    await sync(b);
     assert.deepEqual(requests.map(request => [request.url, request.auth, JSON.parse(request.body)]), [['POST /api/v2/device/nFAKE123CNTRL/device-invites', `Bearer ${token}`, [{ multiUse: false, allowExitNode: false }]]]);
+    assert.equal((await b.call(`/api/team-access/device-invites/${pending.pending}`)).body.state, 'ready');
+    const apiInvite = await b.call('/api/invites', { name: 'ana', role: 'viewer', deviceInvite: pending.pending });
+    assert.equal(apiInvite.status, 200);
     assert.deepEqual(apiInvite.body.share, { url: 'https://login.tailscale.com/admin/invite/single-use-test', kind: 'single-use' });
-    assert.ok(apiInvite.body.message.includes('https://login.tailscale.com/admin/invite/single-use-test (Tailscale share link, single use, made for you)'));
+    assert.ok(apiInvite.body.message.includes('accept this machine share: https://login.tailscale.com/admin/invite/single-use-test (single-use Tailscale invite, made for you)'));
     assert.ok(apiInvite.body.message.includes(`http://yard.tail-test.ts.net:${b.port}/#sign-in=${apiInvite.body.code}`));
+    assert.equal((await b.call('/api/invites', { name: 'ana', role: 'viewer', deviceInvite: pending.pending })).status, 409, 'one Tailscale invite serves one Graphyard invite');
+
     providerStatus = 403;
-    const failed = await a.call('/api/invites', { name: 'zoe', role: 'viewer' });
-    assert.equal(failed.status, 502);
-    assert.match(failed.body.error, /Tailscale refused the device invite \(403: not authorized\); no invite was made/);
+    const second = (await a.call('/api/invites', { name: 'zoe', role: 'viewer' })).body;
+    await sync(a);
+    const failed = (await a.call(`/api/team-access/device-invites/${second.pending}`)).body;
+    assert.equal(failed.state, 'failed');
+    assert.match(failed.error, /Tailscale refused the device invite \(403: not authorized\); no invite was made/);
     assert.equal((await a.store.pool.query("SELECT 1 FROM team_members WHERE name='zoe'")).rowCount, 0, 'a refused Tailscale invite leaves no Graphyard invite');
-    const visible = JSON.stringify([savedToken.body, apiInvite.body, failed.body, (await a.call('/api/team-access')).body, logged, await readFile(join(machineDir, 'tailnet.json'), 'utf8')]);
-    assert.ok(!visible.includes(token), 'the token appears in no response, record or log');
-    assert.equal((await a.call('/api/team-access/tailscale-token', { token: '' })).body.mode, 'reusable', 'removing the token returns to the share link');
+    assert.equal((await a.call('/api/invites', { name: 'zoe', role: 'viewer', deviceInvite: second.pending })).status, 409, 'nor can one be made from it');
+    const fallback = (await a.call('/api/invites', { name: 'zoe', role: 'viewer', share: 'reusable' })).body;
+    assert.ok(fallback.message.includes(fresh), 'the owner may choose the reusable link instead');
+    const stale = (await a.call('/api/invites', { name: 'ivy', role: 'viewer' })).body;
+    now += 3 * minute;
+    assert.match((await a.call(`/api/team-access/device-invites/${stale.pending}`)).body.error, /master loop did not make the Tailscale invite in time/);
+
+    const events = (await a.store.pool.query("SELECT payload FROM events WHERE kind LIKE 'team-access.%'")).rows;
+    const visible = JSON.stringify([savedToken.body, apiInvite.body, failed, (await a.call('/api/team-access')).body, logged, events, (await b.store.pool.query("SELECT payload FROM events")).rows, await readFile(join(machineDir, 'tailnet.json'), 'utf8')]);
+    assert.ok(!visible.includes(token) && !visible.includes('FAKE-not-a-real'), 'the token appears in no response, record or log');
+    const reports = (await a.store.pool.query("SELECT 1 FROM events WHERE kind='team-access.host'")).rowCount!;
+    await sync(a); await sync(a);
+    assert.equal((await a.store.pool.query("SELECT 1 FROM events WHERE kind='team-access.host'")).rowCount, reports, 'an unchanged machine adds nothing to the ledger');
+    assert.equal((await a.call('/api/team-access/tailscale-token', { remove: true })).body.mode, 'reusable', 'removing the token returns to the share link');
+    await sync(a);
+    await assert.rejects(stat(join(machineDir, 'tailscale-api.token')));
   } finally {
     Object.assign(console, original);
     await a.close(); await b.close();
@@ -203,7 +266,7 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
 test('unit:tests/one-click-team-access.test.ts — the machine directory holding the Tailscale token is masked from confined sessions and the Chief', async () => {
   const home = await temporaryDirectory('team-access-mask'), machine = join(home, 'machine'), own = join(home, 'own-install');
   await mkdir(machine); await mkdir(own);
-  await writeFile(join(machine, 'tailscale-api-token'), 'tskey-api-FAKE\n', { mode: 0o600 });
+  await writeFile(join(machine, 'tailscale-api.token'), 'tskey-api-FAKE\n', { mode: 0o600 });
   assert.equal(credentialMaskFor({}, { credentialFile: join(own, 'token') }, home).configHome, home, 'workers, reviewers and producers lose the whole config home, the machine directory with it');
   const chief = masterCredentialMask({ credentialFile: join(own, 'token') }, [], home);
   assert.ok(chief.hostPaths!.includes(machine), 'the master session reads its own install directory, never the machine token');
@@ -213,8 +276,11 @@ test('unit:tests/one-click-team-access.test.ts — the machine directory holding
 test('unit:tests/one-click-team-access.test.ts — README, the infra and setup guides, and the summary say the same thing', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   assert.match(readme, /one machine, many installs, one port each; two locks: tailnet plus per-install sign-in/);
-  for (const phrase of ['one machine, many installs, one port each', 'tailscale serve --bg --http=PORT', "Two locks keep each install private: the machine's tailnet, then the install's own Graphyard sign-in", 'expires that link after 30 days', 'expires in 24 hours', 'single-use Tailscale device invite', 'tailnet policy grant'])
+  for (const phrase of ['one machine, many installs, one port each', 'tailscale serve --bg --http=PORT', "Two locks: the machine's Tailscale share lets a person's devices reach this machine, as far as your tailnet policy allows, and each install still needs its own Graphyard sign-in",
+    'Reusable machine-share link (default)', 'Automatic single-use device invite (optional)', 'expires an unused share link 30 days after it was made', 'with the day it was made', 'expires in 24 hours', '~/.config/graphyard/machine/tailscale-api.token', 'names the missing step', 'tailnet policy grant with a teammate placeholder', 'review broader grants'])
     assert.ok(guides.infra.includes(phrase), `guide infra says: ${phrase}`);
   assert.match(guides.setup, /one machine, many installs, one port each; two locks: tailnet plus per-install sign-in/);
-  assert.match(teamAccessSummary, /One machine, many installs, one port each\. Two locks .*tailnet.*own Graphyard sign-in/);
+  assert.match(teamAccessSummary, /One machine, many installs, one port each\. Two locks: the Tailscale share lets a person's devices reach this machine \(as far as your tailnet policy allows\), and each install still needs its own Graphyard sign-in/);
+  assert.match(aclGuidance, /TEAMMATE@example\.com.*does not revoke them/);
+  assert.doesNotMatch(guides.infra + readme + teamAccessSummary, /opens port \d+ only|port PORT only/, 'nothing claims the share reaches one port alone');
 });

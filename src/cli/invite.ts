@@ -4,12 +4,12 @@ import { asRecordedOperator } from './session-commands.js';
 
 /**
  * GY-3215: the operator invites a teammate as their own human principal, or revokes one. The link it
- * prints is single use and lives ten minutes; the operator delivers it, and the session it opens
+ * prints is single use and lives 24 hours; the operator delivers it, and the session it opens
  * renews itself until 90 days unused. After that session ends, the operator invites again.
  */
 export const inviteCommand: CliCommand = {
   name: 'invite',
-  help: ['  invite NAME --role ROLE      Print a one-time link (10 minutes) that signs teammate NAME in as their own',
+  help: ['  invite NAME --role ROLE      Print a one-time link (24 hours) that signs teammate NAME in as their own',
     '                                person; ROLE viewer reads everything, maintainer also files work',
     '  invite revoke NAME           End teammate NAME\'s sessions at once and remove them'],
   async run(context) {

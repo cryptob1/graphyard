@@ -367,6 +367,8 @@ export function tailnetShare(server: string, tailnet: Tailnet | null): { command
   const port = url.port || '80';
   return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
 }
+/** GY-3294: the one instruction a host without a running Tailscale gets; up carries on locally. */
+export const tailscaleMissingNote = 'Tailscale is not running here, so this install stays on this machine. To share it: install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.';
 /** This host's Tailscale node from `tailscale status --json`; no Tailscale, or one not running, is no tailnet (the install carries on locally). */
 export async function readTailnet(): Promise<Tailnet | null> {
   try {
@@ -542,6 +544,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     if (!server) return null;
     reached = true;
     const tailnet = await deps.tailnet?.().catch(() => null) ?? null;
+    if (deps.tailnet && !tailnet) deps.emit({ kind: 'note', text: tailscaleMissingNote });
     const share = tailnetShare(server, tailnet);
     if (!share) return state.tailnetUrl ?? null;
     const shell = share.command.join(' ');

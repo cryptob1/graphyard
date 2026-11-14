@@ -14,6 +14,7 @@ import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
 import { processConnectAccounts } from '../../master/connect-accounts.js';
+import { syncTeamAccess } from '../../master/team-access.js';
 import { recordRunningPin } from '../../master/known-good.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';
@@ -67,7 +68,10 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const connects = values.once ? undefined : setInterval(() => {
       if (connecting || !current().url || !current().hostId) return;
       connecting = true;
-      processConnectAccounts(current()).catch(error => console.error(`[graphyard-master] connect-account worker: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { connecting = false; });
+      processConnectAccounts(current()).catch(error => console.error(`[graphyard-master] connect-account worker: ${error instanceof Error ? error.message : String(error)}`))
+        // GY-3294: and carries Setup's team access to this machine's shared record and back (a server without the routes answers 404).
+        .then(() => syncTeamAccess(current())).catch(error => { if (error?.status !== 404) console.error(`[graphyard-master] team access: ${error instanceof Error ? error.message : String(error)}`); })
+        .finally(() => { connecting = false; });
     }, 15_000);
     connects?.unref?.();
     stopping.signal.addEventListener('abort', () => clearInterval(connects));

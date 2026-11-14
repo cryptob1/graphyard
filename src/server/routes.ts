@@ -31,8 +31,8 @@ export interface Services {
   signinClaim?: { hash: string; principal: string; token: string } | null;
   /** The server's clock (sign-in and invite expiry); Date.now unless an embedder controls time. */
   clock?: () => number;
-  /** GY-3294: team access across the installs on this machine (team-access.ts). */
-  teamAccess?: { machineDir: string | null; tailscaleApi: string; port: string | null };
+  /** GY-3294: the port this install is published on, for team access (routes/team-access.ts). */
+  teamAccess?: { port: string | null };
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */

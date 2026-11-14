@@ -17,7 +17,6 @@ import { Next, type Route, type RouteContext, type RouteModule, type Services } 
 import { leaseCommandRequest } from './routes/work.js';
 import { launchTokenActor } from './review-verdict.js';
 import { signinClaimFromEnv } from './routes/signin.js';
-import { defaultTailscaleApi } from '../team-access.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
@@ -314,6 +313,6 @@ export function assembleServices(engine: Engine, credentials: Credential[], opti
   engine.principals = credentials.map(({ token, ...actor }) => actor);
   return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env),
     ...(options.clock ? { clock: options.clock } : {}),
-    // GY-3294: the machine directory every install on this host shares (team-access.ts), the Tailscale API, and the port the dashboard is published on.
-    teamAccess: { machineDir: env.GRAPHYARD_MACHINE_DIR || null, tailscaleApi: env.GRAPHYARD_TAILSCALE_API || defaultTailscaleApi, port: env.GRAPHYARD_LOCAL_VIEW_PORT || null } };
+    // GY-3294: the port the dashboard is published on, which its tailnet address and invites name.
+    teamAccess: { port: env.GRAPHYARD_LOCAL_VIEW_PORT || null } };
 }
