@@ -21,11 +21,11 @@ if (args[0] !== 'terminal' || args[1] !== 'session') process.exit(0);
 const [, , mode, pane] = args;
 let cols = Number(args[args.indexOf('--cols') + 1]), rows = Number(args[args.indexOf('--rows') + 1]);
 const frame = text => process.stdout.write(`${JSON.stringify({ type: 'terminal.frame', seq: 0, encoding: 'ansi', width: cols, height: rows, full: false, bytes: Buffer.from(text).toString('base64') })}\n`);
-// The fixture's `pane` is laid out at its own size, as Herdr lays a pane out (GY-3313): only a controlling
-// stream's resize sizes it, and an observer is shown it at that size. Its program draws a ruler: every
-// row filled to the pane's width, redrawn on each resize.
+// The fixture's `pane` is laid out at its own size, as Herdr lays a pane out (GY-3313): a controlling
+// stream sizes it to the stream's size and each resize, and an observer is shown it at its layout size.
+// Its program draws a ruler: every row filled to the pane's width, redrawn on each resize.
 const layout = fixture().pane;
-let paneCols = layout?.cols ?? cols, paneRows = layout?.rows ?? rows;
+let paneCols = layout && mode === 'observe' ? layout.cols : cols, paneRows = layout && mode === 'observe' ? layout.rows : rows;
 const ruler = () => frame(`\x1b[H\x1b[2J${Array.from({ length: paneRows }, (_, row) => `\x1b[${row + 1};1H${`row ${row + 1} `.padEnd(paneCols - 1, '=')}|`).join('')}`);
 // One controlling stream per pane, as in Herdr: `control` without --takeover is refused while another holds it.
 const holder = `${process.env.HERDR_STUB_LOG}.${pane}.control`, held = () => { try { process.kill(Number(readFileSync(holder, 'utf8')), 0); return true; } catch { return false; } };
