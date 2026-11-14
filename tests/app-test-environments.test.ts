@@ -144,7 +144,7 @@ test('e2e:app-test-environments — a declared environment is provisioned from t
   assert.deepEqual(state.instances, [], 'the torn-down instance no longer counts');
   assert.equal(state.runs.staging.outcome, 'passed');
   assert.equal(state.runs.staging.commit, fx.candidate);
-  assert.equal(state.runs.staging.url, fx.url);
+  assert.equal(state.runs.staging.url, '[redacted]', 'a URL made of a secrets-file value is redacted in the record, though the case got the real one');
 });
 
 test('e2e:app-test-environments — max-concurrent holds across competing gate runs: exhaustion waits, failing and reverting nothing', async () => {
@@ -199,6 +199,10 @@ test('e2e:app-test-environments — a provisioning outage and a teardown failure
   assert.equal(fx.app.hits, 0, 'no case ran against a failed environment');
   assert.equal(readEnvironmentState(fx.stateFile).runs.staging?.outcome, 'fault');
   assert.deepEqual(readEnvironmentState(fx.stateFile).instances, [], 'whatever up started was torn down');
+  // The scheduled diagnostics leave the faulted environment's cases out and run the rest, rather than failing and rerunning the whole suite every cycle.
+  const diagnosed = await ports.diagnose(fx.candidate);
+  assert.ok(!diagnosed.failed.includes('e2e:staged-app'), 'an outage condemns no case in the diagnostics either');
+  assert.ok(diagnosed.failed.includes('e2e:ghost-app'), 'the rest of the catalog still ran and judged');
   await rm(join(fx.provider, 'outage'));
 
   // Teardown failure: the check's own pass stands; the fault is recorded and the instance stays counted.

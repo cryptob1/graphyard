@@ -154,7 +154,7 @@ export function environmentLifecycle(options: { stateFile: string; secretsFile: 
       if (typeof result.url !== 'string' || !/^https?:\/\//.test(result.url)) throw new Error('up printed no {"url":"http…"} as its last line');
       url = result.url;
       if (typeof result.instance === 'string' && result.instance) instance = result.instance;
-      await update(state => { const entry = state.instances.find(item => item.runId === runId); if (entry) Object.assign(entry, { instance, url }); });
+      await update(state => { const entry = state.instances.find(item => item.runId === runId); if (entry) Object.assign(entry, { instance, url: redactSecrets(url, secrets) }); });
     } catch (error) {
       const detail = `provisioning failed: ${scrub(error)}`;
       // Whatever up started is torn down; an instance down cannot remove stays counted and is reaped later.
@@ -168,7 +168,7 @@ export function environmentLifecycle(options: { stateFile: string; secretsFile: 
       let teardown: string | null = null;
       try { await down(name, definition, cwd, secrets, { runId, instance, commit }); } catch (error) { teardown = `teardown failed: ${scrub(error)}`; log(`environment ${name}: ${teardown}`); }
       active.delete(runId);
-      await recordRun(name, { commit, runId, url, at: at(), ms: now() - started, outcome: teardown ? 'fault' : verdict ? 'passed' : 'failed', detail: teardown });
+      await recordRun(name, { commit, runId, url: redactSecrets(url, secrets), at: at(), ms: now() - started, outcome: teardown ? 'fault' : verdict ? 'passed' : 'failed', detail: teardown });
     }
     return result;
   }
@@ -186,7 +186,14 @@ export const loopLifecycle = (stateFile: string, secretsFile: () => string, log?
  * The trusted base's tree, checked out once per commit beside the state file through a private
  * index, so lifecycle commands run its scripts and never a candidate's.
  */
-export async function trustedCheckout(git: (args: string[], env?: Record<string, string>) => Promise<string>, root: string, base: string): Promise<string> {
+const checkouts = new Map<string, Promise<string>>();
+export function trustedCheckout(git: (args: string[], env?: Record<string, string>) => Promise<string>, root: string, base: string): Promise<string> {
+  // The gate and the diagnostics beside it share one checkout of a base: never two writers.
+  const key = join(root, base);
+  if (!checkouts.has(key)) checkouts.set(key, checkOut(git, root, base).finally(() => checkouts.delete(key)));
+  return checkouts.get(key)!;
+}
+async function checkOut(git: (args: string[], env?: Record<string, string>) => Promise<string>, root: string, base: string): Promise<string> {
   const parent = join(root, '.graphyard', 'app-environment-bases'), directory = join(parent, base);
   if (existsSync(join(directory, '.graphyard-ready'))) return directory;
   await rm(parent, { recursive: true, force: true });

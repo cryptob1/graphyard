@@ -12,7 +12,7 @@ import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
-import { declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
+import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
 
@@ -28,22 +28,32 @@ const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(B
  * the failing step's for a case, the trial log's for the build or a test file); the trial is bounded
  * by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142).
  */
-async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, trusted: () => string | null = () => null): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
+async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, trusted: () => string | null = () => null, skipFaults = false): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
   const environments = await gateEnvironments(reads, commit, cases, trusted());
   const runCases = cases.filter(proof => !(proof in environments.unknown) && !environments.untrusted.includes(proof));
-  const trial = (origins: Record<string, string>) => reads.trial(commit, tests, { key: gateKey, criteria: runCases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: runCases }] as Work['criteria'] : [], ...(Object.keys(origins).length ? { environments: origins } : {}) }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
-  // GY-3296: each named environment is provisioned around the one trial, its URL handed to its cases.
-  const named = [...environments.named];
-  const nest = (index: number, origins: Record<string, string>): ReturnType<typeof trial> => {
-    if (index === named.length) return trial(origins);
-    const [name, proofs] = named[index]!;
-    return environments.lifecycle!.use(name, environments.definitions[name]!, commit, environments.cwd!,
-      url => nest(index + 1, { ...origins, ...Object.fromEntries(proofs.map(proof => [proof.slice(4), url])) }),
-      run => !(run.e2e ?? []).some(entry => proofs.includes(entry.proof) && (entry.failed > 0 || entry.executed === 0)));
+  const trial = (origins: Record<string, string>, skipped: readonly string[]) => {
+    const proofs = runCases.filter(proof => !skipped.includes(proof));
+    return reads.trial(commit, tests, { key: gateKey, criteria: proofs.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs }] as Work['criteria'] : [], ...(Object.keys(origins).length ? { environments: origins } : {}) }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
   };
-  const run = await nest(0, {});
+  // GY-3296: each named environment is provisioned around the one trial, its URL handed to its cases.
+  // An environment wait or fault throws for the gate, which retries; the diagnostics (`skipFaults`)
+  // leave that environment's cases out and run the rest, so an outage never reruns the whole suite.
+  const named = [...environments.named];
+  const nest = async (index: number, origins: Record<string, string>, skipped: readonly string[]): ReturnType<typeof trial> => {
+    if (index === named.length) return trial(origins, skipped);
+    const [name, proofs] = named[index]!;
+    try {
+      return await environments.lifecycle!.use(name, environments.definitions[name]!, commit, environments.cwd!,
+        url => nest(index + 1, { ...origins, ...Object.fromEntries(proofs.map(proof => [proof.slice(4), url])) }, skipped),
+        run => !(run.e2e ?? []).some(entry => proofs.includes(entry.proof) && (entry.failed > 0 || entry.executed === 0)));
+    } catch (error) {
+      if (!skipFaults || !(error instanceof EnvironmentFault) || error.environment !== name) throw error;
+      return nest(index + 1, origins, [...skipped, ...proofs]);
+    }
+  };
+  const run = await nest(0, {}, []);
   const failed = [...Object.keys(environments.unknown), ...(run.build === 'fail' ? ['build'] : []),
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
@@ -157,7 +167,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
       const held = await catalog(commit), cases = held.map(id => `e2e:${id}`), started = reads.now();
-      const { failed, details, outputs } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs, trusted) : { failed: [], details: {}, outputs: {} }, catalogMs = reads.now() - started;
+      const { failed, details, outputs } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs, trusted, true) : { failed: [], details: {}, outputs: {} }, catalogMs = reads.now() - started;
       const previews = reads.gate?.previews;
       const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
         : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
