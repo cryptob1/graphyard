@@ -53,8 +53,6 @@ async function fixture(browser: Browser, phone = false) {
 }
 
 test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnect and pane changes', async ({ browser }) => {
-  // Includes server startup, two reconnects and two pane changes under the parallel browser suite.
-  test.setTimeout(60_000);
   const f = await fixture(browser), { page } = f;
   try {
     await expect(page.getByRole('status')).toContainText('test-account · codex · idle · w1:master');
@@ -64,8 +62,9 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
       return { cols: terminal.cols, rows: terminal.rows, bottom: box.bottom, height: box.height, viewport: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth };
     });
     const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false);
-    // The gap holds the bottom version-label strip (GY-3310) beside its 12px margin.
-    expect(before.viewport - before.bottom).toBeLessThan(50);
+    // The terminal ends at the page's bottom padding: the document never scrolls (GY-3308), so the
+    // gap below it is that padding (32 px on a desktop main) rather than a fixed 12 px, and at least the version-label strip (GY-3310).
+    expect(before.viewport - before.bottom).toBeLessThan(40);
     await page.setViewportSize({ width: 1050, height: 720 });
     await expect.poll(async () => (await layout()).cols).not.toBe(before.cols);
     const after = await layout();

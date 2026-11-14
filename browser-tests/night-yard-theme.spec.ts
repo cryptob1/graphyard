@@ -87,7 +87,6 @@ const grain = (page: Page) => page.evaluate(() => getComputedStyle(document.body
 const live = { timeout: 15_000 };
 
 test('e2e:night-yard-theme — Night Yard serves by default with rain over grain, Daylight is selectable and remembered, and both themes hold WCAG AA', async ({ page }) => {
-  test.setTimeout(90_000);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await serve(page, auditWork());
   // A fresh browser gets Night Yard: near-black blue, the rain drifting, the grain still.
@@ -153,7 +152,6 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
 });
 
 test('e2e:night-yard-theme — with reduced motion the rain, the glitch flicker and the ship pulse do not run', async ({ page }) => {
-  test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const state = await serve(page, auditWork());
   const glitch = page.locator('.work-row.glitch');
@@ -174,7 +172,6 @@ test('e2e:night-yard-theme — with reduced motion the rain, the glitch flicker 
 });
 
 test('e2e:night-yard-theme — with motion on a failed trial glitches and a ship pulses; Fun off skips both', async ({ page }) => {
-  test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const state = await serve(page, auditWork());
   const glitch = page.locator('.work-row.glitch');

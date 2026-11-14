@@ -25,8 +25,14 @@ const frame = text => process.stdout.write(`${JSON.stringify({ type: 'terminal.f
 // a master at work shows its scan line (GY-3272), one standing idle shows none.
 { const state = fixture(), master = state.master ?? { account: 'master-agent', runtime: 'claude', agentName: 'master' };
   process.stdout.write(`${JSON.stringify({ type: 'session', session: { pane, account: master.account ?? null, runtime: master.runtime ?? null, state: state.status ?? 'working' } })}\n`); }
-// Enable bracketed paste as a real TUI does.
-frame(`\x1b[?2004hscreen of ${pane}\r\n`);
+// Enable bracketed paste as a real TUI does. The fixture's `tui` runs the pane's program on the
+// alternate screen (GY-3308): the opening frame switches to it and repaints, then live output
+// keeps arriving while the page is open.
+if (fixture().tui) {
+  frame(`\x1b[?2004h\x1b[?1049h\x1b[H\x1b[2J\x1b[1mmaster TUI on ${pane}\x1b[0m\r\n`);
+  let live = 0;
+  setInterval(() => frame(`live line ${String(++live).padStart(4, '0')}\r\n`), 200);
+} else frame(`\x1b[?2004hscreen of ${pane}\r\n`);
 createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   log({ mode, pane, command });

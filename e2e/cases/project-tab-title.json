@@ -1,0 +1,19 @@
+{
+  "id": "project-tab-title",
+  "title": "The browser tab names the project: gh · OWNER/REPO for the install, Graphyard before the identity loads",
+  "description": "A real browser opens the served dashboard of two distinct configured project identities. Each document title is gh · OWNER/REPO for that install and stays so through navigation (Workers, Work, an item's page, Back) and reload; before the identity loads, and after sign-out, the title is the plain Graphyard fallback, never undefined and never a stale other project.",
+  "tags": [
+    "dashboard"
+  ],
+  "target": "any",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "two installs' tab titles through navigation and reload",
+      "run": "npm run test:browser -- browser-tests/project-tab-title.spec.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

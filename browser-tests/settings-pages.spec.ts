@@ -72,7 +72,6 @@ const pages = [
 ] as const;
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }] as const) test(`unit:settings-pages-browser-check — the Agents, settings and automation pages use the shared layout, hide raw JSON and internal ids until expanded, and fit ${viewport.width}px with no console error`, async ({ page }) => {
-  test.setTimeout(60_000);
   const errors: string[] = [];
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
   await open(page, errors);
