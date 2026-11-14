@@ -1,0 +1,14 @@
+{
+  "id": "master-page-scroll-top",
+  "title": "The Master page scrolls all the way to the top: wheel, touch drag and keyboard reach the first history line under the header, and live output does not pull the view back",
+  "description": "A real browser against the served dashboard with a host-side herdr stub whose master pane holds more history than one screen and runs a TUI on the alternate screen: at 1280 px and at 390 px width, scrolling up by mouse wheel, by touch drag and by keyboard reaches the first line of the history the page was sent, fully visible below the page header with the header itself reachable; the view stays where the user scrolled while new live output arrives, and scrolling back to the bottom resumes following live output.",
+  "tags": ["dashboard", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Scroll the Master page terminal to the top in a browser at both widths",
+    "run": "npm run test:browser -- browser-tests/master-page-scroll-top.spec.ts",
+    "timeoutSeconds": 300
+  }]
+}
