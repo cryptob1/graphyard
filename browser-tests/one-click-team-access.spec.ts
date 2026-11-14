@@ -34,13 +34,11 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     const port = (http.address() as { port: number }).port;
     return { name, store, http, port, url: `http://127.0.0.1:${port}`, credentialFile, token: `test-operator-${name}`, tailnet: `http://yard.tail-test.ts.net:${port}` };
   }));
-  // Each install's master loop on the shared host, as the loop runs it every 15 seconds (faster here).
-  let syncing = false;
-  const loops = setInterval(() => {
-    if (syncing) return;
-    syncing = true;
-    void Promise.all(installs.map(install => syncTeamAccess({ url: install.url, credentialFile: install.credentialFile }, { machineDir, tailscaleApi }))).catch(() => {}).finally(() => { syncing = false; });
-  }, 250);
+  // Each install's master loop on the shared host, as the loop runs it every 15 seconds: one pass
+  // here whenever a page is about to read what the other install saved, and a short ticker only
+  // while the page polls for the single-use invite its host must answer (setup.tsx polls every second).
+  const sync = () => Promise.all(installs.map(install => syncTeamAccess({ url: install.url, credentialFile: install.credentialFile }, { machineDir, tailscaleApi })));
+  await sync();
   const [a, b] = installs;
   const contexts: BrowserContext[] = [];
   /** A browser whose API calls reach INSTALL, as the dashboard served on that install's port would. */
@@ -77,7 +75,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     const sectionA = await signIn(pageA, a), sectionB = await signIn(pageB, b);
 
     await expect(sectionA).toContainText("One machine, many installs, one port each. Two locks: the Tailscale share lets a person's devices reach this machine");
-    await expect(async () => { await reload(pageA); await expect(sectionA.getByRole('link', { name: a.tailnet })).toBeVisible({ timeout: 1_000 }); }).toPass({ timeout: 15_000 });
+    await expect(async () => { await sync(); await reload(pageA); await expect(sectionA.getByRole('link', { name: a.tailnet })).toBeVisible({ timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     await expect(sectionA).toContainText(`(port ${a.port})`);
     await expect(sectionA.locator('[data-share-state="missing"]')).toContainText('No Tailscale share link is saved for this machine yet, so Invite cannot make a complete message');
     await sectionA.getByText("Optional: keep shared people on this install's port").click();
@@ -97,7 +95,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await sectionA.getByLabel('Tailscale share link', { exact: true }).fill(link);
     await sectionA.getByRole('button', { name: 'Save for this machine' }).click();
     await expect(sectionA.locator('[data-share-state="ok"]')).toContainText(link);
-    await expect(async () => { await reload(pageB); await expect(sectionB.locator('[data-share-state="ok"]')).toContainText(link, { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
+    await expect(async () => { await sync(); await reload(pageB); await expect(sectionB.locator('[data-share-state="ok"]')).toContainText(link, { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     await expect(sectionB.getByRole('link', { name: b.tailnet })).toBeVisible();
 
     // Invite someone on each install: one message with the machine link and that install's own sign-in link.
@@ -127,7 +125,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await sectionA.getByLabel('Made on', { exact: true }).fill(isoDay(now - 25 * 86_400_000));
     await sectionA.getByRole('button', { name: 'Save for this machine' }).click();
     await expect(sectionA.locator('[data-share-state="refresh"]')).toContainText('expires within seven days');
-    await expect(async () => { await reload(pageB); await expect(sectionB.locator('[data-share-state="refresh"]')).toContainText('expires within seven days', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
+    await expect(async () => { await sync(); await reload(pageB); await expect(sectionB.locator('[data-share-state="refresh"]')).toContainText('expires within seven days', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     now += 6 * 86_400_000;
     await reload(pageB);
     await expect(sectionB.locator('[data-share-state="expired"]')).toContainText('It has expired');
@@ -142,13 +140,15 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await sectionB.getByRole('button', { name: 'Save token' }).click();
     await expect(sectionB).toContainText('A token is saved: invites make single-use Tailscale links.');
     await expect(sectionB.getByLabel('Tailscale API token', { exact: true })).toHaveValue('');
-    const apiMessage = await (await invite(pageB, 'ana', 'viewer')).inputValue();
+    // The host answers the pending device invite while the page polls for it, as its loop would.
+    const answering = setInterval(() => { void sync().catch(() => {}); }, 1_000);
+    let apiMessage: string;
+    try { apiMessage = await (await invite(pageB, 'ana', 'viewer')).inputValue(); } finally { clearInterval(answering); }
     expect(apiMessage).toContain('accept this machine share: https://login.tailscale.com/admin/invite/single-use-browser (single-use Tailscale invite, made for you)');
     expect(apiMessage).toContain(`${b.tailnet}/#sign-in=`);
-    await expect(async () => { await reload(pageA); await expect(sectionA).toContainText('A token is saved', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
+    await expect(async () => { await sync(); await reload(pageA); await expect(sectionA).toContainText('A token is saved', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     for (const page of [pageA, pageB]) expect(await page.content()).not.toContain(token);
   } finally {
-    clearInterval(loops);
     for (const context of contexts) await context.close();
     for (const install of installs) { await new Promise<void>(resolve => { install.http.close(() => resolve()); install.http.closeAllConnections(); }); await install.store.close(); }
     await new Promise<void>(resolve => provider.close(() => resolve()));
