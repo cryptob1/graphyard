@@ -24,13 +24,14 @@ import { hostname } from 'node:os';
 // GY-2075, over simulated days: the hourly probe of a post-merge request the launch-attempt limit
 // stranded is the loop's new per-item repeating behaviour — every stranded request earns one real
 // launch attempt per standstill hour for as long as its refusal's cause stands, each attempt
-// preparing a review checkout and a session directory and discarding them again. The day below runs
+// preparing a review checkout and a session directory and discarding them again. The days below run
 // three stranded requests through the real `runDispatchTick` and the real `launchReview` (the
-// served control plane's 400 read as a refused registration) at the loop's own one-minute cadence,
-// then hourly past the attempt clamp, and asserts the repetition stays bounded: at most one attempt
-// per request per hour and never one per tick, no session directory, checkout or ledger reservation
-// left behind by any of them, the cursor still persisting once attempts reach the schema's 1000,
-// and one launch per request once the cause is gone with no probe ever after.
+// served control plane's 400 read as a refused registration) at the loop's own one-minute cadence.
+// Two causes repair at the two-day mark — one launch each on the first probe past the repair, and
+// never a probe again — while the third stands on: its count walks hourly to the schema's 1000 and
+// stays there, the probe going on all the while, and the production cursor writer persists every
+// tick of it. All the while no session directory, checkout or ledger reservation is left behind by
+// any refused attempt, and the last cause's repair launches its request exactly once too.
 
 const H = 'a'.repeat(40), B = 'b'.repeat(40), M = 'c'.repeat(40);
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
@@ -63,7 +64,7 @@ const repository = 'owner/project';
 /** The volume read the launch would make on durable storage; the test's directories stand in for the paths. */
 const durable = async (path: string) => ({ probed: path, volatile: null, freeBytes: 200e9 });
 
-test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000 }, async () => {
+test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, one launch per request on the first probe past its cause repair with none probed afterwards, and the longest-standing request still walking hourly to the cursor schema clamp with the cursor persisting every tick of it', { timeout: 900_000 }, async () => {
   // The loop's own root: one reviewer profile, the managed worktree
   // root and credential directory pointed at this run's directories, and the dispatch cursor
   // persisted by the production writer so the schema judges every tick's cursor.
@@ -83,10 +84,11 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   const sessions = join(reviewerCredentialDirectory(config), 'sessions');
   const cursor = emptyDispatchCursor(config);
 
-  // The served control plane's refusal, standing until the recovery: the registration call every
-  // real launch ends in is refused with the words the stranded requests were refused with.
+  // The served control plane's refusal, standing per request until that request's recovery: the
+  // registration call every real launch ends in is refused with the words the stranded requests
+  // were refused with.
   const registrations: { key: string; at: number; postMerge: boolean; head: string; baseTip: string }[] = [];
-  let cause = true;
+  const refusing = new Set(keys);
   const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   const items = keys.map(deliveredPrLess);
   /** The merge commit's first parent when the ledger names one; the launcher reads it from the object store when not. */
@@ -96,7 +98,7 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
     postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
     registerLaunch: async (item, launch) => {
       registrations.push({ key: item.key, at: instantMs, postMerge: launch.postMerge, head: launch.head, baseTip: launch.baseTip });
-      if (cause) throw new Error(`The control plane refused the reviewer launch of ${item.key} (400): Invalid input`);
+      if (refusing.has(item.key)) throw new Error(`The control plane refused the reviewer launch of ${item.key} (400): Invalid input`);
       return { launch: randomUUID() };
     },
   });
@@ -104,7 +106,11 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
     snapshot: async () => ({ work: items, now: at() }),
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    reconcileReviews: async () => ({ reviews: [] }),
+    // The served control plane's reconcile, as production runs it (reviewer.ts reconcileReviews):
+    // the ledger is the durable record of every review session, so its records are what the tick
+    // reads — a request whose session is pending is skipped, never relaunched, exactly as the
+    // served plane's answer decides it here.
+    reconcileReviews: async () => ({ reviews: (await readReviewLedger(root)).reviews }),
     reconcileProducers: async () => ({ producers: [] }),
     launchReview: async () => {}, launchProducer: async () => {},
     launchPostMergeReview: (work, request) => realLaunch(work, request.id),
@@ -112,16 +118,33 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   };
   const tick = async (stepMs = intervalMs) => { const result = await runDispatchTick(config, cursor, effects, () => instantMs); instantMs += stepMs; return result; };
   const attemptsOf = (key: string) => registrations.filter(entry => entry.key === key);
-  // What a refused launch must never leave behind, however many of them a day earns.
-  const assertNothingAccumulates = async () => {
-    assert.deepEqual((await readReviewLedger(root)).reviews, [], 'a refused launch leaves no ledger reservation behind');
-    assert.deepEqual(await readdir(sessions).catch(() => [] as string[]), [], 'a refused launch leaves no session directory behind');
-    assert.deepEqual(await readdir(worktrees).catch(() => [] as string[]), [], 'a refused launch leaves no checkout behind');
+  // What a refused launch must never leave behind, however many of them a day earns. A request
+  // whose cause repaired holds exactly its one session, checkout and ledger record — never more.
+  const assertNothingAccumulates = async (holding = 0) => {
+    const ledger = await readReviewLedger(root);
+    assert.deepEqual(ledger.reviews.filter(record => record.state !== 'pending'), [], 'a refused launch leaves no settled ledger record behind');
+    assert.equal(ledger.reviews.filter(record => record.state === 'pending').length, holding, `the ledger holds exactly the ${holding} session(s) recovered requests hold, and no reservation any refused launch left behind`);
+    assert.equal((await readdir(sessions).catch(() => [] as string[])).length, holding, `a refused launch leaves no session directory behind (${holding} recovered)`);
+    // The managed root also holds the install's own bookkeeping (its verification slots), so a
+    // checkout is counted the way the recovery below counts one: a managed `graphyard-…` directory.
+    const count = (path: string, managed = false) => readdir(path, { withFileTypes: true }).catch(() => [] as { name: string; isDirectory(): boolean }[])
+      .then(entries => entries.filter(entry => entry.isDirectory() && (!managed || /^graphyard-(proof|review|approval|trial)-/.test(entry.name))).length);
+    assert.equal(await count(worktrees, true), holding, `a refused launch leaves no checkout behind (${holding} recovered)`);
+  };
+  /** The one-launch recovery every request's cause repair earns, asserted wherever it lands. */
+  const assertRecovered = async (key: string, before: number) => {
+    const attempts = attemptsOf(key);
+    assert.equal(attempts.length, before + 1, `${key} launched exactly once on the first probe past its cause`);
+    assert.equal(cursor.failures[requestIdOf(key)], undefined, `${key}'s refusal record is cleared by its launch`);
+    const records = (await readReviewLedger(root)).reviews.filter(record => record.requestId === requestIdOf(key));
+    assert.equal(records.length, 1, `${key} holds one session for its request`);
+    assert.deepEqual([records[0].state, records[0].mode, records[0].postMerge, records[0].pr > 0, records[0].sha], ['pending', 'control-plane', true, true, M], `${key}'s session is the post-merge review of the merge commit, on the ledger with a positive pr`);
+    assert.deepEqual(attempts.at(-1), { key, at: attempts.at(-1)!.at, postMerge: true, head: M, baseTip: B }, `${key}'s launch is registered as the post-merge review of the merge commit against its parent`);
   };
   assert.deepEqual(owedPostMergeReviews(items).map(item => item.key).sort(), keys, 'the three delivered items each owe their post-merge review');
 
-  // Day one and two at the loop's own cadence, the refusal's cause standing: twelve widening
-  // attempts and then one probe per standstill hour per request, never one per tick.
+  // Day one and two at the loop's own cadence, every cause standing: twelve widening attempts and
+  // then one probe per standstill hour per request, never one per tick.
   const cadenceEnd = instantMs + 48 * hour;
   let sinceCheck = 0;
   while (instantMs < cadenceEnd) {
@@ -142,42 +165,53 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   assert.ok(registrations.length <= hours * keys.length + keys.length * dispatchFailureLimit,
     `${registrations.length} attempts over ${hours}h: at most one per request per hour plus the backoff, not one per tick`);
 
-  // Then hourly, past the clamp: every request's count reaches the schema's 1000 and stays there,
-  // the probe going on all the while, and the production cursor writer persists every tick of it.
-  while (keys.some(key => (cursor.failures[requestIdOf(key)]?.attempts ?? 0) < dispatchAttemptCeiling)) await tick(hour);
-  for (const key of keys) assert.equal(cursor.failures[requestIdOf(key)]!.attempts, dispatchAttemptCeiling, `${key}'s refusals count to the clamp and no further`);
-  const clamped = attemptsOf(keys[0]).length;
-  for (let guard = 0; guard < 6; guard++) await tick(hour);
-  for (const key of keys) {
-    assert.equal(cursor.failures[requestIdOf(key)]!.attempts, dispatchAttemptCeiling, `${key}'s count holds at the clamp while the probe goes on`);
-    assert.ok(attemptsOf(key).length >= clamped + 6, `${key} is still probed hourly at the clamp, not stranded silently`);
-  }
-  const persisted = await readDispatchCursor(root, config);
-  assert.deepEqual(keys.map(key => persisted.failures[requestIdOf(key)]!.attempts), [dispatchAttemptCeiling, dispatchAttemptCeiling, dispatchAttemptCeiling], 'the cursor in Postgres carries the clamped counts the production writer accepted');
-  await assertNothingAccumulates();
-
-  // The cause is gone: the next hourly probe launches each request exactly once through the real
-  // path — session recorded, nothing refused — and no probe ever comes again.
-  const stranded = Object.fromEntries(keys.map(key => [key, attemptsOf(key).length]));
-  cause = false;
+  // Two of the three causes repair at the two-day mark: the next hourly probe launches each request
+  // exactly once through the real path — session recorded, nothing refused — and neither is ever
+  // probed again, while the third request's cause stands on into the clamp below.
+  const recovered = keys.slice(1), standing = keys[0];
+  const standingCount = (key: string) => attemptsOf(key).length;
+  const beforeRepair = Object.fromEntries(keys.map(key => [key, standingCount(key)]));
+  for (const key of recovered) refusing.delete(key);
+  // The clock advances after a tick runs, so the hour the requests' next probe falls in is walked
+  // into first: the second tick below lands on every probe's due instant and launches each
+  // recovered request, while the standing one's probe meets its cause still standing.
   await tick(hour);
-  const ledger = await readReviewLedger(root);
-  for (const key of keys) {
-    const attempts = attemptsOf(key);
-    assert.equal(attempts.length, stranded[key] + 1, `${key} launched exactly once on the first probe past the cause`);
-    assert.equal(cursor.failures[requestIdOf(key)], undefined, `${key}'s refusal record is cleared by its launch`);
-    const records = ledger.reviews.filter(record => record.requestId === requestIdOf(key));
-    assert.equal(records.length, 1, `${key} holds one session for its request`);
-    assert.deepEqual([records[0].state, records[0].mode, records[0].postMerge, records[0].pr > 0, records[0].sha], ['pending', 'control-plane', true, true, M], `${key}'s session is the post-merge review of the merge commit, on the ledger with a positive pr`);
-    assert.deepEqual(attempts.at(-1), { key, at: attempts.at(-1)!.at, postMerge: true, head: M, baseTip: B }, `${key}'s launch is registered as the post-merge review of the merge commit against its parent`);
+  await tick(hour);
+  for (const key of recovered) await assertRecovered(key, beforeRepair[key]);
+  await assertNothingAccumulates(recovered.length);
+
+  // Then hourly, past the clamp, for the request whose cause still stands: its count reaches the
+  // schema's 1000 and stays there, the probe going on all the while, the production cursor writer
+  // persists every tick of it, and the recovered requests are touched by none of it.
+  let sinceClampCheck = 0;
+  while ((cursor.failures[requestIdOf(standing)]?.attempts ?? 0) < dispatchAttemptCeiling) {
+    await tick(hour);
+    if (++sinceClampCheck >= 120) { sinceClampCheck = 0; await assertNothingAccumulates(recovered.length); }
   }
-  // The recovery's launches also leave the sessions' shared verification-slot directory under the
-  // managed root; a session checkout is a managed `graphyard-<kind>-…` directory, and that is what is counted.
+  assert.equal(cursor.failures[requestIdOf(standing)]!.attempts, dispatchAttemptCeiling, `${standing}'s refusals count to the clamp and no further`);
+  const clamped = attemptsOf(standing).length;
+  for (let guard = 0; guard < 6; guard++) await tick(hour);
+  assert.equal(cursor.failures[requestIdOf(standing)]!.attempts, dispatchAttemptCeiling, `${standing}'s count holds at the clamp while the probe goes on`);
+  assert.ok(attemptsOf(standing).length >= clamped + 6, `${standing} is still probed hourly at the clamp, not stranded silently`);
+  const persisted = await readDispatchCursor(root, config);
+  assert.equal(persisted.failures[requestIdOf(standing)]!.attempts, dispatchAttemptCeiling, 'the cursor in Postgres carries the clamped count the production writer accepted');
+  assert.deepEqual(recovered.map(key => persisted.failures[requestIdOf(key)]), [undefined, undefined], 'the recovered requests hold no refusal the cursor remembers');
+  await assertNothingAccumulates(recovered.length);
+
+  // The last cause is gone: the next hourly probe launches the standing request exactly once
+  // through the real path — session recorded, nothing refused — and no probe ever comes again.
+  const stranded = standingCount(standing);
+  refusing.delete(standing);
+  await tick(hour);
+  await assertRecovered(standing, stranded);
+  // Every recovery holds its own session directory under the credentials and its own managed
+  // checkout under the managed root; a session checkout is a managed `graphyard-<kind>-…`
+  // directory, and that is what is counted.
   const directories = (path: string, managed = false) => readdir(path, { withFileTypes: true }).catch(() => [] as { name: string; isDirectory(): boolean }[])
     .then(entries => entries.filter(entry => entry.isDirectory() && (!managed || /^graphyard-(proof|review|approval|trial)-/.test(entry.name))).length);
   assert.equal(await directories(sessions), keys.length, 'each recovery holds its own session directory');
   assert.equal(await directories(worktrees, true), keys.length, 'each recovery holds its own checkout');
   for (let guard = 0; guard < 48; guard++) await tick(hour);
-  for (const key of keys) assert.equal(attemptsOf(key).length, stranded[key] + 1, `${key} is never probed again once its request launched`);
+  for (const key of keys) assert.equal(standingCount(key), key === standing ? stranded + 1 : beforeRepair[key] + 1, `${key} is never probed again once its request launched`);
   assert.deepEqual((await readReviewLedger(root)).reviews.filter(record => record.state === 'pending').map(record => record.key).sort(), keys, 'the recovered sessions still hold the requests');
 });
