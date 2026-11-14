@@ -58,8 +58,7 @@ await record(sixth.id, { id: 'reviewer-a:1', kind: 'review', role: 'review', pri
   transcript: runTranscript(openRun(sixth.key, 1, 'reviewer-a', 'review', ['reading the diff of the head'])), subject: `${sixth.key}: review` });
 await record(sixth.id, { id: 'producer-a:1', kind: 'proof', role: 'proof:e2e', principal: 'producer-a', agentName: 'producer-a',
   transcript: runTranscript(openRun(sixth.key, 1, 'producer-a', 'proof', ['running the bound e2e cases'])), subject: `${sixth.key}: proofs` });
-await record(sixth.id, { id: 'master-1:1', kind: 'coordination', role: 'master', principal: 'graphyard-master-1', agentName: 'master-1',
-  transcript: null, attach: null, subject: 'Coordinate the cycle' });
+await record(sixth.id, { id: 'master-1:1', kind: 'coordination', role: 'master', principal: 'graphyard-master-1', agentName: 'master-1', subject: 'Coordinate the cycle' });
 
 // The dashboard is served from ./dist, as an install serves it.
 process.chdir(site);
