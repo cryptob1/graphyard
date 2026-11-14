@@ -11,7 +11,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../install/loop-unit.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig, MAX_WORKER_PROFILES, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -32,7 +32,11 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json');
   // A checkout no install or master init has configured names the step that writes it (GY-1352), not a bare lstat ENOENT.
   await privateFile(file).catch((error: any) => { throw error?.code === 'ENOENT' ? Object.assign(new Error(`${file} does not exist: run graphyard install --apply, or graphyard master init --token-stdin, in this checkout first`), { code: 'ENOENT' }) : error; });
-  const config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8')));
+  const stored = JSON.parse(await readFile(file, 'utf8'));
+  // GY-3292: a file the loop grew past the limit before the cap stays readable; the profiles past it
+  // are the newest generated spares, and the next profile write saves the trimmed list.
+  if (Array.isArray(stored?.workers)) stored.workers = stored.workers.slice(0, MAX_WORKER_PROFILES);
+  const config = masterConfigSchema.parse(stored);
   config.url = serverOrigin(config.url);
   const repositoryRoot = resolve(root), credentialFile = resolve(config.credentialFile);
   if (!isAbsolute(config.credentialFile) || credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error('Master credential file must be outside the repository and use an absolute path');
@@ -222,6 +226,7 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
     if (status.actor?.role !== 'worker' || status.actor.id !== profile.principal) throw new Error('Worker credential does not match the profile principal and worker role');
   }
   if (config.workers.some(worker => worker.name === profile.name || worker.agentName === profile.agentName || worker.principal === profile.principal)) throw new Error('Worker profile name, agent name, and principal must be unique');
+  if (config.workers.length >= MAX_WORKER_PROFILES) throw new Error(`master.json already holds the most worker profiles, ${MAX_WORKER_PROFILES}`);
   config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length,
     launch: profile.mode === 'launch' ? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };

@@ -1,0 +1,9 @@
+{
+  "id": "lease-survives-message-and-unblock",
+  "title": "Headless workers keep their lease through messages and unblocks",
+  "description": "A real Postgres and headless rework worker reproduce sync selecting an old epoch on a reused branch, verify autonomous renewal and same-attempt completion, and stop repeated lease-loss exits after one retry.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "lease survival and bounded retry", "run": "node --import tsx tests/helpers/run-tests.ts tests/lease-survives-message-and-unblock.test.ts", "timeoutSeconds": 300 }]
+}

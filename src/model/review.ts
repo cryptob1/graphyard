@@ -1,3 +1,4 @@
+import { implementerIdentities } from './implementers.js';
 import type { Work } from './work.js';
 import type { ApprovalIdentity } from './carry.js';
 
@@ -16,6 +17,9 @@ export function exactApproval(work: Work): ApprovalIdentity | null {
   const provider = reviewProviderOf(work.policy);
   const baseline = work.formalReviewBaseline;
   const review = (obs.reviews ?? []).find(r => r.sha === candidate.sha && r.state === 'APPROVED' && r.reviewer !== candidate.author
+    && !implementerIdentities(work).includes(r.reviewer)
+    && (r.baseSha === undefined || r.baseSha === (obs.mergeBase ?? candidate.baseSha))
+    && (r.policyRevision === undefined || r.policyRevision === work.policyRevision)
     && (!work.formalReviewResetRequired
       || (r.source === 'control-plane' && (!baseline || !baseline.reviewIds.includes(r.id!)))
       || (baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && Number.isSafeInteger(r.id) && r.id! > 0 && !baseline.reviewIds.includes(r.id!))));

@@ -1,0 +1,15 @@
+{
+  "id": "master-profile-capacity",
+  "title": "The loop grows the worker pool only to the 100 profiles master.json holds",
+  "description": "With a registry worker role allowing 120 workers and master.json holding 11 existing-mode profiles and one launch profile, a loop cycle adds generated worker profiles until master.json holds 100 and no more; configured profiles stay intact, later cycles mint no identity, master status and saveWorkerProfile keep working, and a master.json already grown to 101 loads with its newest generated spare dropped.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "worker-pool growth stops at the master.json profile limit and the configuration stays readable",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-profile-capacity.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

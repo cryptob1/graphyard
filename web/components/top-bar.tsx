@@ -1,6 +1,6 @@
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
-import { viewFor, visibleViews } from '../pages';
+import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { cityCounts } from '../city';
 import { useFun } from '../fun';
@@ -99,8 +99,8 @@ const meaning = (label: string): GlossaryTerm | null => {
 
 /**
  * The board's top bar: the configured repository, then the release line, then the pages
- * of the current section, when it has more than one (Shipped, Insights, Settings). The tabs are
- * not a second navigation:
+ * of the current section, when it has more than one (Work, Workers, Shipped, Tests, Settings); a
+ * rarely needed page sits behind the row's Advanced fold. The tabs are not a second navigation:
  * no page shares a label with a sidebar entry (a test holds the registry to that), they list only
  * the pages under the entry the sidebar has selected, and a section with a single page draws none
  * at all. An open item keeps the repository and release line, with its own Back control.
@@ -113,7 +113,9 @@ const meaning = (label: string): GlossaryTerm | null => {
 export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
   const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
   const section = viewFor(view).section;
-  const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
+  const pages = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
+  const tabs = pages.filter(page => !page.advanced), advanced = pages.filter(page => page.advanced);
+  const tab = (page: View) => { const term = meaning(page.label); return <button key={page.id} type="button" className={page.id === view ? 'tab active' : 'tab'} aria-current={page.id === view ? 'page' : undefined} onClick={() => setView(page.id)}>{term ? <Term term={term} focusable={false}>{page.label}</Term> : page.label}</button>; };
   return <div className="top-bar">
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
@@ -123,6 +125,6 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
       </div>
     </div>
     {status && <ReleaseLine status={status}/>}
-    {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
+    {!selected && pages.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab)}{advanced.length > 0 && <details className="tabs-advanced" open={advanced.some(page => page.id === view) || undefined}><summary className="tab">Advanced</summary>{advanced.map(tab)}</details>}</nav>}
   </div>;
 }

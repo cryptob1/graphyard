@@ -129,7 +129,7 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
     withLaunchedRuntime(handle, launch), launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'rework', 'attest', 'restart', 'environments'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'hold', 'message', 'unblock', 'defer', 'requirements', 'rework', 'attest', 'restart', 'environments'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -181,6 +181,9 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const work = await item(args[0]), text = reason(args.slice(1)), write = async (work: Work, attempt = 1) => call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: text }, attemptKey(attempt));
     return id === 'release' ? write(work) : unblockWithRetry(work, write, item);
   }
+  // GY-3298: hold a released item out of dispatch (release resumes it); message whichever worker holds it.
+  if (id === 'hold') { const work = await item(args[0]); return call(await operator(), `work/${work.id}/hold`, { expectedRevision: work.revision, reason: reason(args.slice(1)) }); }
+  if (id === 'message') { const work = await item(args[0]); return call(await operator(), `work/${work.id}/message`, { text: reason(args.slice(1)) }); }
   if (id === 'defer') {
     // GY-1740: an unleased post-deploy follow-up held on the instant its reading can first exist; its blocker cleared in the same write.
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master defer GY-N NOT-BEFORE REASON');

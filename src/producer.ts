@@ -443,7 +443,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
       // The install's credential locations are hidden from this session (GY-1856); the producer's
       // own credential file — often under the operator config home — and its runtime login stay.
-      const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable, launch.kind) });
       await verifySessionSandbox('producer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, false, credentialMask, dependencies.coordinatorRoot);
       // The producer secrets never reach Herdr's argv: they are exported from a 0600 file as the runtime starts.
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,

@@ -182,7 +182,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, priority: true, requirements: true, unblock: true, rework: true, claim: true,
     heartbeat: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, evidence: true,
-    reading: true, revoke: true, session: true, request: true };
+    reading: true, revoke: true, session: true, request: true, hold: true, message: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
     ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);

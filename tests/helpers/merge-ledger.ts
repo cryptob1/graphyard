@@ -1,3 +1,4 @@
+import { proveFixtureCase } from './ledger-delivery.js';
 import { randomUUID } from 'node:crypto';
 import type { Engine } from '../../src/engine.js';
 import type { Principal, Work } from '../../src/model.js';
@@ -18,7 +19,11 @@ const record = (engine: Engine, work: Work, body: unknown) => recordMergeEvent({
 
 /** The writer's intent of the item's submitted head on its base: its trial passed, so the test gate passes and the merge gate waits on the push. */
 export async function mergeIntent(engine: Engine, work: Work, mergeSha = fixtureMergeSha(work)): Promise<Work> {
+  work = await proveFixtureCase(engine, work);
   await record(engine, work, { kind: 'intent', head: work.candidate!.sha, baseTip: work.candidate!.baseSha, mergeSha, risk: 'normal', at: new Date().toISOString() });
+  if (work.observation?.source === 'control-plane') await record(engine, work, { kind: 'trial', head: work.candidate!.sha, baseTip: work.candidate!.baseSha, mergeSha,
+    outcome: 'verdict', build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: [], durationMs: 1, attempts: [],
+    proofs: Object.fromEntries(work.criteria.filter(c => !c.bootstrap).flatMap(c => c.proofs).filter(p => /^(unit|integration|e2e):/.test(p)).map(p => [p, { executed: 1, failed: 0 }])) });
   return (await engine.store.workItem(work.id))!;
 }
 

@@ -1,0 +1,15 @@
+{
+  "id": "long-install-worker-pool",
+  "title": "Long install names never block worker-pool growth, and a growth failure is shown until it recovers",
+  "description": "An install named inspecthoa-hwd-backend whose registry allows 13 workers (13 accounts × concurrency 1) grows its worker pool to 13 schema-valid, stable, unique profiles within Herdr's 32-character session names, where base generated the 33-character inspecthoa-hwd-backend-claude-1-2 the schema refuses. An injected growth failure appears with its exact cause and the capacity it leaves in master status and on the dashboard's Needs you, stands through a further cycle, and clears once growth succeeds; configured profiles stay intact; master workers, master status and the dispatcher agree on 13, and headless dispatch with no Herdr session launches all 13.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "worker-pool growth under a long install name, its failure surfaced and cleared",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/long-install-worker-pool.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

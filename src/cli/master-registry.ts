@@ -130,7 +130,10 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     if (positionals[0].startsWith('@')) return api.write('agent-registry/accounts', { account: await fromFile(positionals[0]), reason: values.reason });
     const existing = current.accounts.find(account => account.name === positionals[0]);
     if (!existing && (!values.runtime || !values.model)) throw new Error(`${positionals[0]} is a new account; name its --runtime and --model (graphyard master registry lists both)`);
-    const { quota: _observed, smoke: _smoke, unjudged: _held, ...kept } = existing ?? { quota: null };
+    // `quotaDecision` is the registry's own record of an operator's quota mark (GY-3117), not a
+    // field a write names: echoing it back made every typed `account set` on a marked account
+    // fail schema validation, so an explicit model change could not even be written (GY-3301).
+    const { quota: _observed, smoke: _smoke, unjudged: _held, quotaDecision: _decided, ...kept } = existing ?? { quota: null };
     if (values['no-key'] && (values['key-file'] || values['key-variable'])) throw new Error('--no-key removes the account\'s key; it cannot be combined with --key-file or --key-variable');
     if (!!values['key-file'] !== !!values['key-variable']) throw new Error('Name the key by both --key-file FILE (inside the login home) and --key-variable VAR (the variable the runtime reads it from)');
     const existingKey = existing?.credential.key;

@@ -1,0 +1,15 @@
+{
+  "id": "idle-stack-cleanup",
+  "title": "Idle previews and abandoned temporary stacks stop; active work and installed services keep running",
+  "description": "Runs the idle stack cleanup regression over a controlled container inventory and clock: a preview unused for 30 minutes and a temporary stack whose owner is gone are stopped with docker stop, keeping their volumes, while an opened preview, one under review, a live trial's stack, the installed server and database, foreign and unlabelled containers and the shared builder keep running; repeating it stops nothing; the stop is logged and recorded on the item with its last use; opening the stopped preview's link restarts it; and after a loop restart cleanup resumes without touching a live trial.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "idle stack cleanup regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/idle-stack-cleanup.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

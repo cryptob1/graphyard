@@ -54,10 +54,10 @@ async function submitted() {
 }
 function observation(item: Work): Observation {
   return {
-    clockOffset: { min: 0, max: 0 },
+    source: 'control-plane', clockOffset: { min: 0, max: 0 },
     candidate: { sha: head, baseSha: base, pr: item.submission!.pr, branch: item.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
-    reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/app.ts'], scopeFiles: [],
+    reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/app.ts'], scopeFiles: [{ path: 'src/app.ts', status: 'modified', sha: null, additions: 1, deletions: 0, binary: false }],
     at: new Date().toISOString(), prState: 'open',
   };
 }

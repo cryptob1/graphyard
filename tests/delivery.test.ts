@@ -154,7 +154,7 @@ test('D3-2 staggered, missing, gapped and stale observations refuse; a common in
   await observe(snapshot(f, 1, validity(-30, 0, 0, now), [service('api', [instance('api-1', expected.api)])]));
   await observe(snapshot(f, 1, validity(-20, -5, -5, now), [service('web', [instance('web-1', expected.web)])])); await delivery.sweep();
   s = await state(f.env.id); assert.equal(s.verification.status, 'verified'); assert.ok(s.verification.verifiedAt);
-  assert.ok(s.verification.interval && Date.parse(s.verification.interval.from) >= Date.now() - 21_000 && Date.parse(s.verification.interval.to) <= Date.now() - 4_000, 'the interval is the intersection, not either observation');
+  assert.deepEqual(s.verification.interval, { from: at(-20, now), to: at(-5, now) }, 'the interval is the intersection, not either observation');
   assert.equal(s.history.at(-1)?.outcome, 'verified');
 });
 

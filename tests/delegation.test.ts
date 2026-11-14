@@ -366,7 +366,7 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   item = await engine.observe(item.id, item.revision, observation(item));
   // GitHub merges the head whose gates pass (GY-1235): no proof gate stands in between and
   // Graphyard issues no merge authorization of its own.
-  assert.equal(item.gates.find(gate => gate.name === 'acceptance'), undefined);
+  assert.equal(item.gates.find(gate => gate.name === 'acceptance')?.passed, false);
   assert.equal(item.mergeAuthorization ?? null, null);
   // Control-plane truth never depends on the session runtime.
   for (const module of ['model.ts', 'engine.ts', 'store.ts', 'delegation.ts', 'server.ts'])

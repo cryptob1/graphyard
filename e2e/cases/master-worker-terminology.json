@@ -1,0 +1,11 @@
+{
+  "id": "master-worker-terminology",
+  "title": "The dashboard says Master and Workers, never Chief",
+  "description": "A real browser on the built dashboard: the left navigation, the Master page's heading and its accessible controls — the section's tab row, the terminal region — all say Master with Fun on and off, the agents page remains Workers with its own heading and tab row, and no visible label or accessible name on those pages says Chief.",
+  "tags": ["dashboard", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "Master and Workers terminology on the dashboard", "run": "npm run test:browser -- browser-tests/master-worker-terminology.spec.ts", "timeoutSeconds": 300 }
+  ]
+}

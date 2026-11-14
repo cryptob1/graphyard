@@ -1,3 +1,4 @@
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -11,9 +12,10 @@ import { AgentRegistry } from '../../src/agent-registry.js';
 import { Engine } from '../../src/engine.js';
 import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../../src/master/config.js';
 import { dispatchWork, prepareWorkerLaunch, workerCommand, workerRunHandle } from '../../src/master/dispatch.js';
+import { runtimeKinds, type RuntimeKind } from '../../src/master/runtimes.js';
 import { gitRunnerFor } from '../../src/merge-writer/local-observation.js';
 import { bridgeTerminals } from '../../src/master/terminal-bridge.js';
-import { spawnHeadless } from '../../src/headless-session.js';
+import { spawnHeadless, workerRunsDirectory } from '../../src/headless-session.js';
 import { liveRun } from '../../src/runner/registry.js';
 import type { Principal, Work } from '../../src/model.js';
 import { server } from '../../src/server.js';
@@ -23,26 +25,51 @@ import { Store } from '../../src/store.js';
 // claim/worktree/watch and dispatch; the only substitute is each runtime's model executable, which
 // commits in its worktree and submits its head under its own lease. Herdr is never called.
 //
-// The world both headless-worker files share (GY-3290: the runtime matrix is split across two
-// files, because a merge trial bounds one file at five minutes and twenty-three real headless
-// runs do not fit that beside the handoff scenarios on a loaded host).
-
-export const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
-export const worker: Principal = { id: 'worker-a', role: 'worker' };
-export const reader: Principal = { id: 'reader', role: 'reader' } as Principal;
-export const token = (principal: Principal) => `${principal.id}-token-${'x'.repeat(32)}`;
+// The kind matrix spans two files (the built-in contracts here, the registry-contract kinds in
+// tests/headless-workers-registry-kinds.test.ts): a merge trial bounds one file at five minutes
+// (tests/helpers/bounded-tests.mjs), and the whole matrix at the trial host's own pace overruns
+// that bound while either half stays well inside it.
+const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
+const worker: Principal = { id: 'worker-a', role: 'worker' };
+const reader: Principal = { id: 'reader', role: 'reader' } as Principal;
+const token = (principal: Principal) => `${principal.id}-token-${'x'.repeat(32)}`;
 const now = () => new Date().toISOString();
 const launcher = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
 
-/** One headless-worker world: a control plane on a real database, a fixture repository, and the launcher's own dispatch path. */
-export async function headlessWorkerWorld(label: string) {
+/** Everything one matrix file's tests share: its control plane, fixture directories and helpers. */
+export interface HeadlessWorkers {
+  /** The coordinator root the dispatch launches from; `workerRunsDirectory(root)` holds each run's record. */
+  root: string;
+  url: string;
+  hostId: string;
+  herdrCalls: string;
+  homes: Map<string, string>;
+  registry: AgentRegistry;
+  api: (principal: Principal | null, method: 'GET' | 'POST', path: string, body?: unknown) => Promise<{ status: number; body: any }>;
+  stored: (id: string) => Promise<Work>;
+  readyItem: (key: string) => Promise<Work>;
+  /** One registry account per entry, each with a stub model executable for its runtime kind. */
+  configure: (entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) => Promise<void>;
+  /** One host dispatch invocation: the real launcher, its origin fetch answered from the local base. */
+  dispatch: (work: Work) => Promise<Awaited<ReturnType<typeof dispatchWork>>>;
+  submitted: (id: string, epoch: number) => Promise<Work>;
+  started: (name: string) => Promise<{ args: string[]; cwd: string; tty: boolean }>;
+  runLog: (work: Work, run: string) => Promise<{ status: number; body: any }>;
+  stop: () => Promise<void>;
+}
+
+/** The running fixture behind `started`/`submitted`: one per matrix file, from its `before` hook. */
+export type HeadlessWorkersHandle = () => HeadlessWorkers;
+
+/** Builds one file's fixture: its database, served control plane, coordinator root and bridge. */
+export async function headlessWorkers(label: string, leaseSeconds = 120): Promise<HeadlessWorkers> {
   const store: Store = await withDatabase(label); await store.init();
   await mkdir(join(process.cwd(), '.graphyard'), { recursive: true });
   const scratch = await temporaryDirectory(label, join(process.cwd(), '.graphyard'));
   const root = await temporaryDirectory('coordinator', scratch);
   const bin = await temporaryDirectory('bin', scratch);
-  const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = gitRunnerFor(root);
-  const http = server(engine, [coordinator, worker, reader].map(principal => ({ ...principal, token: token(principal) })));
+  const engine = new Engine(store, leaseSeconds, 'owner/project'); engine.gitRunner = gitRunnerFor(root);
+  const http = server(engine, [coordinator, worker, reader, { id: 'fixture-admin', role: 'admin' } as Principal].map(principal => ({ ...principal, token: token(principal) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
@@ -61,6 +88,7 @@ export async function headlessWorkerWorld(label: string) {
   await writeFile(credentialFile, token(worker), { mode: 0o600 });
   await saveWorkerProfile(root, { name: 'launch', principal: worker.id, agentName: 'eng-a', mode: 'launch', kind: 'claude', credentialFile }, async () => ({ actor: worker }));
   const registry = new AgentRegistry(store);
+  const homes = new Map<string, string>();
   // The loop's host bridge, which serves run logs to the item page.
   const bridge = new AbortController();
   await new Promise<void>(resolve => bridgeTerminals(url, token(coordinator), bridge.signal, resolve, undefined, root));
@@ -79,10 +107,7 @@ export async function headlessWorkerWorld(label: string) {
     await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
     return work;
   }
-
-  const homes = new Map<string, string>();
-  /** One registry account per entry, each with a stub model executable for its runtime kind. */
-  async function configure(entries: { name: string; kind: string; failure?: string; wait?: boolean }[]) {
+  async function configure(entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) {
     const accounts = (await registry.document(coordinator)).accounts.filter(account => !entries.some(entry => entry.name === account.name)).map(({ quota, quotaDecision, smoke, unjudged, ...account }) => ({ ...account, enabled: false }));
     const runtimes = [];
     for (const entry of entries) {
@@ -108,6 +133,7 @@ fs.writeFileSync('notes-' + epoch + '.txt', 'partial work of epoch ' + epoch + '
 if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); }
 (async () => {
   while (${!!entry.wait} && !fs.existsSync(home + '/release')) await new Promise(resolve => setTimeout(resolve, 20));
+  ${entry.afterWait ?? ''}
   fs.writeFileSync('change.txt', 'done by ${entry.kind}\\n');
   execFileSync('git', ['add', '-A']);
   execFileSync('git', ['-c', 'user.name=w', '-c', 'user.email=w@example.invalid', 'commit', '-qm', 'work']);
@@ -124,8 +150,6 @@ if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(ent
       roles: [{ name: 'worker', accounts: entries.map(entry => entry.name), concurrency: 4 }], reason: 'fixture runtime matrix' }, randomUUID());
     await registry.observe(coordinator, { host: hostId, observations: entries.map(entry => ({ account: entry.name, quota: { loggedIn: true, state: 'available' }, smoke: { result: 'pass', reason: null } })) }, randomUUID());
   }
-
-  /** One host dispatch invocation: the real launcher, its origin fetch answered from the local base. */
   async function dispatch(work: Work) {
     const config = await loadMasterConfig(root);
     return dispatchWork(root, work, config.workers[0]!, { allWork: [work], observedAt: now(), headless: spawnHeadless,
@@ -144,10 +168,42 @@ if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(ent
   }
   const started = async (name: string) => JSON.parse(await readFile(join(homes.get(name)!, 'started.json'), 'utf8'));
   const runLog = async (work: Work, run: string) => api(reader, 'GET', `work/${work.key}/runs/${run}/log`);
-  const stop = async () => {
-    bridge.abort();
-    await new Promise<void>(resolve => { http.closeAllConnections?.(); http.close(() => resolve()); });
-    await store.close();
-  };
-  return { root, url, hostId, registry, api, stored, readyItem, configure, dispatch, submitted, started, runLog, homes, herdrCalled: () => existsSync(herdrCalls), stop };
+  return { root, url, hostId, herdrCalls, homes, registry, api, stored, readyItem, configure, dispatch, submitted, started, runLog,
+    stop: async () => {
+      bridge.abort();
+      await new Promise<void>(resolve => { http.closeAllConnections?.(); http.close(() => resolve()); });
+      await store.close();
+    } };
+}
+
+/** The kinds with a built-in startup contract (tests/headless-workers.test.ts); `devin` is the first registry-contract kind. */
+export const contractKinds = runtimeKinds.slice(0, runtimeKinds.indexOf('devin'));
+/** The kinds launched only through an agent-registry contract (tests/headless-workers-registry-kinds.test.ts). */
+export const registryKinds = runtimeKinds.slice(runtimeKinds.indexOf('devin'));
+
+/** One per-kind matrix test, as both files declare it: the kind claims, commits and completes as one headless run. */
+export function headlessWorkerKindTest(workers: HeadlessWorkersHandle, kind: RuntimeKind) {
+  test(`e2e:headless-workers — ${kind} claims, commits and completes as one headless run`, async () => {
+    const f = workers();
+    await f.configure([{ name: kind, kind }]);
+    const work = await f.readyItem(`GY-${9600 + runtimeKinds.indexOf(kind)}`);
+    const launched = await f.dispatch(work);
+    assert.equal(launched.epoch, 1);
+    assert.equal(launched.runtime, kind);
+    assert.match(launched.run, /^[0-9a-f-]{36}$/);
+    const item = await f.submitted(work.id, 1);
+    assert.equal(item.lease, null, 'complete ended the lease');
+    assert.equal(item.workspaces[0]?.owner, worker.id, 'the worker claimed under its own identity');
+    const argv = (await f.started(kind)).args as string[];
+    assert.equal(argv[0], 'one-task');
+    assert.ok(!argv.includes('--interactive-must-not-appear'));
+    assert.equal(argv.filter(word => word.includes(`complete ${work.key} 1 --head`)).length, 1, 'the brief is the one request on the command line');
+    assert.equal((await f.started(kind)).tty, false);
+    assert.equal((await f.started(kind)).cwd, item.workspaces[0]!.path);
+    // The durable run record names the work, epoch, principal, account and runtime, outside the worktree.
+    const record = JSON.parse(await readFile(join(workerRunsDirectory(f.root), launched.run, 'session.json'), 'utf8'));
+    assert.deepEqual([record.work, record.epoch, record.principal, record.account, record.kind], [work.key, 1, worker.id, kind, kind]);
+    assert.ok(!join(workerRunsDirectory(f.root), launched.run).startsWith(item.workspaces[0]!.path));
+    assert.equal(existsSync(f.herdrCalls), false, 'no Herdr call is made for workers');
+  });
 }

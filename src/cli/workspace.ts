@@ -41,12 +41,17 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   };
   const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const branch = git('symbolic-ref', '--short', 'HEAD');
-  if (!work.workspaces.some((w: any) => w.branch === branch)) throw new Error(`Run sync from a workspace branch registered for ${work.key}; ${branch} is not one`);
+  const workspace = work.workspaces.find((w: any) => w.branch === branch && resolve(w.path) === cwd);
+  if (!workspace) throw new Error(`Run sync from a workspace registered for ${work.key}; ${cwd} on ${branch} is not one`);
   // GY-3266: the requirements revision an operator recorded under this lease reaches the worker
   // here — every sync prints the revised criteria with what changed, and a completed merge also
   // acknowledges them (a heartbeat naming the policy revision), which complete waits for.
   const unsynced = work.unsyncedRevision ?? null;
-  const epoch = work.workspaces.find((w: any) => w.branch === branch)?.epoch;
+  // GY-3298: the master's unread messages, with author and time; the completed sync acknowledges them.
+  const unread = (work.messages ?? []).filter((message: any) => !message.acknowledged);
+  const messages = unread.length ? { messages: unread.map(({ id, at, by, text }: any) => ({ id, at, by, text })) } : {};
+  // Rework keeps the branch across attempts; only this checkout identifies its epoch.
+  const epoch = workspace.epoch;
   const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
   const generated = await localGeneratedManifest(cwd);
   // A merge the previous sync left for the worker to resolve is continued, not restarted.
@@ -101,7 +106,7 @@ export async function syncWork({ api, print }: CliContext, work: any) {
     }
     const remaining = attributeConflicts(conflicts, all ?? [], sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail,
-      ...(unsynced ? { requirements: { policyRevision: unsynced.policyRevision, changed: unsynced.changed, criteria: work.criteria } } : {}),
+      ...(unsynced ? { requirements: { policyRevision: unsynced.policyRevision, changed: unsynced.changed, criteria: work.criteria } } : {}), ...messages,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge.` });
     process.exitCode = 1; return;
   }
@@ -112,9 +117,9 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   }
   if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
   else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
-  if (unsynced) await api(`work/${work.id}/heartbeat`, { epoch, syncedPolicyRevision: work.policyRevision });
+  if (unsynced || unread.length) await api(`work/${work.id}/heartbeat`, { epoch, ...(unsynced ? { syncedPolicyRevision: work.policyRevision } : {}), ...(unread.length ? { acknowledgedMessages: unread.map((message: any) => message.id) } : {}) });
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: false, regenerated, generated: generated?.files ?? [], ok: true,
-    ...(unsynced ? { requirements: { policyRevision: unsynced.policyRevision, changed: unsynced.changed, criteria: work.criteria } } : {}),
+    ...(unsynced ? { requirements: { policyRevision: unsynced.policyRevision, changed: unsynced.changed, criteria: work.criteria } } : {}), ...messages,
     next: `Nothing is pushed: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.` });
 }
 

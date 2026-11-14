@@ -63,7 +63,10 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
       const terminal = (window as any).testTerminal, box = document.querySelector('.terminal-host')!.getBoundingClientRect();
       return { cols: terminal.cols, rows: terminal.rows, bottom: box.bottom, height: box.height, viewport: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false); expect(before.viewport - before.bottom).toBeLessThan(30);
+    const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false);
+    // The terminal ends at the page's bottom padding: the document never scrolls (GY-3308), so the
+    // gap below it is that padding (32 px on a desktop main) rather than a fixed 12 px, and at least the version-label strip (GY-3310).
+    expect(before.viewport - before.bottom).toBeLessThan(40);
     await page.setViewportSize({ width: 1050, height: 720 });
     await expect.poll(async () => (await layout()).cols).not.toBe(before.cols);
     const after = await layout();
@@ -98,7 +101,7 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     f.current.gap = 'output produced during the gap'; await f.save();
     f.child.send('drop-terminals');
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
-    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
+    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);
     expect(await page.evaluate(() => (window as any).survivedDrop)).toBe(true);
     // A failed reconnect while offline must keep retrying once the network returns.
     await page.context().setOffline(true);
@@ -107,7 +110,7 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
     await page.waitForTimeout(1000);
     await page.context().setOffline(false);
-    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
+    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);
     f.current.master.pane = 'w1:replacement'; f.current.master.account = 'second-account'; f.current.status = 'working'; await f.save();
     await expect(page.locator('.xterm-rows')).toContainText('screen of w1:replacement');
     await expect(page.getByRole('status')).toContainText('second-account · codex · working · w1:replacement');
