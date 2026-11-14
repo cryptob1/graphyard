@@ -48,7 +48,7 @@ for (let index = 0; index < builders.length; index++) {
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   items.push({ id: item.id, key: item.key, title: item.title });
   const lines = index === 0 ? [...Array(40).keys()].map(n => `line ${n + 1} of the long run`) : [`working on ${item.key}`];
-  await record(item.id, { id: `${principal}:1`, kind: 'implementation', principal, epoch: 1, agentName: `work-${principal}`,
+  await record(item.id, { id: `${principal}:1`, kind: 'implementation', principal, agentName: `work-${principal}`,
     transcript: runTranscript(openRun(item.key, 1, principal, 'implementation', lines)), subject: `${item.key}: ${item.title}` });
 }
 // A reviewer and a producer on the last item's head, beside its builder, and the master's
