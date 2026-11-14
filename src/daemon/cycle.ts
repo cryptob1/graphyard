@@ -355,7 +355,9 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'trialContainers', trials.length);
   if (trials.length) await note(cycle, `trial-orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${trials.join(', ')}: a trial container whose checkout is gone or that outlived twice the trial deadline`);
   const leftovers = await effects.reclaimJobLeftovers?.() ?? [];
-  tallyLeftovers(state, 'reclaimed', leftovers.length);
+  const networks = leftovers.filter(entry => entry.startsWith('network ')).length;
+  tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
+  tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);

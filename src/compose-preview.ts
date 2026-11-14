@@ -379,6 +379,13 @@ export async function removeComposeProject(project: string, options: { docker?: 
 }
 
 const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean);
+/** GY-3316: Docker's refusal of a new network once leaked networks have spent its address pools. */
+export const addressPoolsSpent = 'all predefined address pools have been fully subnetted';
+/** GY-3316: how many Graphyard preview networks the daemon holds; null when it cannot be read. */
+export async function previewNetworkCount(env: Record<string, string>, docker: Docker = defaultDocker): Promise<number | null> {
+  try { return lines(await docker(['network', 'ls', '--format', '{{.Name}}', '--filter', `name=${composeProjectPrefix}`], { env, timeoutMs: 30_000 })).filter(name => name.startsWith(composeProjectPrefix)).length; }
+  catch { return null; }
+}
 /** What of `project` the daemon still holds: container ids, volume and network names, and the ids of images built for it. */
 export async function composeLeftovers(project: string, options: { docker?: Docker; env?: Record<string, string> } = {}) {
   const docker = options.docker ?? defaultDocker, env = options.env ?? dockerEnvironment({ PATH: process.env.PATH ?? '' });

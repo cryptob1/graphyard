@@ -7,7 +7,7 @@ import { checkoutGitDirectory, checkoutGitProblem } from '../master/checkout-git
 import { writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
-import { composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
+import { addressPoolsSpent, composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -208,6 +208,8 @@ writeFileSync(${JSON.stringify(result)}, JSON.stringify(cases));
           failingStep: `the E2E runner could not start: ${error instanceof Error ? error.message : String(error)}` }));
       }
     } catch (error) {
+      // GY-3316: a network Docker refused for spent address pools is the trial host's fault, not a failed case.
+      if (error instanceof Error && error.message.includes(addressPoolsSpent)) throw error;
       return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1,
         failingStep: error instanceof Error ? error.message : String(error) }));
     } finally { await stack?.close(); }
