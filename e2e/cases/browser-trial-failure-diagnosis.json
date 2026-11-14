@@ -1,0 +1,15 @@
+{
+  "id": "browser-trial-failure-diagnosis",
+  "title": "A failed browser run with passing cases and noisy teardown keeps its failing test and error in the gate and revert records",
+  "description": "Runs a fixture repository whose browser check prints a Playwright failure summary followed by noisy web-server teardown. Through the real trial, whose checkout is cleaned up after, the failing specs, tests and errors survive in the verdict, the reason a revert records, and the batch gate's diagnostic filing - teardown warnings cannot crowd them out - and a run that names no failing test keeps an explicit no-cause marker instead of a quiet diagnosis. The reproduced lifecycle cause is repaired with it: an install whose lifecycle scripts npm's allowlist skipped leaves the embedded Postgres binaries without their library symlinks, so resolving them hydrates what is missing.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the failing browser tests and their errors survive cleanup in the trial, revert and gate diagnostic records, and the Postgres binaries hydrate their skipped symlinks",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:browser-trial-failure-diagnosis tests/browser-trial-failure-diagnosis.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
