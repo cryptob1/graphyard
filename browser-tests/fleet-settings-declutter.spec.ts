@@ -68,7 +68,6 @@ async function openAgents(page: Page, phone: boolean) {
 }
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }] as const) test(`manual:fleet-settings-declutter-screenshots — Settings › Agents over 17 accounts and 4 roles at ${viewport.width}px: no sideways scroll, ${viewport.width === 1440 ? 'at most half its former height' : 'one card per account'}`, async ({ page }) => {
-  test.setTimeout(60_000);
   mkdirSync(out, { recursive: true });
   await page.setViewportSize(viewport);
   await openAgents(page, viewport.width < 650);

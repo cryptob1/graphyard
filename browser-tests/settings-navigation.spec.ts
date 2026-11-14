@@ -30,7 +30,6 @@ async function heading(page: Page, name: string | RegExp) { await expect(page.ge
 
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
   test(`e2e:settings-navigation — everyday pages outside Settings, configuration inside it, at ${viewport.name} width`, async ({ page }) => {
-    test.setTimeout(60_000);
     await page.setViewportSize(viewport);
     await open(page, 'admin');
     await heading(page, 'Work');

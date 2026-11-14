@@ -20,7 +20,6 @@ const paste = (page: Page, text: string, image: boolean) => page.locator('.xterm
 }, { text, image, bytes: [...png] });
 
 test('e2e:master-page-paste — Ctrl+V text arrives as one bracketed paste, a PNG is saved to the inbox and its path pasted, a viewer is refused', async ({ browser }) => {
-  test.setTimeout(90_000);
   const database = await signInDatabase();
   const site = await mkdtemp(join(tmpdir(), 'graphyard-master-paste-'));
   const log = join(site, 'herdr.log');
