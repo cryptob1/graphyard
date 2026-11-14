@@ -6,7 +6,6 @@ import { homedir } from 'node:os';
 import { defaultChildRun } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
 import { trialLoad } from './trial-load.js';
-import { ensureTrialImage } from '../install/trial-image.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiEnvironment } from '../cli/test-isolation.js';
@@ -22,7 +21,6 @@ export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');
 export const workerVerificationPrefix = 'verify-';
 
 export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot()): Promise<WorkerVerificationResult> {
-  await ensureTrialImage(); // GY-3328: a host missing the trial image provisions it, once for every verification waiting on it
   await mkdir(parent, { recursive: true });
   const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
   await writeTempOwner(allocation);

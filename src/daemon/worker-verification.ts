@@ -1,6 +1,7 @@
 import { defaultChildRun } from '../child-runner.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { runWorkerCheck } from '../merge-writer/worker-check.js';
+import { ensureTrialImage } from '../install/trial-image.js';
 import type { WorkerVerificationJob } from '../server/worker-verification-queue.js';
 
 /**
@@ -28,7 +29,8 @@ export function workerVerificationPump(root: string, host: () => string,
           await moveBranchToHead(root, job.branch, job.input.head);
           const result = job.input.mode === 'check'
             ? await check({ root, base: base(), baseBranch: job.baseBranch, key: job.work.key, head: job.input.head, check: job.input.check! })
-            : await runWorkerVerification(root, job.work, job.input, job.baseBranch);
+            // GY-3328: a host missing the trial image provisions it, once for every verification waiting on it.
+            : await ensureTrialImage().then(() => runWorkerVerification(root, job.work, job.input, job.baseBranch));
           reply = { id: job.id, result };
         } catch (error) { reply = { id: job.id, error: error instanceof Error ? error.message : String(error) }; }
         await mutate('worker-verifications/finish', reply);
