@@ -67,7 +67,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(page.locator('[data-group-section="up-next"]')).toBeVisible(settled);
       const work = await shell(page, '[data-group-section="up-next"]');
 
-      await page.locator(`[data-row="${backlog.key}"]`).evaluate(row => (row as HTMLElement).click());
+      await page.locator('[data-group-section="backlog"] > summary').click();
+      await page.locator(`[data-row="${backlog.key}"]`).click();
       await expect(page.getByRole('heading', { name: 'Export costs as a spreadsheet', level: 1 })).toBeVisible(settled);
       await page.evaluate(() => window.scrollTo(0, 0));
       const item = await shell(page, '[aria-label="What is left"]');
