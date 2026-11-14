@@ -327,15 +327,20 @@ export const checkServiceVariables = (services: readonly CheckService[]): Record
  * isolated-trial mode compose E2E groups use; its children join the network of the first service's
  * container, as a Compose E2E group's do. A start that fails removes what it started.
  */
-export async function startCheckServices(input: { checkout: string; services: readonly CheckService[]; scratch: string; env: Record<string, string>; key: string; timeoutMs: number }): Promise<CheckServices> {
+export async function startCheckServices(input: { checkout: string; services: readonly CheckService[]; scratch: string; env: Record<string, string>; key: string; timeoutMs: number; docker?: Docker }): Promise<CheckServices> {
   const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }), first = input.services[0]!;
   const project = composeProjectName('trial-services-' + input.key, randomUUID());
   const stack = composeStack({ checkout: input.checkout, file: first.file, service: first.service, port: first.port, project, environment, variables: {},
-    bounds: composeBounds(), isolatedTrial: true, scratch: await mkdtemp(join(input.scratch, 'services-')), checkServices: input.services.map(entry => entry.service) });
+    bounds: composeBounds(), isolatedTrial: true, scratch: await mkdtemp(join(input.scratch, 'services-')), checkServices: input.services.map(entry => entry.service), docker: input.docker });
   try {
     await stack.start(AbortSignal.timeout(input.timeoutMs), input.timeoutMs);
-    return { network: 'container:' + await composeServiceContainer(project, first.service, { env: environment, timeoutMs: input.timeoutMs }), close: () => stack.close() };
-  } catch (error) { await stack.close().catch(() => {}); throw error; }
+    return { network: 'container:' + await composeServiceContainer(project, first.service, { docker: input.docker, env: environment, timeoutMs: input.timeoutMs }), close: () => stack.close() };
+  } catch (error) {
+    await stack.close().catch(() => {});
+    // GY-3316: a network refused for spent address pools carries how many preview networks the daemon holds.
+    if (error instanceof Error && error.message.includes(addressPoolsSpent)) Object.assign(error, { previewNetworks: await previewNetworkCount(environment, input.docker) });
+    throw error;
+  }
 }
 
 /**
