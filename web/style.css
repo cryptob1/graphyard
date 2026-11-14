@@ -181,7 +181,7 @@ img.mark{width:26px;height:26px}
 .panel.where-now{border-color:color-mix(in srgb,var(--group) 35%,var(--bg));background:color-mix(in srgb,var(--group) 6%,var(--bg))}
 .next-line{margin:0;font-size:var(--type-body);color:var(--text-2)}.next-line strong{color:var(--text);font-weight:600}
 .panel{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4) 18px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
-.panel h2,.panel>summary{display:flex;align-items:baseline;gap:10px;margin:0;font-size:var(--type-item);font-weight:600;color:var(--text)}.panel h2 small{font-size:var(--type-small);font-weight:400;color:var(--text-2)}
+.panel h2,.work-group>summary{display:flex;align-items:baseline;gap:10px;margin:0;font-size:var(--type-item);font-weight:600;color:var(--text)}.panel h2 small{font-size:var(--type-small);font-weight:400;color:var(--text-2)}
 .panel.work-group{padding:0;gap:0;overflow:hidden}.panel.work-group>h2,.panel.work-group>summary{align-items:center;padding:var(--space-3) var(--space-4)}.work-group>summary{cursor:pointer}
 .left-list{margin:0;padding-left:18px;font-size:var(--type-body);line-height:1.7;color:var(--text)}
 .left-step h3{margin:0 0 var(--space-2);font-size:var(--type-body);font-weight:600}.left-step h3 small{font-weight:400}.left-step+.left-step{margin-top:var(--space-3)}
