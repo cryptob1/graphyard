@@ -8,6 +8,10 @@ import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { serveXterm } from './xterm';
 
 test('e2e:master-page-terminal-refused — when the terminal cannot start, the Master page says "refused:" with the cause, not "Detached"', async ({ browser }) => {
+  // Its own database and server start cold inside the spec, and the whole suite runs beside it in
+  // parallel, so like its siblings (master-page-ux, master-page-paste) it carries a budget that
+  // load cannot eat; the refusal it asserts is unchanged.
+  test.setTimeout(60_000);
   const site = await temporaryDirectory('refused-terminal');
   await symlink(resolve('.graphyard/browser-dist'), join(site, 'dist'));
   const database = await signInDatabase();

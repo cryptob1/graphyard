@@ -63,7 +63,15 @@ const repository = 'owner/project';
 /** The volume read the launch would make on durable storage; the test's directories stand in for the paths. */
 const durable = async (path: string) => ({ probed: path, volatile: null, freeBytes: 200e9 });
 
-test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000 }, async () => {
+// This simulated day runs at the coordination host's own loaded pace — eleven minutes on the host
+// whose trials bound a file at five minutes — so a bounded runner (the merge trial bounds every file
+// at 300 s, tests/helpers/bounded-tests.mjs) cannot host it: it defers to an unbounded whole-suite
+// run, exactly as the slow-tick receipt's twenty-run execution defers (slow-tick-repeat-receipt.test.ts).
+const deferred = Number(process.env.GRAPHYARD_FILE_TIMEOUT_MS ?? Infinity) < 900_000
+  ? `a runner bounding this file at ${process.env.GRAPHYARD_FILE_TIMEOUT_MS} ms leaves the simulated probe days to a whole-suite run`
+  : false;
+
+test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000, skip: deferred }, async () => {
   // The loop's own root: one reviewer profile, the managed worktree
   // root and credential directory pointed at this run's directories, and the dispatch cursor
   // persisted by the production writer so the schema judges every tick's cursor.

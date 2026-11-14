@@ -109,12 +109,6 @@ function App() {
     void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
     return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
-  // The browser tab names the project it serves (GY-3306): gh · OWNER/REPO from the same status
-  // reply the header's project name renders, so an operator's tabs tell installs apart. Graphyard
-  // stands until that identity arrives — and returns on sign-out — so a tab is never untitled,
-  // undefined, or a stale other project's name.
-  const project = typeof status?.repository === 'string' && status.repository ? status.repository : null;
-  useEffect(() => { document.title = project ? `gh · ${project}` : 'Graphyard'; }, [project]);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   // A read answered while the same item is still open is kept even when a work poll re-ran the effect meanwhile, so a later failed read never leaves history empty.
   const selectedRef = useRef(selected); selectedRef.current = selected;

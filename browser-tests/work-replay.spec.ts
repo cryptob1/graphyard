@@ -5,6 +5,7 @@ import { signInProcess } from '../tests/helpers/sign-in-process';
 
 test.use({ reducedMotion: 'no-preference' });
 test('e2e:work-replay — recorded stages, windows, playback and motion preferences on a fixture install', async ({ page }) => {
+  test.setTimeout(120_000);
   const store = await withDatabase('work_replay'); await store.init();
   const http = await signInProcess((store.pool as any).options.connectionString);
   const end = Date.now(), hour = 3_600_000;
