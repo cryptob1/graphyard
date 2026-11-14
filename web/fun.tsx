@@ -57,7 +57,7 @@ export const LINES = [
 export function BuildLine() {
   const [index, setIndex] = useState(() => Math.floor(Math.random() * LINES.length));
   const line = LINES[index];
-  return <button type="button" className="build-line" title="Another one" data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
+  return <button type="button" className="build-line" title="Another one" data-decor data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
     <span key={index} className="typed" style={{ '--chars': line.length } as CSSProperties}>{line}</span>
   </button>;
 }
@@ -75,7 +75,7 @@ export function shippedToday(work: Work[], now = Date.now()) {
 }
 export function ShippedToday({ work }: { work: Work[] }) {
   const { count, streak } = shippedToday(work);
-  return <span className="shipped-today" aria-label="Shipped today" data-shipped-today={count}>🚢 {count} shipped today{streak > 1 ? ` · 🔥 ${streak}-day streak` : ''}</span>;
+  return <span className="shipped-today" aria-label="Shipped today" data-decor data-shipped-today={count}>🚢 {count} shipped today{streak > 1 ? ` · 🔥 ${streak}-day streak` : ''}</span>;
 }
 
 /** The agent that built an item: the last implementer, or the lease holder. */
