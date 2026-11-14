@@ -282,5 +282,10 @@ test('unit:tests/one-click-team-access.test.ts — README, the infra and setup g
   assert.match(guides.setup, /one machine, many installs, one port each; two locks: tailnet plus per-install sign-in/);
   assert.match(teamAccessSummary, /One machine, many installs, one port each\. Two locks: the Tailscale share lets a person's devices reach this machine \(as far as your tailnet policy allows\), and each install still needs its own Graphyard sign-in/);
   assert.match(aclGuidance, /TEAMMATE@example\.com.*does not revoke them/);
+  // The dashboard Guide's FAQ answers the same flow: tailnet serving by default, one port each, two locks, 24-hour invites.
+  const guidePage = await readFile(new URL('../web/pages/guide.tsx', import.meta.url), 'utf8');
+  const faq = guidePage.slice(guidePage.indexOf("['faq-access'"), guidePage.indexOf("['faq-decisions'"));
+  for (const phrase of ['http://HOST:PORT', 'one machine, many installs, one port each', 'two locks', 'within 24 hours', 'Invite someone']) assert.ok(faq.includes(phrase), `the Guide FAQ says: ${phrase}`);
+  assert.doesNotMatch(faq, /share-tailnet|ten minutes|HTTPS/, 'the Guide FAQ names no retired flag, ten-minute link or HTTPS address');
   assert.doesNotMatch(guides.infra + readme + teamAccessSummary, /opens port \d+ only|port PORT only/, 'nothing claims the share reaches one port alone');
 });

@@ -120,7 +120,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
       ['faq-context', ['product brief', 'AGENTS.md', 'work item', 'committed work']],
       ['faq-delivery', ['reviews it', 'proof', 'latest main', 'batch', 'reverts', 'rolls back']],
       ['faq-deploy', ['Railway', 'AWS', 'delivery.applications', 'versionUrl']],
-      ['faq-access', ['http://127.0.0.1:4310', 'first free port', '--port N', 'graphyard login', 'Invite someone', 'each install']],
+      ['faq-access', ['http://127.0.0.1:4310', 'first free port', '--port N', 'graphyard login', 'Invite someone', 'each install', 'http://HOST:PORT', 'two locks', '24 hours']],
     ];
     for (const [id, says] of answers) {
       const faq = docs.locator(`#${id}`);

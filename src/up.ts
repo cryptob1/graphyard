@@ -1161,7 +1161,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses (GY-1510). */
-export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'push-auth': { type: 'string' }, 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
+export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'push-auth': { type: 'string' }, 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
