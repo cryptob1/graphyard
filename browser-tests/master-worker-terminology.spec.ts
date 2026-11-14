@@ -3,7 +3,7 @@ import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
 
 // GY-3307: the dashboard names the master agent Master everywhere — the navigation, the Master
-// page's heading and its accessible controls — with Fun on and off, and the agents page stays
+// page's heading and its accessible controls — and the agents page stays
 // Workers. Chief labels fail this proof.
 test('e2e:master-worker-terminology — navigation, the Master heading and its accessible controls say Master, and Workers stays Workers', async ({ page }) => {
   const work = boardWork();
@@ -28,10 +28,6 @@ test('e2e:master-worker-terminology — navigation, the Master heading and its a
   await expect(page.getByRole('region', { name: 'Master terminal' })).toBeVisible();
   const tabs = page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button');
   await expect(tabs).toHaveText(['Master', 'Product']);
-  // Fun changes nothing here: the entry and the heading still say Master.
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(menu.nth(1)).toHaveText('Master');
-  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
 
   // Workers remains Workers: its own entry, heading and tab row.
   await menu.nth(2).click();

@@ -236,8 +236,6 @@ img.mark{width:26px;height:26px}
 .time-legend{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 20px;font-size:var(--type-small)}.time-legend i{width:10px;height:10px;border-radius:2px;margin-right:var(--space-2);vertical-align:-1px}.time-legend .slowest{color:var(--needs-you)}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before{animation:none;transition:none}}
-/* The Fun toggle (GY-3272) turns every animation off with it: the names and the lines are Fun's, and so is the yard's motion. */
-html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,html[data-fun='off'] *,html[data-fun='off'] *::before,html[data-fun='off'] *::after{animation:none!important;transition:none!important}
 @media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.insight-charts{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:200px;min-width:200px}.main{padding:var(--space-5)}}
 /* Phone: the sidebar folds into a menu, tiles become chips, rows become cards. */
@@ -345,7 +343,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* ---------------------------------------------------------------------------------------------
    GY-3272 Night Yard: the neo-noir layer. Every rule here keys off html:not([data-theme='daylight'])
    so Daylight — the same dashboard in plain light — carries none of it, and every animation is one
-   the reduced-motion rule above already stops and the Fun toggle above turns off. Colours stay
+   the reduced-motion rule above already stops. Colours stay
    tokens: a tint is a color-mix of one. Nothing here animates a layout property: transforms,
    opacity and clip-path only, so the compositor carries every effect at 60 fps.
    --------------------------------------------------------------------------------------------- */
