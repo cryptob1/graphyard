@@ -10,7 +10,7 @@ import { releaseView } from '../src/model/release.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';
-import WorkersPage, { SessionPanel, roleWords, spent } from '../web/pages/workers.js';
+import WorkersPage, { SessionPanel, spent } from '../web/pages/workers.js';
 import TopBar from '../web/components/top-bar.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 
@@ -202,7 +202,7 @@ test('unit:attach-command-remote-form — a session in a pane offers its local a
   assert.doesNotMatch(logPanel, /Copy local|Copy remote|no attach command/);
   // The compact row carries no attach buttons at all: everything to copy sits in the opened panel.
   const html = render(work);
-  for (const handle of every(work)) assert.deepEqual(copies(html, handle.id), [], `${handle.id} row has nothing to copy`);
+  for (const { handle } of every(work)) assert.deepEqual(copies(html, handle.id), [], `${handle.id} row has nothing to copy`);
 });
 
 test('integration:workers-tab-per-principal-summary — running rows first by time spent descending, finished rows collapsed with a count, and one line per principal naming its current item and epoch, how long, and its sessions in the last 24 hours', () => {

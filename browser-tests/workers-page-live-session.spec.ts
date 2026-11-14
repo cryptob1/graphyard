@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { appendFile, mkdtemp, rm, symlink } from 'node:fs/promises';

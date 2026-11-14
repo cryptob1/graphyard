@@ -55,9 +55,9 @@ for (let index = 0; index < builders.length; index++) {
 // coordination session: open, headless, nothing to attach to — its row opens the Master page.
 const sixth = items.at(-1)!;
 await record(sixth.id, { id: 'reviewer-a:1', kind: 'review', role: 'review', principal: 'reviewer-a', agentName: 'reviewer-a',
-  transcript: runTranscript(sixth.key, 1, 'reviewer-a', 'review', ['reading the diff of the head']), subject: `${sixth.key}: review` });
+  transcript: runTranscript(openRun(sixth.key, 1, 'reviewer-a', 'review', ['reading the diff of the head'])), subject: `${sixth.key}: review` });
 await record(sixth.id, { id: 'producer-a:1', kind: 'proof', role: 'proof:e2e', principal: 'producer-a', agentName: 'producer-a',
-  transcript: runTranscript(sixth.key, 1, 'producer-a', 'proof', ['running the bound e2e cases']), subject: `${sixth.key}: proofs` });
+  transcript: runTranscript(openRun(sixth.key, 1, 'producer-a', 'proof', ['running the bound e2e cases'])), subject: `${sixth.key}: proofs` });
 await record(sixth.id, { id: 'master-1:1', kind: 'coordination', role: 'master', principal: 'graphyard-master-1', agentName: 'master-1',
   transcript: null, attach: null, subject: 'Coordinate the cycle' });
 
