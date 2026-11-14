@@ -984,7 +984,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // GY-2995: that launch directory under the config home is kept readable, and with it the
       // deploy checkout the CLI it must run lives in.
       // A headless session (headless-session.ts) holds no binding at all: the launcher posts its answer.
-      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable, launch.kind) });
       const delivery: RequestDelivery = 'request';
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
       /** The session the run is on: a headless run moves off a logged-out account (GY-3218). */
@@ -1007,7 +1007,7 @@ export async function launchReview(root: string, work: Work, profileName: string
             const moved = accountLaunch(profile, next.account, { writable, headless: true });
             const rules = await prepareSessionHarness(root, config, { role: 'reviewer', kind: moved.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
             return { kind: moved.kind!, account: next.account?.name ?? null, args: [...moved.args, ...rules.args], environment: withVerificationPath(rules.environment, moved.environment), contract: moved.contract, role: rules.role,
-              credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable) }) };
+              credentialMask: credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(moved.environment, moved.contract?.homeVariable, moved.kind) }) };
           });
           // One child, its request carrying the exact diff; its JSON answer goes through review post's own path under this launch's token.
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, account: on.current.account?.name ?? profileAccount(profile.name), args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,

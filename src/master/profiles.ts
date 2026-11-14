@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { environmentKinds, runtimeAdapter, runtimeHomeVariables, runtimeKinds, type EnvironmentKind } from './runtimes.js';
+import { environmentKinds, runtimeAdapter, runtimeKinds, type EnvironmentKind } from './runtimes.js';
 import { launchEnvironmentValueLimit } from '../model/registry.js';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
@@ -92,12 +92,15 @@ export { environmentKinds, type EnvironmentKind };
 export const environmentVariable = Object.fromEntries(environmentKinds.map(kind => [kind, runtimeAdapter(kind)!.home!.variable])) as Record<EnvironmentKind, string>;
 /**
  * The runtime login homes a launch's environment names (GY-1856): the session's own login, set on
- * the kind's home variable, plus the registry contract's own — the credential mask keeps these
- * readable while it hides every other credential location.
+ * its kind's home variable, plus the registry contract's own — the credential mask keeps these
+ * readable while it hides every other credential location. Only the session's own kind names a
+ * login home here (GY-3303): another runtime's variable in the environment is not this session's
+ * login — a Muse launch sets `XDG_DATA_HOME`, which is also OpenCode's login-home variable — so its
+ * base directory stays no more writable than the runtime's own state roots under it.
  */
-export const runtimeLoginHomes = (environment: Record<string, string> | undefined, homeVariable?: string | null): string[] => {
-  const variables = new Set([...runtimeHomeVariables(), ...(homeVariable ? [homeVariable] : [])]);
-  return [...variables].flatMap(variable => environment?.[variable] ? [environment[variable]] : []);
+export const runtimeLoginHomes = (environment: Record<string, string> | undefined, homeVariable: string | null | undefined, kind: string | null | undefined): string[] => {
+  const own = kind ? runtimeAdapter(kind)?.home?.variable : undefined;
+  return [...new Set([...(own ? [own] : []), ...(homeVariable ? [homeVariable] : [])])].flatMap(variable => environment?.[variable] ? [environment[variable]] : []);
 };
 export const agentEnvironmentSchema = z.object({
   name: profileName,

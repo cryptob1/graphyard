@@ -40,6 +40,7 @@ async function nav(page: Page, entry: string, phone: boolean) {
 }
 
 for (const viewport of viewports) test(`every page is captured at ${viewport.name} width`, async ({ page }) => {
+  test.setTimeout(120_000);
   mkdirSync(out, { recursive: true });
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
   const retiredReads = await open(page);

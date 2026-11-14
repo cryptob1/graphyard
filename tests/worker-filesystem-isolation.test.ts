@@ -447,7 +447,7 @@ for (const kind of ['codex', 'claude'] as const) for (const inherited of [false,
       if (args[0] === 'pane' && args[1] === 'run') {
         launched++;
         // Use exactly the account-null launch environment with the production master boundary.
-        const confined = await masterSessionConfinement(kind, f.root, {}, runtimeLoginHomes(environment), environment);
+        const confined = await masterSessionConfinement(kind, f.root, {}, runtimeLoginHomes(environment, null, kind), environment);
         run(confined.wrapper, f.root, '/bin/bash', ['-ec', args[3]], environment);
       }
       return startedAtOnce(args) ?? '{}';

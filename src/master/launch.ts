@@ -214,7 +214,7 @@ async function masterLaunchConfinement(kind: string, options: Pick<SessionStart,
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
   if (root) {
     return masterSessionConfinement(kind, root, options.confinementProbe, [
-      ...runtimeLoginHomes(options.environment, options.contract?.homeVariable),
+      ...runtimeLoginHomes(options.environment, options.contract?.homeVariable, kind),
       ...(options.masterStateDirectory ? [options.masterStateDirectory] : []),
       ...(options.stateDirectories ?? []),
     ], options.environment, options.credentialMask, options.herdrPaths);

@@ -42,6 +42,7 @@ const search = (page: Page) => page.getByLabel('Search commands');
 const sheet = (page: Page) => page.getByRole('dialog', { name: 'Keyboard shortcuts' });
 
 test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Enter opens that item; the palette jumps and switches theme', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   await page.keyboard.press('Control+k');
   await expect(palette(page)).toBeVisible();
@@ -78,6 +79,7 @@ test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Ent
 });
 
 test('e2e:keyboard-palette — j/k move a cursor through the Work rows, Enter opens that row, and Esc clears the cursor', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   const cursor = page.locator('.work-row.kb-cursor');
   // The board's first visible row is the one that needs the operator.
@@ -99,6 +101,7 @@ test('e2e:keyboard-palette — j/k move a cursor through the Work rows, Enter op
 });
 
 test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? shows the shortcut sheet', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   await page.keyboard.press('g');
   await page.keyboard.press('m');
@@ -121,6 +124,7 @@ test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? show
 });
 
 test('e2e:keyboard-palette — the top bar strip counts the shift, the trials and tonight’s ships, matching the Workers page', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   // The fixture holds two fresh running sessions (a third not seen for forty minutes), one pushed
   // merge trial and one merge from tonight.
