@@ -733,15 +733,23 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
       }).join('\n')}${end}`;
     }
     // GY-3305: a Playwright run keeps each failing test's heading, its error's first line and the
-    // run's counts — never the end of its output, which the web server's teardown noise owns.
+    // run's counts — never the end of its output, which the web server's teardown noise owns. Whole
+    // entries in failure order, the earliest cut only when it alone outgrows the share.
     const browser = playwrightFailures(output);
     if (browser.length) {
       const counts = output.split('\n').map(line => line.replace(ansiEscape, '')).findLast(line => playwrightCounts.test(line))?.trim() ?? '';
       const entries = browser.map(failure => `${failure.file}:${failure.line} › ${failure.title}${failure.error ? `\n  ${failure.error}` : ''}`);
-      const overhead = command.length + cut.length + end.length + (counts ? counts.length + 1 : 0);
-      const perEntry = Math.floor((share - overhead) / entries.length);
-      const wanted = entries.map(entry => entry.slice(0, Math.max(0, perEntry)).trimEnd()).join('\n');
-      return `${command}${cut}${wanted}${counts ? `\n${counts}` : ''}${end}`;
+      const roomForEntries = share - command.length - cut.length - end.length - (counts ? counts.length + 1 : 0);
+      const kept: string[] = [];
+      let used = 0;
+      for (const entry of entries) {
+        const left = roomForEntries - used - kept.length;
+        if (left <= 0) break;
+        kept.push(entry.length <= left ? entry : entry.slice(0, left - 1).trimEnd());
+        used += Math.min(entry.length, left);
+        if (entry.length > left) break;
+      }
+      return `${command}${cut}${kept.join('\n')}${counts ? `\n${counts}` : ''}${end}`;
     }
     const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
     if (errorAt >= 0) {
