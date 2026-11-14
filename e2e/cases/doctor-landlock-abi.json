@@ -1,0 +1,13 @@
+{
+  "id": "doctor-landlock-abi",
+  "title": "Doctor names the Landlock ABI 9 requirement and the Ubuntu 26.04 kernel fix",
+  "description": "With the host Landlock ABI stubbed to 8, doctor prints a FAIL landlock line naming ABI 8, the required ABI 9 and the Ubuntu 26.04 fix (sudo apt install linux-image-oem-7.3); with ABI 9 it prints PASS. The README prerequisites name the Landlock ABI 9 requirement and the same fix.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "doctor landlock line and README prerequisite",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/doctor-landlock-abi.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
