@@ -28,7 +28,7 @@ const layout = fixture().pane;
 let paneCols = layout?.cols ?? cols, paneRows = layout?.rows ?? rows;
 const ruler = () => frame(`\x1b[H\x1b[2J${Array.from({ length: paneRows }, (_, row) => `\x1b[${row + 1};1H${`row ${row + 1} `.padEnd(paneCols - 1, '=')}|`).join('')}`);
 // One controlling stream per pane, as in Herdr: `control` without --takeover is refused while another holds it.
-const holder = `${process.env.HERDR_STUB_STATE}.${pane}.control`, held = () => { try { process.kill(Number(readFileSync(holder, 'utf8')), 0); return true; } catch { return false; } };
+const holder = `${process.env.HERDR_STUB_LOG}.${pane}.control`, held = () => { try { process.kill(Number(readFileSync(holder, 'utf8')), 0); return true; } catch { return false; } };
 if (mode === 'control') {
   if (!args.includes('--takeover') && held()) { process.stdout.write(`${JSON.stringify({ type: 'terminal.closed', reason: 'terminal attach failed: terminal already has an attached client; retry with --takeover' })}\n`); process.exit(0); }
   writeFileSync(holder, String(process.pid));
