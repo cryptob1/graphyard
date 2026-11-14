@@ -14,6 +14,7 @@ import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } 
 import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
+import { trialImageMissingFault } from '../install/trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
@@ -36,6 +37,8 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
+  /** GY-3328: provisions the image trials run when this host lacks it, before a detached trial launches (install/trial-image.ts `ensureTrialImage`); absent, nothing is provisioned. */
+  ensureTrialImage?(): Promise<void>;
   /** GY-3120: how many queued heads are trialled at once, each alone on the current tip (`run.mergeWriter.parallel`); absent, one. */
   parallel?: number;
   /** GY-1902: the item previews' ports (merge-writer/preview.ts `itemPreviewStep`); absent, no item is previewed. */
@@ -76,6 +79,8 @@ export interface MergeWriterReads extends MergePorts {
   /** GY-3159: stops a detached trial run nobody will read; best effort. */
   stopTrialRun?(ref: { directory: string }): void;
 }
+/** GY-3328: the attention row a trial host missing its trial image raises; master status shows it while it stands. */
+export const trialImageKey = 'merge-writer:trial-image';
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
 
@@ -668,6 +673,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
       handle.cancel(`the base tip moved under ${item.key}'s landing, so the adopted trial of ${handle.mergeSha.slice(0, 12)} no longer names its merge commit`);
     }
     if (!launch) return reads.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs);
+    await reads.ensureTrialImage?.();
     const launched = launch({ key: item.key, head: heads?.[0]?.head ?? mergeSha, mergeSha,
       baseTip: baseTip?.toLowerCase() ?? null, changedFiles: [...files], proofs: criterionProofs(item), e2eProofs: e2eProofsOf(item),
       reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeoutMs) });
@@ -855,6 +861,10 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads' trials passed (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head yields its turn and is tried after every other queued head`);
+          } else if (trialImageMissingFault(error)) {
+            // GY-3328: the host lacks the trial image and could not provision it: no verdict on the head, one attention line until a trial runs again.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            storeAction(state, trialImageKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail: trialImageMissingFault(error)!.slice(0, 1900), attempts: (state.actions[trialImageKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
           } else if (trialRepositoryImageFault(error)) {
             // GY-3275: the repository's own trial image could not be built: no verdict on the head, reported upstream like a fetch fault (GY-3249).
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
@@ -870,6 +880,7 @@ export async function mergeWriterStep(cycle: Cycle) {
         }
         const { outcome } = result;
         settledNow.add(itemKey);
+        if (state.actions[trialImageKey]?.state === 'failed') delete state.actions[trialImageKey];
         if (outcome.outcome === 'merged' || outcome.outcome === 'reconciled') {
           writer.lastMergeAt = at();
           // GY-2079: this head's trial passed — the yields' evidence that the host completes trials.

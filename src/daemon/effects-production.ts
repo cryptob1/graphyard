@@ -32,6 +32,7 @@ import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
 import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
+import { ensureTrialImage } from '../install/trial-image.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
@@ -212,6 +213,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get mergeWriter() { const config = current();
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => { const snapshot = await deps.snapshot(); return mergeCandidateHold(snapshot.work.find(item => item.id === work.id), work, snapshot.work); }, holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
+        ensureTrialImage: () => ensureTrialImage(),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
         gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },
