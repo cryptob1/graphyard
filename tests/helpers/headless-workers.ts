@@ -49,7 +49,7 @@ export interface HeadlessWorkers {
   stored: (id: string) => Promise<Work>;
   readyItem: (key: string) => Promise<Work>;
   /** One registry account per entry, each with a stub model executable for its runtime kind. */
-  configure: (entries: { name: string; kind: string; failure?: string; wait?: boolean }[]) => Promise<void>;
+  configure: (entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) => Promise<void>;
   /** One host dispatch invocation: the real launcher, its origin fetch answered from the local base. */
   dispatch: (work: Work) => Promise<Awaited<ReturnType<typeof dispatchWork>>>;
   submitted: (id: string, epoch: number) => Promise<Work>;
@@ -62,14 +62,14 @@ export interface HeadlessWorkers {
 export type HeadlessWorkersHandle = () => HeadlessWorkers;
 
 /** Builds one file's fixture: its database, served control plane, coordinator root and bridge. */
-export async function headlessWorkers(label: string): Promise<HeadlessWorkers> {
+export async function headlessWorkers(label: string, leaseSeconds = 120): Promise<HeadlessWorkers> {
   const store: Store = await withDatabase(label); await store.init();
   await mkdir(join(process.cwd(), '.graphyard'), { recursive: true });
   const scratch = await temporaryDirectory(label, join(process.cwd(), '.graphyard'));
   const root = await temporaryDirectory('coordinator', scratch);
   const bin = await temporaryDirectory('bin', scratch);
-  const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = gitRunnerFor(root);
-  const http = server(engine, [coordinator, worker, reader].map(principal => ({ ...principal, token: token(principal) })));
+  const engine = new Engine(store, leaseSeconds, 'owner/project'); engine.gitRunner = gitRunnerFor(root);
+  const http = server(engine, [coordinator, worker, reader, { id: 'fixture-admin', role: 'admin' } as Principal].map(principal => ({ ...principal, token: token(principal) })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
@@ -107,7 +107,7 @@ export async function headlessWorkers(label: string): Promise<HeadlessWorkers> {
     await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
     return work;
   }
-  async function configure(entries: { name: string; kind: string; failure?: string; wait?: boolean }[]) {
+  async function configure(entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) {
     const accounts = (await registry.document(coordinator)).accounts.filter(account => !entries.some(entry => entry.name === account.name)).map(({ quota, quotaDecision, smoke, unjudged, ...account }) => ({ ...account, enabled: false }));
     const runtimes = [];
     for (const entry of entries) {
@@ -133,6 +133,7 @@ fs.writeFileSync('notes-' + epoch + '.txt', 'partial work of epoch ' + epoch + '
 if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); }
 (async () => {
   while (${!!entry.wait} && !fs.existsSync(home + '/release')) await new Promise(resolve => setTimeout(resolve, 20));
+  ${entry.afterWait ?? ''}
   fs.writeFileSync('change.txt', 'done by ${entry.kind}\\n');
   execFileSync('git', ['add', '-A']);
   execFileSync('git', ['-c', 'user.name=w', '-c', 'user.email=w@example.invalid', 'commit', '-qm', 'work']);
