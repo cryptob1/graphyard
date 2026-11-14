@@ -289,7 +289,7 @@ html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,ht
 .sessions-table.workers .agent-name{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%}
 .sessions-table.workers .agent-name .agent{overflow:hidden;text-overflow:ellipsis}
 .sessions-table.workers tr[data-session] td[data-label='Working on']{overflow:hidden;padding:0}
-.sessions-table.workers .row-open{display:flex;align-items:center;gap:6px;width:100%;height:44px;min-width:0;padding:0 var(--space-3);text-align:left;color:var(--text)}
+.sessions-table.workers .row-open{display:flex;align-items:center;gap:6px;width:100%;min-width:0;padding:0 var(--space-3);text-align:left;color:var(--text)}
 .sessions-table.workers .row-open:hover .row-title{text-decoration:underline}
 .sessions-table.workers .row-open .row-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sessions-table.workers tr[data-session] td[data-label=State]{color:var(--text-2)}
