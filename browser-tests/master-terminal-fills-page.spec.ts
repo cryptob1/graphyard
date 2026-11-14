@@ -46,8 +46,7 @@ const fill = (page: Page) => page.evaluate(() => {
 async function fillsThePage(page: Page) {
   const fills = (at: Awaited<ReturnType<typeof fill>>) => !!at && at.right >= 0 && at.right <= 1 && at.bottom >= 0 && at.bottom <= 1 && at.drawnRows === at.rows;
   await expect.poll(async () => fills(await fill(page)), settled).toBe(true).catch(async error => {
-    const debug = await page.evaluate(() => ({ host: document.querySelector('.terminal-host')?.getBoundingClientRect().toJSON(), screen: document.querySelector('.xterm-screen')?.getBoundingClientRect().toJSON(), cols: (window as any).testTerminal?.cols, html: document.querySelector('.terminal-host')?.innerHTML.slice(0, 600) }));
-    throw new Error(`The terminal does not fill its container: ${JSON.stringify(await fill(page))} ${JSON.stringify(debug)}\n${error}`);
+    throw new Error(`The terminal does not fill its container (gaps in cells): ${JSON.stringify(await fill(page))}\n${error}`);
   });
   expect((await fill(page))!.documentScrolls).toBe(false);
 }
