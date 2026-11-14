@@ -59,7 +59,6 @@ async function bootHeld(page: Page) {
 }
 
 test('e2e:night-yard-animation — the boot sequence plays once per browser session, and any key skips it', async ({ page }) => {
-  test.setTimeout(60_000);
   const boot = await bootHeld(page);
   // The readout types out: a quarter second in, it holds some of its characters but not all.
   await page.clock.runFor(250);
@@ -77,7 +76,6 @@ test('e2e:night-yard-animation — the boot sequence plays once per browser sess
 });
 
 test('e2e:night-yard-animation — left alone, the boot hands the page over inside its second', async ({ page }) => {
-  test.setTimeout(60_000);
   const boot = await bootHeld(page);
   // A loaded machine: more than the veil's real second passes before the next look. The veil
   // answers to the page clock alone, so it is still up until the clock moves.
@@ -90,7 +88,6 @@ test('e2e:night-yard-animation — left alone, the boot hands the page over insi
 });
 
 test('e2e:night-yard-animation — a stage change glides the row to its new group instead of jumping', async ({ page }) => {
-  test.setTimeout(60_000);
   const state = await serve(page);
   const row = page.locator('[data-row="GY-20"]');
   await expect(row).toHaveAttribute('data-group', 'needs-you');
@@ -109,7 +106,6 @@ test('e2e:night-yard-animation — a stage change glides the row to its new grou
 });
 
 test('e2e:night-yard-animation — a row in trial carries the streak, the rain falls in two sheets, headings flicker in and the line types itself out', async ({ page }) => {
-  test.setTimeout(60_000);
   await serve(page);
   // The streak: exactly the row whose merge trial is out.
   const streak = page.locator('.work-row.trial');
@@ -139,7 +135,6 @@ test('e2e:night-yard-animation — a row in trial carries the streak, the rain f
 });
 
 test('e2e:night-yard-animation — with reduced motion every animation stills and the boot never runs', async ({ page }) => {
-  test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const state = await serve(page);
   // The boot never ran on this load.
@@ -155,7 +150,6 @@ test('e2e:night-yard-animation — with reduced motion every animation stills an
 });
 
 test('e2e:night-yard-animation — Fun off turns every animation off, on this page and the next', async ({ page }) => {
-  test.setTimeout(60_000);
   await serve(page);
   await page.getByRole('button', { name: 'Fun', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-fun', 'off');
