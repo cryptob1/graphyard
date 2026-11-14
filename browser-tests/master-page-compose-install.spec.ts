@@ -36,7 +36,7 @@ test('e2e:master-page-compose-install — a server with no herdr streams the mas
   try {
     await new Promise<void>(done => bridgeTerminals(server.url, 'test-coordinator', stopping.signal, done));
     const operator = await server.signIn(browser);
-    await expect(operator.getByRole('heading', { name: 'The Chief', exact: true })).toBeVisible(settled);
+    await expect(operator.getByRole('heading', { name: 'Master', exact: true })).toBeVisible(settled);
     await expect(operator.locator('.xterm-rows')).toContainText('screen of w1:master', settled);
     await operator.locator('.terminal-host').click();
     await operator.keyboard.type('status please');

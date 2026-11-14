@@ -8,11 +8,13 @@ import type { Principal } from '../../src/model.js';
 
 /**
  * The real control plane e2e:master-page-terminal drives (GY-3211), forked with the stub herdr
- * first on PATH: argv is the database URL and the directory whose dist/ holds the built dashboard.
- * The loop has named its master pane `w1:master`, and one item records a running worker session in
- * pane `w1:worker`. Credentials: the human operator (test-human-operator) and a reader (test-reader).
+ * first on PATH: argv is the database URL, the directory whose dist/ holds the built dashboard, and
+ * optionally the port to listen on — a successor plane can take the same port a predecessor left,
+ * as one URL does across a deploy. The loop has named its master pane `w1:master`, and one item
+ * records a running worker session in pane `w1:worker`. Credentials: the human operator
+ * (test-human-operator) and a reader (test-reader).
  */
-const [database, site] = process.argv.slice(2) as [string, string];
+const [database, site, port] = process.argv.slice(2) as [string, string, string?];
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
@@ -34,8 +36,11 @@ await engine.execute(coordinator, 'session', item.id, { id: 'worker-1', kind: 'i
   pane: 'w1:worker', attach: 'herdr pane attach w1:worker --workspace w1', subject: `${item.key}: Watch a worker`, state: 'running', observed: 'working', observedAt: new Date().toISOString() }, randomUUID());
 // The dashboard is served from ./dist, as an install serves it.
 process.chdir(site);
-http.listen(0, '127.0.0.1', () => process.send!({ url: `http://127.0.0.1:${(http.address() as { port: number }).port}` }));
+http.listen(port ? Number(port) : 0, '127.0.0.1', () => process.send!({ url: `http://127.0.0.1:${(http.address() as { port: number }).port}` }));
 const sockets = new Set<import('node:stream').Duplex>();
 http.on('upgrade', (req, socket) => { if (req.url?.startsWith('/api/terminal?')) { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); } });
+// A stop drops any live terminal socket too — an upgraded connection survives closeAllConnections, and a
+// page still open would hold the server open; its terminal reconnects, as it does across a real deploy.
 process.on('message', (message) => { if (message === 'drop-terminals') { for (const socket of sockets) socket.destroy(); return; }
+ for (const socket of sockets) socket.destroy();
  http.close(() => { void store.close().finally(() => process.exit(0)); }); http.closeAllConnections(); });

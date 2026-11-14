@@ -1,9 +1,9 @@
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
-import { sections, viewFor, visibleViews, type View } from '../pages';
+import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { cityCounts } from '../city';
-import { Playful, useFun } from '../fun';
+import { useFun } from '../fun';
 import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
@@ -115,9 +115,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
   const section = viewFor(view).section;
   const pages = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   const tabs = pages.filter(page => !page.advanced), advanced = pages.filter(page => page.advanced);
-  // A section's own page reads as its sidebar entry does, so Fun's "The Chief" names the Master tab too.
-  const named = sections.find(entry => entry.id === section && 'fun' in entry);
-  const tab = (page: View) => { const term = meaning(page.label); return <button key={page.id} type="button" className={page.id === view ? 'tab active' : 'tab'} aria-current={page.id === view ? 'page' : undefined} onClick={() => setView(page.id)}>{named && 'fun' in named && page.id === named.id ? <Playful plain={page.label} fun={named.fun}/> : term ? <Term term={term} focusable={false}>{page.label}</Term> : page.label}</button>; };
+  const tab = (page: View) => { const term = meaning(page.label); return <button key={page.id} type="button" className={page.id === view ? 'tab active' : 'tab'} aria-current={page.id === view ? 'page' : undefined} onClick={() => setView(page.id)}>{term ? <Term term={term} focusable={false}>{page.label}</Term> : page.label}</button>; };
   return <div className="top-bar">
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}

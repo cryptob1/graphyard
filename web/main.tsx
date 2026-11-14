@@ -109,6 +109,12 @@ function App() {
     void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
     return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
+  // The browser tab names the project it serves (GY-3306): gh · OWNER/REPO from the same status
+  // reply the header's project name renders, so an operator's tabs tell installs apart. Graphyard
+  // stands until that identity arrives — and returns on sign-out — so a tab is never untitled,
+  // undefined, or a stale other project's name.
+  const project = typeof status?.repository === 'string' && status.repository ? status.repository : null;
+  useEffect(() => { document.title = project ? `gh · ${project}` : 'Graphyard'; }, [project]);
   useEffect(() => { setEvents([]); setEditingRequirements(false); window.scrollTo?.(0, 0); }, [selected, token]);
   // A read answered while the same item is still open is kept even when a work poll re-ran the effect meanwhile, so a later failed read never leaves history empty.
   const selectedRef = useRef(selected); selectedRef.current = selected;
@@ -137,6 +143,15 @@ function App() {
     {creating && <CreateWork {...dashboard}/>}
     {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
+    <VersionLabel status={status}/>
   </div>;
+}
+/** GY-3310: the version and serving commit each status poll reports, in the bottom-left corner; nothing until one is known. */
+function VersionLabel({ status }: { status: any }) {
+  const commit: string | undefined = status.build?.commit;
+  const version: string | undefined = status.release?.version && !status.release.version.startsWith('unreleased') ? status.release.version : undefined;
+  const parts = [version && `v${version}`, commit && commit.slice(0, 7)].filter(Boolean);
+  if (!parts.length) return null;
+  return <span className="version-label" title={commit}>Graphyard {parts.join(' · ')}</span>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

@@ -18,9 +18,11 @@ import type { DaemonState, FailureRun } from './state.js';
 /** The cursor key of an item's early-exit incident (worker-launch-health.ts records it). */
 export const earlyExitKey = (item: Pick<Work, 'id'>) => `early-exit:${item.id}`;
 
+export const leaseLossReason = 'worker exited after lease loss or refusal (missing, expired, or superseded)';
+
 export type FailureKind = FailureRun['kind'];
 export interface Failure { id: string; kind: FailureKind; reason: string }
-const labels: Record<FailureKind, string> = { launch: 'launch failure', trial: 'merge trial refusal', review: 'review refusal' };
+const labels: Record<FailureKind, string> = { launch: 'launch failure', trial: 'merge trial refusal', review: 'review refusal', lease: 'lease loss' };
 
 /** The names stripped before hashing: every worker profile's name, principal, agent name and accounts. */
 export const accountNames = (workers: readonly Pick<WorkerProfile, 'name' | 'principal' | 'agentName' | 'accounts'>[]) =>
@@ -47,7 +49,11 @@ export const failureSignature = (kind: FailureKind, reason: string, accounts: re
 export function itemFailures(item: Work, actions: DaemonState['actions']): Failure[] {
   const failures: Failure[] = [];
   const exit = actions[earlyExitKey(item)];
-  if (exit?.state === 'failed') failures.push({ id: `launch:exit:${exit.epoch}`, kind: 'launch', reason: exit.detail });
+  if (exit?.state === 'failed') {
+    const lost = exit.detail.includes(leaseLossReason) || exit.detail.includes('Lease missing, expired, or superseded');
+    failures.push({ id: `launch:exit:${exit.epoch}`, kind: lost ? 'lease' : 'launch',
+      reason: lost ? `${item.key} epoch ${exit.epoch}: ${leaseLossReason}` : exit.detail });
+  }
   const ledger = item.mergeLedger;
   if (ledger?.state === 'refused' && ledger.refusal?.kind === 'merge' && ledger.refusal.reason.startsWith(trialFailurePrefix))
     failures.push({ id: `trial:${ledger.head}:${ledger.intentAt}`, kind: 'trial', reason: ledger.refusal.reason });
@@ -64,7 +70,7 @@ const marks = (item: Work) => ({ rework: item.lastRework?.at ?? null, handedIn: 
 function runEnded(item: Work, run: FailureRun): boolean {
   const rework = item.lastRework;
   if (rework && !rework.binding && rework.at !== run.rework) return true;
-  if (run.kind === 'launch') return handedIn(item) !== run.handedIn;
+  if (run.kind === 'launch' || run.kind === 'lease') return handedIn(item) !== run.handedIn;
   if (run.kind === 'trial') return item.mergeLedger?.state === 'pushed' || item.mergeLedger?.state === 'reconciled';
   return !!item.gates.find(gate => gate.name === 'review')?.passed;
 }
@@ -90,8 +96,8 @@ export function advanceFailureRuns(state: DaemonState, work: readonly Work[], ac
   }
 }
 
-/** The third equal failure: the loop dispatches the item no more until the run ends. */
-export const failureHeld = (run: FailureRun | undefined) => (run?.count ?? 0) >= 3;
+/** Two lease losses or three other equal failures hold dispatch until the run ends. */
+export const failureHeld = (run: FailureRun | undefined) => (run?.count ?? 0) >= (run?.kind === 'lease' ? 2 : 3);
 const repeating = (run: FailureRun | undefined): run is FailureRun => (run?.count ?? 0) >= 2;
 const quoted = (run: FailureRun) => run.reasons.map((reason, index) => `(${index + 1}) ${reason}`).join(' ');
 
@@ -101,7 +107,7 @@ export function repeatedFailureCause(run: FailureRun | undefined): { key: string
   const key = `repeat:${createHash('sha1').update(`${run.key}:${run.signature}`).digest('hex')}`;
   const label = labels[run.kind];
   return failureHeld(run)
-    ? { key, detail: `${run.key}: the same ${label} a third time; the loop stopped dispatching it. Decide: resume it with node graphyard master rework ${run.key} REASON naming a different approach, or close or park it. The last two: ${quoted(run)}` }
+    ? { key, detail: `${run.key}: the same ${label} ${run.kind === 'lease' ? 'twice' : 'a third time'}; the loop stopped dispatching it. Decide: resume it with node graphyard master rework ${run.key} REASON naming a different approach, or close or park it. The last two: ${quoted(run)}` }
     : { key, detail: `${run.key}: the same ${label} twice; its next worker is asked to state a diagnosis and a different approach before changing code. Both: ${quoted(run)}` };
 }
 

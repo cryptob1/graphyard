@@ -346,7 +346,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const confinementCredential = { ownGitHubCredential: false, secretsBus: null };
     // The operator's credential locations are hidden from this session (GY-1856): the config home
     // wholesale, the deployment and configured mask paths, while its own token and runtime login stay.
-    const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+    const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable, launch.kind) });
     // The worker writes its worktree, the worktree's own Git admin directory, the common Git
     // directory (GY-2977: packed-refs lock) and the shared Git paths the coordinator confinement
     // re-exposes; each is granted to the runtime's sandbox, and the grant is proved below before
