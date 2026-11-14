@@ -55,19 +55,19 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
   expect(LINES).toContain(await line.textContent());
   await expect(shipped(page)).toHaveAttribute('data-shipped-today', '0');
 
-  // The item history names the same account the same way, and the master as the Chief.
+  // The item history names the same account the same way, and the master as the Master.
   await page.getByRole('button', { name: /Change priority from the dashboard.*GY-1/ }).click();
   await page.locator('.full-history > summary').click();
   const history = page.getByRole('region', { name: 'History entries' });
   await expect(history.locator(`[data-agent="${builder}"]`)).toHaveText(name);
-  await expect(history.locator(`[data-agent="${master}"]`)).toHaveText('the Chief');
+  await expect(history.locator(`[data-agent="${master}"]`)).toHaveText('the Master');
   await expect(history.locator(`[data-agent="${builder}"]`)).toHaveAttribute('title', builder);
 
-  // The Workers page: the same name for the same account, the master as the Chief.
+  // The Workers page: the same name for the same account, the master as the Master.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   const sessions = page.getByRole('table', { name: 'Agent sessions' });
   await expect(sessions.locator(`[data-agent="${builder}"]`).first()).toHaveText(name);
-  await expect(sessions.locator(`[data-agent="${master}"]`).first()).toHaveText('the Chief');
+  await expect(sessions.locator(`[data-agent="${master}"]`).first()).toHaveText('the Master');
 
   // GY-1 merges while the page is open: a toast names its builder, confetti runs, and Shipped today counts it.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Work', exact: true }).click();

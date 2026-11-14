@@ -27,9 +27,9 @@ const NAMES = ['Ada', 'Juno', 'Pixel', 'Milo', 'Nova', 'Otto', 'Iris', 'Felix', 
 const isMaster = (id: string) => /master/.test(id);
 /** Ids that are not an agent account: Graphyard itself and the people who run it keep their own names. */
 const unnamed = (id: string) => id === 'graphyard' || /operator|admin|human/.test(id);
-/** An account's friendly name: the same on every page and every install, from its id alone. The master is always the Chief. */
+/** An account's friendly name: the same on every page and every install, from its id alone. A master account is always the Master. */
 export function friendlyName(id: string): string | null {
-  if (isMaster(id)) return 'the Chief';
+  if (isMaster(id)) return 'the Master';
   if (unnamed(id)) return null;
   let hash = 2166136261;
   for (const char of id) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
@@ -37,7 +37,7 @@ export function friendlyName(id: string): string | null {
 }
 /** An account as the dashboard names it: its friendly name with the account id on hover, or the id itself with Fun off. */
 export function Agent({ id, master, detail }: { id: string; master?: boolean; detail?: string }) {
-  const fun = useFun(), name = fun ? (master ? 'the Chief' : friendlyName(id)) : null;
+  const fun = useFun(), name = fun ? (master ? 'the Master' : friendlyName(id)) : null;
   return <span className="agent" data-agent={id} title={detail ? `${id} · ${detail}` : id}>{name ?? id}</span>;
 }
 

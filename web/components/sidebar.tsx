@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { sections, viewFor, type primaryEntry } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
-import { Playful, setFun, useFun } from '../fun';
+import { setFun, useFun } from '../fun';
 import { setTheme, useTheme } from '../theme';
 
 type Entry = NonNullable<ReturnType<typeof primaryEntry>>;
@@ -40,7 +40,7 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
       const entry = entries.find(candidate => candidate?.id === section.id);
       if (!entry) return null;
       const active = current === entry.id;
-      return <button key={entry.id} type="button" data-nav={entry.id} className={active ? 'nav active' : 'nav'} aria-current={active ? 'page' : undefined} onClick={() => go(entry.view.id)}><NavIcon name={section.icon}/><span>{'fun' in section ? <Playful plain={section.label} fun={section.fun}/> : entry.label}</span></button>;
+      return <button key={entry.id} type="button" data-nav={entry.id} className={active ? 'nav active' : 'nav'} aria-current={active ? 'page' : undefined} onClick={() => go(entry.view.id)}><NavIcon name={section.icon}/><span>{entry.label}</span></button>;
     })}</nav>
     <div className="sidebar-bottom">
       <span className="connection"><span className={`dot ${connected ? 'live' : ''}`}/>{connected ? `Live · updated ${lastUpdated ?? 'now'}` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</span>

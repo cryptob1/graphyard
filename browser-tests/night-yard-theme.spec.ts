@@ -95,14 +95,14 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   expect(await background(page)).toEqual([7, 11, 20]);
   expect(await rain(page)).toBe('gy-rain');
   expect(await grain(page)).toContain('svg');
-  // AC-5: the playful copy names the master the Chief and the agents runners; plain labels keep their words.
+  // AC-5: the playful copy names the agents runners; plain labels keep their words, and the Master page's title reads Master either way (GY-3307).
   await expect(page.locator('.city-strip')).toContainText('runners on shift');
   await expect(page.locator('[data-row="GY-14"] .row-who')).toContainText('Theo is running GY-14');
   await page.keyboard.press('Control+k');
   await page.getByLabel('Search commands').fill('Master');
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
-  // The playful names are Fun's: with Fun off the page is Master again, and the strip and the row use the app's own words.
+  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
+  // The playful names are Fun's: with Fun off the strip and the row use the app's own words, and the title stays Master.
   await page.getByRole('button', { name: 'Fun', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
   await expect(page.locator('.city-strip')).toContainText('agents working');
