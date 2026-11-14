@@ -1,23 +1,29 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Work } from '../../src/model';
-import { sessionStaleThresholdMs, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
+import { sessionStaleThresholdMs, sessionState, workersView, type PrincipalSummary, type SessionRoleKind, type WorkerRow } from '../workers-view';
 import { prSteps } from '../../src/model/pr-steps';
 import { transcriptRun } from '../../src/model/sessions';
 import { releaseView, type ReleaseView } from '../../src/model/release';
 import type { Dashboard } from './dashboard';
 import DeliverySlices from '../components/delivery-slices';
+import LiveRun from '../components/live-run';
 import { shortShas } from '../candidate';
 import { Agent } from '../fun';
 
 /**
- * The Workers tab (GY-116, redrawn to the design in GY-161): every agent session across every item
- * — who it is, what it is on, how long it has spent, and the command that attaches to it — read
- * for triage: open sessions first by time spent, ended ones and the per-account summary folded.
+ * The Workers tab (GY-116, one compact line per agent since GY-3314): every agent session across
+ * every item in one table of at most 44 px rows — the agent, its item with a truncated title, a
+ * state of at most three words and how long it has held it — open sessions first by time spent,
+ * ended ones and the per-account summary folded.
  *
  * A row is a session handle the item carries (src/model/sessions.ts), not a Herdr listing: the
  * page draws what the control plane recorded and never asks a runtime. What the derivation is —
- * the stale threshold, the two attach forms, the order — lives in `workersView`, so a test
- * asserts it over a fixture without a browser (web/workers-view.ts).
+ * the stale threshold, the two attach forms, the order, the state words — lives in
+ * `workersView` and `sessionState` (web/workers-view.ts), so a test asserts it over a fixture
+ * without a browser. Opening a row unfolds that session below it: a live, read-only view of a
+ * headless run's output (its run log, the same data the item page reads), the attach commands for
+ * a pane session, and nothing that can type into any of them. The master's row opens the Master
+ * page instead (GY-3314).
  */
 
 /** Time spent to the second, so a running row is seen to tick: `1h 02m 09s`, `4m 30s`, `12s`. */
@@ -85,23 +91,11 @@ export function health(row: WorkerRow, now: number): { tone: 'live' | 'stale' | 
   return { tone: 'ended', text: 'Finished' };
 }
 
+/** The health as a row carries it (GY-3314): one coloured dot beside the name, its sentence on hover. */
 function Health({ row, now }: { row: WorkerRow; now: number }) {
   const { tone, text } = health(row, now);
   return <span className={`health ${tone}`} data-health={tone} data-stale={row.stale ? row.id : undefined}
-    data-reconciled={row.reconciled ?? undefined} title={row.outcome ? shortShas(row.outcome) : undefined}><span className="health-dot" aria-hidden="true"/>{text}</span>;
-}
-
-function Attach({ row, open }: { row: WorkerRow; open(): void }) {
-  // A headless worker's output is its run log, on its item's page (GY-3259).
-  if (transcriptRun(row.transcript)) return <span className="attach"><button type="button" className="text-button" onClick={open}>Run log</button></span>;
-  if (row.state === 'running' && !row.leftOn) {
-    if (!row.local) return <span className="muted">no attach command recorded</span>;
-    return <span className="attach">
-      <CopyButton text={row.local} label="Copy local"/>
-      {row.remote ? <CopyButton text={row.remote} label="Copy remote"/> : <span className="muted">no remote form</span>}
-    </span>;
-  }
-  return row.transcript ? <CopyButton text={row.transcript} label="Copy transcript path"/> : <span className="muted">no transcript recorded</span>;
+    data-reconciled={row.reconciled ?? undefined} title={`${text}${row.outcome ? ` · ${shortShas(row.outcome)}` : ''}`}><span className="health-dot" aria-hidden="true"/></span>;
 }
 
 /** What the session is doing now: a builder by its item's current step, anyone else by what it was launched for, an ended one by how it ended. */
@@ -112,30 +106,62 @@ function doing(row: WorkerRow, item: Work | undefined, now: number, release: Rel
   return shortShas(row.subject);
 }
 
-/** Since when, relative to now: a running session by when it started, an ended one by when it ended and how long it ran. */
-function since(row: WorkerRow, now: number) {
-  if (row.leftOn) return <>last seen {ago(row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
-  if (row.state === 'running') return <>started <span className="spent">{spent(row.spentMs)}</span> ago</>;
-  return <>ended {ago(row.endedAt ?? row.updatedAt, now)} · ran <span className="spent">{spent(row.spentMs)}</span></>;
+/**
+ * What an unfolded session shows beside its output: the attach commands for a session in a pane
+ * (the launcher's own form and the remote one built from its host), and a transcript path for an
+ * ended session that kept one. A headless run shows its log instead (`LiveRun`); a row that
+ * recorded neither says so rather than offering something that cannot work.
+ */
+function Attach({ row }: { row: WorkerRow }) {
+  if (row.state === 'running' && !row.leftOn) {
+    if (!row.local) return <p className="muted">no attach command recorded</p>;
+    return <p className="attach">
+      <CopyButton text={row.local} label="Copy local"/>
+      {row.remote ? <CopyButton text={row.remote} label="Copy remote"/> : <span className="muted">no remote form</span>}
+    </p>;
+  }
+  return row.transcript ? <p className="attach"><CopyButton text={row.transcript} label="Copy transcript path"/></p> : <p className="muted">no transcript recorded</p>;
 }
 
-function Row({ row, item, now, release, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
-  return <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined}>
-    <th scope="row" data-label="Agent"><span className="agent-name"><Agent id={row.principal} master={row.roleKind === 'master'} detail={`${row.runtime} on ${row.host}`}/></span><Attach row={row} open={() => setSelected(row.workId)}/></th>
-    <td data-label="Role">{roleWords[row.roleKind]}</td>
-    <td data-label="Working on"><button type="button" className="text-button" title={shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button></td>
-    <td data-label="Doing now">{doing(row, item, now, release)}</td>
-    <td data-label="Since" data-spent={row.spentMs}>{since(row, now)}</td>
-    <td data-label="Health"><Health row={row} now={now}/></td>
-  </tr>;
+/**
+ * The session's own view, unfolded under its row (GY-3314): the full title and the doing sentence
+ * the row truncates, then the live read-only output of a headless run — following its tail — or
+ * the attach commands of a pane session. Nothing here can type into anything.
+ */
+export function SessionPanel({ row, item, now, release, token, setSelected }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; token: string; setSelected(id: string | null): void }) {
+  const run = transcriptRun(row.transcript);
+  return <tr className="session-view" data-view-of={row.id}><td colSpan={4}>
+    <div className="session-head">
+      <button type="button" className="text-button session-item" title={item?.title ?? shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button>
+      <span className="muted">{doing(row, item, now, release)} · {row.runtime} on {row.host}</span>
+    </div>
+    {run ? <LiveRun workId={row.workId} run={run} token={token} live={row.state === 'running' && !row.stale && !row.leftOn}/> : <Attach row={row}/>}
+  </td></tr>;
 }
 
-const columns = ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health'];
-function Table({ rows, label, work, now, release, setSelected }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; setSelected(id: string | null): void }) {
+function Row({ row, item, now, release, open, setOpen, token, setSelected, setView }: { row: WorkerRow; item?: Work; now: number; release: ReleaseView; open: string | null; setOpen(id: string | null): void; token: string; setSelected(id: string | null): void; setView(view: string): void }) {
+  const state = sessionState(row, item, now);
+  // The master's row is the one exception: it opens the Master page, where its terminal lives.
+  const master = row.roleKind === 'master';
+  const unfold = () => master ? setView('master') : setOpen(open === row.id ? null : row.id);
+  return <>
+    <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined} onClick={unfold}>
+      <th scope="row" data-label="Agent"><span className="agent-name"><Health row={row} now={now}/><Agent id={row.principal} master={master} detail={`${row.runtime} on ${row.host}`}/></span></th>
+      <td data-label="Working on"><button type="button" className="text-button row-open" aria-expanded={master ? undefined : open === row.id} title={item?.title ?? shortShas(row.subject)} onClick={event => { event.stopPropagation(); unfold(); }}><span className="mono">{row.key}</span> <span className="row-title">{item ? item.title : shortShas(row.subject)}</span></button></td>
+      <td data-label="State" data-state={state.words}>{state.words}</td>
+      <td data-label="Age" data-since={state.since}><span className="spent">{spent(now - Date.parse(state.since))}</span></td>
+    </tr>
+    {open === row.id && <SessionPanel key={`${row.id}:view`} row={row} item={item} now={now} release={release} token={token} setSelected={setSelected}/>}
+  </>;
+}
+
+const columns = ['Agent', 'Working on', 'State', 'Age'];
+function Table({ rows, label, work, now, release, open, setOpen, token, setSelected, setView }: { rows: WorkerRow[]; label: string; work: Work[]; now: number; release: ReleaseView; open: string | null; setOpen(id: string | null): void; token: string; setSelected(id: string | null): void; setView(view: string): void }) {
   const byId = new Map(work.map(item => [item.id, item]));
-  return <table className="sessions-table" aria-label={label}>
+  return <table className="sessions-table workers" aria-label={label}>
+    <colgroup><col className="col-agent"/><col/><col className="col-state"/><col className="col-age"/></colgroup>
     <thead><tr>{columns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
-    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} setSelected={setSelected}/>)}</tbody>
+    <tbody>{rows.map(row => <Row key={`${row.workId}:${row.id}`} row={row} item={byId.get(row.workId)} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>)}</tbody>
   </table>;
 }
 
@@ -188,24 +214,27 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
 }
 
 /**
- * The Workers page (GY-161, design/dashboard/Workers.dc.html): one table of the agent sessions
- * open now — the agent, its role in plain words, the item it works on, what it is doing, since
- * when, and its health — with the sessions that ended and the per-account summary folded below.
+ * The Workers page (GY-161, one compact line per agent since GY-3314): one table of the agent
+ * sessions open now — the agent, its item with a truncated title, its state of at most three
+ * words and how long it has held it — where each row unfolds its session's live, read-only view,
+ * with the sessions that ended and the per-account summary folded below.
  */
-export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
+export default function WorkersPage({ work, observedAt, setSelected, setView, token, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected' | 'setView' | 'token'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
   const release = releaseView(status);
   const view = workersView(work, new Date(now), undefined, release);
+  const [open, setOpen] = useState<string | null>(null);
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
-  const open = view.running.length - stale;
+  const openCount = view.running.length - stale;
+  const table = (rows: WorkerRow[], label: string) => <Table rows={rows} label={label} work={work} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>;
   return <>
-    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
-    {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
-    <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
+    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{openCount} agent {openCount === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
+    {view.running.length ? table(view.running, 'Agent sessions') : <p className="muted">No agent session is open.</p>}
+    <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
     <ProjectMemorySection memory={status?.projectMemory}/>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
-      {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
+      {view.finished.length ? table(view.finished, 'Ended sessions') : <p className="muted">No session has ended yet.</p>}
     </details>
     <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
       {view.principals.length ? <Accounts principals={view.principals} setSelected={setSelected}/> : <p className="muted">No agent has worked here yet.</p>}

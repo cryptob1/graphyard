@@ -74,12 +74,16 @@ test('unit:ui-reads-session-state — the Workers page and its counts show a ses
 
   const html = renderToStaticMarkup(createElement(WorkersPage, dashboard(work)));
   assert.match(html, /2 agent sessions open\. 1 not seen recently\. 2 ended\./, 'the counts are the same reading');
-  assert.match(rowOf(html, 'working'), /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Seen 1m 00s ago<\/span>/, 'seen at the observation, not at the forty-minute-old write');
-  assert.match(rowOf(html, 'idle'), /data-health="live"[^>]*>.*Seen 2m 00s ago · at its prompt<\/span>/, 'idle is running, and says it waits at its prompt');
-  assert.match(rowOf(html, 'stale'), /data-health="stale"[^>]*>.*Not seen for 20m 00s<\/span>/, 'not seen since its last observation, whatever wrote the record since');
-  assert.doesNotMatch(rowOf(html, 'stale'), /data-health="live"|>Seen \d|running/);
-  assert.match(rowOf(html, 'shell'), /Ended · its agent exited/);
-  assert.match(rowOf(html, 'lost'), /Ended · stopped responding/);
+  assert.match(rowOf(html, 'working'), /data-health="live"[^>]*title="Seen 1m 00s ago"/, 'seen at the observation, not at the forty-minute-old write');
+  assert.match(rowOf(html, 'idle'), /data-health="live"[^>]*title="Seen 2m 00s ago · at its prompt"/, 'idle is running, and says it waits at its prompt');
+  assert.match(rowOf(html, 'idle'), /data-state="In review"/);
+  assert.match(rowOf(html, 'stale'), /data-state="Not seen"/);
+  assert.match(rowOf(html, 'stale'), /data-health="stale"[^>]*title="Not seen for 20m 00s"/, 'not seen since its last observation, whatever wrote the record since');
+  assert.doesNotMatch(rowOf(html, 'stale'), /data-health="live"|>Seen \d|data-state="(Building|In review)"/);
+  assert.match(rowOf(html, 'shell'), /data-state="Ended"/);
+  assert.match(rowOf(html, 'shell'), /data-health="ended"[^>]*title="Ended · its agent exited"/);
+  assert.match(rowOf(html, 'lost'), /data-state="Ended"/);
+  assert.match(rowOf(html, 'lost'), /data-health="ended"[^>]*title="Ended · stopped responding/);
   const open = html.slice(0, html.indexOf('<details class="finished-sessions">'));
   assert.ok(!open.includes('data-session="shell"') && !open.includes('data-session="lost"'), 'ended and lost sessions are never in the open table');
 });
