@@ -2,12 +2,12 @@ import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../private-file.js';
-import { cliRelease } from '../release.js';
+import { cliRelease, releaseIdentityPath } from '../release.js';
 import { cliCommit } from '../protocol-version.js';
 import { verificationRequest } from './verification-request.js';
 
@@ -30,7 +30,13 @@ export const versionSkewMessage = (cliRelease: string, serverRelease: string) =>
 export const leaseCommands = new Set(['heartbeat', 'claim', 'complete', 'blocked', 'defer']);
 
 /** What each side of a CLI request runs: the stamped release version, and the commit an unreleased build runs. */
-export interface ReleaseIdentity { version: string; released: boolean; commit: string | null }
+export interface ReleaseIdentity { version: string; released: boolean; commit: string | null; unreadable?: string }
+
+/** GY-3317: the refusal of a CLI that can read no release of its own: the file it looked for, and the command that records it. */
+export const unreadableReleaseMessage = (root: string) => {
+  const file = releaseIdentityPath(root), name = basename(root);
+  return `This CLI cannot read its own release: ${root} is no readable Git checkout and ${file} is missing; record it with: printf %s ${commitPattern.test(name) ? name : '<commit>'} > ${file}`;
+};
 
 /**
  * Why this CLI refuses its server, or null. A server that names no release says nothing about
@@ -45,6 +51,7 @@ export function releaseSkew(cli: ReleaseIdentity, server: { version?: unknown; c
   const serverVersion = typeof server.version === 'string' && server.version.trim() ? server.version.trim() : null;
   if (!serverVersion) return null;
   if (!cli.released) {
+    if (!cli.commit && cli.unreadable) return cli.unreadable;
     const raw = typeof server.commit === 'string' ? server.commit.trim().toLowerCase() : null;
     const serverCommit = raw && commitPattern.test(raw) ? raw : null;
     if (cli.commit && serverCommit) return cli.commit === serverCommit ? null : versionSkewMessage(`commit ${cli.commit}`, `commit ${serverCommit}`);
@@ -54,8 +61,9 @@ export function releaseSkew(cli: ReleaseIdentity, server: { version?: unknown; c
 
 /** This CLI's own release: the same release `graphyard version` reports and /healthz serves (src/release.ts cliRelease), so both sides compare like with like. Its commit is the checkout this file runs from, what an unreleased build compares. */
 const thisRelease = (): ReleaseIdentity => {
-  const release = cliRelease();
-  return { version: release.version, released: release.released, commit: cliCommit(fileURLToPath(new URL('../../', import.meta.url))) };
+  const release = cliRelease(), root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+  const commit = cliCommit(root) ?? (commitPattern.test(release.revision) ? release.revision.toLowerCase() : null);
+  return { version: release.version, released: release.released, commit, unreadable: commit ? undefined : unreadableReleaseMessage(root) };
 };
 
 /** The release /healthz serves — no credential needed — or null when it cannot be read or names none. */

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 /**
  * `package.json`'s version. It is no longer the release: every candidate production promotes is
@@ -90,8 +91,17 @@ export function stampedRelease(env: NodeJS.ProcessEnv, revisionOf: () => string)
 
 /** The Graphyard installation this code runs from. */
 export const installationRoot = fileURLToPath(new URL('..', import.meta.url));
+/**
+ * GY-3317: the commit a CLI release tree recorded when it was created (bin/cli-release.mjs). A
+ * release is a Git worktree whose `.git` names the source checkout of the host that made it, so a
+ * tree copied to another host cannot be read by Git; this file still names the code it holds.
+ */
+export const releaseIdentityPath = (root: string) => join(root, '.graphyard', 'cli-ready');
+export const recordedCommit = (root: string) => {
+  try { const value = readFileSync(releaseIdentityPath(root), 'utf8').trim(); return /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : null; } catch { return null; }
+};
 let ownCheckout: Release | undefined;
-const checkout = () => ownCheckout ??= checkoutRelease(installationRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
+const checkout = () => ownCheckout ??= checkoutRelease(installationRoot, process.env.GRAPHYARD_BUILD_REVISION || recordedCommit(installationRoot) || 'unknown');
 /**
  * This process's release, which `graphyard version`, `/healthz` and the install defaults all report:
  * the build's stamp when it has one, else the checkout's dated tag or `unreleased <sha>` (read once).
