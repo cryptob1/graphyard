@@ -29,6 +29,6 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 
 ## Gotchas
 
-- `tests/barrel-imports.test.ts`: only CLI source may import `src/master.ts`; otherwise import owners directly. Daemon exports live in `src/daemon/*`; `src/master-daemon.ts` is removed.
+- `tests/barrel-imports.test.ts`: only CLI source imports `src/master.ts`; otherwise import owners directly. Daemon exports live in `src/daemon/*`; `src/master-daemon.ts` is removed.
 - Prompt changes break exact-text assertions; grep the sentence first.
 - A generated prompt never names `/tmp`.
