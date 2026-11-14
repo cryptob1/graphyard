@@ -18,7 +18,7 @@ Prerequisites (Linux host): Linux 7.0+ with Landlock ABI 9+ (`uname -r`); Node/n
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. Workers and reviewers run headless, logged per item (`graphyard guide runtimes`). Org blocks deploy keys? `--push-auth gh` pushes with your gh login. Watch: `graphyard master status`; update: `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in. Setup invites (`graphyard guide infra`).
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. Workers and reviewers run headless, logged per item (`graphyard guide runtimes`). Org blocks deploy keys? Use `--push-auth gh`. Watch: `graphyard master status`; update: `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in. A share reaches the machine; Setup invites (`graphyard guide infra`).
 
 ## Where things run
 

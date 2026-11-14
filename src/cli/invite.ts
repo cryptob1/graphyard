@@ -19,8 +19,10 @@ export const inviteCommand: CliCommand = {
     if (!name || positionals.length > (revoke ? 2 : 1) || (!revoke && !values.role)) throw new Error('Usage: graphyard invite NAME --role viewer|maintainer, or graphyard invite revoke NAME');
     const recorded = await asRecordedOperator(context.repositoryRoot());
     if (revoke) return context.print(await context.api(`invites/${encodeURIComponent(name)}/revoke`, {}));
-    const link = await context.api('invites', { name, role: values.role }) as { code: string; principal: string; role: string; expiresAt: string };
+    // GY-3294: the machine's reusable Tailscale share link goes with it (Setup alone makes single-use device invites).
+    const link = await context.api('invites', { name, role: values.role, share: 'reusable' }) as { code: string; principal: string; role: string; expiresAt: string; message?: string | null; missing?: string | null };
     return context.print({ invite: `${(recorded?.reachableUrl ?? context.base).replace(/\/+$/, '')}/#sign-in=${link.code}`, teammate: link.principal, role: link.role, expiresAt: link.expiresAt, singleUse: true,
+      ...(link.message ? { message: link.message } : link.missing ? { missing: link.missing } : {}),
       next: `Send this link to ${link.principal}; it opens their own session, which renews itself until 90 days unused` });
   },
 };
