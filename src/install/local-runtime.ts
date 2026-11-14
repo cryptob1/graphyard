@@ -11,9 +11,9 @@
 // and exits the process on SIGTERM, which would stop Postgres before the store has closed.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, symlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { Store } from '../store.js';
@@ -62,7 +62,31 @@ export async function postgresBinaries(): Promise<PostgresBinaries> {
   const file = createRequire(import.meta.resolve('embedded-postgres')).resolve(name);
   const located = await import(pathToFileURL(file).href) as { initdb?: string; postgres?: string };
   if (!located.initdb || !located.postgres || !existsSync(located.initdb) || !existsSync(located.postgres)) throw new Error(`${name} does not ship initdb and postgres for this platform`);
+  await hydratePostgresLibraries({ postgres: located.postgres });
   return { package: name, initdb: located.initdb, postgres: located.postgres };
+}
+
+/**
+ * The Postgres binaries load their bundled libraries (libicui18n.so.60 and its kin) through
+ * symlinks the package's own postinstall creates from native/pg-symlinks.json — and an install
+ * whose lifecycle scripts never ran leaves them unlaunchable (`error while loading shared
+ * libraries: libicui18n.so.60`). npm's install-scripts allowlist skips the script silently, so
+ * every database-backed test and the local provider's own cluster die on a fresh worktree or
+ * install (GY-3305: a recurring browser-suite failure whose records kept only teardown noise).
+ * Resolving the binaries hydrates any missing link exactly as the postinstall would, relative
+ * target like its own; where it ran, or where the tree is read-only with the links already there,
+ * this changes nothing and a link it cannot make is left to the error the binary will name.
+ */
+export async function hydratePostgresLibraries(binaries: Pick<PostgresBinaries, 'postgres'>): Promise<void> {
+  const root = resolve(dirname(binaries.postgres), '..', '..');
+  const links = await readFile(join(root, 'native', 'pg-symlinks.json'), 'utf8')
+    .then(text => { const parsed = JSON.parse(text) as unknown; return Array.isArray(parsed) ? parsed as { source?: unknown; target?: unknown }[] : []; })
+    .catch(() => [] as { source?: unknown; target?: unknown }[]);
+  for (const { source, target } of links) {
+    if (typeof source !== 'string' || typeof target !== 'string' || !source || !target) continue;
+    const link = join(root, target);
+    if (!existsSync(link) && existsSync(join(root, source))) await symlink(basename(source), link).catch(() => {});
+  }
 }
 
 export const clusterExists = (paths: LocalPaths) => existsSync(join(paths.data, 'PG_VERSION'));

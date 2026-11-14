@@ -32,7 +32,15 @@ async function trialFailures(reads: MergeWriterReads, commit: string, checks: re
   const failed = [...(run.build === 'fail' ? ['build'] : []),
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
-  const details = Object.fromEntries((run.e2e ?? []).filter(entry => entry.failingStep).map(entry => [entry.proof, entry.failingStep!]));
+  // GY-3305: a failing test check keeps its own identity in the record's detail — the browser
+  // suite's failing spec, test and error from the trial's verdict — and one whose run named no
+  // failing test says so explicitly: teardown warnings can neither crowd it out of the tail nor
+  // pass for a diagnosis that was never made.
+  const testDetail = run.failingCase ?? (run.tests.failed.length ? 'the run named no failing test or error: nothing in its output establishes a cause' : null);
+  const details = Object.fromEntries([
+    ...(run.e2e ?? []).filter(entry => entry.failingStep).map(entry => [entry.proof, entry.failingStep!]),
+    ...(testDetail ? run.tests.failed.slice(0, 1).map(file => [`test:${file}`, testDetail]) : []),
+  ]);
   const logTail = (run.logTail ?? '').split('\n').filter(line => line.trim()).slice(-outputLines);
   const outputs = Object.fromEntries([...(run.e2e ?? []).filter(entry => entry.output?.length).map(entry => [entry.proof, entry.output!.slice(-outputLines)]),
     ...failed.filter(check => !check.startsWith('e2e:') && logTail.length).map(check => [check, logTail])]);
@@ -101,7 +109,9 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       const previews = reads.gate?.previews;
       const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
         : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
-      return { failed: [...new Set([...suite.failed, ...failed])], catalogMs, previewCases, details, outputs: { ...suite.outputs, ...outputs } };
+      // GY-3305: the suite trial's details ride with the catalog's — a failing test check (the browser
+      // suite among them) keeps its identity whichever trial named it.
+      return { failed: [...new Set([...suite.failed, ...failed])], catalogMs, previewCases, details: { ...suite.details, ...details }, outputs: { ...suite.outputs, ...outputs } };
     },
   };
 }

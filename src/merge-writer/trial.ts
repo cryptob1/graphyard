@@ -732,6 +732,25 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
         return useful.slice(0, Math.max(0, perEntry)).trimEnd();
       }).join('\n')}${end}`;
     }
+    // GY-3305: a Playwright run keeps each failing test's heading, its error's first line and the
+    // run's counts — never the end of its output, which the web server's teardown noise owns. Whole
+    // entries in failure order, the earliest cut only when it alone outgrows the share.
+    const browser = playwrightFailures(output);
+    if (browser.length) {
+      const counts = output.split('\n').map(line => line.replace(ansiEscape, '')).findLast(line => playwrightCounts.test(line))?.trim() ?? '';
+      const entries = browser.map(failure => `${failure.file}:${failure.line} › ${failure.title}${failure.error ? `\n  ${failure.error}` : ''}`);
+      const roomForEntries = share - command.length - cut.length - end.length - (counts ? counts.length + 1 : 0);
+      const kept: string[] = [];
+      let used = 0;
+      for (const entry of entries) {
+        const left = roomForEntries - used - kept.length;
+        if (left <= 0) break;
+        kept.push(entry.length <= left ? entry : entry.slice(0, left - 1).trimEnd());
+        used += Math.min(entry.length, left);
+        if (entry.length > left) break;
+      }
+      return `${command}${cut}${kept.join('\n')}${counts ? `\n${counts}` : ''}${end}`;
+    }
     const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
     if (errorAt >= 0) {
       const first = output.slice(errorAt, errorAt + Math.floor(room / 2));
@@ -743,6 +762,40 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
   }).join('\n').slice(-length);
 }
 const testFile = /[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?/g;
+/** A Playwright failure summary heading: `  2) [chromium] › browser-tests/x.spec.ts:10:1 › title`. */
+const playwrightHeading = /^\s*\d+\)\s+(?:\[[^\]]+\]\s+›\s+)?([\w./-]+\.(?:spec|test)\.[cm]?[jt]sx?):(\d+):\d+\s+›\s+(.+?)\s*$/;
+/** Playwright's end-of-run count line: `  89 passed, 2 failed (2.1m)`. */
+const playwrightCounts = /^\s*\d+ (?:passed|failed|flaky|skipped|interrupted|did not run)\b/;
+/**
+ * One failure a Playwright run's output names (GY-3305): the spec file and line its summary heading
+ * carries, the test title, and the first line of the error block that follows the heading — the
+ * identity a browser run must keep in its verdict and records when its teardown noise (web-server
+ * shutdown warnings, pool-end errors) crowds the log's tail. Only the numbered summary headings
+ * name the file; the run's `✘` progress lines carry the title alone.
+ */
+export interface PlaywrightFailure { file: string; line: number; title: string; error: string | null }
+/** Every failure a Playwright run's output names, in log order, deduplicated by file, line and title. */
+export function playwrightFailures(log: string): PlaywrightFailure[] {
+  const lines = log.split('\n').map(line => line.replace(ansiEscape, ''));
+  const failures: PlaywrightFailure[] = [];
+  for (let at = 0; at < lines.length; at++) {
+    const heading = playwrightHeading.exec(lines[at]!);
+    if (!heading) continue;
+    let error: string | null = null;
+    // The error block sits between the heading and the next heading or the counts line; its first
+    // non-empty line is the failure's own words (an Error:, a Test timeout … exceeded).
+    for (let next = at + 1; next < lines.length; next++) {
+      const line = lines[next]!;
+      if (playwrightHeading.test(line) || playwrightCounts.test(line)) break;
+      if (!line.trim()) continue;
+      error = line.trim().slice(0, 300);
+      break;
+    }
+    const failure = { file: heading[1]!, line: Number(heading[2]), title: heading[3]!, error };
+    if (!failures.some(seen => seen.file === failure.file && seen.line === failure.line && seen.title === failure.title)) failures.push(failure);
+  }
+  return failures;
+}
 /**
  * The failing files a runner log names, for a runner whose records are missing. A file-level
  * failure is a `not ok`/`✖` line carrying the path; a failing case inside a file is reported as
@@ -768,8 +821,13 @@ const timeoutFailure = /timed?\s*out|Timeout of \d+m?s exceeded/i;
  * order, and whether every named case's nearby output is only a time-out (load, not a regression).
  */
 export function repositoryCheckFailure(log: string): { files: string[]; cases: string[]; firstCase: string | null; timedOut: boolean } {
-  const files = failingFilesInLog(log).slice(0, 10);
-  const cases = parseFailedTests(log).filter(name => !fileLevelFailure.test(name));
+  // GY-3305: a browser run's failures arrive as Playwright's summary headings, each with its error
+  // block — read as test identities, so the failing spec and its error ride in the verdict's own
+  // fields and survive whatever the log's tail ends up holding.
+  const browser = playwrightFailures(log);
+  const files = [...new Set([...failingFilesInLog(log), ...browser.map(failure => failure.file)])].slice(0, 10);
+  const node = parseFailedTests(log).filter(name => !fileLevelFailure.test(name));
+  const cases = [...new Set([...node, ...browser.map(failure => `${failure.file}:${failure.line} › ${failure.title}`)])];
   let firstCase: string | null = null;
   for (const raw of log.split('\n')) {
     const line = raw.replace(ansiEscape, '').trimEnd();
@@ -778,10 +836,18 @@ export function repositoryCheckFailure(log: string): { files: string[]; cases: s
     const name = (spec?.[1] ?? (tap && !tap[2] ? tap[1] : null))?.trim() ?? null;
     if (name && name.length <= 500 && !fileLevelFailure.test(name)) { firstCase = name; break; }
   }
-  const timedOut = cases.length > 0 && cases.every(name => {
-    const at = log.indexOf(name);
-    return timeoutFailure.test(at < 0 ? name : log.slice(Math.max(0, at - 80), at + 400));
-  });
+  if (firstCase === null && browser.length) {
+    const first = browser[0]!;
+    firstCase = `${first.file}:${first.line} › ${first.title}${first.error ? `: ${first.error}` : ''}`.slice(0, 500);
+  }
+  // A browser failure is a time-out only when its own error block says so: an assertion whose call
+  // log merely mentions a wait timeout is a failure, not load.
+  const timedOut = (node.length > 0 || browser.length > 0)
+    && node.every(name => {
+      const at = log.indexOf(name);
+      return timeoutFailure.test(at < 0 ? name : log.slice(Math.max(0, at - 80), at + 400));
+    })
+    && browser.every(failure => failure.error !== null && timeoutFailure.test(failure.error));
   return { files, cases, firstCase, timedOut };
 }
 /** The runner's per-file records (`--durations FILE`, the runner records): one JSON line per file that ran, with whether it passed. */
