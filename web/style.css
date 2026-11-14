@@ -286,7 +286,8 @@ html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,ht
 .sessions-table.workers .col-state{width:132px}
 .sessions-table.workers .col-agent{width:21%}
 .sessions-table.workers tr[data-session]{cursor:pointer}
-.sessions-table.workers .agent-name{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%}
+.sessions-table.workers .agent-line{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;vertical-align:middle}
+.sessions-table.workers .agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sessions-table.workers .agent-name .agent{overflow:hidden;text-overflow:ellipsis}
 .sessions-table.workers tr[data-session] td[data-label='Working on']{overflow:hidden;padding:0}
 .sessions-table.workers .row-open{display:flex;align-items:center;gap:6px;width:100%;min-width:0;padding:0 var(--space-3);text-align:left;color:var(--text)}

@@ -378,7 +378,7 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   assert.match(css, /\.sessions-table \.agent-name,\.sessions-table td\[data-label=Role\]\{white-space:nowrap\}/);
   assert.match(css, /\.sessions-table \.attach\{display:flex;[^}]*flex-wrap:wrap\}/); assert.match(css, /\.sessions-table \.copy\{[^}]*white-space:nowrap/);
   // GY-3268: the account by its friendly name, its id on hover, with its health as one dot beside it.
-  assert.match(row('s14'), new RegExp(`<th scope="row" data-label="Agent"><span class="agent-name"><span class="health live" data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\\/span><\\/span><span class="agent" data-agent="worker-3" title="worker-3 · [^"]+">${friendlyName('worker-3')}<\\/span><\\/span><\\/th>`));
+  assert.match(row('s14'), new RegExp(`<th scope="row" data-label="Agent"><span class="agent-line"><span class="health live" data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\\/span><\\/span><span class="agent-name"><span class="agent" data-agent="worker-3" title="worker-3 · [^"]+">${friendlyName('worker-3')}<\\/span><\\/span><\\/span><\\/th>`));
   // The browser suite measures both at 1440px and 390px: each name and role on one line.
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });

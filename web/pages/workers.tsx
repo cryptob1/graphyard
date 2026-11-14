@@ -146,7 +146,7 @@ function Row({ row, item, now, release, open, setOpen, token, setSelected, setVi
   const unfold = () => master ? setView('master') : setOpen(open === row.id ? null : row.id);
   return <>
     <tr data-session={row.id} data-work={row.key} data-role={row.roleKind} className={row.stale && !row.leftOn ? 'stale' : undefined} onClick={unfold}>
-      <th scope="row" data-label="Agent"><span className="agent-name"><Health row={row} now={now}/><Agent id={row.principal} master={master} detail={`${row.runtime} on ${row.host}`}/></span></th>
+      <th scope="row" data-label="Agent"><span className="agent-line"><Health row={row} now={now}/><span className="agent-name"><Agent id={row.principal} master={master} detail={`${row.runtime} on ${row.host}`}/></span></span></th>
       <td data-label="Working on"><button type="button" className="text-button row-open" aria-expanded={master ? undefined : open === row.id} title={item?.title ?? shortShas(row.subject)} onClick={event => { event.stopPropagation(); unfold(); }}><span className="mono">{row.key}</span> <span className="row-title">{item ? item.title : shortShas(row.subject)}</span></button></td>
       <td data-label="State" data-state={state.words}>{state.words}</td>
       <td data-label="Age"><span className="spent">{spent(now - Date.parse(state.since))}</span></td>
