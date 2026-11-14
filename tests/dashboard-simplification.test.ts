@@ -223,8 +223,9 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   const count = words(view).length;
   assert.ok(count <= 250, `item view renders ${count} words: ${visible}`);
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
-  const order = [at('Moving'), at('PR #43'), at('Testing 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, pull request, why, who acts next, then what is left');
+  // GY-3321: the why is the page heading's fact, under the title; the pull request is its action, top right.
+  const order = [at('Moving'), at('Testing 2 of 3 proofs passed'), at('PR #43'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, why, pull request, who acts next, then what is left');
   // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under Technical details.
   const review = itemView('GY-15');
   assert.match(text(review), /Waiting for someone else to approve the latest code/);

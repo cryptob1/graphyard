@@ -271,7 +271,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())}</span><Priority item={item} disabled={busy} onChange={mayChangePriority(status?.actor) ? priority => { void action(item.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
-        <p className={`page-fact status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
+        <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={why}/></p>
       </div>
       {(item.candidate || (!item.ready && admin)) && <div className="page-actions">
         {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key} observation={item.observation}/> on GitHub ↗</span>}
