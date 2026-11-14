@@ -189,10 +189,12 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       element.addEventListener('touchstart', touchStart, { passive: true }); element.addEventListener('touchmove', touchMove, { passive: false });
       const typing = terminal.onData(input);
       const observer = new ResizeObserver(fit); observer.observe(host.current!);
-      window.addEventListener('resize', fit);
+      // Back on the page after another tab or app sized the pane, the pane is fitted to this page again (GY-3313).
+      const visible = () => { if (document.visibilityState === 'visible') fit(); };
+      window.addEventListener('resize', fit); document.addEventListener('visibilitychange', visible);
       fit(); connect();
       stop = () => {
-        clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit);
+        clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit); document.removeEventListener('visibilitychange', visible);
         element.removeEventListener('paste', paste, true); element.removeEventListener('drop', drop); element.removeEventListener('dragover', over); element.removeEventListener('contextmenu', context);
         element.removeEventListener('touchstart', touchStart); element.removeEventListener('touchmove', touchMove);
         typing.dispose(); socket.close(); terminal.dispose(); sendKey.current = () => {};

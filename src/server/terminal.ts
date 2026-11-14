@@ -112,8 +112,9 @@ const bridgedStream = (bridge: NonNullable<typeof host>, request: StreamRequest,
  * (`graphyard, TOKEN`); a request without a valid one is refused before the upgrade. The pane is
  * always the master's, as the loop last named it (GY-3259: workers run headless, and their output
  * is the item page's run log). A human admin gets Herdr's writable `terminal session control`
- * stream, anyone else its read-only `observe` stream. Frames go out as binary messages of ANSI bytes; the page
- * sends `{type:'input',data}` and `{type:'resize',cols,rows}`. Each typed line is recorded in
+ * stream (taking over), anyone else a read-only view whose input is never forwarded. Frames go out as binary
+ * messages of ANSI bytes; the page sends `{type:'input',data}` and `{type:'resize',cols,rows}`, every viewer's
+ * resize sizing the pane to its page (GY-3313). Each typed line is recorded in
  * history under the human who typed it. Closing the page releases the stream; the pane runs on.
  * These are the streams Herdr documents for bridges: unlike `herdr terminal attach TERMINAL_ID`,
  * they take the pane ids Graphyard records and speak newline-delimited JSON over pipes, so the
@@ -177,8 +178,10 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   };
   const message = (text: string) => {
     let input: any; try { input = JSON.parse(text); } catch { return; }
-    if (!control || !activePane) return;
-    if (input.type === 'resize') command({ type: 'terminal.resize', cols: Number(input.cols), rows: Number(input.rows) });
+    if (!activePane) return;
+    // Every viewer sizes the pane to its page, read-only ones too (GY-3313); only a typing viewer types.
+    if (input.type === 'resize') return void command({ type: 'terminal.resize', cols: Number(input.cols), rows: Number(input.rows) });
+    if (!control) return;
     if (input.type === 'upload') return void upload(String(input.name ?? 'file'), Buffer.from(String(input.data ?? ''), 'base64'));
     if (input.type !== 'input' || typeof input.data !== 'string') return;
     command({ type: 'terminal.input', text: input.data });

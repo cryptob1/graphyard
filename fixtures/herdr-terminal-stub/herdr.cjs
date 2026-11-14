@@ -1,5 +1,5 @@
 // Host-only TUI fixture: history, agent observations, resize and raw input share a log.
-const { appendFileSync, readFileSync } = require('node:fs');
+const { appendFileSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
 const { createInterface } = require('node:readline');
 const log = entry => appendFileSync(process.env.HERDR_STUB_LOG, `${JSON.stringify(entry)}\n`);
 const args = process.argv.slice(2);
@@ -21,6 +21,19 @@ if (args[0] !== 'terminal' || args[1] !== 'session') process.exit(0);
 const [, , mode, pane] = args;
 let cols = Number(args[args.indexOf('--cols') + 1]), rows = Number(args[args.indexOf('--rows') + 1]);
 const frame = text => process.stdout.write(`${JSON.stringify({ type: 'terminal.frame', seq: 0, encoding: 'ansi', width: cols, height: rows, full: false, bytes: Buffer.from(text).toString('base64') })}\n`);
+// The fixture's `pane` is laid out at its own size, as Herdr lays a pane out (GY-3313): only a controlling
+// stream's resize sizes it, and an observer is shown it at that size. Its program draws a ruler: every
+// row filled to the pane's width, redrawn on each resize.
+const layout = fixture().pane;
+let paneCols = layout?.cols ?? cols, paneRows = layout?.rows ?? rows;
+const ruler = () => frame(`\x1b[H\x1b[2J${Array.from({ length: paneRows }, (_, row) => `\x1b[${row + 1};1H${`row ${row + 1} `.padEnd(paneCols - 1, '=')}|`).join('')}`);
+// One controlling stream per pane, as in Herdr: `control` without --takeover is refused while another holds it.
+const holder = `${process.env.HERDR_STUB_STATE}.${pane}.control`, held = () => { try { process.kill(Number(readFileSync(holder, 'utf8')), 0); return true; } catch { return false; } };
+if (mode === 'control') {
+  if (!args.includes('--takeover') && held()) { process.stdout.write(`${JSON.stringify({ type: 'terminal.closed', reason: 'terminal attach failed: terminal already has an attached client; retry with --takeover' })}\n`); process.exit(0); }
+  writeFileSync(holder, String(process.pid));
+  process.on('exit', () => { try { if (readFileSync(holder, 'utf8') === String(process.pid)) rmSync(holder); } catch {} });
+}
 // The session record Herdr's stream opens with, read off the same state file the agent list reads:
 // a master at work shows its scan line (GY-3272), one standing idle shows none.
 { const state = fixture(), master = state.master ?? { account: 'master-agent', runtime: 'claude', agentName: 'master' };
@@ -28,7 +41,8 @@ const frame = text => process.stdout.write(`${JSON.stringify({ type: 'terminal.f
 // Enable bracketed paste as a real TUI does. The fixture's `tui` runs the pane's program on the
 // alternate screen (GY-3308): the opening frame switches to it and repaints, then live output
 // keeps arriving while the page is open.
-if (fixture().tui) {
+if (layout) ruler();
+else if (fixture().tui) {
   frame(`\x1b[?2004h\x1b[?1049h\x1b[H\x1b[2J\x1b[1mmaster TUI on ${pane}\x1b[0m\r\n`);
   let live = 0;
   setInterval(() => frame(`live line ${String(++live).padStart(4, '0')}\r\n`), 200);
@@ -37,6 +51,6 @@ createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   log({ mode, pane, command });
   if (command.type === 'terminal.input') frame(command.text.replace(/\r/g, '\r\n'));
-  if (command.type === 'terminal.resize') { cols = command.cols; rows = command.rows; log({ pane, size: { cols, rows } }); }
+  if (command.type === 'terminal.resize' && mode !== 'observe') { cols = paneCols = command.cols; rows = paneRows = command.rows; log({ pane, size: { cols, rows } }); if (layout) ruler(); }
   if (command.type === 'terminal.release') process.exit(0);
 }).on('close', () => { log({ mode, pane, detached: true }); process.exit(0); });
