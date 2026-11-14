@@ -17,7 +17,8 @@ import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 // panes — so the panel answers from the loop's own report, not from a fixture the page invented.
 
 test('e2e:setup-where-things-run — the Setup page\'s Where things run panel names this install\'s units, containers, port, URL, directories and master pane', async ({ page, context, baseURL }) => {
-  test.setTimeout(90_000);
+  // Booting embedded Postgres alone takes ~11 s solo and several times that under the full parallel suite.
+  test.setTimeout(120_000);
   const store = await withDatabase('setup_where_things_run');
   await store.init();
   const engine = new Engine(store, 120, 'fixture/shop');
