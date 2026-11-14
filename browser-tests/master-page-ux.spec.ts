@@ -63,7 +63,9 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
       const terminal = (window as any).testTerminal, box = document.querySelector('.terminal-host')!.getBoundingClientRect();
       return { cols: terminal.cols, rows: terminal.rows, bottom: box.bottom, height: box.height, viewport: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth };
     });
-    const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false); expect(before.viewport - before.bottom).toBeLessThan(30);
+    const before = await layout(); expect(before.height).toBeGreaterThan(600); expect(before.overflow).toBe(false);
+    // The gap holds the bottom version-label strip (GY-3310) beside its 12px margin.
+    expect(before.viewport - before.bottom).toBeLessThan(50);
     await page.setViewportSize({ width: 1050, height: 720 });
     await expect.poll(async () => (await layout()).cols).not.toBe(before.cols);
     const after = await layout();

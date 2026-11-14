@@ -52,7 +52,8 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       sendKey.current = key => { input(key); terminal.focus(); };
       const fit = () => {
         if (!host.current || !section.current) return;
-        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 12}px)`;
+        // The section ends above the bottom version-label strip (GY-3310), so the terminal never runs under it.
+        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 30}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
         const cols = Math.max(10, Math.min(500, Math.floor((host.current.clientWidth - 16) / (screen.width / terminal.cols))));

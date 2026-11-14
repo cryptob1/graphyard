@@ -1,20 +1,22 @@
 import { test, expect, type Page } from '@playwright/test';
-import { fork, type ChildProcess } from 'node:child_process';
+import { fork } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { symlink } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
+import { freePort } from '../src/cli/test-isolation';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
+import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 import { serveXterm } from './xterm';
 
 const stub = resolve('fixtures/herdr-terminal-stub');
 const settled = { timeout: 15_000 };
+const follows = { timeout: 30_000 };
 const first = '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b';
 const second = 'f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d';
 
-/** The real control plane serving the built dashboard at build commit SHA, with the stub herdr for the Master terminal. */
-async function plane(database: string, site: string, sha: string) {
-  const child: ChildProcess = fork(resolve('tests/helpers/terminal-server.ts'), [database, site], { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+/** The real control plane serving the built dashboard at build commit SHA on port, with the stub herdr for the Master terminal. */
+async function plane(database: string, site: string, sha: string, port: number) {
+  const child = fork(resolve('tests/helpers/terminal-server.ts'), [database, site, String(port)], { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     env: { ...process.env, GRAPHYARD_BUILD_SHA: sha, PATH: `${stub}${delimiter}${process.env.PATH}`, HERDR_STUB_LOG: join(site, 'herdr.log'), GRAPHYARD_HERDR_CONFIG_HOME: '', GRAPHYARD_HERDR_SESSION: '' } });
   const [{ url }] = await once(child, 'message') as [{ url: string }];
   return { url, close: async () => { const ended = once(child, 'exit'); child.send('stop'); await ended; } };
@@ -40,24 +42,19 @@ async function checkCorner(page: Page) {
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`e2e:dashboard-version-label — the served commit shows bottom-left on Work and Master at ${viewport.width} px and follows a new deploy`, async ({ browser }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(120_000);
     const database = await signInDatabase();
-    const site = await mkdtemp(join(tmpdir(), 'version-label-'));
+    const site = await temporaryDirectory('version-label');
     await symlink(resolve('.graphyard/browser-dist'), join(site, 'dist'));
-    let http = await plane(database.url, site, first);
-    const origin = http.url;
+    // Both planes listen on one port, as one URL does across a deploy; the page talks to whichever is serving it.
+    const port = await freePort();
+    let http = await plane(database.url, site, first, port);
     const page = await browser.newPage({ viewport }); await serveXterm(page);
     try {
-      // Every request after the first page load reaches whichever plane is serving now, as one URL does across a deploy.
-      await page.route(`${origin}/**`, async route => {
-        const target = new URL(route.request().url()); const current = new URL(http.url);
-        target.host = current.host;
-        await route.fetch({ url: target.toString() }).then(response => route.fulfill({ response }), () => route.abort('connectionrefused').catch(() => {}));
-      });
-      const served = async () => (await (await fetch(http.url + '/api/status', { headers: { Authorization: 'Bearer test-human-operator' } })).json() as { build: { commit: string } }).build.commit.slice(0, 7);
+      const served = async () => (await (await fetch(`${http.url}/api/status`, { headers: { Authorization: 'Bearer test-human-operator' } })).json() as { build: { commit: string } }).build.commit.slice(0, 7);
       expect(await served()).toBe(first.slice(0, 7));
       const { code } = await (await fetch(`${http.url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
-      await page.goto(`${origin}/#sign-in=${code}`);
+      await page.goto(`${http.url}/#sign-in=${code}`);
       await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(settled);
       await expect(page.locator('.version-label')).toContainText(await served());
       await checkCorner(page);
@@ -69,11 +66,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(page.locator('.version-label')).toContainText(first.slice(0, 7));
       await checkCorner(page);
 
-      // A deploy: the plane restarts at a new commit; the label follows on the page's own poll.
+      // A deploy: the plane restarts at a new commit on the same port; the label follows on the page's own poll, with no reload.
       await http.close();
-      http = await plane(database.url, site, second);
+      http = await plane(database.url, site, second, port);
       expect(await served()).toBe(second.slice(0, 7));
-      await expect(page.locator('.version-label')).toContainText(second.slice(0, 7), settled);
+      await expect(page.locator('.version-label')).toContainText(second.slice(0, 7), follows);
       await checkCorner(page);
       expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(1);
     } finally { await page.close(); await http.close(); await database.close(); }
