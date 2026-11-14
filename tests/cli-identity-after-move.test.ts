@@ -52,7 +52,7 @@ test('e2e:cli-identity-after-move — a CLI release copied to another host passe
   await listen(server);
   const url = `http://127.0.0.1:${(server.address() as any).port}`;
   const base = await temporaryDirectory('cli-identity-move');
-  const [a, b] = [join(base, 'host-a'), join(base, 'host-b')];
+  const [a, b] = [join(base, 'host-a'), join(base, 'host b')];
   try {
     const { commit, releaseFrom } = await hostA(a, url);
     served = { version: `unreleased ${commit.slice(0, 12)}`, commit };
@@ -82,10 +82,10 @@ test('e2e:cli-identity-after-move — a CLI release copied to another host passe
     await unlink(identity);
     const refused = await status();
     assert.notEqual(refused.code, 0, 'status is refused without any readable release');
-    const repair = new RegExp(`record it with: (printf %s ${commit} > ${identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`, 'm').exec(refused.stderr);
+    const repair = /repair it with: (.+ upgrade --repair-identity)$/m.exec(refused.stderr);
     assert.ok(refused.stderr.includes(identity), `the refusal names the missing file: ${refused.stderr}`);
     assert.ok(repair, `the refusal names the repair command: ${refused.stderr}`);
-    execFileSync('sh', ['-c', repair[1]]);
+    await exec('sh', ['-c', repair[1]], { cwd: checkout, env });
     const repaired = await status();
     assert.equal(repaired.code, 0, `status succeeds after the repair command: ${repaired.stderr}`);
 

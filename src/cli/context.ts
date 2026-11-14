@@ -2,12 +2,13 @@ import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { basename, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../private-file.js';
 import { cliRelease, releaseIdentityPath } from '../release.js';
+import { shellQuote } from '../shell-quote.js';
 import { cliCommit } from '../protocol-version.js';
 import { verificationRequest } from './verification-request.js';
 
@@ -34,8 +35,8 @@ export interface ReleaseIdentity { version: string; released: boolean; commit: s
 
 /** GY-3317: the refusal of a CLI that can read no release of its own: the file it looked for, and the command that records it. */
 export const unreadableReleaseMessage = (root: string) => {
-  const file = releaseIdentityPath(root), name = basename(root);
-  return `This CLI cannot read its own release: ${root} is no readable Git checkout and ${file} is missing; record it with: printf %s ${commitPattern.test(name) ? name : '<commit>'} > ${file}`;
+  const file = releaseIdentityPath(root);
+  return `This CLI cannot read its own release: ${root} is no readable Git checkout and ${file} is missing or invalid; repair it with: ${shellQuote(process.execPath)} ${shellQuote(join(root, 'bin', 'graphyard.mjs'))} upgrade --repair-identity`;
 };
 
 /**
