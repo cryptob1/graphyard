@@ -17,6 +17,7 @@ import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
+import { failureHeld, repeatedFailureCause } from '../daemon/repeated-failure.js';
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
@@ -124,6 +125,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     return { subject: item.key, text: `${item.key}'s blocker${since !== null ? ` has waited ${formatAge(since, now)}` : ''}: ${item.blocker}`,
       next: `Clear the cause, then graphyard master unblock ${item.key} REASON; ${blockerEscalationMinutes} minutes unanswered raises it on the dashboard's Needs you` };
   });
+  const leaseLosses = open.flatMap(item => {
+    const run = state?.failureRuns[item.id];
+    return run?.kind === 'lease' && failureHeld(run)
+      ? [{ subject: item.key, text: repeatedFailureCause(run)!.detail, next: `Diagnose the lease loss, then graphyard master rework ${item.key} REASON` }] : [];
+  });
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   // GY-3105: delivery speed from the event ledger for the last merged items, computed now.
@@ -144,7 +150,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
