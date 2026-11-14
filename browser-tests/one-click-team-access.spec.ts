@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { withDatabase } from '../tests/helpers/postgres';
 import { Engine } from '../src/engine';
 import { server } from '../src/server';
+import { syncTeamAccess } from '../src/master/team-access';
 
 test.use({ actionTimeout: 15_000 });
 
@@ -19,17 +20,27 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
   const provider = createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify([{ inviteUrl: 'https://login.tailscale.com/admin/invite/single-use-browser' }])); }); });
   await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve));
   let now = Date.now();
-  const env = { ...process.env, GRAPHYARD_MACHINE_DIR: machineDir, GRAPHYARD_TAILSCALE_API: `http://127.0.0.1:${(provider.address() as { port: number }).port}` };
+  const isoDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const tailscaleApi = `http://127.0.0.1:${(provider.address() as { port: number }).port}`;
   const installs = await Promise.all(['a', 'b'].map(async name => {
     const store = await withDatabase(`team_access_browser_${name}`);
     await store.init();
     const engine = new Engine(store, 120, `owner/${name}`);
     engine.gitRunner = null;
-    const http = server(engine, [{ id: 'operator', role: 'admin', sessionKind: 'human', token: `test-operator-${name}` }], { env, clock: () => now });
+    const loop = `test-loop-coordinator-${name}-credential-0123456789`, credentialFile = join(machineDir, '..', `${name}.token`);
+    await writeFile(credentialFile, loop, { mode: 0o600 });
+    const http = server(engine, [{ id: 'operator', role: 'admin', sessionKind: 'human', token: `test-operator-${name}` }, { id: 'loop', role: 'coordinator', token: loop }], { clock: () => now });
     await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
     const port = (http.address() as { port: number }).port;
-    return { name, store, http, port, url: `http://127.0.0.1:${port}`, token: `test-operator-${name}`, tailnet: `http://yard.tail-test.ts.net:${port}` };
+    return { name, store, http, port, url: `http://127.0.0.1:${port}`, credentialFile, token: `test-operator-${name}`, tailnet: `http://yard.tail-test.ts.net:${port}` };
   }));
+  // Each install's master loop on the shared host, as the loop runs it every 15 seconds (faster here).
+  let syncing = false;
+  const loops = setInterval(() => {
+    if (syncing) return;
+    syncing = true;
+    void Promise.all(installs.map(install => syncTeamAccess({ url: install.url, credentialFile: install.credentialFile }, { machineDir, tailscaleApi }))).catch(() => {}).finally(() => { syncing = false; });
+  }, 250);
   const [a, b] = installs;
   const contexts: BrowserContext[] = [];
   /** A browser whose API calls reach INSTALL, as the dashboard served on that install's port would. */
@@ -39,7 +50,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseURL! });
     await context.route('**/*', async route => {
       const { pathname, search } = new URL(route.request().url());
-      await route.fetch(pathname.startsWith('/api/') ? { url: install.url + pathname + search } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+      await route.fetch(pathname.startsWith('/api/') ? { url: install.url + pathname + search } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => { /* the page navigated away meanwhile */ });
     });
     return context.newPage();
   };
@@ -58,28 +69,35 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await section.getByLabel('Role', { exact: true }).selectOption(role);
     await section.getByRole('button', { name: 'Invite', exact: true }).click();
     const message = section.getByLabel('Invitation message', { exact: true });
-    await expect(message).toBeVisible();
+    await expect(message).toBeVisible({ timeout: 15_000 });
     return message;
   };
   try {
     const pageA = await open(a), pageB = await open(b);
     const sectionA = await signIn(pageA, a), sectionB = await signIn(pageB, b);
 
-    await expect(sectionA).toContainText('One machine, many installs, one port each. Two locks keep each install private');
-    await expect(sectionA.getByRole('link', { name: a.tailnet })).toBeVisible();
+    await expect(sectionA).toContainText("One machine, many installs, one port each. Two locks: the Tailscale share lets a person's devices reach this machine");
+    await expect(async () => { await reload(pageA); await expect(sectionA.getByRole('link', { name: a.tailnet })).toBeVisible({ timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     await expect(sectionA).toContainText(`(port ${a.port})`);
-    await expect(sectionA.locator('[data-share-state="missing"]')).toContainText('No Tailscale share link is saved for this machine yet');
+    await expect(sectionA.locator('[data-share-state="missing"]')).toContainText('No Tailscale share link is saved for this machine yet, so Invite cannot make a complete message');
     await sectionA.getByText("Optional: keep shared people on this install's port").click();
     await expect(sectionA.getByLabel('ACL example')).toContainText(`"tcp:${a.port}"`);
-    await expect(sectionA.getByLabel('ACL example')).toContainText('autogroup:shared');
+    await expect(sectionA.getByLabel('ACL example')).toContainText('TEAMMATE@example.com');
+    await expect(sectionA).toContainText('does not revoke them');
 
-    // Paste the machine's share link on A; B, on the same machine, shows the same saved link.
+    // With no share link saved, Invite withholds the message and names the missing step.
+    await sectionA.getByLabel('Name', { exact: true }).fill('early');
+    await sectionA.getByRole('button', { name: 'Invite', exact: true }).click();
+    await expect(sectionA.locator('[data-invite-missing]')).toContainText('No ready-to-send message yet: No Tailscale share link is saved');
+    await expect(sectionA.getByLabel('Invitation message', { exact: true })).toHaveCount(0);
+
+    // Paste the machine's share link on A (made today by default); B, on the same machine, shows it after the host loops sync.
     const link = 'https://login.tailscale.com/admin/invite/machine-share-browser';
+    await expect(sectionA.getByLabel('Made on', { exact: true })).toHaveValue(isoDay(Date.now()));
     await sectionA.getByLabel('Tailscale share link', { exact: true }).fill(link);
     await sectionA.getByRole('button', { name: 'Save for this machine' }).click();
     await expect(sectionA.locator('[data-share-state="ok"]')).toContainText(link);
-    await reload(pageB);
-    await expect(sectionB.locator('[data-share-state="ok"]')).toContainText(link);
+    await expect(async () => { await reload(pageB); await expect(sectionB.locator('[data-share-state="ok"]')).toContainText(link, { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     await expect(sectionB.getByRole('link', { name: b.tailnet })).toBeVisible();
 
     // Invite someone on each install: one message with the machine link and that install's own sign-in link.
@@ -88,8 +106,9 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
       const text = await message.inputValue();
       const signInLink = await page.getByLabel('Sign-in link', { exact: true }).inputValue();
       expect(signInLink).toMatch(new RegExp(`^${install.tailnet.replace(/[.:/]/g, '\\$&')}/#sign-in=`));
-      for (const part of [`Hi ${name}`, `${install.tailnet} as ${role}`, `port ${install.port} only`, 'Two locks keep it private', link, 'reusable, Tailscale expires it', signInLink, 'single use, expires in 24 hours'])
+      for (const part of [`Hi ${name}`, `${install.tailnet} as ${role}`, `this one is on port ${install.port}`, 'Two locks', `accept this machine share: ${link}`, 'reusable Tailscale share link; Tailscale expires it', "as far as the owner's tailnet policy allows", signInLink, 'single use, expires in 24 hours', 'does not sign you in to the others'])
         expect(text, `message carries ${part}`).toContain(part);
+      expect(text).not.toMatch(/port \d+ only/);
       const copy = page.getByRole('button', { name: /^Copy Copy message:/ });
       await expect(copy).toHaveText('Copy message');
       await copy.click();
@@ -103,18 +122,20 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await teammate.goto(`/#sign-in=${code}`);
     expect((await (await signedIn).json()).actor).toMatchObject({ id: 'sam', team: 'viewer' });
 
-    // The reusable link keeps its real expiry: a warning in its last seven days, a refusal once expired.
-    now += 24 * 86_400_000;
-    await reload(pageA);
+    // An older link keeps its real expiry: made 25 days ago it warns, replaces A's for B too, and refuses invites once expired.
+    await sectionA.getByLabel('Tailscale share link', { exact: true }).fill(link);
+    await sectionA.getByLabel('Made on', { exact: true }).fill(isoDay(now - 25 * 86_400_000));
+    await sectionA.getByRole('button', { name: 'Save for this machine' }).click();
     await expect(sectionA.locator('[data-share-state="refresh"]')).toContainText('expires within seven days');
-    now += 7 * 86_400_000;
+    await expect(async () => { await reload(pageB); await expect(sectionB.locator('[data-share-state="refresh"]')).toContainText('expires within seven days', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
+    now += 6 * 86_400_000;
     await reload(pageB);
     await expect(sectionB.locator('[data-share-state="expired"]')).toContainText('It has expired');
     await sectionB.getByLabel('Name', { exact: true }).fill('max');
     await sectionB.getByRole('button', { name: 'Invite', exact: true }).click();
     await expect(sectionB.getByRole('alert')).toContainText('share link expired');
 
-    // Optional API mode: the owner's token is saved for the machine, never shown, and each invite gets a single-use Tailscale link.
+    // Optional API mode: the owner's token is sealed to the machine, never shown, and each invite gets a single-use Tailscale link.
     const token = 'tskey-api-FAKE-browser-only';
     await sectionB.getByText('Optional: a single-use Tailscale invite per person').click();
     await sectionB.getByLabel('Tailscale API token', { exact: true }).fill(token);
@@ -122,12 +143,12 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await expect(sectionB).toContainText('A token is saved: invites make single-use Tailscale links.');
     await expect(sectionB.getByLabel('Tailscale API token', { exact: true })).toHaveValue('');
     const apiMessage = await (await invite(pageB, 'ana', 'viewer')).inputValue();
-    expect(apiMessage).toContain('https://login.tailscale.com/admin/invite/single-use-browser (Tailscale share link, single use, made for you)');
+    expect(apiMessage).toContain('accept this machine share: https://login.tailscale.com/admin/invite/single-use-browser (single-use Tailscale invite, made for you)');
     expect(apiMessage).toContain(`${b.tailnet}/#sign-in=`);
-    await reload(pageA);
-    await expect(sectionA).toContainText('A token is saved');
+    await expect(async () => { await reload(pageA); await expect(sectionA).toContainText('A token is saved', { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     for (const page of [pageA, pageB]) expect(await page.content()).not.toContain(token);
   } finally {
+    clearInterval(loops);
     for (const context of contexts) await context.close();
     for (const install of installs) { await new Promise<void>(resolve => { install.http.close(() => resolve()); install.http.closeAllConnections(); }); await install.store.close(); }
     await new Promise<void>(resolve => provider.close(() => resolve()));
