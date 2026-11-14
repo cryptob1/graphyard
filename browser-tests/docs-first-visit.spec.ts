@@ -77,7 +77,6 @@ async function readableDiagrams(page: Page) {
 
 for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
   test(`e2e:docs-first-visit — a newcomer follows Docs from overview to FAQ and reference at ${viewport.width}px, with readable diagrams and no overflow`, async ({ page }, testInfo) => {
-    test.setTimeout(60_000);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await signedIn(page);
     // On a phone the sidebar folds behind Menu; Help is at its foot.

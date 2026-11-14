@@ -40,7 +40,6 @@ const shipped = (page: Page) => page.locator('[aria-label="Shipped today"]');
 const live = { timeout: 15_000 };
 
 test('e2e:dashboard-fun — named agents on every page, a rotating line, and a toast with confetti when an item merges', async ({ page }) => {
-  test.setTimeout(90_000);
   const state = await serve(page, [item('GY-1', 'Change priority from the dashboard'), item('GY-2', 'Another change')]);
   // The Work page: the builder by its friendly name, the account id on hover.
   const agent = page.locator(`[data-row="GY-1"] [data-agent="${builder}"]`);
@@ -90,7 +89,6 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
 });
 
 test('e2e:dashboard-fun — with reduced motion set, a merge brings the toast and no confetti', async ({ page }) => {
-  test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const state = await serve(page, [item('GY-1', 'Change priority from the dashboard')]);
   state.work = [merged(state.work[0])];

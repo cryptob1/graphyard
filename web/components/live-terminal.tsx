@@ -9,9 +9,31 @@ const xterm = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0';
 /** The part of xterm.js's Terminal this page uses. */
 type TerminalClass = new (options: Record<string, unknown>) => {
   open(host: HTMLElement): void; focus(): void; write(data: Uint8Array | string): void; reset(): void; resize(cols: number, rows: number): void;
-  cols: number; rows: number; getSelection(): string; paste(data: string): void;
+  cols: number; rows: number; getSelection(): string; paste(data: string): void; scrollLines(lines: number): void;
+  buffer: { active: { viewportY: number; baseY: number } };
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void; dispose(): void;
   onData(listener: (data: string) => void): { dispose(): void };
+};
+/**
+ * The master's program may switch its pane to the alternate screen (DEC 47/1047/1049), where a
+ * terminal has no scrollback: the history the page was sent would be locked away and the wheel
+ * would type arrows into the pane instead of scrolling (GY-3308). The switches are dropped from the
+ * stream, so the pane's redraws land in the normal buffer and one stream stays one scrollable
+ * history. Bytes are filtered as bytes: the stream is UTF-8, never decoded here.
+ */
+const withoutAlternateScreen = (data: string) => data.replace(/\x1b\[\?(?:47|1047|1049)[hl]/g, '');
+const bytesWithoutAlternateScreen = (bytes: Uint8Array) => {
+  const kept = new Uint8Array(bytes.length); let length = 0;
+  for (let i = 0; i < bytes.length;) {
+    let skip = -1; // ESC [ ? <digits> h|l — a private mode switch; the alternate screen's codes go.
+    if (bytes[i] === 0x1b && bytes[i + 1] === 0x5b && bytes[i + 2] === 0x3f) {
+      let digits = i + 3;
+      while (digits < bytes.length && bytes[digits]! >= 0x30 && bytes[digits]! <= 0x39) digits++;
+      if ((bytes[digits] === 0x68 || bytes[digits] === 0x6c) && ['47', '1047', '1049'].includes(String.fromCharCode(...bytes.subarray(i + 3, digits)))) skip = digits + 1;
+    }
+    if (skip < 0) { kept[length++] = bytes[i]!; i++; } else i = skip;
+  }
+  return kept.subarray(0, length);
 };
 let loading: Promise<TerminalClass> | undefined;
 const loadTerminal = () => loading ??= new Promise((done, fail) => {
@@ -50,9 +72,20 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       const send = (value: unknown) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
       const input = (data: string) => { if (writable) send({ type: 'input', data }); };
       sendKey.current = key => { input(key); terminal.focus(); };
+      /** Scrolls the view by LINES. A scroll that lands on the bottom row must resume following
+       *  live output: xterm clears its held-view state only when the buffer itself scrolls onto the
+       *  last line, so a scroll arriving there steps one line off and back (GY-3308). */
+      const scrollBy = (lines: number) => {
+        if (lines > 0 && terminal.buffer.active.viewportY + lines >= terminal.buffer.active.baseY) { terminal.scrollLines(-1); lines++; }
+        terminal.scrollLines(lines);
+      };
       const fit = () => {
         if (!host.current || !section.current) return;
-        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 12}px)`;
+        // The page below the section is its parent's bottom padding: the section takes the rest of
+        // the viewport, exactly, so the document never scrolls and the terminal is the one scrolling
+        // surface (GY-3308).
+        const below = parseFloat(getComputedStyle(section.current.parentElement!).paddingBottom) || 12;
+        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + below}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
         const cols = Math.max(10, Math.min(500, Math.floor((host.current.clientWidth - 16) / (screen.width / terminal.cols))));
@@ -73,7 +106,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
           if (typeof event.data === 'string') {
             const message = JSON.parse(event.data);
             if (message.refused) { refused = true; writable = false; setReason(message.refused); setState('refused'); return; }
-            if (message.type === 'scrollback') { terminal.reset(); terminal.write(message.data.replace(/\r?\n/g, '\r\n')); return; }
+            if (message.type === 'scrollback') { terminal.reset(); terminal.write(withoutAlternateScreen(message.data.replace(/\r?\n/g, '\r\n'))); return; }
             if (message.note) { setReason(message.note); return; }
             if (message.session) setSession(message.session);
             if (message.mode) {
@@ -83,7 +116,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
             }
             return;
           }
-          terminal.write(new Uint8Array(event.data));
+          terminal.write(bytesWithoutAlternateScreen(new Uint8Array(event.data)));
         };
         socket.onclose = async () => {
           writable = false;
@@ -126,6 +159,10 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
         } catch { setReason('Clipboard access unavailable. Use Ctrl/Cmd+V.'); }
       };
       terminal.attachCustomKeyEventHandler(event => {
+        // Shift+PageUp/PageDown walk the history: xterm binds no scroll keys of its own (GY-3308).
+        if (event.type === 'keydown' && event.shiftKey && (event.key === 'PageUp' || event.key === 'PageDown')) {
+          event.preventDefault(); scrollBy(event.key === 'PageUp' ? -(terminal.rows - 1) : terminal.rows - 1); return false;
+        }
         // Ctrl/Cmd+V (with or without Shift) is left to the browser, whose paste event the page handles above.
         if ((event.ctrlKey || event.metaKey) && event.key.toUpperCase() === 'V') return false;
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toUpperCase() === 'C' && navigator.clipboard) {
@@ -134,9 +171,22 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
         }
         return true;
       });
+      // A finger drag scrolls the history, as every phone reader expects: the screen has no wheel
+      // and no PageUp (GY-3308). The pane itself is untouched; this moves only the view.
+      let fingerY = 0;
+      const touchStart = (event: TouchEvent) => { fingerY = event.touches[0]?.clientY ?? fingerY; };
+      const touchMove = (event: TouchEvent) => {
+        const y = event.touches[0]?.clientY;
+        if (y === undefined) return;
+        const cell = element.querySelector('.xterm-rows')?.firstElementChild?.getBoundingClientRect().height || 16;
+        const lines = Math.round((fingerY - y) / cell);
+        if (!lines) return;
+        fingerY = y; scrollBy(lines); event.preventDefault();
+      };
       const context = (event: MouseEvent) => { if (event.shiftKey || !navigator.clipboard) return; event.preventDefault(); void readClipboard(); };
       const element = host.current!;
       element.addEventListener('paste', paste, true); element.addEventListener('drop', drop); element.addEventListener('dragover', over); element.addEventListener('contextmenu', context);
+      element.addEventListener('touchstart', touchStart, { passive: true }); element.addEventListener('touchmove', touchMove, { passive: false });
       const typing = terminal.onData(input);
       const observer = new ResizeObserver(fit); observer.observe(host.current!);
       window.addEventListener('resize', fit);
@@ -144,6 +194,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       stop = () => {
         clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit);
         element.removeEventListener('paste', paste, true); element.removeEventListener('drop', drop); element.removeEventListener('dragover', over); element.removeEventListener('contextmenu', context);
+        element.removeEventListener('touchstart', touchStart); element.removeEventListener('touchmove', touchMove);
         typing.dispose(); socket.close(); terminal.dispose(); sendKey.current = () => {};
       };
     }, () => { if (live) { setReason('xterm.js did not load. Reload to try again.'); setState('refused'); } });
