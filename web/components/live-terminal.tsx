@@ -81,7 +81,11 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       };
       const fit = () => {
         if (!host.current || !section.current) return;
-        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + 12}px)`;
+        // The page below the section is its parent's bottom padding: the section takes the rest of
+        // the viewport, exactly, so the document never scrolls and the terminal is the one scrolling
+        // surface (GY-3308).
+        const below = parseFloat(getComputedStyle(section.current.parentElement!).paddingBottom) || 12;
+        section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + below}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
         const cols = Math.max(10, Math.min(500, Math.floor((host.current.clientWidth - 16) / (screen.width / terminal.cols))));

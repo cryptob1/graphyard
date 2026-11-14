@@ -18,6 +18,14 @@ const scroll = (page: Page) => page.evaluate(() => {
   return { top: buffer.viewportY, bottom: buffer.length - terminal.rows, length: buffer.length };
 });
 
+/** The page offers no scrolling surface of its own: the document and every ancestor of the terminal hold their content (GY-3308). */
+const onlyTerminalScrolls = (page: Page) => page.evaluate(() => {
+  const scrolled = (element: Element) => element.scrollHeight - element.clientHeight > 1;
+  for (let element = document.querySelector('.terminal-host'); element; element = element.parentElement)
+    if (scrolled(element)) return false;
+  return window.scrollY === 0 && window.scrollX === 0;
+});
+
 /**
  * The Master page against the real control plane, with the host-side herdr stub holding more
  * history than one screen and its TUI running on the alternate screen: exactly the report (GY-3308).
@@ -65,6 +73,8 @@ async function fixture(browser: Browser, width: 1280 | 390) {
 async function scrollsToTheTop(page: Page, up: () => Promise<void>, down: () => Promise<void>, tries: number) {
   // A wheel notch moves a few lines, a drag or a page one screen: keep going until the top, as a reader would.
   for (let i = 0; i < tries && (await scroll(page)).top > 0; i++) await up();
+  // However the reader scrolled — wheel, finger or keys — the page itself never moved.
+  expect(await onlyTerminalScrolls(page)).toBe(true);
   // The first line of the history the page was sent is fully visible below the page header — one
   // atomic DOM read, polled: xterm re-renders its rows as live output arrives.
   const firstLineBelowHeader = () => page.evaluate(() => {
@@ -127,6 +137,8 @@ test('e2e:master-page-scroll-top — wheel, touch drag and keyboard reach the to
     try {
       // The pane's TUI redraw must not cut the page off from the history it was sent.
       expect((await scroll(page)).length).toBeGreaterThan(await page.evaluate(() => (window as any).testTerminal.rows) * 2);
+      // The page itself offers no scrolling surface: the terminal is the only thing that scrolls.
+      expect(await onlyTerminalScrolls(page)).toBe(true);
       await scrollsToTheTop(page, () => wheel(page, true), () => wheel(page, false), 400);
       await scrollsToTheTop(page, () => drag(page, true), () => drag(page, false), 120);
       await scrollsToTheTop(page, () => keys(page, true), () => keys(page, false), 120);
