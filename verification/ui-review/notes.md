@@ -44,3 +44,12 @@ beside the sidebar.
 - Delivery: no page title at all, only a tiny breadcrumb above a rule; its sections already use `.panel`.
 - Needs you, Releases and Operator automation show only with matching data or configuration and were not
   reachable on the seeded plane; apply the same shell.
+
+## Rework verification (epoch 3)
+
+Synced onto `origin/main` at `0fe82c9c5012`; the prior implementation already contains that base.
+The master's rework instruction attributes the create-work-one-box timeout to concurrent trial load
+and requests resubmission without changing that test or its timeout. Both remain unchanged.
+`npm run build` passes. The affected run and focused browser retry encountered local environment
+and host-load failures (recorded in this commit); they do not establish a fresh browser pass.
+The existing screenshots and bound proof remain intact for the independent trial of the new head.
