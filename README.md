@@ -18,7 +18,7 @@ Prerequisites (Linux host): Linux 7.0+ with Landlock ABI 9+ (`uname -r`); Node/n
 git clone https://github.com/cryptob1/graphyard.git && cd graphyard
 npm ci
 npm run build
-./bin/graphyard.mjs up --repo OWNER/NAME
+node bin/graphyard.mjs up --repo OWNER/NAME
 ```
 
 Once published to npm:
