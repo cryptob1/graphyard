@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
 import { readdir, rm } from 'node:fs/promises';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -200,7 +200,18 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+    // GY-3290: one suite run is one heavy job of the host budget — the slot the runner itself
+    // takes when a session started it — and the heavy work its files launch (a fixture's deploy
+    // build, a merge trial through the real port) runs inside that admission, never as jobs of
+    // the host's own budget: with the default two, one file's gated fixtures would starve every
+    // other file's past the trial's per-file bound. The fixtures' own budget is this run's, scoped
+    // to its data directory and wide as its breadth; a host's real bound still governs every
+    // project run outside a suite.
+    const fixtureSlots = join(dataHome, 'heavy-jobs');
+    mkdirSync(fixtureSlots, { recursive: true });
+    const fixtureLimit = Math.max(2, Math.floor(options.breadth ?? availableParallelism()));
+    try { writeFileSync(join(fixtureSlots, 'limit'), `${fixtureLimit}\n`); } catch { /* the default bound stands */ }
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, [slotsDirectoryVariable]: fixtureSlots, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
