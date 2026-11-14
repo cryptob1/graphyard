@@ -101,7 +101,7 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     f.current.gap = 'output produced during the gap'; await f.save();
     f.child.send('drop-terminals');
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
-    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
+    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);
     expect(await page.evaluate(() => (window as any).survivedDrop)).toBe(true);
     // A failed reconnect while offline must keep retrying once the network returns.
     await page.context().setOffline(true);
@@ -110,7 +110,7 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
     await page.waitForTimeout(1000);
     await page.context().setOffline(false);
-    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, { timeout: 5_000 });
+    await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);
     f.current.master.pane = 'w1:replacement'; f.current.master.account = 'second-account'; f.current.status = 'working'; await f.save();
     await expect(page.locator('.xterm-rows')).toContainText('screen of w1:replacement');
     await expect(page.getByRole('status')).toContainText('second-account · codex · working · w1:replacement');

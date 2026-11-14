@@ -24,8 +24,8 @@ import { DeliveryDefaults } from '../components/delivery-slices';
  */
 export const sections = [
   { id: 'work', icon: 'work', label: 'Work' },
-  // The master agent has its own entry so anyone looking for it finds it at once (GY-3287); Fun calls it the Chief.
-  { id: 'master', icon: 'master', label: 'Master', fun: 'The Chief' },
+  // The master agent has its own entry so anyone looking for it finds it at once (GY-3287); it always reads Master (GY-3307).
+  { id: 'master', icon: 'master', label: 'Master' },
   { id: 'workers', icon: 'workers', label: 'Workers' },
   { id: 'shipped', icon: 'shipped', label: 'Shipped' },
   { id: 'tests', icon: 'tests', label: 'Tests' },

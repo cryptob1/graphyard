@@ -1,7 +1,7 @@
 {
   "id": "keyboard-palette",
   "title": "The dashboard is keyboard-first: a Cmd/Ctrl+K command palette, j/k over Work rows, g-prefix jumps, a ? shortcut sheet, and a live top bar strip",
-  "description": "A real browser on the built dashboard: Cmd/Ctrl+K (and a visible button, so a phone can too) opens the command palette; typing an item key and Enter opens that item's page, and the palette also opens Master (whose title reads The Chief) and toggles the theme; j/k move a cursor through the Work rows and Enter opens the row under it; g m opens Master, g w returns to Work, g s opens Setup; ? shows the shortcut sheet and Esc closes it; the top bar's strip counts runners on shift, merges in trial and items shipped tonight, matching the counts the board derives from the same snapshot.",
+  "description": "A real browser on the built dashboard: Cmd/Ctrl+K (and a visible button, so a phone can too) opens the command palette; typing an item key and Enter opens that item's page, and the palette also opens Master (whose title reads Master) and toggles the theme; j/k move a cursor through the Work rows and Enter opens the row under it; g m opens Master, g w returns to Work, g s opens Setup; ? shows the shortcut sheet and Esc closes it; the top bar's strip counts runners on shift, merges in trial and items shipped tonight, matching the counts the board derives from the same snapshot.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,
