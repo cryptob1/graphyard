@@ -10,6 +10,7 @@ import { configHome } from '../install/secrets.js';
 import { socketConfinementWords } from './socket-confinement.js';
 import { underTestRunner } from '../runtime-environment.js';
 import { WorkerSandboxError } from '../worker-sandbox.js';
+import { runtimeStateRoots } from './runtimes.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
 // Every runtime carries the same outer namespace, including runtimes with their own sandbox:
@@ -502,7 +503,12 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  // GY-3303: the runtime's own state directories under the account's XDG paths are writable, and
+  // the session reads those paths from the same variables, so its state persists to the account.
+  const state = runtimeStateRoots(input.kind, { ...process.env, ...input.environment });
+  for (const path of state.writable) mkdirSync(path, { recursive: true, mode: 0o700 });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: [...(input.writable ?? []), ...state.writable], environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  const wrapper = [bwrap, ...Object.entries(state.variables).flatMap(([name, value]) => ['--setenv', name, value]), ...words];
   await assertCredentialsMasked(wrapper, { coordinatorRoot: root, sessionDirectory: directory, credentialMask: input.credentialMask, maskProbe: input.maskProbe });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,

@@ -35,7 +35,7 @@ test('unit:agy-session-works-confined — a confined agy session reads its login
   // The launch path: the account's home rides on its home variable, kept writable, and bound at
   // the path agy reads under the session's private HOME.
   const environment = { AGY_CONFIG_DIR: home };
-  const credentialMask = credentialMaskFor({}, { runtimeHomes: runtimeLoginHomes(environment, 'AGY_CONFIG_DIR') }, join(base, 'config'));
+  const credentialMask = credentialMaskFor({}, { runtimeHomes: runtimeLoginHomes(environment, 'AGY_CONFIG_DIR', 'agy') }, join(base, 'config'));
   const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: session, credentialMask, environment });
   const homeAt = wrapper.findIndex((word, index) => word === '--setenv' && wrapper[index + 1] === 'HOME');
   assert.equal(wrapper[homeAt + 2], '/tmp/home');

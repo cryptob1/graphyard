@@ -1,0 +1,13 @@
+{
+  "id": "muse-writable-session-state",
+  "title": "Confined Muse sessions keep writable session state",
+  "description": "Under real bubblewrap, through the launcher's own confinement, a stand-in Muse worker and reviewer create, lock and persist their session under the selected account's XDG data directory — the default under HOME, an explicit XDG_DATA_HOME/XDG_CONFIG_HOME, and an account home set on XDG_DATA_HOME — while unrelated host directories stay unwritable and another account's home stays unreadable. Before GY-3303 the session failed with 'failed to create session lock directory … Read-only file system'.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined Muse persists its session state",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/muse-writable-session-state.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
