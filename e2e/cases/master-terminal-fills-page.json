@@ -1,0 +1,14 @@
+{
+  "id": "master-terminal-fills-page",
+  "title": "The Master terminal fills the page every time it is opened, for typing and read-only viewers",
+  "description": "A real browser against the served dashboard with a host-side herdr stub whose master pane is laid out at 70 columns: at 1280 px and at 390 px, on first open, after navigating away and back and after a reconnect, the pane's drawing spans the terminal container's width (its last column within one character cell of the right edge) and its rows fill the height, for a typing viewer and for a read-only viewer; the read-only viewer still cannot send input, and the Master page document does not scroll.",
+  "tags": ["dashboard", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Open the Master terminal at both widths as a typing and a read-only viewer",
+    "run": "npm run test:browser -- browser-tests/master-terminal-fills-page.spec.ts",
+    "timeoutSeconds": 300
+  }]
+}
