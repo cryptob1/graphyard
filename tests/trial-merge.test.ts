@@ -274,8 +274,9 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   assert.deepEqual(result.tests, { passed: 1, failed: [hung], files: 2 });
   assert.equal(result.runnerExit, 1);
   assert.match(result.logTail, /hung\.test\.ts/);
-  assert.match(result.logTail, /timed out/);
-  assert.ok(result.phases!.tests < 45_000, `file bound, not overall deadline: ${result.phases!.tests}ms`);
+  // The file bound ended the hung file, not the overall deadline (which would leave no verdict):
+  // no wall-clock limit here, so a hot or busy host cannot fail it (GY-3374).
+  assert.match(result.logTail, /test file timed out after 10000ms/);
   assert.deepEqual(result.retried ?? [], [], 'a named failure is a verdict, not a no-verdict retry');
 });
 
