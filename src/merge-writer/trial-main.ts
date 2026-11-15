@@ -8,12 +8,18 @@ import { join } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { proofTestFiles, runMergeTrial } from './executor.js';
 import { serializeTrialError, trialRunFiles, type TrialRunSpec } from './trial-run.js';
+import { TrialCancelledError } from './trial.js';
 
 const directory = process.argv[2];
 if (!directory) throw new Error('the detached trial run names no directory');
 const spec: TrialRunSpec = JSON.parse(await readFile(join(directory, 'spec.json'), 'utf8'));
 const files = trialRunFiles(directory);
 const record = async (line: object) => { try { await appendFile(files.steps, `${JSON.stringify(line)}\n`); } catch { /* a step that cannot be recorded never stops the trial */ } };
+
+// GY-3316: a cancelled run is signalled SIGTERM; aborting the trial lets it remove its Compose
+// stacks — containers and networks — before the SIGKILL that follows, instead of dying with them up.
+const stop = new AbortController();
+process.once('SIGTERM', () => stop.abort(new TrialCancelledError('the trial run was stopped')));
 
 try {
   const run = await runMergeTrial({
@@ -24,7 +30,7 @@ try {
     ...(spec.baseTip ? { baseTip: spec.baseTip } : {}), ...(spec.cores ? { cores: spec.cores } : {}),
     onStep: step => void record({ step, at: new Date().toISOString() }),
     onTiming: (step, durationMs) => void record({ timing: step, durationMs }),
-    environment: process.env,
+    environment: process.env, signal: stop.signal,
   });
   await writeFile(`${files.result}.tmp`, `${JSON.stringify({ ok: true, run } as const)}\n`);
 } catch (error) {
