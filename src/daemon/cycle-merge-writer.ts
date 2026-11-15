@@ -111,7 +111,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     return sha;
   };
   return {
-    baseBranch: base, parallel: config.run.mergeWriter?.parallel ?? Math.max(1, Math.floor(availableParallelism() / 2)), now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
+    baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
     git: (args, env) => gitAs(args, env),
     fetch: async () => {
       if (settings.tokenFile || settings.pushAuth) await gitAs(['fetch', '--no-tags', remote, `+refs/heads/${base}:${ref}`], pushEnvironment(settings, options.environment));
