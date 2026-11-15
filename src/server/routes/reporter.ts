@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { demand } from '../../model.js';
+import { once } from '../../store/mutations.js';
 import { Next, defineRoutes, parseJson } from '../routes.js';
 
 /**
@@ -33,11 +34,10 @@ export const masterMessageRoutes = defineRoutes('master-messages', [
     const { actor, services } = context;
     demand(actor.role === 'reporter' || actor.role === 'admin', 'Only a reporter or the operator messages the Master', 403);
     const { text: body } = text.parse(await parseJson(context, 20_000));
-    const key = context.idempotencyKey();
-    await services.engine.store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL,$1,$2,$3
-      WHERE NOT EXISTS (SELECT 1 FROM events WHERE kind=$2 AND actor=$1 AND payload->>'key'=$4)`, [actor.id, messageKind, JSON.stringify({ text: body, key }), key]);
-    const { rows } = await services.engine.store.pool.query(`SELECT seq FROM events WHERE kind=$1 AND actor=$2 AND payload->>'key'=$3`, [messageKind, actor.id, key]);
-    return { id: Number(rows[0].seq), sent: true, next: 'Read the Master\'s reply with graphyard messages' };
+    return services.engine.store.transaction(db => once(db, actor, context.idempotencyKey(), { command: 'master.message', text: body }, async () => {
+      const row = (await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3) RETURNING seq', [actor.id, messageKind, JSON.stringify({ text: body })])).rows[0];
+      return { id: Number(row.seq), sent: true, next: 'Read the Master\'s reply with graphyard messages' };
+    }));
   } },
   { method: 'GET', path: '/api/master/messages', async handle({ actor, services }) {
     demand(['reporter', 'admin', 'coordinator'].includes(actor.role), 'Only a reporter, the operator or the Master reads Master messages', 403);
@@ -52,11 +52,10 @@ export const masterMessageRoutes = defineRoutes('master-messages', [
     const { actor, services } = context;
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Only the Master or the operator replies to a Master message', 403);
     const { text: body } = text.parse(await parseJson(context, 20_000));
-    const pool = services.engine.store.pool;
-    demand((await pool.query('SELECT 1 FROM events WHERE seq=$1 AND kind=$2', [id, messageKind])).rows.length, `There is no Master message ${id}`, 404);
-    const key = context.idempotencyKey();
-    await pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL,$1,$2,$3
-      WHERE NOT EXISTS (SELECT 1 FROM events WHERE kind=$2 AND actor=$1 AND payload->>'key'=$4)`, [actor.id, replyKind, JSON.stringify({ message: Number(id), text: body, key }), key]);
-    return { replied: Number(id) };
+    return services.engine.store.transaction(db => once(db, actor, context.idempotencyKey(), { command: 'master.reply', message: Number(id), text: body }, async () => {
+      demand((await db.query('SELECT 1 FROM events WHERE seq=$1 AND kind=$2', [id, messageKind])).rows.length, `There is no Master message ${id}`, 404);
+      await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, replyKind, JSON.stringify({ message: Number(id), text: body })]);
+      return { replied: Number(id) };
+    }));
   } },
 ]);
