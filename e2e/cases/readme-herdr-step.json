@@ -1,0 +1,13 @@
+{
+  "id": "readme-herdr-step",
+  "title": "README setup installs Herdr and doctor names that step",
+  "description": "With herdr absent from PATH, doctor prints one FAIL herdr line naming the README's Herdr prerequisite and its install command, which the README carries; with herdr on PATH the line is PASS.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "README Herdr step and doctor line",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/readme-herdr-step.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

@@ -167,7 +167,7 @@ const failureRunSchema = z.object({
 export type FailureRun = z.infer<typeof failureRunSchema>;
 
 /** GY-3190: what the close step's sweeps stopped or removed, by kind, and the disk Graphyard's leftovers hold. */
-const leftoverCountsSchema = z.object({ processes: z.number().int().min(0), trialContainers: z.number().int().min(0), reclaimed: z.number().int().min(0), panes: z.number().int().min(0), worktrees: z.number().int().min(0) }).strict();
+const leftoverCountsSchema = z.object({ processes: z.number().int().min(0), trialContainers: z.number().int().min(0), reclaimed: z.number().int().min(0), panes: z.number().int().min(0), worktrees: z.number().int().min(0), networks: z.number().int().min(0).default(0) }).strict();
 export type LeftoverCounts = z.infer<typeof leftoverCountsSchema>;
 const bytes = z.number().min(0).nullable();
 const leftoverDiskSchema = z.object({ trialRuns: bytes, worktrees: bytes, trialCheckouts: bytes, trialImages: bytes, buildCache: bytes }).strict();
@@ -211,7 +211,7 @@ export const daemonStateSchema = z.object({
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()
-    .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 }, report: null })),
+    .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0, networks: 0 }, report: null })),
   /** GY-3199: the UTC day the control-plane diagnostics last ran, so the staleness lines log once a day. */
   controlPlaneDay: z.string().max(10).nullable().default(null),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */

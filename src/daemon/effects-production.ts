@@ -2,7 +2,7 @@ import { sessionInventory } from '../session-inventory.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { workerVerificationPump } from './worker-verification.js';
+import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -45,6 +45,8 @@ import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
+import { runWorkerVerification } from '../merge-writer/worker-verification.js';
+import { failedRequiredProofs } from '../cli/worker-verification.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
@@ -63,6 +65,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   /** Explicit confinement root for an embedded, non-CLI coordinator. */
   coordinatorRoot?: string;
   fetcher?: typeof fetch;
+  /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
+  verify?: typeof runWorkerVerification;
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
@@ -80,6 +84,38 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
+  // GY-3335: the loop's own resubmission of a finished head. The verification `complete` runs is
+  // re-run on this host — the same private trial the worker-verification pump runs — and its
+  // outcome is submitted to the control plane, which binds the candidate. A verification that
+  // failed on the change itself (a required proof, or complete's own rerun refusal) clears the
+  // record so the item goes to a worker; anything else is a fault of this run, retried next cycle.
+  const verifyHead = deps.verify ?? runWorkerVerification;
+  const resubmit: DaemonEffects['resubmit'] = async (work, head) => {
+    const config = current();
+    const record = work.finishedBlockerHead;
+    const space = record && record.head === head ? work.workspaces.find(entry => entry.epoch === record.epoch) : undefined;
+    if (!record || !space) throw new Error(`${work.key} names no finished head ${head.slice(0, 12)} on a registered workspace to resubmit`);
+    await moveBranchToHead(root, space.branch, head);
+    // One idempotency key per recorded blocker: a head re-recorded by a later attempt (a rework
+    // round that failed its complete on a fault again) is a fresh resubmission, not a replay.
+    const key = `resubmit:${work.id}:${head}:${record.epoch}`;
+    const refused = async (reason: string) => {
+      await mutate(`work/${work.id}/resubmit`, { head, failed: reason.slice(0, 4000) }, key);
+      return { submitted: false, detail: `${work.key}'s finished head ${head.slice(0, 12)} failed the verification complete runs on the change itself: ${reason}; the item goes to a worker`.slice(0, 2000) };
+    };
+    let verification: Awaited<ReturnType<typeof runWorkerVerification>>;
+    try { verification = await verifyHead(root, work, { head, epoch: record.epoch, mode: 'complete' }, config.baseBranch); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // A refusal complete itself would give names the change; a fault of the run does not.
+      if (/^complete refused:/.test(reason)) return refused(reason);
+      throw error;
+    }
+    const failed = failedRequiredProofs(verification.record);
+    if (failed.length) return refused(`complete refused: required proofs failed: ${JSON.stringify(failed)}`);
+    await mutate(`work/${work.id}/resubmit`, { head, verification: { head: verification.record.head, ran: verification.record.ran } }, key);
+    return { submitted: true, detail: `${work.key}: the loop submitted the finished head ${head.slice(0, 12)} the blocker named, its verification re-run and passed; no worker session and no worker slot was spent` };
+  };
   const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
     ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
   // GY-2991: the loop releases backlog itself, under the same identity, to keep the pipeline full.
@@ -230,6 +266,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Rework and backlog release exist only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
     askHumanProof,
+    // GY-3335: the loop's own machinery, like dispatch beside it, under the coordinator credential.
+    resubmit,
     get release() { return current().operatorAgent ? release : undefined; },
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),

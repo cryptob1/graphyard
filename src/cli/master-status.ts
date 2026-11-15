@@ -22,7 +22,7 @@ import { failureHeld, repeatedFailureCause } from '../daemon/repeated-failure.js
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
-import type { FleetView } from '../model/registry.js';
+import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
@@ -155,7 +155,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -201,3 +201,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
 }
+/** GY-3302: each enabled account serving a role whose model names no concrete id runs its runtime's default, perhaps a free model. */
+export const unspecifiedModelAttention = (fleet: Pick<FleetView, 'accounts'> | null) => (fleet?.accounts ?? []).filter(account => account.enabled && account.roles.length).flatMap(account => {
+  const text = unspecifiedModel(account);
+  return text ? [{ subject: `account ${account.name}`, text, next: `graphyard master registry model set ${account.model} --id ID --reason REASON names the model it runs` }] : [];
+});

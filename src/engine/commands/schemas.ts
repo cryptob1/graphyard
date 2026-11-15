@@ -73,11 +73,21 @@ export const commands = {
     .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
-  blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
+  // GY-3335: `finishedHead`, sent by `blocked --finished` from the attempt's own worktree, records
+  // that the change is finished at that commit and only `complete` failed — the head the loop
+  // resubmits itself after the master's unblock.
+  blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional(), finishedHead: sha.optional() }).strict(),
   // GY-1726: a post-deploy follow-up whose reading cannot exist before `notBefore` ends its attempt
   // and waits for that instant, with no blocker and no intervention: the loop dispatches it then.
   defer: z.object({ epoch, notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000) }).strict(),
-  // GY-1740: the master's (or the loop's) hold of an unleased post-deploy follow-up on the instant its
+  // GY-3335: the loop's own submission of a finished head a worker named in a blocker its complete
+  // failed on. The loop runs complete's verification on its host first: a passing run travels as
+  // `verification`, and the head is submitted as the item's next attempt; one that failed on the
+  // change travels as `failed` and clears the record, so the item goes to a worker as today.
+  resubmit: z.object({ head: sha,
+    failed: z.string().trim().min(1).max(4000).optional(),
+    verification: z.object({ head: sha, ran: z.array(z.record(z.string(), z.unknown())).max(200) }).strict().optional() }).strict()
+    .superRefine((data, context) => { if (data.failed && data.verification) context.addIssue({ code: 'custom', message: 'A resubmission carries either the verification that passed or the failure that refused it' }); }),  // GY-1740: the master's (or the loop's) hold of an unleased post-deploy follow-up on the instant its
   // reading can first exist: the observation window `defer` sets, with no lease, and the recorded blocker cleared.
   window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files

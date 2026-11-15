@@ -68,7 +68,7 @@ export function trialSandboxFaultItem(repository: string) {
     reason: 'Filed by the master loop from a trial-host fault (GY-3339)',
   };
 }
-export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem> | ReturnType<typeof trialHostFaultItem> | ReturnType<typeof trialImageFaultItem> | ReturnType<typeof trialSandboxFaultItem>;
+export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem> | ReturnType<typeof trialHostFaultItem> | ReturnType<typeof trialImageFaultItem> | ReturnType<typeof trialSandboxFaultItem> | ReturnType<typeof trialNetworkFaultItem>;
 
 /** GY-3275: the bug item a merge trial that cannot build a repository's own trial image files upstream: one per repository. */
 export function trialImageFaultItem(repository: string) {
@@ -80,6 +80,19 @@ export function trialImageFaultItem(repository: string) {
     dependencies: [],
     criteria: [{ id: 'AC-1', text: `A merge trial builds ${repository}'s graphyard.trial.Dockerfile image; a new test pins the cause and fails without the fix`, proofs: ['unit:trial-image-builds'] }],
     reason: 'Filed by the master loop from a trial-host fault (GY-3275)',
+  };
+}
+
+/** GY-3316: the bug item a merge trial that Docker refused a network for spent address pools files upstream: one per repository. */
+export function trialNetworkFaultItem(repository: string, networks: string) {
+  return {
+    title: `Merge trials cannot create Docker networks on the install for ${repository}`.slice(0, 200),
+    type: 'bug' as const,
+    priority: 1,
+    description: `A merge trial on the install for ${repository} failed to create its network: all predefined address pools have been fully subnetted, with ${networks} Graphyard preview networks on the trial host. The head was neither refused nor reworked and stays queued. Find what leaks the networks and remove it; the loop's leftovers sweep removes trial networks no container uses.`,
+    dependencies: [],
+    criteria: [{ id: 'AC-1', text: `A merge trial on the install for ${repository} creates its network; a new test pins the leak and fails without the fix`, proofs: ['unit:trial-network-created'] }],
+    reason: 'Filed by the master loop from a trial-host fault (GY-3316)',
   };
 }
 
@@ -118,6 +131,10 @@ async function reportFault(cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'l
 /** GY-3249: a merge trial that could not fetch from `host` is reported once per host, like any Graphyard fault. */
 export const reportTrialHostFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>, host: string) =>
   reportFault(cycle, `trial-host-fault:${host}`, trialHostFaultItem(host, cycle.config.repository), `merge trials cannot fetch from ${host}, a host a normal build needs`);
+
+/** GY-3316: a merge trial Docker refused a network for spent address pools is reported once per repository, naming the preview networks on the host. */
+export const reportTrialNetworkFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>, networks: string) =>
+  reportFault(cycle, `trial-network-fault:${cycle.config.repository}`, trialNetworkFaultItem(cycle.config.repository, networks), `merge trials cannot create a Docker network on the install for ${cycle.config.repository}: its address pools are spent, with ${networks} Graphyard preview networks on the trial host`);
 
 /** GY-3275: a merge trial that could not build a repository's own trial image is reported once per repository, like any Graphyard fault. */
 export const reportTrialImageFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>) =>

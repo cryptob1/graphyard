@@ -395,7 +395,9 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'trialContainers', trials.length);
   if (trials.length) await note(cycle, `trial-orphans:${state.cycle}`, 'reclaim', null, 'done', `Stopped ${trials.join(', ')}: a trial container whose checkout is gone or that outlived twice the trial deadline`);
   const leftovers = await effects.reclaimJobLeftovers?.() ?? [];
-  tallyLeftovers(state, 'reclaimed', leftovers.length);
+  const networks = leftovers.filter(entry => entry.startsWith('network ')).length;
+  tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
+  tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
@@ -521,6 +523,19 @@ async function dispatchStep(cycle: Cycle) {
   // GY-3225: an untrusted checkout carrying repository Claude configuration holds the roles it
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
   const refusedRoles = await untrustedCheckoutRoles(cycle);
+  // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
+  // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
+  // and submits the head as the next attempt, so no worker session and no worker slot is spent
+  // re-running complete on unchanged work. While the record stands the item is not claimable
+  // (assertDispatchable); a verification that fails on the change clears it and the item goes to a
+  // worker as today.
+  if (effects.resubmit) for (const item of open) {
+    const finished = item.finishedBlockerHead;
+    if (!finished || !item.ready || item.blocker || item.hold || item.lease || item.submission && !item.reworkRequested) continue;
+    const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
+    launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
+  }
   // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
   // stopped. The first cycle below it launches again on its own.
@@ -616,6 +631,25 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
         : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`, config.operatorAgent?.id ?? null);
     }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
+  }
+}
+
+/**
+ * GY-3335: one finished-head resubmission on the launcher: the verification `complete` runs on
+ * this host, then the submit through the control plane. A fault of the run or the plane is one
+ * failed action retried next cycle; the fault the 2026-11-14 host move left every item with.
+ */
+async function resubmitFinishedHead(cycle: Cycle, item: Work, finished: NonNullable<Work['finishedBlockerHead']>, sink: DaemonAction[]) {
+  const { state, effects, now } = cycle;
+  const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
+  const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+  const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: finished.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)}: the verification complete runs, then the submit, with no worker session`);
+  try {
+    const outcome = await effects.resubmit!(item, finished.head);
+    await entry('done', outcome.detail);
+  } catch (error) {
+    await entry('failed', `Could not resubmit ${item.key}'s finished head ${finished.head.slice(0, 12)}: ${message(error)}; it is retried next cycle`);
   }
 }
 
