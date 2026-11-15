@@ -15,6 +15,7 @@ import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { requestedView } from '../src/model/setup-checklist';
 import { idempotencyKey } from './idempotency-key';
+import { poll } from './poll';
 import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
@@ -86,9 +87,8 @@ function App() {
   const live = !!status;
   useEffect(() => {
     if (!live) return;
-    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
+    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true;
     const load = async () => {
-      if (pending) return; pending = true;
       try {
         const read = async (path: string) => {
           const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
@@ -102,12 +102,12 @@ function App() {
         if (!active || epoch !== sessionEpoch.current) return;
         if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
-      } finally { pending = false; }
+      }
     };
     // A hidden tab's timers are throttled to once a minute, so returning to the tab reads at once.
-    const visible = () => { if (document.visibilityState === 'visible') void load(); };
-    void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
-    return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+    const polling = poll(load, 5000), visible = () => { if (document.visibilityState === 'visible') polling.now(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { active = false; controller.abort(); polling.stop(); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
   // The browser tab names the project it serves (GY-3306): gh · OWNER/REPO from the same status
   // reply the header's project name renders, so an operator's tabs tell installs apart. Graphyard
