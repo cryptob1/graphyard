@@ -84,7 +84,9 @@ async function cycle(state: ReturnType<typeof emptyDaemonState>, options: { fail
   const mutate = (path: string, data: unknown) => api('POST', path, data);
   const production = daemonEffects(root, () => config, { snapshot, mutate, headless: spawnHeadless });
   const effects: DaemonEffects = {
-    snapshot, agents: () => [], herdr: production.herdr, credentials: production.credentials, closeSession: () => {}, recordSession: production.recordSession,
+    snapshot, agents: () => [], herdr: production.herdr,
+    // Inspecting 100 profiles' credentials takes seconds a cycle; the step-failure cycles need none of them.
+    credentials: options.failCloseStep ? async () => ({}) : production.credentials, closeSession: () => {}, recordSession: production.recordSession,
     registry: production.registry, growWorkers: production.growWorkers, dispatch: production.dispatch, persist: async value => { await writeDaemonState(config, value); },
     // A failing volumes read fails the close step identically every cycle, while the rest of the cycle runs.
     diskVolumes: options.failCloseStep ? async () => { throw new Error('cannot read the volumes: fixture'); } : async () => [{ path: root, freeBytes: 1e12 }],
