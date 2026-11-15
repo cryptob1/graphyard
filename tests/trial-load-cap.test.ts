@@ -77,7 +77,7 @@ test(`${proof} — a CPU sensor at 95C holds a start until it cools; a hot non-C
     await host.sensor('nvme', 99_000);
     await host.sensor('coretemp', 95_000);
     const held = host.launch();
-    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C or more'), 'the start says the CPU is hot');
+    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C, at or over 95C'), 'the start says the CPU is hot');
     assert.equal(await host.started(), 0, 'nothing starts while the CPU is at 95C');
     await host.sensor('coretemp', 94_000);
     await host.until(async () => await host.started() === 1, 'the start goes once the sensor clears');

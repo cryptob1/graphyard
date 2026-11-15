@@ -18,7 +18,7 @@ export async function moveBranchToHead(root: string, branch: string, head: strin
 
 /** Poll alongside the host loop; trials never hold up supervision or renewal. */
 export function workerVerificationPump(root: string, host: () => string,
-  mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck) {
+  mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck, verify = runWorkerVerification) {
   return async () => {
     const jobs: WorkerVerificationJob[] = await mutate('worker-verifications/take', { host: host() });
     for (const job of jobs) {
@@ -28,7 +28,7 @@ export function workerVerificationPump(root: string, host: () => string,
           await moveBranchToHead(root, job.branch, job.input.head);
           const result = job.input.mode === 'check'
             ? await check({ root, base: base(), baseBranch: job.baseBranch, key: job.work.key, head: job.input.head, check: job.input.check! })
-            : await runWorkerVerification(root, job.work, job.input, job.baseBranch, undefined,
+            : await verify(root, job.work, job.input, job.baseBranch, undefined,
               line => { void mutate('worker-verifications/progress', { id: job.id, line }).catch(() => {}); });
           reply = { id: job.id, result };
         } catch (error) { reply = { id: job.id, error: error instanceof Error ? error.message : String(error) }; }

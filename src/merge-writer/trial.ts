@@ -236,12 +236,13 @@ export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly str
  * (a trial's scratch would compete with workers for RAM, and a tmpfs smaller than the disk floor
  * would hold every start forever), and the chosen one fails when its volume is too small ever to keep the floor free.
  */
-export function trialTemporaryRootReport(root: string, roots: readonly string[] = trialTemporaryRoots(), volatile: (path: string) => string | null = volatileFilesystem,
-  size: (path: string) => number | null = path => { try { const info = statfsSync(path); return Number(info.blocks) * Number(info.bsize); } catch { return null; } }) {
+export function trialTemporaryRootReport(root: string, { roots = trialTemporaryRoots(), exists = existsSync, volatile = volatileFilesystem,
+  size = path => { try { const info = statfsSync(path); return Number(info.blocks) * Number(info.bsize); } catch { return null; } } }: {
+  roots?: readonly string[]; exists?: (path: string) => boolean; volatile?: (path: string) => string | null; size?: (path: string) => number | null } = {}) {
   const floor = diskFloorBytes({ run: (() => { try { return JSON.parse(readFileSync(join(root, '.graphyard', 'master.json'), 'utf8')).run ?? {}; } catch { return {}; } })() });
-  const chosen = trialTemporaryRoot('the trial session directory', roots, existsSync, volatile);
-  const skipped = roots.filter(path => existsSync(path) && volatile(path)).map(path => `${path} is a ${volatile(path)}, so trials do not use it`);
-  const bytes = existsSync(chosen) ? size(chosen) : null;
+  const chosen = trialTemporaryRoot('the trial session directory', roots, exists, volatile);
+  const skipped = roots.filter(path => exists(path) && volatile(path)).map(path => `${path} is a ${volatile(path)}, so trials do not use it`);
+  const bytes = exists(chosen) ? size(chosen) : null;
   const fits = bytes === null || bytes >= floor;
   return { path: chosen, skipped, status: fits ? 'pass' as const : 'fail' as const,
     ...(fits ? {} : { fix: `${chosen} holds ${(bytes! / 1e9).toFixed(1)} GB in all, under the ${(floor / 1e9).toFixed(1)} GB disk floor, so trials there would wait forever: move ${durableTemporaryRoot()} to a larger durable volume, or lower run.diskFloorGb in .graphyard/master.json` }) };

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { defaultChildRun } from '../child-runner.js';
+import { defaultChildRun, type ChildRunOptions } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
 import { launcherLines, trialContainerFault, trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
@@ -20,6 +20,18 @@ export const workerVerificationTimeoutMs = 55 * 60_000;
 export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');
 export const workerVerificationPrefix = 'verify-';
 
+/**
+ * One child of a verification in its trial container (GY-3332): the launcher's lines reach `progress` as
+ * they happen, and a start that gave up waiting fails in the launcher's own words, never as a bare failed command.
+ */
+export async function verificationStep(command: string, args: string[], options: ChildRunOptions, progress: (line: string) => void): Promise<string> {
+  try { return await defaultChildRun(command, args, { ...options, onStderr: launcherLines(progress) }); }
+  catch (error) {
+    const fault = trialContainerFault(String((error as { stderr?: unknown }).stderr ?? ''));
+    throw fault ? new Error(`The verification could not start: ${fault}`) : error;
+  }
+}
+
 /** `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332). */
 export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
   progress: (line: string) => void = () => {}): Promise<WorkerVerificationResult> {
@@ -29,7 +41,6 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
   const tree = join(allocation, 'checkout'), home = join(allocation, 'home'), temporary = join(allocation, 'tmp');
   const deadline = Date.now() + workerVerificationTimeoutMs;
   const remaining = () => Math.max(1, deadline - Date.now());
-  const onStderr = launcherLines(progress);
   try {
     await mkdir(home); await mkdir(temporary);
     // Objects borrowed through alternates: candidate tests cannot write the shared repository.
@@ -43,13 +54,13 @@ export async function runWorkerVerification(root: string, work: Work, input: Wor
     delete env.NODE_TEST_CONTEXT;
     const wrapper = trialContainerWords([allocation], trialContainerDependencies(root), undefined, undefined, deadline, await trialLoad(root, 'verification'));
     // GY-3207: the candidate's install and checks run under the Node major it declares.
-    env.PATH = (await pinnedNodePath(tree, env.PATH, (command, args) => defaultChildRun(command, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining(), onStderr })))!;
+    env.PATH = (await pinnedNodePath(tree, env.PATH, (command, args) => verificationStep(command, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining() }, progress)))!;
     const lock = (path: string) => readFile(join(path, 'package-lock.json'), 'utf8').catch(() => null);
     const [own, candidate] = await Promise.all([lock(root), lock(tree)]);
     if (own !== null && own === candidate && existsSync(join(root, 'node_modules'))) await symlink(join(root, 'node_modules'), join(tree, 'node_modules'));
     else if (candidate !== null || packageManager(tree).name === 'pnpm') {
       const [command, ...args] = installArgv(packageManager(tree));
-      await defaultChildRun(command!, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining(), onStderr });
+      await verificationStep(command!, args, { cwd: tree, env: npmCiEnvironment(env), wrapper, timeoutMs: remaining() }, progress);
     }
     const result = join(allocation, 'result.json'), script = join(allocation, 'verify.mjs');
     await writeFile(script, `
@@ -61,11 +72,7 @@ const record = await verifyWorkingTree(work, ${JSON.stringify(tree)}, undefined,
 const rerun = ${input.mode === 'complete' ? `await completionRerun(${JSON.stringify(tree)}, work)` : '{ flaked: [], baseFailures: [] }'};
 writeFileSync(${JSON.stringify(result)}, JSON.stringify({ record, rerun }));
 `);
-    await defaultChildRun('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], { cwd: tree, env, wrapper, timeoutMs: remaining(), onStderr, group: true });
+    await verificationStep('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], { cwd: tree, env, wrapper, timeoutMs: remaining(), group: true }, progress);
     return JSON.parse(await readFile(result, 'utf8'));
-  } catch (error) {
-    // A start that gave up waiting is the host's: say so in its own words, not as a failed command.
-    const fault = trialContainerFault(String((error as { stderr?: unknown }).stderr ?? ''));
-    throw fault ? new Error(`The verification of ${input.head.slice(0, 12)} could not start: ${fault}`) : error;
   } finally { await rm(allocation, { recursive: true, force: true }); await rm(tempOwnerMarker(allocation), { force: true }); }
 }
