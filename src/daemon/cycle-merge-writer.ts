@@ -29,6 +29,7 @@ import { cpuPressureHeld } from './cpu-pressure.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
+import { readHeavyDrain, verificationSlotsDirectory, type HeavyDrain } from '../master/verification-slots.js';
 
 /** The merge writer's ports (merge-writer/executor.ts). */
 export interface MergeWriterReads extends MergePorts {
@@ -38,6 +39,8 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
+  /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge, revert or batch-gate trial starts. Absent, never drained. */
+  drain?(): HeavyDrain | null;
   /** GY-3120: how many queued heads are trialled at once, each alone on the current tip (`run.mergeWriter.parallel`); absent, one. */
   parallel?: number;
   /** GY-1902: the item previews' ports (merge-writer/preview.ts `itemPreviewStep`); absent, no item is previewed. */
@@ -107,7 +110,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     return sha;
   };
   return {
-    baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
+    baseBranch: base, parallel: settings.parallel, now: options.now ?? Date.now, record: options.record, drain: () => readHeavyDrain(verificationSlotsDirectory(options.base)), ...(options.hold ? { hold: options.hold } : {}), ...(options.holdOpening ? { holdOpening: options.holdOpening } : {}),
     git: (args, env) => gitAs(args, env),
     fetch: async () => {
       if (settings.tokenFile || settings.pushAuth) await gitAs(['fetch', '--no-tags', remote, `+refs/heads/${base}:${ref}`], pushEnvironment(settings, options.environment));
@@ -586,7 +589,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   // GY-3122: below the disk floor no new trial starts — the revert flight's trial is the loop's
   // most disk-heavy one — and an owed retrial keeps its place until room returns. GY-3348: a
   // saturated CPU holds it just the same.
-  if (state.diskHeadroom || cpuPressureHeld(state)) return false;
+  if (state.diskHeadroom || cpuPressureHeld(state) || reads.drain?.()) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
   // An owed retrial waits the base-failure hold like a base-held head (executor.ts GY-1834)
@@ -1034,7 +1037,8 @@ export async function mergeWriterStep(cycle: Cycle) {
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
       // GY-3122: below the disk floor no new trial starts; one in flight settles. GY-3348: so does
       // a saturated CPU — the trial would time out into rework, the episode this reading answers.
-      const due = next?.candidate && !state.diskHeadroom && !cpuPressureHeld(state) && (reads.admit?.() ?? true) ? next : null;
+      // GY-3304: nor while the host's heavy work is drained; the queue keeps every head and its gates.
+      const due = next?.candidate && !state.diskHeadroom && !cpuPressureHeld(state) && !reads.drain?.() && (reads.admit?.() ?? true) ? next : null;
       // GY-3120: the first `parallel` heads in queue order are trialled at once, each alone on the current tip; the flight is named by the first.
       // GY-3182: a new flight fills only the slots the running flights leave free.
       const heads = runnable.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work).slice(0, parallel - busy.size);

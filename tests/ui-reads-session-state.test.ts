@@ -84,7 +84,7 @@ test('unit:ui-reads-session-state — the Workers page and its counts show a ses
   assert.match(rowOf(html, 'shell'), /data-health="ended"[^>]*title="Ended · its agent exited[^"]*"/);
   assert.match(rowOf(html, 'lost'), /data-state="Ended"/);
   assert.match(rowOf(html, 'lost'), /data-health="ended"[^>]*title="Ended · stopped responding/);
-  const open = html.slice(0, html.indexOf('<details class="finished-sessions">'));
+  const open = html.slice(0, html.indexOf('<details class="panel finished-sessions">'));
   assert.ok(!open.includes('data-session="shell"') && !open.includes('data-session="lost"'), 'ended and lost sessions are never in the open table');
 });
 

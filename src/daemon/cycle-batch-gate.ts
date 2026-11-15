@@ -229,7 +229,8 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  */
 export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'now' | 'log'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
-  if (!reads?.git || !gate) return null;
+  // GY-3304: while the host's heavy work is drained no gate or diagnostics run starts; the batch waits on its record.
+  if (!reads?.git || !gate || reads.drain?.()) return null;
   const file = gateRecordPath(gate.root);
   const git = reads.git;
   // GY-3336: while the fetch-refusal backoff stands, neither the gate nor its bootstrap fetches —
