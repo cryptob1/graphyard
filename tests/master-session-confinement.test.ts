@@ -85,7 +85,7 @@ test('integration:master-session-checkout-readonly — the master session cannot
   }
 });
 
-test('unit:master-session-peer-grant — a recorded peer\'s token directory is granted writable and its install kept readable, while an unpeered install stays masked', async () => {
+test('unit:master-session-peer-grant — a recorded peer\'s token directory is granted writable while its install and an unpeered one stay masked', async () => {
   const base = await temporaryDirectory('master-peer-grant');
   const { root } = coordinator(base);
   // Two installs under one config home beside an unrelated third: this one's credential, a peer's
@@ -105,7 +105,8 @@ test('unit:master-session-peer-grant — a recorded peer\'s token directory is g
   const words = confinement.wrapper;
   const granted = words.indexOf(peerTokenDirectory(theirs));
   assert.ok(granted > 0 && words[granted - 1] === '--bind', 'the peer\'s token directory is bound writable');
-  assert.ok(!words.some((word, index) => word === '--tmpfs' && words[index + 1] === theirs), 'the peer\'s own install directory is not masked: the configuration names it');
+  const masked = words.findIndex((word, index) => word === '--tmpfs' && words[index + 1] === theirs);
+  assert.ok(masked > 0 && masked < granted, 'the peer\'s install directory stays masked — its credentials unreadable — and only its peers directory is bound in after the mask');
   assert.ok(words.some((word, index) => word === '--tmpfs' && words[index + 1] === join(configHome, 'c-install')), 'an install no configuration names stays masked');
   // Without the peer recorded, its directory is neither granted nor readable: the session that
   // first records the peer places nothing and names the rerun (GY-3385).
