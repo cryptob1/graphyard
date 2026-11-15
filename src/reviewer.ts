@@ -1064,8 +1064,8 @@ export async function launchReview(root: string, work: Work, profileName: string
         const own = withVerificationPath(harness.environment, launch.environment);
         // GY-3331: a product review's session gets the connection a worker's gets — the control
         // plane's address and the CLI it runs — and a browser tool on its PATH. The preflight
-        // checks the three in the environment the session would actually run with; a launch that
-        // cannot give them starts no reviewer and records the review as could not run instead.
+        // checks the three before anything starts; a launch that cannot give them records the
+        // review as could not run with the missing thing named and starts no reviewer.
         if (product) {
           const tool = (dependencies.browserTool ?? browserToolOnPath)({ PATH: process.env.PATH });
           const refusal = productLaunchRefusal(config, credentialMask, tool);
@@ -1073,6 +1073,8 @@ export async function launchReview(root: string, work: Work, profileName: string
             await (dependencies.recordCouldNotRun ?? recordCouldNotRunReview)(config, work, { reviewer: reviewerIdentity, sha: binding.sha, baseSha: binding.baseSha, reason: refusal }).catch(() => { /* the launch refusal itself is reported; the record is retried with it */ });
             throw new Error(`The product review of ${binding.key} could not run: ${refusal}`);
           }
+          // The tool resolved on the host the confinement mounts read-only; its directory goes
+          // first on the session's PATH, so a runtime that declares its own PATH keeps it too.
           own.PATH = [dirname(tool!), own.PATH ?? process.env.PATH ?? ''].filter(Boolean).join(':');
           own.GRAPHYARD_URL = config.url;
           own.GRAPHYARD_CLI = config.cliPath ?? launcherPath;
