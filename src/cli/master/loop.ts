@@ -6,10 +6,10 @@ import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
 import { readDaemonState } from '../../daemon/state.js';
 import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopCheckoutTrust, encodeLoopPanes, loopAlertsHeader, loopCheckoutTrustHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/loop-presence.js';
+import { encodeLoopCheckoutTrust, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
 import { encodeLoopWhere, loopWhereHeader } from '../../model/where-things-run.js';
 import { loopWhereReport } from '../../master/where.js';
-import { checkoutTrustKey, workerGrowthKey } from '../../daemon/cycle.js';
+import { checkoutTrustKey, standingStepFailures, workerGrowthKey } from '../../daemon/cycle.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
@@ -33,9 +33,13 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
     if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
     // A coordinator credential is the daemon's entire authority; its roster --proof patterns cover only the loop's readings,
-    // since evidence submission refuses every coordinator (GY-2934).
-    if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
-    assertProtocol(coordinator);
+    // since evidence submission refuses every coordinator (GY-2934). GY-3347: a plane that is down
+    // at startup is waited out rather than refused — the loop keeps running for the plane to
+    // answer, and the plane itself enforces the credential on every call the loop then makes.
+    if (coordinator) {
+      if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
+      assertProtocol(coordinator);
+    }
     const state = await readDaemonState(root, master);
     // The deploy unit pins new tips while this loop still runs from its own pin; it keeps the one recorded here.
     try { recordRunningPin(installDirectory(installIdFor(master.repository))); } catch { /* no install directory: no pin to keep */ }
@@ -50,9 +54,11 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
     // GY-3101: and names whether it alerts the operator directly (run.alertUrl) and after how many minutes, for the same page.
     // GY-3225: and names the standing checkout-trust refusal (an untrusted checkout carrying repository Claude configuration), for the Setup checklist's one item.
+    // GY-3293: and names the standing repeated step-failure line (a step failing the same way ten consecutive cycles), for the Setup checklist's Needs you item.
     // GY-3277: and names where this install's parts run — its units, containers, port, URL and directories — for the Setup page's panel.
     const where = await loopWhereReport(root, master);
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
+    const stepFailureLine = (failure: Parameters<typeof encodeLoopStepFailure>[0] | undefined) => failure ? encodeLoopStepFailure(failure) : 'off';
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
@@ -60,7 +66,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const stopping = new AbortController();
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
     const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root,
-      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator.actor.id } }))
+      // GY-3347: a loop started while the plane is down knows no actor of its own yet; no event reads as its own, so any event may wake it — one more cycle, never a lost one.
+      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator?.actor.id ?? '' } }))
       .finally(() => stopping.abort());
     // GY-409: the loop turns a connect made in Settings › Agents into a registered account on this host, one pass at a time.
     let connecting = false;
@@ -77,7 +84,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const result = await daemonRun;
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
     if (result.stopped) exit.stopped();
-    return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null });
+    return print({ repository: master.repository, coordinator: coordinator?.actor.id ?? null, intervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null });
   }
   return unhandled;
 }

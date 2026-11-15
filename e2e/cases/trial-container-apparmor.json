@@ -1,0 +1,14 @@
+{
+  "id": "trial-container-apparmor",
+  "title": "Trial containers start nested sandboxes on an AppArmor host",
+  "description": "With the Docker CLI and apparmor_parser stubbed: on a host reporting AppArmor enabled, install plans and loads the graphyard-trial profile (flags=(unconfined) with userns) and the trial container is created with --security-opt=apparmor=graphyard-trial, never apparmor=unconfined; without AppArmor neither happens. Doctor prints a FAIL trial-apparmor line naming AppArmor and the fix when the profile is not loaded or the nested sandbox is denied. A trial whose nested sandbox is denied is a trial-host fault: no verdict on the head, no base failure, reported upstream once.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "AppArmor trial profile, doctor line and nested-sandbox trial-host fault",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-container-apparmor.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
