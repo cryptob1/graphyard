@@ -293,7 +293,9 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.gate = null; }
     })();
   }
-  // Diagnostics get at most one extra trial so a one-slot host cannot starve its daily check.
+  // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy
+  // trial slot (trial-slots.ts): the merge flights and the gate size around them, and their own trial
+  // takes its share of the lanes.
   if (!live.diagnostics) {
     live.diagnostics = (async () => {
       try {
