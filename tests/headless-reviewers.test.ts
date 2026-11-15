@@ -82,6 +82,10 @@ async function configure(entries: { name: string; kind: string; failure?: string
     await writeFile(join(home, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: 'fixture-key' } }));
     await writeFile(join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'fixture-key', anthropic: { type: 'api', key: 'fixture-key' } }));
     await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: entry.name } }));
+    // GY-3329: a cursor account's usable sign-in is cursor/auth.json under its home — what the
+    // launch's account probe reads, so a cursor reviewer is eligible to be chosen.
+    await mkdir(join(home, 'cursor'));
+    await writeFile(join(home, 'cursor', 'auth.json'), JSON.stringify({ accessToken: 'fixture-sign-in' }));
     await mkdir(join(home, 'opencode'));
     await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'fixture-key' } }));
     const executable = entry.kind === 'cursor' ? 'cursor-agent' : entry.kind;

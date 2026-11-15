@@ -73,7 +73,9 @@ async function account(directory: string, name: string, login: 'claude' | 'codex
   if (login === 'claude') await writeFile(join(home, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 5 * hour, subscriptionType: 'max' } }), { mode: 0o600 });
   if (login === 'codex') await writeFile(join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: null, tokens: { access_token: token, refresh_token: 'r', id_token: 'i', account_id: 'a' } }), { mode: 0o600 });
   if (login === 'opencode') { await mkdir(join(home, 'opencode'), { recursive: true }); await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'k' } }), { mode: 0o600 }); }
-  if (login === 'cursor') await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: 7, email: 'agent@example.com' } }));
+  // GY-3329: a cursor account's usable sign-in is cursor/auth.json under the account home (what a
+  // confined session reads); cli-config.json holds its profile.
+  if (login === 'cursor') { await mkdir(join(home, 'cursor'), { recursive: true }); await writeFile(join(home, 'cursor', 'auth.json'), JSON.stringify({ accessToken: token }), { mode: 0o600 }); await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: 7, email: 'agent@example.com' } })); }
   return home;
 }
 async function codexUsage(home: string, percent: number, resetsInMs = hour) {
@@ -178,7 +180,7 @@ test('integration:agent-env-discovery — onboarding discovers or creates one en
     assert.deepEqual(applied.created, ['cursor-b']);
     assert.equal((await stat(join(environments, 'cursor-b'))).mode & 0o777, 0o700);
     assert.equal(applied.counts.loggedIn, 4, 'the new cursor-b has no login yet');
-    assert.match(applied.next, /Log in the rest .*CURSOR_CONFIG_DIR=\S+ agent login/);
+    assert.match(applied.next, /Log in the rest .*CURSOR_CONFIG_DIR=\S+ XDG_CONFIG_HOME=\S+ agent login/);
     // The fresh Claude homes get the one setting an unattended bypass-mode launch needs.
     assert.equal(JSON.parse(await readFile(join(claudeA, 'settings.json'), 'utf8')).skipDangerousModePermissionPrompt, true);
     const config = await loadMasterConfig(root);

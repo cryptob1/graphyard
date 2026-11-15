@@ -1,0 +1,15 @@
+{
+  "id": "queued-candidate-never-starves",
+  "title": "A queued head is trialled in its oldest-first place, also after a host move, while newer heads keep arriving",
+  "description": "A head whose merge trial timed out on the loop of the old host is still queued when the install moves and the loop restarts with the carried state. Newer heads at the same priority arrive every cycle. The new loop's merge writer trials the old head first, in its oldest-first place, and lands it; it is never left behind each newer arrival.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the old host's timed-out head is trialled before every newer head and lands",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:queued-candidate-never-starves tests/queued-candidate-never-starves.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

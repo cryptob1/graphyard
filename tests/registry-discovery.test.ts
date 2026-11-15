@@ -32,7 +32,10 @@ async function codingAgents() {
   for (const name of ['claude-a', 'claude-b', 'claude-c'])
     await file(join(root, name, '.credentials.json'), { claudeAiOauth: { accessToken: secret(`${name}-access`), refreshToken: secret(`${name}-refresh`), expiresAt: Date.now() + 3_600_000 } });
   await file(join(root, 'codex', 'auth.json'), { tokens: { access_token: secret('codex-access'), refresh_token: secret('codex-refresh') } });
-  await file(join(root, 'cursor-a', 'cli-config.json'), { authInfo: { userId: 'user-1', email: 'agent@example.test', accessToken: secret('cursor-access') } });
+  // GY-3329: a cursor environment's usable sign-in is cursor/auth.json under its home — the file a
+  // confined session reads; cli-config.json is its profile.
+  await file(join(root, 'cursor-a', 'cursor', 'auth.json'), { accessToken: secret('cursor-access') });
+  await file(join(root, 'cursor-a', 'cli-config.json'), { authInfo: { userId: 'user-1', email: 'agent@example.test' } });
   for (const name of ['opencode-a', 'opencode-b']) await file(join(root, name, 'opencode', 'auth.json'), { anthropic: { type: 'api', key: secret(`${name}-key`) } });
   for (const name of ['pi-a', 'pi-b']) {
     await file(join(root, name, 'auth.json'), { zai: { type: 'api_key', key: secret(`${name}-key`) } });
