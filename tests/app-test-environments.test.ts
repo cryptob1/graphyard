@@ -257,6 +257,9 @@ test('e2e:app-test-environments — after a loop restart, list reaps a leaked ow
   assert.deepEqual(await restarted.reconcile('staging', definition, cwd, { PROVIDER_DIR: fx.provider, PROVIDER_TOKEN: sentinel, APP_URL: fx.url }), [], 'nothing left to reap');
   assert.deepEqual(await readdir(join(fx.provider, 'instances')), [`inst-${mine}`], 'the active instance is preserved');
   assert.deepEqual(readEnvironmentState(fx.stateFile).instances.map(entry => entry.runId), [mine]);
+  // The second up logs its first line before its script exits, so the body that sets `finish` can
+  // start a moment later than the assertions above; wait for it as the file's other waits do.
+  while (typeof finish !== 'function') await new Promise(resolve => setTimeout(resolve, 20));
   finish(); await active; never();
   assert.deepEqual(await readdir(join(fx.provider, 'instances')), [], 'the active run tears down its own instance when done');
 });
