@@ -208,8 +208,10 @@ export const daemonStateSchema = z.object({
    * starts. Null where the pressure file is missing (not Linux), so nothing is held and the pages
    * show no figures.
    */
-  cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100), steal: z.number().min(0).max(100).nullable(),
-    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null) }).strict().nullable().default(null),
+  cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
+    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null),
+    /** GY-3373: the hottest CPU sensor in whole degrees; null where none is readable. */
+    celsius: z.number().nullable().default(null) }).strict().nullable().default(null),
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()

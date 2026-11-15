@@ -7,7 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
-import { cpuPressureHeld, cpuWaitingLine } from '../daemon/cpu-pressure.js';
+import { cpuWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
@@ -180,11 +180,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
     // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
-    // same two figures the Workers page shows — with the one waiting line while avg60 is over the
-    // ceiling and launches are held.
+    // same figures the Workers page shows, with the hottest CPU sensor (GY-3373) — and the one
+    // waiting line while launches are held.
     cpuPressure: state?.cpuPressure
-      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal,
-        waiting: cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure.avg60) : null }
+      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
+        waiting: cpuWaiting(state) }
       : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,

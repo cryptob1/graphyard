@@ -230,12 +230,14 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
   const stale = view.running.filter(row => row.stale).length;
   const openCount = view.running.length - stale;
   const table = (rows: WorkerRow[], label: string) => <Table rows={rows} label={label} work={work} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>;
-  const cpu = status?.cpu as { avg60: number; steal: number | null } | null | undefined;
+  const cpu = status?.cpu as { avg60: number | null; steal: number | null; celsius?: number | null } | null | undefined;
+  const cpuFigures = cpu ? [cpu.avg60 === null ? null : `Host CPU pressure ${Math.round(cpu.avg60)}% · steal ${cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}`,
+    cpu.celsius == null ? null : `${cpu.avg60 === null ? 'Host CPU ' : ''}temperature ${Math.round(cpu.celsius)}°C`].filter(Boolean).join(' · ') : '';
   return <>
     <div className="page-heading"><div>
       <h1>Workers</h1>
       <p className="summary">{openCount} agent {openCount === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p>
-      {cpu ? <p className="summary host-cpu" data-host-cpu>Host CPU pressure {Math.round(cpu.avg60)}% · steal {cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}</p> : null}
+      {cpuFigures ? <p className="summary host-cpu" data-host-cpu>{cpuFigures}</p> : null}
     </div></div>
     {view.running.length ? table(view.running, 'Agent sessions') : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>

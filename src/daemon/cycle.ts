@@ -44,7 +44,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureHeld, cpuPressureStep, cpuWaitingLine } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -588,12 +588,12 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
-  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) or too hot (GY-3373) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
   // stopped. The first cycle below it launches again on its own.
-  const cpuWaiting = cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure!.avg60) : undefined;
+  const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !cpuWaiting && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !cpuWaitingLine && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -639,7 +639,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot, cpuWaiting);
+  await effects.dispatchTick?.(snapshot, cpuWaitingLine);
   await masterSession(cycle, open);
 }
 

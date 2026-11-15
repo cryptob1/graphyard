@@ -17,6 +17,8 @@ export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores /
 const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, trialShardLanes(cores)) * usable / cores));
+/** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */
+export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
 /** A start waits while the hottest CPU sensor reads this or more. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
@@ -50,7 +52,7 @@ const faultLine = `${launcherLine}Trial-host fault: `;
 /** The launcher's Python: `admit()` returns once a container may start, holding its slot in the fd it returns. */
 export const trialAdmission = String.raw`
 load = spec.get('load')
-cpu_sensors = ('coretemp', 'k10temp', 'zenpower', 'cpu_thermal')
+cpu_sensors = ${JSON.stringify(cpuSensorNames)}
 def read(path):
     try:
         with open(path) as file:
