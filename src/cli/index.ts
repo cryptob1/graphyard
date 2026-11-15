@@ -15,6 +15,7 @@ import { reviewCommands } from './review.js';
 import { guideCommands } from './guide.js';
 import { versionCommands } from './version.js';
 import { upgradeCommands } from './upgrade.js';
+import { hostCommands } from './hosts.js';
 
 /**
  * Every command the launcher answers to, in help order. A feature adds its commands to
@@ -24,7 +25,7 @@ export const commands: readonly CliCommand[] = [
   ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...admissionAuditCommands, ...policyCommands,
   ...deliveryCommands, ...scenarioCommands,
   ...operatorAgentCommands, ...leaseCommands, ...workspaceCommands,
-  ...reviewCommands, ...guideCommands, ...versionCommands, ...upgradeCommands,
+  ...reviewCommands, ...guideCommands, ...versionCommands, ...upgradeCommands, ...hostCommands,
 ];
 
 export function renderHelp() {

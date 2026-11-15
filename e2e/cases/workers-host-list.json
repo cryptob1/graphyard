@@ -1,0 +1,22 @@
+{
+  "id": "workers-host-list",
+  "title": "Workers lists every host with cores, temperature, steal and runs now, and an unreachable host as away",
+  "description": "graphyard host add USER@HOST checks Docker over SSH and records the host; each loop cycle reads this machine and every added host (cores, hottest CPU sensor, steal, trial containers running now) and names them on its coordination read. /api/status serves them and the Workers page lists them in a Hosts table, this machine first; a host that does not answer reads Away and is read again next cycle. At 1280 px and 390 px.",
+  "tags": ["dashboard", "hosts"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the loop reads every host and the control plane serves them",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/host-add.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "the host list on the served Workers page",
+      "run": "npm run test:browser -- browser-tests/workers-host-list.spec.ts",
+      "timeoutSeconds": 420
+    }
+  ]
+}
