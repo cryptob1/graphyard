@@ -1,0 +1,17 @@
+{
+  "id": "done-item-ends-sessions",
+  "title": "A done item lists no running session and master status no longer counts its worker",
+  "description": "Against the head served by e2e-serve, drive one fixture item through the real merge writer's flight while its worker's implementation session is still recorded running. The delivered item lists no running session, its worker's handle is ended rather than dropped, and the work snapshot master status counts workers from leaves it out.",
+  "tags": ["api", "delivery"],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "deliver a fixture item with a running worker session and read its sessions",
+      "run": "node --import tsx scripts/e2e-done-item-ends-sessions.mjs {{token}} {{run}}",
+      "timeoutSeconds": 180
+    }
+  ]
+}
