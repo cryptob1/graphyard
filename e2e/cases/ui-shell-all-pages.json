@@ -1,0 +1,11 @@
+{
+  "id": "ui-shell-all-pages",
+  "title": "Every dashboard page uses the shared page shell, leads with its title and primary fact, and never scrolls sideways",
+  "description": "A real browser at 1440 px and at 390 px signs in to a real control plane serving the built dashboard, once with seeded items and once with no data, and opens every page the dashboard router lists by its address. Each page puts one h1 title in the shared page heading with its primary fact under it, both on the first screen; shows its content in the shared card class with the shared section heading style, any table in the shared table class, and the shared empty state when a list page has nothing to list; uses no page-local breadcrumb or heading; never scrolls sideways; and logs no console error. A page added to the router without the shell fails the case.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "walk every dashboard page at 1440 px and 390 px, seeded and empty", "run": "npm run test:browser -- browser-tests/ui-shell-all-pages.spec.ts", "timeoutSeconds": 600 }
+  ]
+}
