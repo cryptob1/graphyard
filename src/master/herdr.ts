@@ -184,10 +184,11 @@ export async function observeHerdrAgents(run?: ChildRun, scope: string | null = 
 
 export async function closeHerdrPane(pane: string, run?: ChildRun, timeoutMs = 5_000, scope: string | null = processScope) {
   assertHerdrScope(pane, scope);
-  await herdrJson(['pane', 'close', pane], run);
   const deadline = Date.now() + timeoutMs;
+  const bounded: ChildRun = (command, args, options) => (run ?? defaultChildRun)(command, args, { ...options, timeoutMs: Math.max(1, deadline - Date.now()) });
+  await herdrJson(['pane', 'close', pane], bounded);
   while (Date.now() < deadline) {
-    const result = await herdrJson(['pane', 'list'], run);
+    const result = await herdrJson(['pane', 'list'], bounded);
     if (!Array.isArray(result.panes)) throw new Error('Herdr did not return a pane inventory after close');
     if (!result.panes.some((candidate: any) => candidate.pane_id === pane)) return;
     await sleep(100);
