@@ -1,0 +1,15 @@
+{
+  "id": "limit-menu-blocked-failover",
+  "title": "A session blocked on Claude's usage-limit menu fails over",
+  "description": "A master pane Herdr reports agent_blocked, whose agent read is refused, is read off its visible screen: Claude's usage-limit menu marks the account exhausted and relaunches the master on another eligible account in one cycle; a blocked pane with no limit notice is left as it is.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "blocked limit-menu failover",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-session-limit.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
