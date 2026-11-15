@@ -34,7 +34,7 @@ function shell(page: Page) {
     const titles = [...document.querySelectorAll('main h1')];
     const fact = document.querySelector('main .page-heading .page-fact');
     return {
-      titles: titles.length, titleInHeading: !!titles[0]?.closest('.page-heading'), title: style(titles[0] ?? null),
+      titles: titles.length, titleText: titles[0]?.textContent?.trim() ?? '', titleInHeading: !!titles[0]?.closest('.page-heading'), title: style(titles[0] ?? null),
       fact: fact?.textContent?.trim() ?? '', firstScreen: { title: onFirstScreen(titles[0] ?? null), fact: onFirstScreen(fact) },
       // The Master page's content is its terminal, which fills the page (GY-3308).
       cards: document.querySelectorAll('main .panel, main table.sessions-table, main .live-terminal').length,
@@ -94,6 +94,7 @@ for (const data of ['seeded', 'empty'] as const) for (const viewport of [{ width
         if (shots) await page.screenshot({ path: new URL(`${route}-${viewport.width}${data === 'empty' ? '-empty' : ''}.jpg`, shots).pathname, quality: 70 });
       }
       const all = Object.entries(reads);
+      expect(new Set(all.map(([, read]) => read.titleText)).size, `each route opens its own page: ${all.map(([route, read]) => `${route}=${read.titleText}`)}`).toBe(routes.length);
       for (const [route, read] of all) expect(read.title, `${route} uses the shared title style`).toBe(all[0][1].title);
       const sections = new Set(all.flatMap(([, read]) => read.sections));
       expect([...sections], 'every card heading uses the shared section heading style').toHaveLength(1);
