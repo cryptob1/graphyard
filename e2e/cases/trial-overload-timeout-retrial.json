@@ -1,0 +1,14 @@
+{
+  "id": "trial-overload-timeout-retrial",
+  "title": "Overloaded trial hosts retry the same head without rework",
+  "description": "Stubbed trial steps and CPU counters prove overload timeouts retry the same head, stop after three trials for the master, and size shards to usable CPU. Idle-host timeouts still refuse the head.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Overloaded timeouts, retry limit, attention and CPU-sized shards",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-overload-timeout-retrial.test.ts tests/trial-load-cap.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
