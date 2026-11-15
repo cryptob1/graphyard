@@ -107,7 +107,8 @@ export function worktreeHead(root: string): string {
  * to the worktree's HEAD. parseArgs has no flag with an optional value, so `--head` and the SHA that
  * follows it (unless the next word is a flag) are taken out before the positionals are parsed.
  */
-export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; head: string } {
+/** The arguments' own validity, before any worktree or control plane is touched: a misused complete (a positional PR number) is refused first. */
+export function completeArgs(args: readonly string[]): { epoch: number; head?: string } {
   const rest: string[] = []; let head: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
@@ -117,9 +118,14 @@ export function completionBody(args: readonly string[], headOf: () => string): {
   }
   const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
   if (positionals[1] !== undefined) throw new Error(`complete submits a commit, never a pull request number: drop ${positionals[1]} and run complete GY-N EPOCH --head [SHA]`);
+  return { epoch: Number(positionals[0]), head };
+}
+
+export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; head: string } {
+  const { epoch, head } = completeArgs(args);
   const sha = (head ?? headOf()).trim();
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--head takes a 40-hex commit, or none for the worktree's HEAD; ${JSON.stringify(sha)} is neither`);
-  return { epoch: Number(positionals[0]), head: sha };
+  return { epoch, head: sha };
 }
 
 /**
@@ -383,8 +389,10 @@ export const completeCommand: CliCommand = {
     // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
     // else derived — so every retry of a submission the control plane did not answer repeats the
     // same request: one the server applied is answered from its receipt, never duplicated.
-    // GY-3344: the checkout is taken first, so a reporter outside one (another install's Master,
-    // which may only file items and message this Master) is refused plainly, not by git's raw error.
+    // A misused complete is refused by the arguments alone first, then GY-3344: a reporter outside
+    // a checkout (another install's Master, which may only file items and message this Master) is
+    // told so plainly, before git's raw error, whatever way --head was given.
+    completeArgs(context.args);
     await checkoutRoot(context, `graphyard complete ${work.key}`);
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? `complete:${work.id}:${body.epoch}:${body.head}`;
     // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
