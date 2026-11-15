@@ -28,6 +28,12 @@ const closeGraceMs = 20_000;
 
 /** GY-3343: how many of a failed serve command's last output lines its trial result keeps. */
 export const serveTailLines = 40;
+/**
+ * GY-3343: how much of a serve command's output its file keeps: the first `serveOutputHeadBytes`
+ * as they arrive, then, once the command has ended, a cut line and the last of it — a command that
+ * prints without end never fills the trial run directory, and the head and the tail say why.
+ */
+export const serveOutputHeadBytes = 256 * 1024;
 /** GY-3343: a serve command that never served the head: why, its last output lines, and when it ran. */
 export class ServeCommandError extends Error {
   constructor(reason: string, readonly output: string[], startedAt: number, endedAt: number) {
@@ -145,8 +151,9 @@ export function serveHead(checkout: string, application: ServedApplication, opti
 /**
  * A head served by its own `e2e.serve` declaration: `command` run in the trial checkout (the trial
  * environment, no credential) until `url` answers, waited for at most `readySeconds` and the
- * budget's remainder; never past it. The group is killed on close. Its whole output goes to
- * `outputFile` when given (GY-3343), and a command that never serves fails with its last lines.
+ * budget's remainder; never past it. The group is killed on close. Its output goes to
+ * `outputFile` when given (GY-3343) — the head as it arrives, the last of it once the command
+ * ends — and a command that never serves fails with its last lines.
  */
 async function serveByCommand(serve: CommandApplication, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = [], outputFile?: string): Promise<{ origin: string; close(): Promise<void>; ended(): string | null }> {
   const startedAt = Date.now(), budgetEnd = startedAt + budgetMs, readyMs = serve.readySeconds * 1000;
@@ -158,15 +165,24 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
   const child = spawn(file!, argv, { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const sink = outputFile ? createWriteStream(outputFile) : null;
   sink?.on('error', error => log(`the serve command's output could not be written to ${outputFile}: ${error.message}`));
-  // The end of the output, enough for its last lines; the whole of it goes to the file.
-  let recent = '';
-  const take = (chunk: Buffer) => { sink?.write(chunk); recent = (recent + chunk.toString('utf8')).slice(-64 * 1024); };
+  // The end of the output, enough for its last lines; the file keeps the head and, once ended, the tail.
+  let recent = '', written = 0, dropped = 0;
+  const take = (chunk: Buffer) => {
+    recent = (recent + chunk.toString('utf8')).slice(-64 * 1024);
+    if (!sink) return;
+    const head = chunk.subarray(0, Math.max(0, serveOutputHeadBytes - written));
+    written += head.length; sink.write(head);
+    dropped += chunk.length - head.length;
+  };
   child.stdout.on('data', take);
   child.stderr.on('data', take);
   const tail = () => recent.trimEnd().split('\n').slice(-serveTailLines);
+  const endSink = () => new Promise<void>(accept => sink
+    ? sink.end(dropped ? `\n… ${dropped} byte(s) of this output were cut here; the last of it follows …\n${recent}` : undefined, () => accept())
+    : accept());
   const fail = async (reason: string): Promise<never> => {
     await close();
-    await new Promise(accept => sink ? sink.end(accept) : accept(null));
+    await endSink();
     throw new ServeCommandError(reason, tail(), startedAt, Date.now());
   };
   let exited: string | null = null;
@@ -193,7 +209,7 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
     if (exited) await fail(`${exited}: ${tail().slice(-5).join(' | ').slice(0, 500)}`);
     // Only a success answers: a server still starting up (503) is not yet the head served.
     const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
-    if (answered) return { origin: new URL(serve.url).origin, close: () => close().finally(() => sink?.end()), ended: () => exited };
+    if (answered) return { origin: new URL(serve.url).origin, close: () => close().finally(endSink), ended: () => exited };
     // GY-3189: the command's time to answer starts when its container does, however long the start waited.
     if (trialContainerWaiting(recent)) deadline = Math.min(Date.now() + readyMs, budgetEnd);
     if (Date.now() >= deadline) {
