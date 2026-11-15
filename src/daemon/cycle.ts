@@ -519,6 +519,19 @@ async function dispatchStep(cycle: Cycle) {
   // GY-3225: an untrusted checkout carrying repository Claude configuration holds the roles it
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
   const refusedRoles = await untrustedCheckoutRoles(cycle);
+  // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
+  // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
+  // and submits the head as the next attempt, so no worker session and no worker slot is spent
+  // re-running complete on unchanged work. While the record stands the item is not claimable
+  // (assertDispatchable); a verification that fails on the change clears it and the item goes to a
+  // worker as today.
+  if (effects.resubmit) for (const item of open) {
+    const finished = item.finishedBlockerHead;
+    if (!finished || !item.ready || item.blocker || item.hold || item.lease || item.submission && !item.reworkRequested) continue;
+    const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
+    launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
+  }
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   if (!state.diskHeadroom && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
@@ -610,6 +623,25 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
         : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`, config.operatorAgent?.id ?? null);
     }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
+  }
+}
+
+/**
+ * GY-3335: one finished-head resubmission on the launcher: the verification `complete` runs on
+ * this host, then the submit through the control plane. A fault of the run or the plane is one
+ * failed action retried next cycle; the fault the 2026-11-14 host move left every item with.
+ */
+async function resubmitFinishedHead(cycle: Cycle, item: Work, finished: NonNullable<Work['finishedBlockerHead']>, sink: DaemonAction[]) {
+  const { state, effects, now } = cycle;
+  const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
+  const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+  const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: finished.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)}: the verification complete runs, then the submit, with no worker session`);
+  try {
+    const outcome = await effects.resubmit!(item, finished.head);
+    await entry('done', outcome.detail);
+  } catch (error) {
+    await entry('failed', `Could not resubmit ${item.key}'s finished head ${finished.head.slice(0, 12)}: ${message(error)}; it is retried next cycle`);
   }
 }
 
