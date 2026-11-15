@@ -166,7 +166,7 @@ test(`e2e:master-issues-peer-reporter — a confined Master session issues anoth
     // The relaunched session — the loop's next launch, now with the peer recorded — places it.
     const second = await launchConfined(b.root);
     assert.match(second, /PEER-ISSUE-EXIT 0/, `the relaunched session's issue succeeded: ${second.slice(-800)}`);
-    assert.match(second, /"issued":"install-b"/, second.slice(-800));
+    assert.match(second, /"issued": ?"install-b"/, second.slice(-800));
     const tokenFile = await tokensOf(b.root, 'install-a');
     assert.ok(existsSync(tokenFile), `the reporter token landed in the peer install's config directory: ${tokenFile}`);
     assert.equal(statSync(tokenFile).mode & 0o777, 0o600, 'the token file has mode 0600');
