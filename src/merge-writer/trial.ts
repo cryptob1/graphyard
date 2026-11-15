@@ -920,7 +920,6 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
  */
 export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
-  const cpu = trialCpuMonitor(input.cpu, input.cores);
   const phases: TrialPhaseDurations = { install: 0, build: 0, selection: 0, tests: 0 };
   let phase: TrialPhase = 'install', phaseAt = startedAt;
   /** Closes the running phase's time and opens `next`'s; with no `next`, answers every phase's time so far. */
@@ -1393,9 +1392,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     }
   };
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
+  const cpu = trialCpuMonitor(input.cpu, input.cores);
   let settled: { verdict: TrialRun } | { error: unknown };
-  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; } finally { closeStep(); }
-  cpu.close();
+  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; } finally { cpu.close(); closeStep(); }
   // An attempt that reached no verdict keeps the phase it ended in and every phase's time (GY-1832).
   if ('error' in settled && typeof settled.error === 'object' && settled.error) attemptContext.set(settled.error, { phase, phases: enter() });
   // A root that was clean when chosen and is not now may have shadowed the trial's lookups: whatever it answered is no verdict.
