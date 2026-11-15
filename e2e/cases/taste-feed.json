@@ -1,0 +1,108 @@
+{
+  "id": "taste-feed",
+  "title": "The Work page's Taste feed lists shipped items with their evidence, and tasting never blocks a delivery",
+  "description": "Two delivered items are seeded on the head's control plane (GY-3393). The Work page's Taste section lists them newest first, each card with its why sentence and the proof that ran the real app. Looks good records the taste and the card leaves the feed; Send back with a note records the taste and files a follow-up item whose reason is the note, beside a proposed master lesson carrying the note. Neither taste reopens or holds the delivered item: no delivery waits on a taste.",
+  "tags": ["dashboard", "api", "taste"],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "seed two delivered items awaiting their taste",
+      "run": "node --import tsx scripts/e2e-seed-taste-feed.mjs",
+      "timeoutSeconds": 60
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard",
+      "action": "open",
+      "path": "/?sign-in"
+    },
+    { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
+    { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
+    {
+      "kind": "browser",
+      "name": "the Work page has a Taste section",
+      "action": "expectText",
+      "role": "heading",
+      "text": "Taste",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "a delivered item's card shows its why sentence",
+      "action": "expectText",
+      "text": "A taste card shows the why sentence of what shipped.",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the card shows the evidence of the proof that ran",
+      "action": "expectText",
+      "text": "e2e:taste-feed · 1 executed",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "taste the first card good",
+      "action": "click",
+      "role": "button",
+      "text": "Looks good GY-TASTE"
+    },
+    {
+      "kind": "http",
+      "name": "the taste is recorded and the delivery never waited for it",
+      "method": "GET",
+      "path": "/api/work/GY-TASTE",
+      "status": 200,
+      "waitSeconds": 10,
+      "expect": [
+        { "path": "stage", "equals": "done" },
+        { "path": "delivery.mergedAt", "exists": true },
+        { "path": "taste.verdict", "equals": "good" }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "write the send-back note",
+      "action": "fill",
+      "label": "Send-back note for GY-SENDBACK",
+      "value": "The taste note for run {{run}}"
+    },
+    {
+      "kind": "browser",
+      "name": "send the second card back",
+      "action": "click",
+      "role": "button",
+      "text": "Send back GY-SENDBACK"
+    },
+    {
+      "kind": "http",
+      "name": "the send-back records its taste with the note, and the delivery stays delivered",
+      "method": "GET",
+      "path": "/api/work/GY-SENDBACK",
+      "status": 200,
+      "waitSeconds": 10,
+      "expect": [
+        { "path": "stage", "equals": "done" },
+        { "path": "delivery.mergedAt", "exists": true },
+        { "path": "taste.verdict", "equals": "send-back" },
+        { "path": "taste.note", "equals": "The taste note for run {{run}}" }
+      ],
+      "save": { "followUp": "taste.followUp.key" }
+    },
+    {
+      "kind": "http",
+      "name": "the follow-up item's reason is the note, beside the proposed lesson carrying it",
+      "method": "GET",
+      "path": "/api/work/{{followUp}}",
+      "status": 200,
+      "expect": [
+        { "path": "stage", "equals": "backlog" },
+        { "path": "description", "includes": "The taste note for run {{run}}" },
+        { "path": "origin.proposedLesson.text", "equals": "The taste note for run {{run}}" },
+        { "path": "origin.proposedLesson.from", "equals": "GY-SENDBACK" }
+      ]
+    }
+  ]
+}
