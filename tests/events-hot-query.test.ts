@@ -2,8 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { databaseUrl } from './helpers/postgres.js';
-import { Store, save } from '../src/store.js';
+import { withDatabase } from './helpers/postgres.js';
+import { save, type Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { readRegistry } from '../src/agent-registry.js';
@@ -49,8 +49,7 @@ const pages = async () => ({
 });
 
 before(async () => {
-  const url = await databaseUrl('events-hot-query');
-  store = new Store(url); await store.init();
+  store = await withDatabase('events-hot-query'); await store.init();
   const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = null;
   http = server(engine, [{ id: 'operator', role: 'admin', sessionKind: 'human', token }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
