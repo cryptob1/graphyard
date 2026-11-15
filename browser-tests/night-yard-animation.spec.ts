@@ -104,8 +104,8 @@ test('e2e:night-yard-animation — a stage change glides the row to its new grou
   state.work = state.work.map(item => item.key === 'GY-20' ? { ...item, humanRequest: null, blocker: null } : item);
   await expect(row).not.toHaveAttribute('data-group', 'needs-you', live);
   await expect.poll(() => page.evaluate(() => (window as any).glided ?? null), live).toMatch(/^transform /);
-  await expect.poll(() => row.evaluate(el => el.classList.contains('glide')), { timeout: 3_000 }).toBe(false);
-  expect(await row.evaluate(el => el.style.transform)).toBe('');
+  // It lands where it belongs: no glide class and no transform left on it, read together in one look.
+  await expect.poll(() => row.evaluate(el => ({ glide: el.classList.contains('glide'), transform: el.style.transform })), live).toEqual({ glide: false, transform: '' });
 });
 
 test('e2e:night-yard-animation — a row in trial carries the streak, the rain falls in two sheets, headings flicker in and the line types itself out', async ({ page }) => {
