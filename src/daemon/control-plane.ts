@@ -24,6 +24,8 @@ export const upstreamRetryMs = 3_600_000;
  */
 export const faultItem = (input: { title: string; description: string; proof: string; reason: string; repaired?: { text: string; proof: string } }) => ({
   title: input.title.slice(0, 200), type: 'bug' as const, priority: 1, description: input.description, dependencies: [],
+  why: 'A fault in Graphyard slows or stops delivery for everyone using this install until it is fixed.',
+  simplest: 'Fix the one cause the description names and pin it with a test; nothing else changes.',
   criteria: [
     // AC-1 never repeats the title: a title like "… on the install for X" reads as a live-install observation the filing refuses.
     { id: 'AC-1', text: 'The fault is fixed at its cause, not skipped or weakened; a new test pins it and fails without the fix', proofs: [input.proof] },

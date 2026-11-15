@@ -3,6 +3,7 @@ import { workerVerification } from '../worker-verification.js';
 import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
+import { whyAndSimplestRefusal } from '../../model-boundary/work.js';
 import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
@@ -183,6 +184,9 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
+      // GY-3382: every creator — master, loop, dashboard, reporter — files through this route, and each new item states why and simplest.
+      const unstated = id ? null : whyAndSimplestRefusal(input);
+      demand(!unstated, unstated!, 400);
       demand(attempted !== 'submit' || input?.pr === undefined, 'A submission names a commit, never a pull request number: complete GY-N EPOCH --head [SHA]');
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey()); }
       catch (error) {

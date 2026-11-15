@@ -32,7 +32,7 @@ test('integration:local-decisions-need-human-session — an anonymous local muta
 
     // Anonymous, from this machine: reads pass, every write and decision is refused.
     assert.equal((await localRequest(url, `/api/work/${work.id}`)).status, 200);
-    for (const [path, body] of [[`work/${work.id}/answer`, answer], ['work', { type: 'chore', title: 'Anonymous', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }] }], [`work/${work.id}/close`, { reason: 'anonymous' }], ['sign-in-links', {}]] as const) {
+    for (const [path, body] of [[`work/${work.id}/answer`, answer], ['work', { why: 'w', simplest: 's', type: 'chore', title: 'Anonymous', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }] }], [`work/${work.id}/close`, { reason: 'anonymous' }], ['sign-in-links', {}]] as const) {
       const refused = await post(path, body);
       assert.equal(refused.status, 401, `${path}: ${JSON.stringify(refused.body)}`);
     }
