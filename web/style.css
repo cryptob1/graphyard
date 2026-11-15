@@ -369,7 +369,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
    opacity and clip-path only, so the compositor carries every effect at 60 fps.
    --------------------------------------------------------------------------------------------- */
 /* A condensed display face carries the headings; ids, SHAs and numbers stay monospace. */
-html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3{font-family:var(--font-display);letter-spacing:.2px}
+html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3,html:not([data-theme='daylight']) .panel>summary{font-family:var(--font-display);letter-spacing:.2px}
 .tile strong,.kpi strong,.city-strip .mono{font-variant-numeric:tabular-nums}
 /* The street: slow rain in two sheets at two depths — the far one fainter and slower still — for
    parallax. Negative layers sit above the root background but behind all page content, including
