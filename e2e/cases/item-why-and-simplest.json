@@ -1,0 +1,12 @@
+{
+  "id": "item-why-and-simplest",
+  "title": "Every work item says why it helps users and why it is the simplest thing that works",
+  "description": "Against a real control plane and isolated Postgres, a create without why or simplest is refused naming the missing field; the dashboard create box files both, and the item page and Work list row lead with them; a requirements revision changes what is shown; an item created before the change opens with neither. Every built-in creator supplies both, and the master prompt, master guide, create help and worker prompt ask for them first.",
+  "tags": ["dashboard", "filing", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "create refusal, revision, creators and prompts", "run": "node --import tsx tests/helpers/run-tests.ts tests/item-why-and-simplest.test.ts", "timeoutSeconds": 240 },
+    { "kind": "command", "name": "file through the create box and read both sentences on the page and in the Work list", "run": "npm run test:browser -- browser-tests/item-why-and-simplest.spec.ts", "timeoutSeconds": 240 }
+  ]
+}
