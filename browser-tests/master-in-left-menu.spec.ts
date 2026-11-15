@@ -3,8 +3,8 @@ import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
 
 // GY-3287 AC-1: Master is the left menu's second top-level entry, opening the master's live page,
-// named Master with Fun on and off (GY-3307) — no longer only a sub-page under Workers.
-test('e2e:master-in-left-menu — Master is the second left-menu entry, opens the master page, and reads Master with Fun on and off', async ({ page }) => {
+// named Master (GY-3307) — no longer only a sub-page under Workers.
+test('e2e:master-in-left-menu — Master is the second left-menu entry, opens the master page, and reads Master', async ({ page }) => {
   const work = boardWork();
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
@@ -24,11 +24,6 @@ test('e2e:master-in-left-menu — Master is the second left-menu entry, opens th
   await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Master terminal' })).toBeVisible();
   await expect(menu.nth(1)).toHaveAttribute('aria-current', 'page');
-
-  // Fun changes nothing here (GY-3307): the entry and the page still read Master.
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(menu.nth(1)).toHaveText('Master');
-  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
 
   // Workers is its own page again: no sub-page row offering Master beside it (Costs sits there since GY-3297).
   await menu.nth(2).click();

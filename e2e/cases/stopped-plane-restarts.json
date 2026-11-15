@@ -1,0 +1,16 @@
+{
+  "id": "stopped-plane-restarts",
+  "title": "A stopped control plane is brought back up without a new commit",
+  "description": "The deploy watch's pass, against a stubbed compose runner and a real health endpoint: with the plane down, no new tip and no deploy running, it runs 'up' for the recorded serving commit within one poll and health returns; a missing-network failure recreates the containers and succeeds; while a deploy is running it does nothing; after three failures exactly one failure reason is recorded where master status and the alert path already read deploy failures. A loop started against an unreachable plane stays running and resumes cycles when the plane answers.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the watcher brings a stopped plane back, and the loop waits out an unreachable one",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/stopped-plane-restarts.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

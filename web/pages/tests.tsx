@@ -3,6 +3,7 @@ import Term from '../components/term';
 import type { CaseRun, TrackedCase } from '../../src/scenarios';
 import type { JudgedProof } from '../../src/test-runs';
 import { matrixColumns, type MatrixCell, type MatrixColumn } from '../../src/test-matrix';
+import type { EnvironmentRow } from '../../src/app-environments';
 
 /** Each result in words and a mark; a skip is its own state and never reads as a pass. */
 export const resultLabel: Record<string, { mark: string; word: string; tone: string }> = {
@@ -62,7 +63,27 @@ const filters: { id: Filter; label: string; keep: (entry: TrackedCase) => boolea
   { id: 'flaky', label: 'Flaky', keep: entry => entry.flaky, keepProof: () => false },
   { id: 'never', label: 'Never run', keep: entry => !entry.latest, keepProof: proof => !proof.record },
 ];
-type TestsData = { window: number; cases: TrackedCase[]; manual?: JudgedProof[] };
+type TestsData = { window: number; cases: TrackedCase[]; manual?: JudgedProof[]; environments?: EnvironmentRow[] };
+
+const lastWords: Record<string, string> = { passed: 'passed', failed: 'failed', waiting: 'waiting for capacity', fault: 'environment fault, retried' };
+/**
+ * GY-3296: where the app under test runs — one line per environment with where it runs, when it is
+ * used and its last run; the lifecycle, waits and cleanup folded. The tests themselves always run on
+ * this host.
+ */
+export function WhereTestsRun({ environments }: { environments: EnvironmentRow[] }) {
+  const named = environments.filter(row => row.lifecycle);
+  return <section className="where-tests-run" aria-label="Where tests run"><h2>Where tests run</h2>
+    <p className="muted">Where the app under test runs. The test runner itself always runs on this host.</p>
+    <ul>{environments.map(row => <li key={row.name} data-environment={row.name}><strong className="mono">{row.name}</strong> · {row.where} · {row.when} · last run{' '}
+      {row.last ? <><span className={row.last.outcome === 'passed' ? 'pass' : row.last.outcome === 'failed' ? 'fail' : 'amber'}>{lastWords[row.last.outcome] ?? row.last.outcome}</span> {ago(row.last.at)}{row.last.ms !== null ? ` in ${Math.round(row.last.ms / 1000)} s` : ''}</> : 'never'}</li>)}</ul>
+    <details><summary>Lifecycle, waits and cleanup</summary>
+      <p>Each batch gate starts one instance of a named environment for the commit it tests with its up command, runs the cases that name it against the URL up prints, then removes it with down. A full environment or a provider fault waits and retries on the next cycle: it never fails or reverts a change. A failed check against a running environment is a real test failure. After a restart the loop removes instances it no longer runs.</p>
+      {named.length > 0 && <ul>{named.map(row => <li key={row.name} data-environment-detail={row.name}><strong className="mono">{row.name}</strong>: at most {row.limit} at once, {row.inUse} in use · up <code>{row.lifecycle!.up}</code> · down <code>{row.lifecycle!.down}</code>{row.lifecycle!.list ? <> · list <code>{row.lifecycle!.list}</code></> : null}
+        {row.last?.commit && <><br/><small>last on <Commit sha={row.last.commit}/>{row.last.runId ? ` · run ${row.last.runId}` : ''}{row.last.url ? ` · ${row.last.url}` : ''}</small></>}
+        {row.last?.detail && <><br/><small className="amber">{row.last.detail}</small></>}</li>)}</ul>}
+    </details></section>;
+}
 
 /** One case's older runs, paged from the run ledger on request. */
 function OlderRuns({ api, id, after }: { api: (path: string) => Promise<any>; id: string; after: number | null }) {
@@ -235,6 +256,7 @@ export function TestsView({ data, error, loading, filter, setFilter, item = '', 
       {canEdit && setView && <button type="button" onClick={() => setView('scenarios')}>Define test cases</button>}</div>
     {error && <div role="alert" className="notice danger">{error} <button type="button" disabled={loading} onClick={retry}>Retry loading tests</button>{data ? <p>Previously loaded results are shown; they may be stale.</p> : null}</div>}
     {loading && !data && <p role="status">Loading tests…</p>}
+    {data?.environments?.length ? <WhereTestsRun environments={data.environments}/> : null}
     {data && !cases.length && !manual.length && <div className="empty"><span>◇</span><h2>No test cases yet.</h2><p>Add a case as <code>e2e/cases/ID.json</code> in the repository, register it with <code>graphyard e2e sync</code>, and <code>graphyard e2e run</code> records its runs here.</p></div>}
     {(cases.length > 0 || manual.length > 0) && <div className="case-filters" role="group" aria-label="View">{([['matrix', 'Where each case runs'], ['cases', 'By item and criterion']] as const).map(([id, label]) =>
       <button key={id} type="button" className={view === id ? 'chip active' : 'chip'} aria-pressed={view === id} onClick={() => setTestsView(id)}>{label}</button>)}</div>}

@@ -13,6 +13,8 @@ import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { landlockRefusal } from './landlock.js';
+import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
+import { trialContainerLaunch, trialImage } from './merge-writer/trial-container.js';
 
 /**
  * The prerequisites that `graphyard doctor` can check from this machine (GY-1352).
@@ -23,7 +25,8 @@ export const setupSteps = {
   install: 'run graphyard up from this checkout',
   environments: 'run graphyard up and connect agent accounts at the Setup link it prints',
   sandbox: 'install bubblewrap: sudo apt install bubblewrap (Debian/Ubuntu) or sudo pacman -S bubblewrap (Arch)',
-  kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9',
+  kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9 (Ubuntu 26.04: sudo apt install linux-image-oem-7.3, then reboot)',
+  trialAppArmor: trialAppArmorFix,
   loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
@@ -53,6 +56,8 @@ export interface SetupFromZeroInput {
   platform?: NodeJS.Platform;
   /** GY-3169: the host's Landlock ABI reader; the landlock line appears only when given. */
   landlockAbi?: () => number;
+  /** GY-3339: starts a nested sandbox in a trial container; null when it starts, else its output. Asked only on an AppArmor host. */
+  trialSandbox?: () => string | null;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -67,6 +72,15 @@ export function bubblewrapProbe(paths: string[]): string | null {
     execFileSync('bwrap', ['--ro-bind', '/', '/', ...binds, '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--', 'sh', '-c', paths.map(path => `test -w '${path.replace(/'/g, `'\\''`)}'`).join(' && ')], { stdio: 'ignore', timeout: 20_000 });
     return null;
   } catch (error: any) { return error.code === 'ENOENT' ? 'bubblewrap (bwrap) is not installed' : `bwrap could not write them: ${error.message.split('\n')[0]}`; }
+}
+
+/** GY-3339: a trial container, as merge trials create it, starting the nested sandbox its tests start. */
+export function trialSandboxProbe(): string | null {
+  const [command, ...args] = trialContainerLaunch({ image: trialImage(), mounts: [], network: 'none' });
+  try {
+    execFileSync(command!, [...args, 'bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--unshare-user', '--unshare-pid', 'true'], { cwd: '/', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
+    return null;
+  } catch (error: any) { return `${error.stderr ?? ''}${error.stdout ?? ''}`.trim().split('\n').slice(-2).join(' ') || String(error.message).split('\n')[0]; }
 }
 
 /**
@@ -236,6 +250,11 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
     const read = input.landlockAbi; let abi = 0;
     const refusal = landlockRefusal(() => (abi = read()));
     lines.push({ id: 'landlock', status: refusal ? 'fail' : 'pass', step: setupSteps.kernel, detail: refusal ?? `Landlock ABI ${abi} confines sessions` });
+  }
+  if (appArmorEnabled()) {
+    const refused = (input.trialSandbox ?? trialSandboxProbe)();
+    lines.push({ id: 'trial-apparmor', status: refused ? 'fail' : 'pass', step: setupSteps.trialAppArmor,
+      detail: refused ? `AppArmor denies a nested sandbox in a merge-trial container, so trials of tests that start one cannot run: ${refused}` : `merge-trial containers start nested sandboxes under the ${trialAppArmorProfile} AppArmor profile` });
   }
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);

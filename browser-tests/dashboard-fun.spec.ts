@@ -6,7 +6,7 @@ import { LINES, friendlyName } from '../web/fun';
 test.use({ reducedMotion: 'no-preference' });
 
 // GY-3268: the dashboard is fun — named agents, a line about building, playful empty states and a
-// small celebration when work ships — and the Fun toggle (or reduced motion, for the confetti) turns it off.
+// small celebration when work ships — in the one mode the dashboard has (GY-3320); reduced motion stops the confetti.
 const builder = 'graphyard-claude-1', master = 'cryptob1-graphyard-master';
 const name = friendlyName(builder)!;
 const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
@@ -76,17 +76,6 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
   await expect(page.locator('.confetti')).toHaveCount(1);
   await expect(shipped(page)).toHaveAttribute('data-shipped-today', '1');
 
-  // Fun off: names and lines fall back to the plain text, and a merge brings a toast but no confetti.
-  await page.locator('.confetti').waitFor({ state: 'detached' });
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(page.locator('[data-build-line]')).toHaveCount(0);
-  await expect(page.locator(`[data-row="GY-2"] [data-agent="${builder}"]`)).toHaveText(builder);
-  state.work = [state.work[0], merged(state.work[1])];
-  await expect(page.locator('[data-toast="GY-2"]')).toContainText(`${builder} shipped “Another change”`, live);
-  await expect(page.locator('.confetti')).toHaveCount(0);
-  // The choice is remembered by this browser.
-  await expect(page.getByRole('button', { name: 'Fun', exact: true })).toHaveAttribute('aria-pressed', 'false');
-  expect(await page.evaluate(() => localStorage.getItem('graphyard.fun'))).toBe('off');
 });
 
 test('e2e:dashboard-fun — with reduced motion set, a merge brings the toast and no confetti', async ({ page }) => {
@@ -98,9 +87,7 @@ test('e2e:dashboard-fun — with reduced motion set, a merge brings the toast an
   await expect(page.locator('.confetti')).toHaveCount(0);
 });
 
-test('e2e:dashboard-fun — an empty board shows the playful empty-state line, and the plain one with Fun off', async ({ page }) => {
+test('e2e:dashboard-fun — an empty board shows the playful empty-state line', async ({ page }) => {
   await serve(page, []);
   await expect(page.getByRole('heading', { name: 'The yard is quiet. File a goal and wake the crew.' })).toBeVisible();
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'No work yet.' })).toBeVisible();
 });

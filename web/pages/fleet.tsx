@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
+import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quotaStates, unspecifiedModel, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
@@ -100,10 +100,11 @@ export function AccountCard({ account, connect, onChangeRoles, now = Date.now() 
   const probe = probeStatus(account, now);
   const live = account.liveSessions.length;
   return <div className="criterion" data-account={account.name} data-probe={probe.tone}>
-    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
+    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ' (runtime default model)'}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
     {account.ineligible && <p role="status" className="amber">Ineligible: {account.ineligible}</p>}
+    {!account.modelId && <p className="amber" data-default-model>{unspecifiedModel(account)}</p>}
     <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {live}{live ? ` — ${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ')}` : ''}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
-    <p>Quota: {account.quota}{account.usage.length ? ` — ${usageText(account.usage)}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''} <span className={`probe ${probe.tone}`} data-probe={probe.tone}>{probe.text}</span></p>
+    <p>Quota: {account.quota}{account.usage.length ? ` — ${usageText(account.usage)}` : ''} · Resets: {account.resetUnknown ? `unknown (held until ${when(account.resetsAt)})` : when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''} <span className={`probe ${probe.tone}`} data-probe={probe.tone}>{probe.text}</span></p>
     {connect?.placement && <p className="muted">Joined by default: {connect.placement.join(', ')}</p>}
     <p className="muted">Capability: {account.capability?.tier ?? 'unknown'}{account.capability?.contextTokens ? ` · ${account.capability.contextTokens.toLocaleString()} token context` : ''} · {cost(account)} · Credential by reference: {account.home ?? 'the runtime\'s own default login'} on {account.host}{account.enabled ? '' : ' · disabled'}</p>
   </div>;

@@ -9,6 +9,14 @@ export interface WorkerVerificationResult {
   rerun: Awaited<ReturnType<typeof completionRerun>>;
 }
 
+/**
+ * GY-3335: the required-proof runs a completed verification failed — exactly what `complete`
+ * refuses on. Empty when every required proof passed or was left to CI; read wherever complete's
+ * own judgement is re-run, never re-worded.
+ */
+export const failedRequiredProofs = (record: Pick<VerifyRecord, 'ran'>) =>
+  record.ran.filter(run => (run.result !== 'pass' && !leftToCiRun(run)) || run.unexercised);
+
 /** No candidate command executes in the worker's sandbox. */
 export async function requestWorkerVerification(context: CliContext, work: any, input: {
   mode: 'verify' | 'complete'; head?: string; epoch?: number; preserves?: string[];
@@ -27,7 +35,9 @@ export async function requestWorkerVerification(context: CliContext, work: any, 
   });
   if (result.record.head !== head) throw new Error('The private trial returned a different head');
   await written(root, result.record);
-  if (input.mode === 'complete' && result.record.ran.some(run => (run.result !== 'pass' && !leftToCiRun(run)) || run.unexercised))
-    throw new Error(`complete refused: required proofs failed: ${JSON.stringify(result.record.ran)}`);
+  if (input.mode === 'complete') {
+    const failed = failedRequiredProofs(result.record);
+    if (failed.length) throw new Error(`complete refused: required proofs failed: ${JSON.stringify(failed)}`);
+  }
   return result;
 }

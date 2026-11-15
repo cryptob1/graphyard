@@ -33,10 +33,25 @@ export const e2eServeSchema = z.object({
   url: z.url().max(200),
   readySeconds: z.number().int().min(1).max(600),
 }).strict();
+/**
+ * GY-3296: one named app test environment — where the app under test runs, not where the test
+ * runner runs. `up` gets GRAPHYARD_COMMIT and GRAPHYARD_RUN_ID and prints, as its last stdout line,
+ * `{"url":"…","instance":"…"}`; `down` gets the same identity plus GRAPHYARD_INSTANCE; the optional
+ * `list` prints `[{"instance":"…","runId":"…"}]` of the instances it owns. `maxConcurrent` counts
+ * instances until their `down` succeeds; `use` is when the loop provisions one (per batch gate).
+ */
+export const appEnvironmentSchema = z.object({
+  up: z.string().trim().min(1).max(500),
+  down: z.string().trim().min(1).max(500),
+  list: z.string().trim().min(1).max(500).optional(),
+  maxConcurrent: z.number().int().min(1).max(100).default(1),
+  use: z.enum(['batch']).default('batch'),
+}).strict();
+export const appEnvironmentsSchema = z.record(z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'an environment name is lower-case letters, digits and -').refine(name => name !== 'local', '"local" is the built-in environment and cannot be redeclared'), appEnvironmentSchema);
 export const repositoryPolicySchema = z.object({
   risk: z.object({ sensitive: z.array(declaredEntrySchema).min(1).max(200) }).strict().optional(),
   review: z.unknown().optional(),
-  e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules).optional(), serve: e2eServeSchema.optional() }).strict().optional(),
+  e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules).optional(), serve: e2eServeSchema.optional(), environments: appEnvironmentsSchema.optional() }).strict().optional(),
   release: z.object({ onFailure: z.enum(releaseFailureActions).optional(), revertUnmatched: z.boolean().optional() }).strict().optional(),
   // GY-2989: the paths whose change is user-facing, so a product review of one head carries to a
   // later one only when nothing here changed between them. A repository that declares none reviews

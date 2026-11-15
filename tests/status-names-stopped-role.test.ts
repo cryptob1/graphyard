@@ -33,7 +33,8 @@ const account = (name: string, quota = { ...unobservedQuota }) => ({ name, runti
 function registry(refusedFor: { master: number; reviewer: number }): AgentRegistry {
   const spent = { ...unobservedQuota, state: 'exhausted' as const, resetsAt: '2026-11-05T21:00:00Z', observedAt: iso(clock - minutes(5)), source: 'probe' as const, reason: 'usage limit reached' };
   const masterRefusal = 'role master is at its concurrency limit (1 of 1 live: codex-master)';
-  const document = { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: null }],
+  // The model carries a concrete id: an unpinned model is its own attention line (GY-3302), not this incident's.
+  const document = { ...emptyRegistry(), revision: 51_000, runtimes: proposedRuntimes.filter(runtime => runtime.name === 'codex'), models: [{ name: 'gpt', id: 'gpt-5.5-codex' }],
     accounts: [account('codex-master'), account('codex-review', spent), account('codex-a'), account('codex-b')],
     roles: [{ name: 'master', accounts: ['codex-master'], concurrency: 1, policy: {} }, { name: 'reviewer', accounts: ['codex-review'], concurrency: 2, policy: {} },
       { name: 'worker', accounts: ['codex-a', 'codex-b'], concurrency: 1, policy: {} }],
