@@ -165,19 +165,20 @@ export async function containerTrialE2e(input: {
   worktree: string; mergeSha: string; proofs: readonly string[]; env: Record<string, string>;
   scratch: string; budgetMs: number; wrapper: readonly string[]; run: ChildRun; log: (line: string) => void;
   networkWrapper: (network: string) => readonly string[];
+  origins?: Record<string, string>;
 }): Promise<TrialE2eCase[]> {
   const holds = async (path: string) => {
     try { execFileSync('git', ['-C', input.worktree, 'cat-file', '-e', input.mergeSha + ':' + path], { stdio: 'ignore' }); return true; }
     catch { return false; }
   };
-  return runTrialE2eCases({ ...input, holds, runGroup: async (target, proofs, group) => {
+  return runTrialE2eCases({ ...input, holds, runGroup: async (target, proofs, group, given) => {
     const deadline = Date.now() + group.budgetMs;
     const left = () => Math.max(1, deadline - Date.now());
     let stack: ReturnType<typeof composeStack> | undefined;
-    let origin: string | undefined;
+    let origin: string | undefined = given;
     let wrapper = input.wrapper;
     try {
-      if ('kind' in target && target.kind === 'compose') {
+      if (!origin && 'kind' in target && target.kind === 'compose') {
         const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' });
         // Unpredictable project identities prevent collisions between parallel trials of a head.
         const project = composeProjectName('trial-e2e-' + target.id, randomUUID());

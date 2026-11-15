@@ -26,6 +26,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { EnvironmentFault } from './app-environments.js';
 import type { Work } from './model.js';
 import type { ServeLanding } from './merge-writer/serve-revert.js';
 import type { PreviewCaseRun } from './merge-writer/served-previews.js';
@@ -386,6 +387,8 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     record.attempt = { ...record.attempt, recuts: record.attempt.recuts + 1 };
     return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha };
   } catch (error) {
+    // GY-3296: a wait for environment capacity or an environment fault blames, fails and reverts nothing: the next cycle gates again.
+    if (error instanceof EnvironmentFault) return { outcome: 'retry', tip, reason: error.message };
     if (!(error instanceof GateTimeout)) throw error;
     if (!(mainKey in finished)) measure(ports.now() - Date.parse(record.inFlight.startedAt));
     // A timeout blames nobody: the batch is recut once, and a second timeout holds.

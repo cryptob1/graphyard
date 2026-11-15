@@ -10,7 +10,7 @@ import { releaseView, servedFor } from '../../src/model/release';
 import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-stage';
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
-import { BuildLine, Playful, ShippedToday } from '../fun';
+import { BuildLine, ShippedToday } from '../fun';
 import { useGlide } from '../glide';
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -66,18 +66,18 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
-  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
+  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
     {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="row-steps"><StepNames/></span><span>Who acts next</span><span>In step</span></div>}
     <div className="rows">{byGroup[group].map(w => row(w, group))}</div>
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><BuildLine/><ShippedToday work={work}/><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
-      <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
+    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/><ShippedToday work={work}/></div>
+      <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
-    {work.length === 0 ? <div className="empty"><h2><Playful plain="No work yet." fun="The yard is quiet. File a goal and wake the crew."/></h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
+    {work.length === 0 ? <div className="empty"><h2>The yard is quiet. File a goal and wake the crew.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextTile(board ? board.groups['up-next'].filter(match) : []) : groupMeaning[group]}</small>
       </button>)}</div>
@@ -86,11 +86,11 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {section('blocked')}
       {section('moving')}
       {section('up-next')}
-      {shown('backlog') && byGroup.backlog.length > 0 && <details className="work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
+      {shown('backlog') && byGroup.backlog.length > 0 && <details className="panel work-group group-backlog" aria-label="Backlog" data-group-section="backlog" open={only === 'backlog'}>
         <summary><GroupDot group="backlog"/>Backlog <span className="count">{byGroup.backlog.length}</span></summary>
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}
-      {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : <Playful plain="Nothing is open." fun="Inbox zero, factory edition."/>}</p>}
+      {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Inbox zero, factory edition.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
         <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, now, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
