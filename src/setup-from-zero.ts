@@ -13,6 +13,9 @@ import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrInstaller, herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { deployCheckoutOf } from './install/loop-unit.js';
+import { installDirectory } from './install/secrets.js';
+import { installIdFor } from './install/types.js';
+import { repositoryFromRemote } from './onboarding.js';
 import { landlockRefusal } from './landlock.js';
 import { MINIMUM_NODE_MAJOR } from './install/local.js';
 import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
@@ -42,7 +45,7 @@ export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: strin
 export interface SetupFromZeroInput {
   /** The managed repository's checkout doctor runs in. */
   root: string;
-  /** This install's directory, whose deploy checkout doctor judges (GY-3350). */
+  /** This install's directory, whose deploy checkout doctor judges (GY-3350); defaults to the one for the root's origin repository. */
   installDir?: string;
   env?: NodeJS.ProcessEnv;
   /** The server's GET /api/status answer, or null with the failure when it did not answer. */
@@ -252,6 +255,14 @@ export async function deploySourceCheck(installDir: string): Promise<SetupCheck 
     : { id: 'deploy-source', status: 'fail', step: setupSteps.deploySource, detail: `the deploy source ${checkout} is a worktree of another checkout, so moving or deleting that checkout breaks this install's deploy` };
 }
 
+/** The install directory for the checkout's origin repository, or null when it has none. */
+function installDirOf(root: string): string | null {
+  try {
+    const repository = repositoryFromRemote(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
+    return repository ? installDirectory(installIdFor(repository)) : null;
+  } catch { return null; }
+}
+
 /** Whether herdr, which the master window runs in, is on PATH (GY-3324). */
 async function herdrCheck(path: string): Promise<SetupCheck> {
   for (const directory of path.split(delimiter).filter(Boolean)) {
@@ -289,7 +300,8 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
-  const deploySource = input.installDir ? await deploySourceCheck(input.installDir) : null;
+  const installDir = input.installDir ?? installDirOf(input.root);
+  const deploySource = installDir ? await deploySourceCheck(installDir) : null;
   if (deploySource) lines.push(deploySource);
   const serve = await serveCheck(input.root);
   if (serve) lines.push(serve);
