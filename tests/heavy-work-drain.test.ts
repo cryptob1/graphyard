@@ -114,7 +114,10 @@ test('e2e:heavy-work-drain — a running trial finishes under a drain while queu
   for (let minute = 6; minute <= 8; minute++) { await runCycle(config, state, effects, () => start + minute * 60_000); await mergeWriterIdle(state); }
   assert.deepEqual(yard.trials, [1, 2], 'the waiting head is trialled after resume');
   assert.deepEqual(yard.kinds(2).slice(0, 3), ['intent', 'trial', 'pushed'], 'it lands through its own trial, as before the drain');
-  await batchGateStep(gateCycle).catch(() => null);
+  // The step hands the gate's flights back rather than awaiting them; both must settle before the
+  // assertion, or it races the detached runs (main's GY-3296 added a hop before the gate's first read).
+  const flights = await batchGateStep(gateCycle) as { gate: Promise<unknown> | null; diagnostics: Promise<unknown> | null };
+  await Promise.allSettled([flights.gate, flights.diagnostics].filter((flight): flight is Promise<unknown> => !!flight));
   assert.ok(gitCalls > 0, 'the batch gate runs again after resume');
 });
 
