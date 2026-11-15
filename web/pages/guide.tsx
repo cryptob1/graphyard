@@ -21,11 +21,11 @@ const host: [string, string, string][] = [
   ['Database', 'graphyard-OWNER-NAME-db-1', 'Postgres 17 in Docker.'],
   ['Merge trials', 'graphyard-trial-…', 'One container per trial.'],
   ['Agent sessions', 'Workers, reviewers, the Master', 'Confined, one worktree each.'],
-  ['More hosts', 'graphyard host add USER@HOST', 'A spare machine with Docker; Workers lists each host.'],
+  ['Hosts', 'graphyard host add', 'Listed on Workers.'],
 ];
 const outside: [string, string][] = [
   ['GitHub', 'Your code. Only the loop pushes.'],
-  ['Agent providers', 'Claude, Codex and others, on your accounts.'],
+  ['Agent providers', 'Claude, Codex and others.'],
   ['npm and GHCR', 'Graphyard’s own releases.'],
   ['Your browser', 'The dashboard, locally or on your tailnet.'],
 ];
