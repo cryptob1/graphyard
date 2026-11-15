@@ -94,8 +94,8 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   expect(await background(page)).toEqual([7, 11, 20]);
   expect(await rain(page)).toBe('gy-rain');
   expect(await grain(page)).toContain('svg');
-  // The strip counts agents working; a builder's row gets its friendly name, and the Master page's title reads Master (GY-3307).
-  await expect(page.locator('.city-strip')).toContainText('agents working');
+  // The strip carries the trust numbers; a builder's row gets its friendly name, and the Master page's title reads Master (GY-3307).
+  await expect(page.locator('.trust-strip')).toContainText('verified by running');
   await expect(page.locator('[data-row="GY-14"] .row-who')).toContainText('Theo is running GY-14');
   await page.keyboard.press('Control+k');
   await page.getByLabel('Search commands').fill('Master');

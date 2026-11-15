@@ -381,7 +381,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
    --------------------------------------------------------------------------------------------- */
 /* A condensed display face carries the headings; ids, SHAs and numbers stay monospace. */
 html:not([data-theme='daylight']) h1,html:not([data-theme='daylight']) h2,html:not([data-theme='daylight']) h3,html:not([data-theme='daylight']) .panel>summary{font-family:var(--font-display);letter-spacing:.2px}
-.tile strong,.kpi strong,.city-strip .mono{font-variant-numeric:tabular-nums}
+.tile strong,.kpi strong,.trust-strip .mono{font-variant-numeric:tabular-nums}
 /* The street: slow rain in two sheets at two depths — the far one fainter and slower still — for
    parallax. Negative layers sit above the root background but behind all page content, including
    dialogs and toasts. Both sheets are overscanned and moved by transform. */
@@ -433,15 +433,15 @@ html:not([data-theme='daylight']) .work-row.glitch{animation:gy-glitch 2.2s infi
 /* A ship pulses neon while its toast is up. */
 @keyframes gy-neon{0%,100%{box-shadow:0 0 10px color-mix(in srgb,var(--shipped) 35%,transparent)}50%{box-shadow:0 0 26px color-mix(in srgb,var(--shipped) 80%,transparent)}}
 .toast.pulse{animation:gy-neon 1.6s ease-in-out infinite}
-/* The beacons: every live agent session, and the yard itself in the top bar, breathe. */
+/* The beacons: every live agent session, and the trust strip's own pulse in the top bar, breathe. */
 .health.live .health-dot{--group:var(--shipped);animation:gy-halo 2s ease-out infinite}
-.city-strip .beacon{--group:var(--moving);display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--group);animation:gy-halo 1.8s ease-out infinite}
+.trust-strip .beacon{--group:var(--moving);display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--group);animation:gy-halo 1.8s ease-out infinite}
 /* The top bar's live strip and the palette affordance share the repository's own row (GY-3272),
    so the strip adds its news without adding the page a new line of height. */
 .top-bar-row{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
 .top-bar-live{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.city-strip{display:flex;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
-.city-strip .mono{color:var(--text)}
+.trust-strip{display:flex;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
+.trust-strip .mono{color:var(--text)}
 .palette-button{display:inline-flex;align-items:center;gap:4px;min-height:30px;padding:2px 10px;font-size:var(--type-small);font-weight:500;background:var(--raised);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-2)}
 .palette-button:hover{color:var(--text);border-color:var(--accent)}
 kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var(--raised);border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:1px 5px}
