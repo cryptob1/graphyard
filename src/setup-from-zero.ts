@@ -13,6 +13,7 @@ import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrInstaller, herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { landlockRefusal } from './landlock.js';
+import { MINIMUM_NODE_MAJOR } from './install/local.js';
 import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
 import { trialContainerLaunch, trialImage } from './merge-writer/trial-container.js';
 
@@ -30,6 +31,7 @@ export const setupSteps = {
   trialAppArmor: trialAppArmorFix,
   loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
+  node: `install Node ${MINIMUM_NODE_MAJOR} or newer (the README prerequisites give the command for your distribution), then rerun doctor with it`,
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
 } as const;
 
@@ -57,6 +59,8 @@ export interface SetupFromZeroInput {
   platform?: NodeJS.Platform;
   /** GY-3169: the host's Landlock ABI reader; the landlock line appears only when given. */
   landlockAbi?: () => number;
+  /** GY-3325: the Node version doctor runs under; process.versions.node when unset here. */
+  nodeVersion?: string;
   /** GY-3339: starts a nested sandbox in a trial container; null when it starts, else its output. Asked only on an AppArmor host. */
   trialSandbox?: () => string | null;
 }
@@ -253,6 +257,8 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   const credential = env.GRAPHYARD_TOKEN_FILE || env.GRAPHYARD_TOKEN || input.masterCredential ? 'refused' : 'missing';
   lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
     detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
+  const node = input.nodeVersion ?? process.versions.node;
+  lines.push({ id: 'node', status: Number(node.split('.')[0]) >= MINIMUM_NODE_MAJOR ? 'pass' : 'fail', step: setupSteps.node, detail: `Node ${node}; Graphyard needs Node ${MINIMUM_NODE_MAJOR} or newer` });
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
