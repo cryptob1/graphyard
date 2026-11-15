@@ -24,7 +24,7 @@ const reporter: Principal = { id: 'huck-master', role: 'reporter' };
 const token = (principal: Principal) => `${principal.id}-token-${'x'.repeat(32)}`;
 const cli = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const exec = promisify(execFile);
-const criteria = [{ id: 'AC-1', text: 'Huck reports a Graphyard fault', proofs: ['unit:reporter-filed'] }];
+const criteria = [{ id: 'AC-1', text: 'Huck reports a Graphyard fault', proofs: ['e2e:reporter-filed'] }];
 let close = async () => {};
 after(() => close());
 
@@ -68,7 +68,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
 
   // It files an item with the CLI and gets its key; the item is unreleased, in backlog and attributed to it.
   const itemFile = join(home, 'item.json');
-  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', description: 'Filed by the Huck install master.', type: 'bug', criteria }));
+  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', description: 'Filed by the Huck install master.', type: 'chore', criteria }));
   const created = await graphyard('create', itemFile);
   assert.match(created.key, /^GY-\d+$/);
   const filed = await api(`work/${created.key}`);
@@ -98,7 +98,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
   // Nothing else: release, close, requirements, priority, claim, complete, evidence, registry and lesson.
   const requirementsFile = join(home, 'requirements.json'), evidenceFile = join(home, 'evidence.json');
   await writeFile(requirementsFile, JSON.stringify({ expectedPolicyRevision: 1, reason: 'Widen it', criteria, dependencies: [] }));
-  await writeFile(evidenceFile, JSON.stringify({ proof: 'unit:reporter-filed', status: 'passed', sha: 'a'.repeat(40) }));
+  await writeFile(evidenceFile, JSON.stringify({ proof: 'e2e:reporter-filed', status: 'passed', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1 }));
   await refused('ready', created.key, 'Release it');
   await refused('master', 'release', created.key, 'Release it');
   await refused('master', 'close', created.key, '--reason', 'Close it');

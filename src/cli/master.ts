@@ -1,6 +1,6 @@
 import { masterGuide } from '../master/guide.js';
 import { defineCommands } from './registry.js';
-import type { CliContext } from './context.js';
+import { checkoutRoot } from './context.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
@@ -81,7 +81,7 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
-      const root = await masterRoot(context);
+      const root = await checkoutRoot(context, `graphyard master ${id ?? ''}`.trimEnd());
       // The master's role instructions lead the guide.
       if (id === 'guide') return console.log(`${masterInstructions}\n${masterGuide}`);
       if (id === 'init') return masterInit(context, root);
@@ -99,15 +99,3 @@ export const masterCommands = defineCommands([
 ]);
 
 export { derivedIntent } from './master/intent.js';
-
-/**
- * The coordinator checkout every master subcommand runs in. GY-3344: outside one, a reporter's
- * credential (another install's Master) is told plainly that master subcommands are not its own.
- */
-async function masterRoot(context: CliContext) {
-  try { return context.repositoryRoot(); } catch (error) {
-    const actor = await context.api('status').then(status => status?.actor, () => null);
-    if (actor?.role === 'reporter') throw new Error(`Reporter ${actor.id} may only file items, message this install's Master and read back its own items and the Master's replies; graphyard master ${context.id ?? ''} is the Master's own`.trimEnd());
-    throw error;
-  }
-}
