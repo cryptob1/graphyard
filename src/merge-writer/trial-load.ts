@@ -17,7 +17,7 @@ export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores /
 const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, trialShardLanes(cores)) * usable / cores));
-/** A start waits while the hottest CPU sensor reads this or more. */
+/** GY-3376: a start waits while a CPU sensor reads 3C under its own critical (else max) temperature; this is the limit for a sensor that reports neither. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
@@ -57,9 +57,19 @@ def read(path):
             return file.read().strip()
     except OSError:
         return ''
+def limit(path):
+    for kind in ('_crit', '_max'):
+        value = read(path.replace('_input', kind))
+        if value.isdigit() and int(value) > 0:
+            return int(value) // 1000 - 3
+    return load['hotCelsius']
 def hottest():
-    readings = [read(path) for path in glob.glob(load['hwmon'] + '/*/temp*_input') if read(os.path.dirname(path) + '/name') in cpu_sensors]
-    return max([int(reading) // 1000 for reading in readings if reading.isdigit()], default=0)
+    # (reading, limit) of the first CPU sensor at or over its own limit, else None.
+    for path in glob.glob(load['hwmon'] + '/*/temp*_input'):
+        reading = read(path)
+        if reading.isdigit() and read(os.path.dirname(path) + '/name') in cpu_sensors and int(reading) // 1000 >= limit(path):
+            return int(reading) // 1000, limit(path)
+    return None
 def free(path):
     try:
         return int(subprocess.check_output(['df', '--output=avail', '-B1', path], stderr=subprocess.DEVNULL).split()[-1])
@@ -69,8 +79,8 @@ def gb(size):
     return '%.1f GB' % (size / 1e9)
 def pressure():
     hot = hottest()
-    if hot >= load['hotCelsius']:
-        return 'a CPU sensor reads ' + str(hot) + 'C, at or over ' + str(load['hotCelsius']) + 'C', False
+    if hot:
+        return 'a CPU sensor reads ' + str(hot[0]) + 'C, at or over its ' + str(hot[1]) + 'C limit', False
     for source, target, readonly in spec['mounts']:
         space = None if readonly else free(source)
         if space is not None and space < load['floorBytes']:
