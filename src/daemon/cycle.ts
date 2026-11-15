@@ -25,6 +25,7 @@ import { herdrWorkspaceOf } from '../master/herdr.js';
 import { launchGraceMs } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
+import { basename } from 'node:path';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { dueHumanProofs } from '../model/human-proof.js';
@@ -43,6 +44,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
+import { cpuPressureHeld, cpuPressureStep, cpuWaitingLine } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -133,13 +135,21 @@ export interface Cycle {
  * One coordination cycle: snapshot, close, dispatch, merge writer, persist. Each step runs under one
  * timeout; a step that fails is one log line and runs again next cycle. Only a snapshot that cannot be
  * read fails the cycle, since every later step acts on it. A cycle run without the loop's launcher
- * settles its own launches before it persists.
+ * settles its own launches before it persists. Each step that settles touches the lock's heartbeat
+ * (GY-3341): a slow but progressing cycle is alive to its supervisor and to `master status`, while a
+ * loop that makes no progress at all is still the stall both report.
  */
-export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line)) {
+export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line), progress?: () => void) {
   const own = !launcher, launches = launcher ?? new Launcher(Number.POSITIVE_INFINITY);
   if (!own) launches.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const steps: CycleStep[] = [];
   const timeoutMs = stepTimeoutMs(config), stalled: string[] = [];
+  /** A step settled: the cycle reached a new step, so the loop is progressing — say so on the lock (persisted, so `master status` reads it) and to the supervisor. */
+  const settled = () => {
+    if (state.lock) state.lock = { ...state.lock, heartbeatAt: new Date(now()).toISOString() };
+    void effects.persist(state).catch(() => {});
+    progress?.();
+  };
   /** GY-3293: one step's outcome folds into its run of equal failures; the threshold's standing line is raised and cleared here. */
   const noteStep = (name: CycleStep, error?: unknown) => {
     const key = stepFailureKey(name);
@@ -168,9 +178,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     let timer: NodeJS.Timeout | undefined;
     try {
       const value = await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => { stalled.push(name); reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)); }, timeoutMs); timer.unref?.(); })]);
+      settled();
       noteStep(name);
       return value;
     } catch (error) {
+      settled();
       noteStep(name, error);
       if (name === 'snapshot') throw error;
       log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`);
@@ -330,6 +342,22 @@ async function closeStep(cycle: Cycle) {
     try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
   }
+  // GY-3341: a settled delivery's worktree never reaches this loop's snapshot again (the coordination
+  // view the loop polls reads open items and what they reference), so the disk names the leftovers:
+  // every `GY-N-EPOCH` tree still standing a day after it last changed, for an item the snapshot no
+  // longer holds, is removed — nothing of a settled delivery will resume in it. A tree the snapshot's
+  // own items own (an open item, or one they reference) is the document pass's alone, and a young
+  // tree is never touched: the snapshot may simply predate the item that just claimed it.
+  if (effects.removeWorktree && effects.attemptWorktrees) for (const leftover of await effects.attemptWorktrees()) {
+    const named = /^(GY-\d+)-(\d+)$/i.exec(basename(leftover.path));
+    if (!named || clock - leftover.changedAt <= finishedWorktreeKeepMs) continue;
+    if (snapshot.work.some(item => item.key.toUpperCase() === named[1].toUpperCase())) continue;
+    const key = `worktree:${named[1].toLowerCase()}-${named[2]}:forced`;
+    const prior = state.actions[key];
+    if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
+    try { if (await effects.removeWorktree(leftover.path, true)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'done', `Removed the worktree ${leftover.path} of settled ${named[1].toUpperCase()} epoch ${named[2]}: it last changed ${Math.round((clock - leftover.changedAt) / 3_600_000)} hour(s) ago and nothing will resume in it`); } }
+    catch (error) { await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'failed', `Could not remove the worktree ${leftover.path} of settled ${named[1].toUpperCase()}: ${message(error)}`); }
+  }
   // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
   // the stage it was launched for, or whose pane Herdr no longer reports is over — and so is the
   // agent-registry session its launch ran under. The registry ends it with the reason (a vanished
@@ -400,6 +428,9 @@ async function closeStep(cycle: Cycle) {
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
+  // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
+  // launches while it is saturated — before anything of this cycle starts one.
+  await cpuPressureStep(cycle);
 }
 
 /**
@@ -532,8 +563,12 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
+  // reviewer or trial starts: one status line names the figure, and running sessions are never
+  // stopped. The first cycle below it launches again on its own.
+  const cpuWaiting = cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure!.avg60) : undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !cpuWaiting && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -579,7 +614,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot);
+  await effects.dispatchTick?.(snapshot, cpuWaiting);
   await masterSession(cycle, open);
 }
 

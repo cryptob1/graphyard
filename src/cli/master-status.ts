@@ -7,6 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
+import { cpuPressureHeld, cpuWaitingLine } from '../daemon/cpu-pressure.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
@@ -146,6 +147,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
   const reworked = reworkAttention(open);
+  // GY-3331: a product review that could not run, one line per item — the fault is the launch's
+  // or the reviewer's own environment, retried on another eligible reviewer, never the worker's.
+  const couldNotRunReviews = open.flatMap(item => {
+    const review = item.productReview;
+    if (!review || review.verdict !== 'could-not-run' || review.sha !== item.candidate?.sha) return [];
+    return [{ subject: item.key, text: `${item.key}'s product review could not run on ${review.sha.slice(0, 12)}: ${(review.findings.split('\n')[0] ?? '').slice(0, 300)}; another eligible reviewer is tried, and the item never returns to its worker for this`,
+      next: 'Fix what the review names (its GRAPHYARD_URL, the Graphyard CLI, or a browser tool on the reviewer\'s PATH), or route product review to a runtime that has them' }];
+  });
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
   // GY-3293: a cycle step failing the same way ten consecutive cycles — attention naming the step
@@ -155,7 +164,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -170,6 +179,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       : { on: false },
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
+    // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
+    // same two figures the Workers page shows — with the one waiting line while avg60 is over the
+    // ceiling and launches are held.
+    cpuPressure: state?.cpuPressure
+      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal,
+        waiting: cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure.avg60) : null }
+      : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },

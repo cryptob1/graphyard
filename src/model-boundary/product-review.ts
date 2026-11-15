@@ -34,7 +34,9 @@ export function standingProductReview(work: Work, policy: RepositoryPolicy = rep
  * The review gate's product refusal for this item, or null. A head the product review has not
  * approved does not merge: one not yet reviewed refuses; a change request returns the item to its
  * worker with the findings; a reject leaves it unmerged and owed to the master, which closes it
- * (or files a reshaped item) — it never merges.
+ * (or files a reshaped item) — it never merges. A could-not-run verdict (GY-3331) is neither: the
+ * reviewer's own environment failed, so the item stays in review on the same head while another
+ * reviewer is tried — it never returns to its worker for it.
  */
 export function productReviewRefusal(work: Work): string | null {
   if (!needsProductReview(work)) return null;
@@ -47,5 +49,9 @@ export function productReviewRefusal(work: Work): string | null {
   if (!standing) return 'Product review of the current commit is required';
   if (standing.review.verdict === 'approved') return null;
   if (standing.review.verdict === 'changes-requested') return `Product review requested changes on ${short(candidate.sha)}: ${standing.review.findings}`;
+  if (standing.review.verdict === 'could-not-run') return `Product review could not run on ${short(candidate.sha)}: ${bounded(standing.review.findings)}; another reviewer is tried and the item never returns to its worker for this`;
   return `Product review rejected ${short(candidate.sha)}: ${standing.review.findings} It never merges; the master closes the item unmerged or files a reshaped one`;
 }
+
+/** One sentence of a could-not-run reason: enough to act on, never the whole verdict body. */
+const bounded = (findings: string) => findings.length > 500 ? `${findings.slice(0, 499)}…` : findings;

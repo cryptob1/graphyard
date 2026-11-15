@@ -1,3 +1,4 @@
+import { machineDirectory, recordMachineNode } from './team-access.js';
 import { readSecretFromStdin } from './cli/context.js';
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
@@ -81,8 +82,6 @@ export interface UpRequest {
   master: string;
   /** GY-1457: how long each wait on a person lasts (`--wait MINUTES`); upWaitMs when omitted. */
   waitMs?: number | null;
-  /** GY-1477: serve a local dashboard on this host's tailnet (`--share-tailnet`); otherwise the command is only printed. */
-  shareTailnet?: boolean;
   /**
    * GY-1641: the control plane's address (`--url`), an origin master init accepts, and only where
    * master.json records none or the same one (upUrlRefusal). Every child command after the install is
@@ -197,6 +196,8 @@ export interface UpDependencies {
   tailnet?(): Promise<Tailnet | null>;
   /** GY-1477: runs the tailnet-only serve command tailnetShare names; ok false (with what it said) when it fails or does not finish. */
   applyTailnet?(command: string[]): Promise<{ ok: boolean; detail?: string }>;
+  /** GY-3294: the machine directory every install on this host shares (team-access.ts), where a served tailnet node is recorded; absent, nothing is recorded. */
+  machineDir?: string;
   /** GY-1511: Herdr on this host (master/herdr.ts); absent, up leaves Herdr to the install alone. */
   herdr?: UpHerdr;
   /**
@@ -348,7 +349,7 @@ async function rememberSignIn(root: string, state: UpState, stdout: string) {
 }
 
 /** A host's Tailscale node: its MagicDNS name (trailing dot allowed) and its tailnet IPv4 address. */
-export interface Tailnet { dnsName: string | null; ip: string | null }
+export interface Tailnet { dnsName: string | null; ip: string | null; deviceId?: string | null }
 const loopbackHosts = ['127.0.0.1', 'localhost', '[::1]'];
 /**
  * GY-1477: how a dashboard bound to this host's loopback is reached from the operator's other
@@ -365,6 +366,23 @@ export function tailnetShare(server: string, tailnet: Tailnet | null): { command
   if (!host) return null;
   const port = url.port || '80';
   return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
+}
+/** GY-3294: the one instruction a host without a running Tailscale gets; up carries on locally. */
+export const tailscaleMissingNote = 'Tailscale is not running here, so this install stays on this machine. To share it: install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.';
+/** This host's Tailscale node from `tailscale status --json`; no Tailscale, or one not running, is no tailnet (the install carries on locally). */
+export async function readTailnet(): Promise<Tailnet | null> {
+  try {
+    const self = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }))?.Self;
+    if (!self || self.Online === false) return null;
+    const ip = Array.isArray(self?.TailscaleIPs) ? self.TailscaleIPs.find((address: unknown) => typeof address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null : null;
+    const deviceId = typeof self?.ID === 'string' && self.ID ? self.ID : null;
+    return typeof self?.DNSName === 'string' || ip ? { dnsName: typeof self?.DNSName === 'string' && self.DNSName ? self.DNSName : null, ip, deviceId } : null;
+  } catch { return null; }
+}
+/** Runs the serve command tailnetShare names. Bounded: a serve waiting on a tailnet permission is reported, never waited on (GY-1477). */
+export async function applyTailnetCommand(command: string[]): Promise<{ ok: boolean; detail?: string }> {
+  try { execFileSync(command[0], command.slice(1), { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; }
+  catch (error: any) { return { ok: false, detail: String(error?.stderr || error?.stdout || error?.message || error).trim() }; }
 }
 /** A sign-in link (`SERVER/#sign-in=CODE`) moved onto BASE: the code is the server's, whichever address opens it. */
 /** GY-1509: how many of a failed child's last output lines up's `next` carries. */
@@ -516,20 +534,23 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
-   * recorded: a tailnet URL served earlier is kept; else, on a host with Tailscale, the tailnet-only
-   * serve command is applied under --share-tailnet, or printed with its URL for the operator to run.
+   * recorded. GY-3294: on a host with Tailscale every run applies the tailnet-only serve command for
+   * this install's own port — idempotent, and it leaves the other installs' ports alone — and records
+   * the machine's node for Setup's team access; without Tailscale the install carries on locally.
    */
   const reach = async () => {
-    if (reached || state.tailnetUrl) return state.tailnetUrl ?? null;
+    if (reached) return state.tailnetUrl ?? null;
     const server = await deps.serverUrl();
     if (!server) return null;
     reached = true;
-    const share = tailnetShare(server, await deps.tailnet?.().catch(() => null) ?? null);
-    if (!share) return null;
+    const tailnet = await deps.tailnet?.().catch(() => null) ?? null;
+    if (deps.tailnet && !tailnet) deps.emit({ kind: 'note', text: tailscaleMissingNote });
+    const share = tailnetShare(server, tailnet);
+    if (!share) return state.tailnetUrl ?? null;
     const shell = share.command.join(' ');
-    if (!request.shareTailnet || !deps.applyTailnet) {
-      deps.emit({ kind: 'note', text: `The dashboard listens on this machine only. To open it from your phone or other devices on your tailnet (never publicly), run ${shell} and open ${share.url}, or rerun with --share-tailnet.` });
-      return null;
+    if (!deps.applyTailnet) {
+      deps.emit({ kind: 'note', text: `The dashboard listens on this machine only. To open it from your phone or other devices on your tailnet (never publicly), run ${shell} and open ${share.url}.` });
+      return state.tailnetUrl ?? null;
     }
     const applied = await deps.applyTailnet(share.command).catch((error: any) => ({ ok: false, detail: String(error?.message ?? error) }));
     if (!applied.ok) {
@@ -537,6 +558,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       return null;
     }
     state.tailnetUrl = share.url; await writeState(deps.root, state);
+    if (deps.machineDir && tailnet) await recordMachineNode(deps.machineDir, { dnsName: tailnet.dnsName, ip: tailnet.ip, deviceId: tailnet.deviceId ?? null });
     deps.emit({ kind: 'note', text: `The dashboard is served on your tailnet only (${shell}): open ${share.url} from your other devices.` });
     return share.url;
   };
@@ -1139,7 +1161,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses (GY-1510). */
-export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'push-auth': { type: 'string' }, 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
+export const upOptions = { 'merge-token-stdin': { type: 'boolean' }, 'push-auth': { type: 'string' }, 'base-branch': { type: 'string' }, port: { type: 'string' }, repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -1167,7 +1189,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   if (pushAuth !== undefined && pushAuth !== 'gh') throw new Error('Use --push-auth gh');
   if (pushAuth && values['merge-token-stdin']) throw new Error('Choose one merge-writer credential: --push-auth gh (the gh login) or --merge-token-stdin (a fine-grained token)');
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, master: values.master ?? 'claude',
-    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(port !== null ? { port } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}), ...(values['merge-token-stdin'] ? { mergeToken: '' } : {}), ...(pushAuth ? { pushAuth: 'gh' as const } : {}) };
+    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}), ...(port !== null ? { port } : {}), ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(url ? { url } : {}), ...(values['merge-token-stdin'] ? { mergeToken: '' } : {}), ...(pushAuth ? { pushAuth: 'gh' as const } : {}) };
 }
 
 /** A one-time dashboard sign-in address minted with the operator's admin credential, TOKEN or the one in FILE (as `graphyard login` mints it). */
@@ -1351,20 +1373,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     },
     signIn: async (file, token) => { const url = await serverUrl(); return url ? mintSignIn(url, file, fetch, token) : null; },
     redeemClaim: claim => redeemSignInClaim(claim),
-    tailnet: async () => {
-      // No Tailscale, or one not running, is no tailnet: the offer is simply not made.
-      try {
-        const self = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }))?.Self;
-        if (!self || self.Online === false) return null;
-        const ip = Array.isArray(self?.TailscaleIPs) ? self.TailscaleIPs.find((address: unknown) => typeof address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null : null;
-        return typeof self?.DNSName === 'string' || ip ? { dnsName: typeof self?.DNSName === 'string' && self.DNSName ? self.DNSName : null, ip } : null;
-      } catch { return null; }
-    },
-    // Bounded: a serve waiting on a tailnet permission is reported, never waited on (GY-1477).
-    applyTailnet: async command => {
-      try { execFileSync(command[0], command.slice(1), { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; }
-      catch (error: any) { return { ok: false, detail: String(error?.stderr || error?.stdout || error?.message || error).trim() }; }
-    },
+    tailnet: readTailnet, applyTailnet: applyTailnetCommand, machineDir: machineDirectory(),
     herdr: upHerdr(root, request.repository),
     operatorToken: async file => { if (!file) return null; try { const token = (await readFile(file, 'utf8')).trim(); return token.length >= 32 ? token : null; } catch { return null; } },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),

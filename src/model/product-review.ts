@@ -1,5 +1,6 @@
 import type { Work } from './work.js';
-export const productVerdicts = ['approved', 'changes-requested', 'rejected'] as const;
+/** `could-not-run` (GY-3331): the reviewer's own environment failed — no URL, no CLI, no browser tool, an unreachable app — so nobody judged the feature; it is retried on another reviewer and never returns the item to its worker. */
+export const productVerdicts = ['approved', 'changes-requested', 'rejected', 'could-not-run'] as const;
 export type ProductVerdict = typeof productVerdicts[number];
 
 /** One product review, bound to the exact head (and its merge base) the session judged. */

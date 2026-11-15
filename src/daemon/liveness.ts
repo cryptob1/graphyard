@@ -34,10 +34,18 @@ export const hostPidProbe = lockPidProbe;
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
  * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence. A reader that
  * cannot probe the pid (outside the lock's PID namespace) judges by the stall bound alone and says so.
+ *
+ * The lock's heartbeat (GY-3341), written as a cycle's steps settle, is progress inside a cycle: a
+ * slow but progressing cycle is running however long its steps take, and only a loop with neither a
+ * completed cycle nor progress inside one for the bound is stalled.
  */
 export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => lockPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
-  const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
+  const heartbeatAt = state.lock?.heartbeatAt ? Date.parse(state.lock.heartbeatAt) : Number.NaN;
+  // Progress is the later of the two: a cycle that completed, or the heartbeat a long cycle's steps keep fresh.
+  const progressedAt = [lastCycleAt, heartbeatAt].filter(Number.isFinite).reduce((latest, at) => Math.max(latest, at), -Number.MAX_VALUE);
+  const lagMs = Number.isFinite(progressedAt) ? Math.max(0, now - progressedAt) : null;
+  const inCycle = Number.isFinite(heartbeatAt) && (!Number.isFinite(lastCycleAt) || heartbeatAt > lastCycleAt);
   // A loop backing off from failed cycles is waiting on purpose, not hung: its bound is two
   // intervals past the retry it announced, so the backoff never reads as a stall to restart.
   const backoff = backingOff(state.failures, now);
@@ -54,13 +62,15 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   }
   if (lagMs === null || lagMs > stalledAfterMs) {
     return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
-      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled${unprobed}.` };
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `or shown progress for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled${unprobed}.` };
   }
   if (backoff) {
     return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
       detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}${unprobed}` };
   }
-  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago${unprobed}` };
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: inCycle
+    ? `Cycle ${state.cycle} is in progress, its last step settled ${Math.round(lagMs / 1000)}s ago${unprobed}`
+    : `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago${unprobed}` };
 }
 
 // ---- A cycle that fails (GY-119) -----------------------------------------------------------
@@ -148,6 +158,36 @@ export function namedEffects(effects: DaemonEffects): DaemonEffects {
 }
 
 /**
+ * The same effects, with every call that settles feeding the loop's heartbeat (GY-3341): a step of
+ * many effects holds the supervisor's window open effect by effect — an object-valued effect (the
+ * merge writer's reads) wraps its own calls the same way — so only work that truly stops, stops
+ * telling the supervisor it is alive.
+ */
+export function markedEffects(effects: DaemonEffects, mark: () => void): DaemonEffects {
+  const marked = (value: Function): Function => function (this: unknown, ...args: unknown[]) {
+    let result: unknown;
+    try { result = value.apply(this, args); } catch (error) { mark(); throw error; }
+    if (result instanceof Promise) return result.finally(() => mark());
+    mark();
+    return result;
+  } as Function;
+  const markedObject = (target: object): object => new Proxy(target, {
+    get(object, property, receiver) {
+      const value = Reflect.get(object, property, receiver);
+      return typeof value === 'function' ? marked(value) : value;
+    },
+  });
+  return new Proxy(effects, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property === 'notify') return value;
+      if (value !== null && typeof value === 'object') return markedObject(value as object);
+      return typeof value === 'function' ? marked(value) : value;
+    },
+  });
+}
+
+/**
  * The same effects, with every cursor write fitted to the schema's bounds first (`boundDaemonState`),
  * whoever does the writing. No value any step computes can then fail the write that follows it.
  */
@@ -171,6 +211,44 @@ export function watchdogPlan(environment: Record<string, string | undefined>, in
     refusal: windowMs !== null && windowMs <= 2 * intervalMs
       ? `The supervisor's watchdog window (${seconds(windowMs)}) is not longer than two cycle intervals (${seconds(2 * intervalMs)}); raise WatchdogSec or shorten run.intervalSeconds, or the supervisor will restart a healthy loop mid-cycle`
       : null };
+}
+
+/** The loop's keep-alive to its supervisor, fed on progress (GY-3341). */
+export interface LoopHeartbeat {
+  /** Records progress — a step settled, an effect answered, a cycle completed — and sends the keep-alive one is due. */
+  mark(): void;
+  /** Stops the heartbeat; the loop is stopping or restarting. */
+  stop(): void;
+}
+
+/**
+ * GY-3341: the supervisor's keep-alive, sent on progress rather than once per cycle. A slow host
+ * made cycles that still progressed outlast the watchdog window, and systemd killed a healthy loop
+ * mid-cycle. Every progress mark — each step that settles, each effect that answers, each cycle
+ * that completes — sends the keep-alive when one is due (never more than one per third of the
+ * window), and a timer holds the window open between marks while the last one is fresh. A loop
+ * that makes no progress for the whole window sends nothing, so the supervisor restarts exactly
+ * the loop that hung. Without a supervisor the heartbeat records progress for the cursor alone.
+ */
+export function loopHeartbeat(notify: () => void | Promise<void>, windowMs: number | null, options: { now?: () => number; log?: (line: string) => void } = {}): LoopHeartbeat {
+  const now = options.now ?? Date.now;
+  const nudgeMs = windowMs === null ? Number.POSITIVE_INFINITY : Math.max(250, Math.floor(windowMs / 3));
+  let lastProgress = now(), lastBeat = Number.NaN;
+  let timer: NodeJS.Timeout | undefined;
+  const beat = () => {
+    const at = now();
+    if (Number.isFinite(lastBeat) && at - lastBeat < nudgeMs) return;
+    lastBeat = at;
+    void Promise.resolve(notify()).catch(error => options.log?.(`[graphyard-master] supervisor notification failed: ${message(error)}`));
+  };
+  if (windowMs !== null) {
+    timer = setInterval(() => { if (now() - lastProgress <= windowMs) beat(); }, nudgeMs);
+    timer.unref?.();
+  }
+  return {
+    mark() { lastProgress = now(); beat(); },
+    stop() { if (timer) clearInterval(timer); },
+  };
 }
 
 /** The responsive interval a failed cycle's backoff starts from when the configured interval is longer. */

@@ -83,10 +83,23 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree, forced only when asked (a done item's, a day after its last attempt ended); whether one was removed. */
   removeWorktree?: (path: string, force?: boolean) => Promise<boolean>;
+  /**
+   * GY-3341: the attempt worktrees still standing on this host, from the disk (`GY-N-EPOCH`
+   * directories under `.graphyard/worktrees`) with when each last changed. The close step reclaims
+   * the leftovers of items the loop's snapshot no longer holds; absent, only the snapshot's own
+   * items are reclaimed.
+   */
+  attemptWorktrees?: () => Promise<{ path: string; changedAt: number }[]>;
   /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
   diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
   /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */
   reclaimDisk?: () => Promise<string[]>;
+  /**
+   * GY-3348: the host's CPU reading — the text of /proc/pressure/cpu and /proc/stat, or null where
+   * the pressure file is missing (not Linux), in which case nothing is held. Absent, no reading is
+   * kept and no launch waits on the CPU.
+   */
+  cpuPressure?: () => Promise<{ pressure: string; stat: string | null } | null>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
@@ -134,8 +147,8 @@ export interface DaemonEffects {
   askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
   /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */
   release?: (work: Work, reason: string) => Promise<unknown>;
-  /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). */
-  dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). `held`, while set (GY-3348: the host's CPU is saturated), is the one wait line every launch the tick would make records instead. */
+  dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
   personalMasterSession?: (config: MasterConfig) => MasterSessionEffects;
