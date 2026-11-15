@@ -17,9 +17,10 @@ export const lessonsToFile = (memory: ProjectMemory) => masterLessons(memory).fi
 
 /** The item that turns one lesson into code. */
 export const lessonCodeItem = (lesson: MemoryNote) => ({
-  title: `Lesson to code: ${lesson.text}`.slice(0, 200), type: 'feature' as const, priority: 2, dependencies: [],
+  title: `Lesson to code: ${lesson.text}`.slice(0, 200), type: 'chore' as const, priority: 2, dependencies: [],
   description: `The master marked this lesson mechanically enforceable: "${lesson.text}". Today an agent reads it in every prompt and a reviewer judges it by hand. Enforce it in code instead — a lint rule, a type or a test that fails when it is broken — so it no longer needs to be said. Once this item is delivered the loop removes the lesson (id ${lesson.id}).`,
-  criteria: [{ id: 'AC-1', text: `A lint rule, type or test enforces the lesson and fails when it is broken: ${lesson.text}`.slice(0, 500), proofs: [`unit:lesson-${lesson.id.slice(0, 8).toLowerCase()}-enforced`] }],
+  criteria: [{ id: 'AC-1', text: `A lint rule, type or test enforces the lesson and fails when it is broken: ${lesson.text}`.slice(0, 500), proofs: [`unit:lesson-${lesson.id.slice(0, 8).toLowerCase()}-enforced`] },
+    { id: 'AC-2', text: 'The app still serves its smoke case', proofs: ['e2e:smoke'] }],
   reason: 'Filed by the master loop: a lesson marked mechanically enforceable becomes code (GY-3399)',
 });
 

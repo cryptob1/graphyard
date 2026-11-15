@@ -63,7 +63,7 @@ test('integration:lessons-become-code — the master pass files an item per enfo
 
   await cycle();
   assert.deepEqual(filed.map(entry => entry.key).sort(), [`lesson-to-code:${check.id}`, `lesson-to-code:${lesson.id}`].sort(), 'one item per enforceable lesson, none for the plain one');
-  assert.ok(filed.every(entry => entry.title.startsWith('Lesson to code: ') && entry.proofs.length === 1 && entry.proofs[0].startsWith('unit:lesson-')), 'each item asks for a lint rule, type or test');
+  assert.ok(filed.every(entry => entry.title.startsWith('Lesson to code: ') && entry.proofs[0].startsWith('unit:lesson-')), 'each item asks for a lint rule, type or test');
   const recorded = masterLessons(await readProjectMemory(root));
   const filedAs = Object.fromEntries(recorded.filter(entry => entry.filedAs).map(entry => [entry.id, entry.filedAs]));
   assert.equal(Object.keys(filedAs).length, 2, 'the file records the item each enforceable lesson was filed as');
@@ -79,7 +79,7 @@ test('integration:lessons-become-code — the master pass files an item per enfo
   const stale = await readProjectMemory(root);
   work = [{ id: 'w-1', key: lessonItem, stage: 'done', delivery: { mergedAt: new Date(clock.at).toISOString(), mergeSha: 'a'.repeat(40) } } as unknown as Work];
   await cycle();
-  let memory = await readProjectMemory(root);
+  const memory = await readProjectMemory(root);
   assert.deepEqual(masterLessons(memory).map(entry => entry.text).sort(), [plain, reason].sort(), 'the delivered lesson left memory and every prompt');
   assert.deepEqual(memory.removedGates?.map(entry => ({ id: entry.id, key: entry.key })), [{ id: lesson.id, key: lessonItem }]);
   // The master writing the file again from its stale copy neither restores the lesson nor counts the removal twice.
