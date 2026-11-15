@@ -130,8 +130,8 @@ export async function compactLedger(pool: pg.Pool, options: { retentionMs?: numb
       if (!measured) {
         measured = true;
         cutoff = (await db.query(`SELECT clock_timestamp() - ($1::text||' milliseconds')::interval AS cutoff`, [String(retentionMs)])).rows[0].cutoff;
-        // One probe of the created_at index from its old end, never a sort of every old row.
-        upper = (await db.query('SELECT seq FROM events WHERE created_at < $1 ORDER BY created_at DESC LIMIT 1', [cutoff])).rows[0]?.seq ?? '0';
+        // The newest old row by two probes of the created_at index, never a sort of every old row.
+        upper = (await db.query('SELECT max(seq) AS seq FROM events WHERE created_at = (SELECT max(created_at) FROM events WHERE created_at < $1)', [cutoff])).rows[0]?.seq ?? '0';
         cursor = (await db.query('SELECT seq FROM ledger_compaction_cursor')).rows[0]?.seq ?? '0';
       }
       end = (await db.query('SELECT max(seq) AS seq FROM (SELECT seq FROM events WHERE seq > $1 AND seq <= $2 ORDER BY seq LIMIT $3) w', [cursor, upper, batch])).rows[0].seq;
