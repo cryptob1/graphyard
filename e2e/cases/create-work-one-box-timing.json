@@ -1,0 +1,14 @@
+{
+  "id": "create-work-one-box-timing",
+  "title": "The one-box filing spec passes five times in a row on two busy cores",
+  "description": "browser-tests/create-work-one-box.spec.ts runs five times in a row pinned to two CPU cores shared with four busy loops, and every run passes: a dashboard poll still in flight when the spec tears down its API proxy no longer holds the teardown open until the test timeout.",
+  "tags": ["dashboard", "filing", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the one-box spec, five runs, on two busy cores",
+    "run": "taskset -c 0,1 sh -c 'for i in 1 2 3 4; do node -e \"for(;;);\" & busy=\"$busy $!\"; done; npm run test:browser -- browser-tests/create-work-one-box.spec.ts --repeat-each 5 --workers 1; status=$?; kill $busy; exit $status'",
+    "timeoutSeconds": 1200
+  }]
+}
