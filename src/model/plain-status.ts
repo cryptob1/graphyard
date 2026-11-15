@@ -16,7 +16,7 @@ import { isFilingRefusal } from './user-facing.js';
  * dashboard never says anything the gates do not. Internal vocabulary stays out of this copy;
  * `jargon` lists the words a test keeps out of every generated sentence.
  */
-export const jargon = ['epoch', 'lease', 'candidate', 'policy revision', 'producer', 'attestation', 'trusted evidence'] as const;
+export const jargon = ['epoch', 'lease', 'candidate', 'policy revision', 'producer', 'attestation', 'trusted evidence', 'trial', 'builder'] as const;
 
 /** Where an item is, in the order work moves. Delivered work is `shipped`. */
 export const phases = ['not-started', 'needs-worker', 'building', 'review', 'checks', 'proof', 'merging', 'shipped'] as const;

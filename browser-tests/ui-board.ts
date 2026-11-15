@@ -12,7 +12,8 @@
 import { NOW, fixtureApi, fixtureStatus, fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { boardFromStatus } from '../src/model/board';
 import { costSummary, type UsageRow } from '../src/model/token-costs';
-import { emptyRegistry } from '../src/model/registry';
+import { emptyRegistry, fleetView, foldObservation, proposedRuntimes } from '../src/model/registry';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 
 export { NOW };
 const minute = 60_000, hour = 60 * minute;
@@ -130,7 +131,7 @@ export function boardApi(path: string, role = 'admin') {
   if (route === 'work') return work;
   // The Tests page (GY-162): one flaky case with history, one skipped, one never run.
   if (route === 'tests') return testsSummary();
-  if (route === 'agent-registry') return { configured: false, attention: [], roles: [], accounts: [], runtimes: [], models: [], sessions: [], refusals: [] };
+  if (route === 'agent-registry') return seededAgentRegistry();
   // The seed's own pages (GY-3396): every read a page makes answers with sanitized install data.
   if (route === 'costs') return seededCosts();
   if (route === 'delivery') return seededDelivery();
@@ -231,4 +232,24 @@ export function seededProductBrief() {
 export function seededOperatorAgents() {
   return [{ id: 'master-loop', displayName: 'Master loop', capabilities: ['work.create', 'work.ready'], scope: { repositories: ['fixture/shop'], workItems: ['*'] },
     fingerprints: ['SHA256:2f2f'], revision: 2, revokedAt: null, lastMutation: { kind: 'update', actor: 'operator', at: at(-40 * hour), reason: 'Scope the loop to this repository' } }];
+}
+
+/** What `GET /api/agent-registry` answers (GY-3396): the fleet view a working install serves — three accounts, three roles. */
+export function seededAgentRegistry() {
+  const host = 'agent-host-1';
+  const document = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: proposedRuntimes.filter(runtime => ['claude', 'codex', 'opencode'].includes(runtime.name)),
+    models: [{ name: 'opus', id: 'claude-opus-5' }, { name: 'gpt', id: 'gpt-5.5-codex' }, { name: 'glm', id: 'zai/glm-5.3' }],
+    accounts: ['claude-a', 'codex-a', 'opencode-a'].map(name => ({ name, runtime: name.split('-')[0], model: { claude: 'opus', codex: 'gpt', opencode: 'glm' }[name.split('-')[0]]!, credential: { host, home: `/home/agent/.coding_agents/${name}` } })),
+    roles: [
+      { name: 'worker', accounts: ['claude-a', 'codex-a'], concurrency: 2 },
+      { name: 'reviewer', accounts: ['codex-a'], concurrency: 1 },
+      { name: 'master', accounts: ['claude-a'], concurrency: 1 },
+    ],
+    reason: 'seed the Agents page',
+  }, { actor: 'coordinator', at: at(-6 * hour) }).registry;
+  for (const account of document.accounts) foldObservation(account,
+    { loggedIn: true, state: 'available', usage: account.runtime === 'claude' || account.runtime === 'codex' ? [{ window: '5h', percent: 31, resetsAt: at(2 * hour) }, { window: '7d', percent: 58, resetsAt: at(4 * 24 * hour) }] : [], resetsAt: null, reason: null },
+    { actor: 'coordinator', at: at(-5 * minute) });
+  return fleetView(document, NOW);
 }
