@@ -19,6 +19,7 @@ import { masterBriefSection, masterLessonsSection } from '../model/project-memor
 import type { MasterConfig } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { masterCredentialMask } from './confinement.js';
+import { accountHomeEnvironment } from './runtimes.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -150,7 +151,7 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     if (!kind) throw new Error('Cannot identify the existing master runtime; retaining its state instead of starting cold');
     assertConversationRuntime(kind);
     const variable = runtime?.launch.homeVariable ?? (kind === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME');
-    const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}) };
+    const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}), ...accountHomeEnvironment(kind, login?.credential.home) };
     const request = await readFile(master.launchRequestRecord ?? join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
     if (request !== null) {
       const record = join(masterRecords(root), `${createHash('sha256').update(request).digest('hex')}.request`);
