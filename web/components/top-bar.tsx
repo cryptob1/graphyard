@@ -103,8 +103,8 @@ export function WeekLine({ status, work, open }: { status?: Dashboard['status'];
     return <span key={key}> <a className="mono" href={`#${key}`} onClick={event => { if (id && open) { event.preventDefault(); open(id); } }}>{key}</a></span>;
   });
   return <p className="week-line" data-reverts={week.reverts} data-gates-removed={week.gatesRemoved}>
-    Reverts this week: <span className="mono">{week.reverts}</span>{links(week.revertedItems)}
-    <span aria-hidden="true"> · </span>Gates removed this week: <span className="mono">{week.gatesRemoved}</span>{links(week.gatesRemovedItems)}
+    <Term term="reverts this week">Reverts this week</Term>: <span className="mono">{week.reverts}</span>{links(week.revertedItems)}
+    <span aria-hidden="true"> · </span><Term term="gates removed this week">Gates removed this week</Term>: <span className="mono">{week.gatesRemoved}</span>{links(week.gatesRemovedItems)}
   </p>;
 }
 
