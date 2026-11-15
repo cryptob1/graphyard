@@ -30,13 +30,16 @@ export function storedLoopState(store: Store, actor: Principal, scope: string): 
       // a lost race is now answered as a conflict the client retries at once.
       await store.transaction(async db => {
         await db.query(`SET LOCAL lock_timeout = '${loopStateLockWaitMs}ms'`);
-        for (const record of parsed) {
-          const id = kind === 'dispatch' ? 'cursor' : (record as { id: string }).id;
+        const ids = parsed.map(record => kind === 'dispatch' ? 'cursor' : (record as { id: string }).id);
+        for (const [index, record] of parsed.entries()) {
+          const id = ids[index];
           await db.query(`INSERT INTO loop_state(scope,kind,id,data) VALUES($1,$2,$3,$4)
             ON CONFLICT(scope,kind,id) ${migrate ? 'DO NOTHING' : 'DO UPDATE SET data=EXCLUDED.data'}`, [scope, kind, id, JSON.stringify(record)]);
         }
         if (removed.length) await db.query('DELETE FROM loop_state WHERE scope=$1 AND kind=$2 AND id=ANY($3::text[])', [scope, kind, removed]);
-        await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [actor.id, `loop-state.${migrate ? 'migrated' : 'saved'}`, JSON.stringify({ scope, kind, records: parsed, removed })]);
+        // GY-3342: the records live in loop_state; the ledger row names only which ids changed,
+        // each id once — dispatch names its one cursor row however many records it wrote.
+        await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [actor.id, `loop-state.${migrate ? 'migrated' : 'saved'}`, JSON.stringify({ scope, kind, ids: [...new Set(ids)], removed })]);
       }, { coordinationLock: false }).catch(error => {
         if (['55P03', '40P01'].includes((error as { code?: string }).code ?? '')) throw new Refusal(`Loop state ${kind} is being written by another writer; retry`, 409, { code: 'loop-state-conflict' });
         throw error;

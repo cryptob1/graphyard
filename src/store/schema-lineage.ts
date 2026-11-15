@@ -55,6 +55,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   // GY-3341: the work index records when a settled delivery merged (merged_at), the recent-merge
   // window the loop's own open-only coordination read keeps.
   'sha256:92dac9aae16df5cec676dd300b3a06bde8ca5e4879ccf05bf83a0ced499ae504',
+  // GY-3342: ledger compaction may delete loop-state bookkeeping rows past the retention window.
+  'sha256:661de45866391f1a2af23e4209ecf6dd1f74e56212a60950db6223f4828a067a',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
