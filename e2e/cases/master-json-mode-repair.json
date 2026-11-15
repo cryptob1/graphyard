@@ -1,0 +1,11 @@
+{
+  "id": "master-json-mode-repair",
+  "title": "The loop repairs the file mode of master.json instead of refusing",
+  "description": "A .graphyard/master.json at mode 0644 owned by the current user is read by the loop's config load and by 'master status': its mode is 0600 afterwards and one log line says so. A symlink at that path is still refused.",
+  "tags": ["config"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "master.json mode repaired, symlink refused", "run": "node --import tsx tests/helpers/run-tests.ts tests/master-json-mode-repair.test.ts", "timeoutSeconds": 300 }
+  ]
+}

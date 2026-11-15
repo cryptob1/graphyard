@@ -426,6 +426,13 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
   tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
+  const releases = await effects.sweepCliReleases?.().catch(error => { cycle.log(`[graphyard-master] the CLI release sweep failed: ${message(error)}`); return null; });
+  if (releases?.removed.length) {
+    tallyLeftovers(state, 'cliReleases', releases.removed.length);
+    tallyLeftovers(state, 'cliReleaseBytes', releases.bytes);
+    await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
+  }
+  if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new

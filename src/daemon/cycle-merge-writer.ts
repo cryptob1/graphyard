@@ -13,7 +13,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialHostFaultPrefix, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
@@ -880,10 +880,12 @@ export async function mergeWriterStep(cycle: Cycle) {
             // GY-3339: AppArmor denied the trial's nested sandbox: no verdict on the head, reported upstream once per repository.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             await reportTrialSandboxFault(cycle);
-          } else if (trialHostFaultHost(error)) {
-            // GY-3249: the trial host could not reach a host the build needs: no verdict on the head, reported upstream once per host.
+          } else if (message(error).startsWith(trialHostFaultPrefix)) {
+            // GY-3249: the trial host could not reach a host the build needs, or (GY-3332) its container gave up waiting on the
+            // host's load: no verdict on the head; a fetch fault is reported upstream once per host.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
-            await reportTrialHostFault(cycle, trialHostFaultHost(error)!);
+            const host = trialHostFaultHost(error);
+            if (host) await reportTrialHostFault(cycle, host);
           } else if (error instanceof TrialCancelledError) action('failed', `Merge of ${itemKey} head ${head} stopped: its trial was cancelled because ${error.reason}; the head is not refused to rework and, while it is still queued, is trialled again on the current base`);
           else action('failed', keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
             : `Merge of ${itemKey} head ${head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);

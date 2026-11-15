@@ -1,0 +1,16 @@
+{
+  "id": "cli-release-cleanup",
+  "title": "Old CLI release copies are removed, keeping only the ones in use",
+  "description": "An install holds six CLI release copies, each a git worktree of one checkout: the served one, the previous release, one a live session runs from, and three nothing uses. The loop's leftovers sweep removes the three through git worktree remove, so their worktree entries go too, and keeps the other three working. A second install's release copy, a worktree of the same checkout, still answers git rev-parse HEAD. The next day's leftovers report counts the three copies and the bytes they freed.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "sweep an install's release copies and report what was freed",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/cli-release-cleanup.test.ts",
+      "timeoutSeconds": 180
+    }
+  ]
+}

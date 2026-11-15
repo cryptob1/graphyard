@@ -1,4 +1,5 @@
 import { defaultChildRun, runChild, type ChildRun } from '../child-runner.js';
+import { statfsSync } from 'node:fs';
 import { lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -46,6 +47,10 @@ export const worktreeRootBudgetBytes = (config: Pick<WorktreeRootSettings, 'run'
 
 /** Filesystems whose contents live in memory and are gone at the next boot. */
 const volatileFilesystems: Record<number, string> = { 0x01021994: 'tmpfs', 0x858458f6: 'ramfs' };
+/** `tmpfs` or `ramfs` when `path`'s volume is memory-backed, else null (unreadable included). */
+export const volatileFilesystem = (path: string): string | null => {
+  try { return volatileFilesystems[Number(statfsSync(path).type)] ?? null; } catch { return null; }
+};
 export interface FilesystemFacts {
   /** The directory that was measured: the path itself, or its nearest existing ancestor. */
   probed: string;
