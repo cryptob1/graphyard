@@ -1,12 +1,12 @@
 import { trialCpuMonitor, trialOverloadFault, type TrialCpuReading } from './trial-cpu.js';
 // Concern: the merge writer's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statfsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
+import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
 import { affectedPackages, buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
@@ -25,7 +25,7 @@ import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
-import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
+import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
 import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -230,8 +230,25 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync) =>
-  roots.find(root => exists(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync,
+  volatile: (path: string) => string | null = volatileFilesystem) =>
+  roots.find(root => exists(root) && !volatile(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
+/**
+ * GY-3332: the temporary root trials use on this host, for doctor: a memory-backed root is passed over
+ * (a trial's scratch would compete with workers for RAM, and a tmpfs smaller than the disk floor
+ * would hold every start forever), and the chosen one fails when its volume is too small ever to keep the floor free.
+ */
+export function trialTemporaryRootReport(root: string, { roots = trialTemporaryRoots(), exists = existsSync, volatile = volatileFilesystem,
+  size = path => { try { const info = statfsSync(path); return Number(info.blocks) * Number(info.bsize); } catch { return null; } } }: {
+  roots?: readonly string[]; exists?: (path: string) => boolean; volatile?: (path: string) => string | null; size?: (path: string) => number | null } = {}) {
+  const floor = diskFloorBytes({ run: (() => { try { return JSON.parse(readFileSync(join(root, '.graphyard', 'master.json'), 'utf8')).run ?? {}; } catch { return {}; } })() });
+  const chosen = trialTemporaryRoot('the trial session directory', roots, exists, volatile);
+  const skipped = roots.filter(path => exists(path) && volatile(path)).map(path => `${path} is a ${volatile(path)}, so trials do not use it`);
+  const bytes = exists(chosen) ? size(chosen) : null;
+  const fits = bytes === null || bytes >= floor;
+  return { path: chosen, skipped, status: fits ? 'pass' as const : 'fail' as const,
+    ...(fits ? {} : { fix: `${chosen} holds ${(bytes! / 1e9).toFixed(1)} GB in all, under the ${(floor / 1e9).toFixed(1)} GB disk floor, so trials there would wait forever: move ${durableTemporaryRoot()} to a larger durable volume, or lower run.diskFloorGb in .graphyard/master.json` }) };
+}
 /**
  * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
  * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
@@ -512,8 +529,10 @@ export class TrialReadOnlyError extends Error {
  */
 export const trialHostFaultPrefix = 'Trial-host fault';
 export class TrialHostFaultError extends Error {
-  constructor(readonly phase: string, readonly host: string) {
-    super(`${trialHostFaultPrefix}: the trial's ${phase} step could not fetch from ${host}, rerun included; this is the trial host's network, not the head's`);
+  /** `host` the fetch failed from; null for a launcher that gave up waiting on the host's load (GY-3332), whose `reading` names why. */
+  constructor(readonly phase: string, readonly host: string | null, reading?: string) {
+    super(host ? `${trialHostFaultPrefix}: the trial's ${phase} step could not fetch from ${host}, rerun included; this is the trial host's network, not the head's`
+      : `${trialHostFaultPrefix}: the trial's ${phase} step could not start its container: ${reading}; this is the trial host's load, not the head's`);
     this.name = 'TrialHostFaultError';
   }
 }
@@ -1084,6 +1103,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       cpu.finish(stepLabel, cpuBefore, !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out), line => entries.push(line));
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      // GY-3332: a container start that gave up waiting on host pressure is no verdict on the head.
+      const fault = trialContainerFault(out);
+      if (fault) throw new TrialHostFaultError(phase, null, fault.slice(fault.indexOf(': ') + 2));
       const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
       if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;

@@ -323,10 +323,14 @@ test('unit:trial-base-run-registry-files-pass — with a stray .git in each shar
   mkdirSync(durable, { recursive: true });
   const entries = new Set([sharedTmp, sharedVar, durable, join(sharedTmp, '.git'), join(sharedVar, '.git')]);
   const exists = (path: string) => entries.has(path);
-  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists), durable, 'a poisoned shared pair falls through to the durable root');
-  assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable], exists), durable, 'never the session directory while the durable root is clean');
+  // This case asserts the poison fallback on a host whose every root is on disk; the real /tmp the
+  // fixture builds its durable root under may itself be a tmpfs (the trial container's is), and the
+  // volatility skip that would pass such a root over is the admission case's own concern (GY-3332).
+  const onDisk = () => null;
+  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists, onDisk), durable, 'a poisoned shared pair falls through to the durable root');
+  assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable], exists, onDisk), durable, 'never the session directory while the durable root is clean');
   entries.add(join(home, '.git'));
-  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists), '/session', 'an isolated HOME below a checkout is not a clean fallback');
+  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists, onDisk), '/session', 'an isolated HOME below a checkout is not a clean fallback');
   // Check the production short-root shape separately from the caller's arbitrary HOME length.
   const endpoint = join(durable, 'graphyard-keyring-probe-backoff-abcdefghij', 'graphyard-secrets-bus');
   assert.ok(endpoint.length <= 107, `the socket path stays inside the kernel's 108-byte sun_path (${endpoint.length} bytes)`);
