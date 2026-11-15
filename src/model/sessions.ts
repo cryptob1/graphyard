@@ -105,6 +105,12 @@ const observation = (input: SessionHandleInput, existing: SessionHandle | undefi
   return { ...(observed ? { observed } : {}), ...(observedAt ? { observedAt } : {}), ...(missed ? { missedReports: missed } : {}) };
 };
 const headMoved = (input: SessionHandleInput, existing: SessionHandle | undefined, at: string) => (headAt => headAt ? { headAt } : {})(input.head && input.head !== existing?.head ? at : existing?.head ? existing.headAt : undefined);
+/** An item reaching Done ends the sessions it still records running, in the same transaction (GY-3388): nothing on a done item runs. */
+export function endRunningSessions(work: Work, reason: string, now: Date): void {
+  const at = now.toISOString();
+  for (const handle of work.sessions ?? []) if (handle.state === 'running')
+    Object.assign(handle, { state: 'finished', endedAt: at, updatedAt: at, outcome: `ended: ${reason}`.slice(0, 500) });
+}
 /** Record or update one handle on the item, newest last, bounded. */
 export function recordSession(work: Work, input: SessionHandleInput, principal: string, now: Date): SessionHandle {
   work.sessions ??= [];

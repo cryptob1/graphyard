@@ -3,6 +3,7 @@ import { recordDispatch } from '../engine/evaluate.js';
 import { once, record } from '../store/mutations.js';
 import type pg from 'pg';
 import { demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
+import { endRunningSessions } from '../model/sessions.js';
 import { closeRefusal, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { closeSchema } from '../model-boundary/closure.js';
 import { deliveredObservationRefusal } from '../model/loop-observation.js';
@@ -55,6 +56,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     // A lease, lapsed or live, ends here, as released.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), blocker: null });
+    endRunningSessions(work!, `${work!.key} was closed as ${data.kind}`, now);
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
     Object.assign(work!, { mergeAuthorization: null });
