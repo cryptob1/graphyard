@@ -9,6 +9,8 @@ import { signInDatabase } from '../tests/helpers/sign-in-database';
 const settled = { timeout: 15_000 };
 
 test('e2e:headless-workers — the item page lists worker runs by attempt and shows each run log, an earlier account\'s included', async ({ page }) => {
+  // Boots embedded Postgres and a forked control plane: a loaded trial host spends most of 30 s there.
+  test.setTimeout(120_000);
   const database = await signInDatabase();
   const site = await mkdtemp(join(tmpdir(), 'graphyard-worker-runs-'));
   await symlink(resolve('.graphyard/browser-dist'), join(site, 'dist'));

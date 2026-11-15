@@ -11,6 +11,13 @@ export function run(c: Ctx) {
   work.blocker = data.reason;
   work.blockedAt = data.reason ? now.toISOString() : null;
   if (data.reason) {
+    // GY-3335: a blocker that names the head its attempt finished at keeps it on the item, past
+    // the unblock, for the loop to resubmit itself — only a head this attempt committed on its
+    // own registered branch, which is what the CLI's `--finished` sends from that worktree.
+    if (data.finishedHead) {
+      const workspace = work.workspaces.find(entry => entry.epoch === data.epoch);
+      if (workspace) work.finishedBlockerHead = { head: data.finishedHead, epoch: data.epoch, branch: workspace.branch, owner: actor.id, at: now.toISOString(), reason: data.reason.slice(0, 500) };
+    }
     recordIntervention(work, 'blocked');
     // GY-1008: recording a blocker ends the attempt in this same transaction, so a blocked
     // item holds no worker slot while the loop re-checks its cause. The work it had is kept

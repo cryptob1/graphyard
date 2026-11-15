@@ -24,7 +24,7 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
-import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
+import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
 import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
@@ -533,6 +533,23 @@ export const trialSandboxFault = (error: unknown) => error instanceof Error && e
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/**
+ * GY-3316: Docker refused the trial's network because leaked networks spent its address pools — the
+ * trial host, not the head. Like a fetch fault it reaches no verdict and is not retried: the head
+ * stays queued and the loop reports the fault, naming how many preview networks the host holds.
+ */
+export class TrialNetworkPoolError extends Error {
+  constructor(readonly networks: number | null) {
+    super(`${trialHostFaultPrefix}: Docker could not create the trial's network (${addressPoolsSpent}); ${networks ?? 'an unknown number of'} Graphyard preview networks are on the trial host`);
+    this.name = 'TrialNetworkPoolError';
+  }
+}
+/** The preview-network count a network-pool fault names, from the error or the message it crossed a process boundary as; null for any other error. */
+export const trialNetworkPoolFault = (error: unknown): string | null =>
+  new RegExp(`^${trialHostFaultPrefix}: Docker could not create the trial's network .*; (.+) Graphyard preview networks`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/** `error` as a network-pool fault when Docker refused a network for spent address pools, else null. */
+const networkPoolFault = async (error: unknown, env: Record<string, string>) => (error instanceof Error ? error.message : String(error)).includes(addressPoolsSpent)
+  ? new TrialNetworkPoolError((error as { previewNetworks?: number | null }).previewNetworks ?? await previewNetworkCount(dockerEnvironment(env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }))) : null;
 const localHost = /^(?:localhost|127\.[\d.]+|0\.0\.0\.0|::1|\[::1\])$/i;
 /**
  * The external host a failed step's output shows a network fetch failure to, or null: a resolver or
@@ -923,7 +940,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || trialOverloadFault(error) || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || trialOverloadFault(error) || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -1225,6 +1242,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let started: CheckServices;
     try { started = await (input.services ?? startCheckServices)({ checkout: worktree, services: check.services, scratch: temporary!, env, key: input.key ?? 'trial', timeoutMs: remaining() }); }
     catch (error) {
+      const fault = await networkPoolFault(error, env);
+      if (fault) throw fault;
       const why = `the services of check ${check.check} did not start: ${error instanceof Error ? error.message : String(error)}`;
       log.push(why);
       return { services: why };
@@ -1255,7 +1274,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-      });
+      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
       const failures = ran.filter(entry => entry.failed);
       cpu.finish(stepLabel, cpuBefore, failures.length > 0 && failures.every(entry => /timed?\s*out|did not answer .* within \d+s|timeout/i.test(entry.failingStep ?? '')), line => log.push(line));
       // The laid-over files served the cases only: the checks that follow test the base tip as it is.
