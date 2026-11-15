@@ -89,6 +89,25 @@ export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
   </p>;
 }
 
+/**
+ * GY-3399: the week's batch-gate reverts beside the week's gates removed — lessons the master
+ * turned into code, whose item's delivery removed them — as /api/status's `thisWeek` reports them,
+ * each count followed by links that open its items. Absent while the status names no week.
+ */
+export function WeekLine({ status, work, open }: { status?: Dashboard['status']; work: Work[]; open?: (id: string) => void }) {
+  const week = status?.thisWeek as { reverts?: unknown; revertedItems?: unknown; gatesRemoved?: unknown; gatesRemovedItems?: unknown } | null | undefined;
+  if (!week || typeof week.reverts !== 'number' || typeof week.gatesRemoved !== 'number') return null;
+  const keys = (value: unknown) => Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
+  const links = (value: unknown) => keys(value).map(key => {
+    const id = work.find(item => item.key === key)?.id;
+    return <span key={key}> <a className="mono" href={`#${key}`} onClick={event => { if (id && open) { event.preventDefault(); open(id); } }}>{key}</a></span>;
+  });
+  return <p className="week-line" data-reverts={week.reverts} data-gates-removed={week.gatesRemoved}>
+    Reverts this week: <span className="mono">{week.reverts}</span>{links(week.revertedItems)}
+    <span aria-hidden="true"> · </span>Gates removed this week: <span className="mono">{week.gatesRemoved}</span>{links(week.gatesRemovedItems)}
+  </p>;
+}
+
 /** The glossary entry a tab's label names, by the label itself or by its singular. */
 const meaning = (label: string): GlossaryTerm | null => {
   const key = label.toLowerCase(), singular = key.replace(/s$/, '');
@@ -123,6 +142,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
       </div>
     </div>
     {status && <ReleaseLine status={status}/>}
+    {status && <WeekLine status={status} work={work} open={dashboard.setSelected}/>}
     {!selected && pages.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab)}{advanced.length > 0 && <details className="tabs-advanced" open={advanced.some(page => page.id === view) || undefined}><summary className="tab">Advanced</summary>{advanced.map(tab)}</details>}</nav>}
   </div>;
 }

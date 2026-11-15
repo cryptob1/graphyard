@@ -65,11 +65,11 @@ export function recordNoteInMemory(memory: ProjectMemory, note: MemoryNote): boo
 }
 
 /** Record one of the master's own lessons (GY-3274): a short note the next master launch prompt carries. */
-export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at: string; forWorkers?: boolean }): MemoryNote {
+export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at: string; forWorkers?: boolean; enforceable?: boolean }): MemoryNote {
   const text = input.text.trim();
   if (!text) throw new Error('A lesson needs its text');
   if (text.length > masterLessonCharacterLimit) throw new Error(`A lesson is at most ${masterLessonCharacterLimit} characters and this one is ${text.length}: ${text.slice(0, 120)}…`);
-  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at, ...(input.forWorkers ? { forWorkers: true } : {}) };
+  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at, ...(input.forWorkers ? { forWorkers: true } : {}), ...(input.enforceable ? { enforceable: true } : {}) };
   recordNoteInMemory(memory, note);
   // The stored total stays under the word budget, dropping the oldest lessons first.
   while (memory.notes.filter(entry => entry.kind === masterLessonKind).length > 1

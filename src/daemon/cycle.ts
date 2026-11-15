@@ -39,6 +39,7 @@ import { pinnedInstall, repinRuntime, type AgentRegistry, type CanaryOffer } fro
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { batchGateStep } from './cycle-batch-gate.js';
+import { lessonsToCode } from './lessons-to-code.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
@@ -229,6 +230,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // GY-3274: the lessons and product brief the master session recorded straight to the file are
     // adopted from it — the file is their truth — before the cycle's own answers and merges join them.
     if (effects.recordedMasterMemory) state.projectMemory = reconcileMasterMemory(state.projectMemory, await effects.recordedMasterMemory());
+    // GY-3399: enforceable lessons become items, and a delivered one's lesson is removed.
+    if (!config.forPerson) await lessonsToCode(state.projectMemory, read.snapshot.work, clock, effects.mergeWriter?.createWork, log);
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);
