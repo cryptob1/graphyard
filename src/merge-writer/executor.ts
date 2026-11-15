@@ -741,7 +741,7 @@ export interface MergePorts {
    * `share` is how many trials run at once (`mergeHeads`): each takes that share of the host's cores.
    * Aborting `signal` stops the trial's children (GY-3099). `timeoutMs` bounds the whole trial; absent, the merge-trial deadline (`trialTimeoutMinutes`).
    */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type']; /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it. */ environments?: Record<string, string> }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
