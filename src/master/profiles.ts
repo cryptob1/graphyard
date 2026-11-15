@@ -391,6 +391,8 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // GY-3228: the host user's personal credentials (~/.ssh, ~/.config/gh, ~/.netrc, ...), other
   // installs and other agent accounts are masked by default; a repository adds its own extras as
   // `confinement.maskPaths` in graphyard.json (absolute or ~/ paths).
+  // GY-3384: the sibling entries beside its checkout a repository declares readable are
+  // `confinement.readonlyPaths` there; every unlisted sibling stays unreadable to a session.
   confinement: z.object({
     maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
   }).strict().optional(),

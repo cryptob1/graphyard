@@ -1,7 +1,7 @@
 // Concern: OS-level host filesystem and coordinator confinement for every launched role.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { slotsDirectoryVariable } from './verification-slots.js';
 import { herdrTarget } from './herdr.js';
@@ -287,6 +287,36 @@ const repositoryMaskPaths = (root: string): string[] => {
       .map(path => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path).filter(isAbsolute);
   } catch { return []; }
 };
+/** GY-3384: the absolute or `~/` sibling paths the repository's own graphyard.json declares readable
+ * (`confinement.readonlyPaths`): checkouts beside the project — a private dependency, a read-only
+ * key — that confined sessions keep as readable as the read-only host itself while every unlisted
+ * sibling stays unreadable; an unreadable declaration adds none. */
+export const repositoryReadonlyPaths = (root: string): string[] => {
+  try {
+    const declared = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.confinement?.readonlyPaths;
+    return (Array.isArray(declared) ? declared : []).filter((path): path is string => typeof path === 'string')
+      .map(path => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path).filter(isAbsolute);
+  } catch { return []; }
+};
+/**
+ * GY-3384: the sibling entries beside the checkout — the host user's other checkouts — that a
+ * confined session cannot read: every entry of the checkout's parent except the checkout itself,
+ * every entry a declared path covers, every symlink (its target stays as reachable as the
+ * read-only host makes any other tree of the host user's), and every entry the wrapper mounts
+ * under (a masked entry carries no mount point of its own). A parent that is the user's home, the
+ * host's temporary directory (the session's scratch already replaces it inside the namespace) or
+ * `/` masks nothing: the host user's home keeps its ordinary files readable, its credential paths
+ * masked on their own.
+ */
+const siblingMaskEntries = (root: string, declared: readonly string[], mounted: readonly string[]): string[] => {
+  const parent = dirname(root);
+  if (parent === '/' || [homedir(), tmpdir()].some(above => canonicalPath(parent) === canonicalPath(above))) return [];
+  let names: string[];
+  try { names = readdirSync(parent); } catch { return []; /* an unreadable parent hides its entries already */ }
+  return names.filter(name => name !== basename(root)).map(name => join(parent, name))
+    .filter(path => !((path): boolean => { try { return lstatSync(path).isSymbolicLink(); } catch { return true; } })(path))
+    .filter(path => ![root, ...declared, ...mounted].some(other => other === path || withinCheckout(other, path) || withinCheckout(path, other)));
+};
 /** The session's own credential paths that exist here, canonical: what the wrapper re-exposes after the masks. */
 const keptCredentialPaths = (mask: CredentialMask | undefined): string[] =>
   [...new Set((mask?.own ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))];
@@ -338,11 +368,18 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
   // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
   // only that public resolver file back, never systemd's directory or sockets.
   const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
+  // GY-3384: the system ssh include directory holds files owned by ids the user namespace cannot
+  // map (root reads as nobody inside), and ssh refuses a config file its owner check rejects —
+  // "Bad owner or permissions on /etc/ssh/ssh_config.d/*.conf" — so every git over SSH failed
+  // inside a confined session. An empty directory in its place leaves ssh its defaults; the
+  // system config itself is never owner-checked, and the session's scratch HOME has no include
+  // to check.
+  const sshIncludes = isDirectoryPath('/etc/ssh/ssh_config.d') ? ['--tmpfs', '/etc/ssh/ssh_config.d'] : [];
   // GY-3108: Antigravity (agy) ignores AGY_CONFIG_DIR and reads its login only from
   // `$HOME/.gemini/antigravity-cli`, so the account's login home is bound there.
   const home = variable('HOME', '/tmp/home'), agy = variable('AGY_CONFIG_DIR', '')[2];
   const agyHome = agy && join(home[2], '.gemini', 'antigravity-cli') !== agy ? ['--bind', agy, join(home[2], '.gemini', 'antigravity-cli')] : [];
-  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
+  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshIncludes,
     '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
     '--dir', '/tmp/home', ...home, ...agyHome,
@@ -430,7 +467,16 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks,
+  // GY-3384: beside the checkout a session reads only what the repository declares. Every other
+  // sibling entry of the checkout's parent is masked unreadable with the same exact-path words as
+  // the credential mask, before every re-exposure, so the checkout, its Git directories, the
+  // session's own directories and every writable grant stay as reachable as before. An entry the
+  // wrapper itself mounts under is never masked: a masked entry carries no mount point of its own.
+  const mounted = [...writable, ...commonGitDir, ...sharedDirectories, ...own, ...shared, ...kept, ...cli, ...herdr, ...busSockets].filter(path => isAbsolute(path));
+  const siblings = siblingMaskEntries(root, repositoryReadonlyPaths(root), mounted);
+  if (siblings.length && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
+  const siblingMasks = siblings.length ? credentialMaskWords({ configHome: '', extraPaths: [], own: [], cli: [], hostPaths: siblings }, [root, directory], blank) : [];
+  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks, ...siblingMasks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
