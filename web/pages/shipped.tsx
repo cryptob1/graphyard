@@ -6,6 +6,7 @@ import { releasedAt } from '../groups';
 import { releaseView } from '../../src/model/release';
 import { Explained } from '../components/term';
 import type { Dashboard } from './dashboard';
+import { EmptyState, PageHeader, PageSection } from '../components/page-layout';
 
 /**
  * Every delivered item, newest first, with its pull request and the plain stage (GY-2988) —
@@ -21,17 +22,17 @@ export default function ShippedPage({ work, status, observedAt, setSelected }: D
   const closed = work.filter(isClosed).sort((a, b) => b.closure!.at.localeCompare(a.closure!.at));
   const shipped = work.filter(isDelivered).sort((a, b) => shippedAt(b).localeCompare(shippedAt(a)));
   return <>
-    <div className="page-heading"><h1>Shipped</h1></div>
+    <PageHeader title="Shipped" fact={shipped.length ? `${shipped.length} shipped · latest ${new Date(shippedAt(shipped[0])).toLocaleDateString()}, ${shipped[0].key} ${shipped[0].title}` : 'Nothing has shipped yet.'}/>
     {liveFailingLine(serve) && <p className="danger-text" data-live-failing>{liveFailingLine(serve)}.</p>}
-    {shipped.length === 0 ? <p className="muted">Nothing has shipped yet. Items appear here once their pull request merges.</p>
-      : <ul className="shipped-list shipped-page">{shipped.map(w => { const plain = plainStatus(w, now); const label = plainStage(w, now, release, serve); return <li key={w.id} className={`tone-${plain.tone}`}>
+    {shipped.length === 0 ? <EmptyState title="Nothing has shipped yet.">Items appear here once their pull request merges.</EmptyState>
+      : <PageSection title="Delivered" count={shipped.length} label="Delivered"><ul className="shipped-list shipped-page">{shipped.map(w => { const plain = plainStatus(w, now); const label = plainStage(w, now, release, serve); return <li key={w.id} className={`tone-${plain.tone}`}>
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
         {w.candidate && <CandidatePr repository={status?.repository} candidate={w.candidate} workKey={w.key} observation={w.observation}/>}
         <span className="muted">{new Date(shippedAt(w)).toLocaleDateString()}</span>
         <span className={live(w) ? undefined : 'muted'} data-live={live(w)} data-plain-stage={label}>{label}</span>
         {plain.blocking && <span className={plain.tone === 'stuck' ? 'danger-text' : 'amber'}><Explained sentence={plain.blocking}/></span>}
-      </li>; })}</ul>}
-    {closed.length > 0 && <details className="work-list closed-history"><summary>Closed without shipping <span className="count">{closed.length}</span></summary>
+      </li>; })}</ul></PageSection>}
+    {closed.length > 0 && <details className="panel closed-history"><summary>Closed without shipping <span className="count">{closed.length}</span></summary>
       <ul className="shipped-list">{closed.map(w => <li key={w.id}>
         <button className="text-button" onClick={() => setSelected(w.id)}>{w.key} <span data-title>{w.title}</span></button>
         <span className="muted">{w.closure!.kind}{w.closure!.ref ? ` · ${w.closure!.ref}` : ''} · {new Date(w.closure!.at).toLocaleDateString()} · {w.closure!.by}</span>

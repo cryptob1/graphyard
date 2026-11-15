@@ -36,12 +36,13 @@ function shell(page: Page) {
     return {
       titles: titles.length, titleInHeading: !!titles[0]?.closest('.page-heading'), title: style(titles[0] ?? null),
       fact: fact?.textContent?.trim() ?? '', firstScreen: { title: onFirstScreen(titles[0] ?? null), fact: onFirstScreen(fact) },
-      cards: document.querySelectorAll('main .panel').length,
+      // The Master page's content is its terminal, which fills the page (GY-3308).
+      cards: document.querySelectorAll('main .panel, main table.sessions-table, main .live-terminal').length,
       sections: [...new Set([...document.querySelectorAll('main .panel > h2, main .panel > summary')].map(style))],
       strays: [...document.querySelectorAll('main section > h2, main article > h2')].filter(h2 => !h2.parentElement!.matches('.panel, .modal')).map(h2 => h2.textContent),
       tables: [...document.querySelectorAll('main table')].map(table => table.className).filter(name => !name.split(' ').includes('sessions-table')),
       empty: !!document.querySelector('main .empty'),
-      legacy: [...document.querySelectorAll('main .breadcrumb, main .eyebrow, main .section-title, main .master-heading')].map(node => node.className),
+      legacy: [...document.querySelectorAll('main .breadcrumb, main .eyebrow, main .section-title')].map(node => node.className),
       sideways: document.documentElement.scrollWidth - innerWidth,
     };
   });
@@ -81,7 +82,7 @@ for (const data of ['seeded', 'empty'] as const) for (const viewport of [{ width
         expect(read.titleInHeading, `${route} title sits in the shared page heading`).toBe(true);
         expect(read.fact, `${route} states its primary fact`).not.toBe('');
         expect(read.firstScreen, `${route} first screen shows its title and primary fact`).toEqual({ title: true, fact: true });
-        expect(read.cards > 0 || read.empty, `${route} shows its content in cards or the shared empty state`).toBe(true);
+        expect(read.cards > 0 || read.empty, `${route} shows its content in cards, the shared table or the shared empty state`).toBe(true);
         expect(read.strays, `${route} section headings belong to cards`).toEqual([]);
         expect(read.tables, `${route} tables use the shared table class`).toEqual([]);
         expect(read.legacy, `${route} uses no page-local heading`).toEqual([]);

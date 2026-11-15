@@ -80,9 +80,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await openSettings(page, tab, viewport.name === 'phone', section);
     const main = page.getByRole('main');
     await expect(main.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
-    // The shared layout: the page header with its place in its section, and a heading block.
-    await expect(main.locator('header .breadcrumb')).toContainText(new RegExp(`^${section}\\s*/\\s*`));
+    // The shared page shell (GY-3322): one heading block, its title and the page's primary fact.
     await expect(main.locator('.page-heading h1')).toHaveCount(1);
+    await expect(main.locator('.page-heading .page-fact')).not.toBeEmpty();
     await page.waitForTimeout(200);
     // No sideways scroll at this width.
     const bounds = await page.evaluate(() => ({ content: document.documentElement.scrollWidth, width: document.documentElement.clientWidth }));
