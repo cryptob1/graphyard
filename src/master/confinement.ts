@@ -291,7 +291,7 @@ const repositoryMaskPaths = (root: string): string[] => {
  * (`confinement.readonlyPaths`): checkouts beside the project — a private dependency, a read-only
  * key — that confined sessions keep as readable as the read-only host itself while every unlisted
  * sibling stays unreadable; an unreadable declaration adds none. */
-export const repositoryReadonlyPaths = (root: string): string[] => {
+const repositoryReadonlyPaths = (root: string): string[] => {
   try {
     const declared = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.confinement?.readonlyPaths;
     return (Array.isArray(declared) ? declared : []).filter((path): path is string => typeof path === 'string')
