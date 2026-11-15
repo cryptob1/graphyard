@@ -92,7 +92,7 @@ test('e2e:install-move-host — install move copies the database, files and cred
     assert.deepEqual(plan.database, { kind: 'directory', path: join(directory, 'postgres') });
     assert.ok(plan.files.includes(root) && plan.files.includes(directory) && plan.files.includes(masters), 'the checkout, the install directory and the credential directory are listed');
     assert.deepEqual(plan.credentials, [config.credentialFile, operatorCredential, workerCredential].sort());
-    assert.deepEqual([...plan.worktrees].sort(), [join(repo, '.git', 'worktrees', basename(root)), join(repo, '.git', 'worktrees', commit)].sort());
+    assert.deepEqual(plan.worktrees, [join(repo, '.git')], 'the main clone the checkout and its CLI release are worktrees of');
     assert.match(plan.trialImage.command!, /'--tag' 'graphyard-trial:local'/);
     assert.deepEqual(plan.accounts, ['claude-a']); assert.deepEqual(plan.refusals, []); assert.equal(plan.applied, false);
     assert.equal(existsSync(target), false, 'the plan copies nothing');
@@ -107,7 +107,11 @@ test('e2e:install-move-host — install move copies the database, files and cred
     assert.equal((await stat(join(target, otherOperatorToken))).mode & 0o777, 0o600, 'the credential directory carries operator tokens master.json does not name');
     for (const file of ['master.json', 'connection.json']) assert.equal(JSON.parse(await readFile(join(target, root, '.graphyard', file), 'utf8')).hostId, 'target-host', `${file} names the target host`);
     assert.ok(existsSync(join(target, data, 'PG_VERSION')), 'the database directory is on the target');
-    for (const entry of plan.worktrees) assert.ok(existsSync(join(target, entry, 'gitdir')), `${entry} is re-created on the target`);
+    // The main clone's .git (objects, refs, HEAD, config) moves with both worktree registrations, so Git on the target accepts the moved trees.
+    const movedGit = join(target, repo, '.git');
+    for (const name of [basename(root), commit]) assert.ok(existsSync(join(movedGit, 'worktrees', name, 'gitdir')), `the ${name} registration is on the target`);
+    assert.equal(execFileSync('git', ['--git-dir', movedGit, 'rev-parse', `${commit}^{commit}`], { encoding: 'utf8' }).trim(), commit, 'the moved .git holds the objects');
+    assert.equal(execFileSync('git', ['--git-dir', movedGit, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim(), 'https://github.com/owner/project.git', 'the moved .git holds the config');
     const commands = docker.commands.map(recorded => [recorded.program, ...recorded.args].join(' '));
     assert.ok(commands.some(line => line.startsWith('docker buildx build ') && line.includes('--tag graphyard-trial:local ') && line.endsWith(join(target, root))), `the trial image is built from the copied checkout:\n${commands.join('\n')}`);
 

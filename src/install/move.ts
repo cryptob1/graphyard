@@ -2,8 +2,8 @@
 // checks through the running control plane that nothing is leased, trialled or queued to merge,
 // re-points the registry accounts placed on this host, stops the install, copies the database, the
 // install files, the credential directory (the operator tokens and the loop's state files beside
-// the coordinator token) and every credential file master.json names, re-creates the Git worktree
-// registrations the checkout and its CLI release copies point at, provisions the merge-trial image
+// the coordinator token) and every credential file master.json names, copies the main Git repository
+// (with its worktree registrations) the checkout and its CLI release copies point at, provisions the merge-trial image
 // on the target, rewrites hostId there and prints what to start. The copy is plain rsync, outside
 // any coordination transaction.
 import { spawn } from 'node:child_process';
@@ -85,17 +85,21 @@ const gitdirPointer = (tree: string): string | null => {
     return match ? resolve(match[1].trim()) : null;
   } catch { return null; }
 };
+/** The main repository a worktree registration belongs to: Git's `commondir` file names it, relative to the registration. */
+const commonGitdir = (registration: string): string => {
+  try { return resolve(registration, readFileSync(join(registration, 'commondir'), 'utf8').trim()); } catch { return dirname(dirname(registration)); }
+};
 /**
- * The worktree registrations the copy leaves dangling on the target (GY-3317): every copied tree
- * that is a linked worktree — the checkout itself and each CLI release copy under it — points at a
- * `<gitdir>/worktrees/<name>` entry that the rsync of the trees does not carry, so the move copies
- * each entry too. Registrations already inside a carried directory (a checkout that is its own
- * main repository) went with the copy and are left alone.
+ * The Git repositories the copy leaves dangling on the target (GY-3317): every copied tree that is
+ * a linked worktree — the checkout itself and each CLI release copy under it — points at a
+ * `<gitdir>/worktrees/<name>` registration inside its main clone's `.git`, whose objects, refs and
+ * config Git needs as well, so the move copies that whole `.git`. A repository already inside a
+ * carried directory (a checkout that is its own main repository) went with the copy.
  */
-function worktreeRegistrations(root: string, carried: string[]): string[] {
+function worktreeRepositories(root: string, carried: string[]): string[] {
   const releases = join(root, '.graphyard', 'cli-releases');
   const trees = [root, ...(existsSync(releases) ? readdirSync(releases, { withFileTypes: true }) : []).filter(entry => entry.isDirectory()).map(entry => join(releases, entry.name))];
-  return [...new Set(trees.map(gitdirPointer).filter((entry): entry is string => !!entry && existsSync(entry)))]
+  return [...new Set(trees.map(gitdirPointer).filter((entry): entry is string => !!entry && existsSync(entry)).map(commonGitdir))]
     .filter(entry => !carried.some(base => entry === base || entry.startsWith(`${base}/`)));
 }
 
@@ -137,7 +141,7 @@ export async function moveInstall(root: string, options: { to: string; into?: st
   // daemon state and cursor files, none of which master.json names (~/.config/graphyard/masters).
   const credentialDirectory = dirname(config.credentialFile);
   const carried = [root, directory, ...(credentialDirectory === directory || credentialDirectory.startsWith(`${directory}/`) ? [] : [credentialDirectory])];
-  const worktrees = worktreeRegistrations(root, carried);
+  const worktrees = worktreeRepositories(root, carried);
   const directories = [...carried, ...worktrees];
   let units: { master: string; deploy: string } | null = null;
   try { const recorded = readInstallUnits(root, dependencies.unitDirectory); units = { master: recorded.master, deploy: deployUnitOf(recorded) }; } catch { /* no units recorded: nothing to stop or copy */ }
