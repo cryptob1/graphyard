@@ -240,7 +240,12 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   const hung = 'tests/hung.test.ts', slow = 'tests/slow.test.ts';
   writeFileSync(join(trial.root, hung), "import { test } from 'node:test'; test('hung', async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n");
   writeFileSync(join(trial.root, slow), "import { test } from 'node:test'; test('slow', async () => { await new Promise(resolve => setTimeout(resolve, 500)); });\n");
-  gitIn(trial.root, 'add', hung, slow, 'tests/helpers');
+  // The subject is the bound and its verdict, not this repository's own build: a trial host loaded
+  // enough to run six trials spent most of this trial's deadline building the scratch tree, leaving
+  // the runner this regression exercises too little of it (GY-3366's trial), so the scratch builds nothing.
+  const manifest = JSON.parse(readFileSync(join(trial.root, 'package.json'), 'utf8'));
+  writeFileSync(join(trial.root, 'package.json'), JSON.stringify({ ...manifest, scripts: { ...manifest.scripts, build: 'node -e 0' } }));
+  gitIn(trial.root, 'add', hung, slow, 'tests/helpers', 'package.json');
   gitIn(trial.root, 'commit', '-q', '-m', 'hung and slow fixtures');
   let testRuns = 0;
   const result = await runTrial({
@@ -250,8 +255,9 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
       if (args.includes('tests/helpers/run-tests.ts')) {
         testRuns++;
         assert.ok(args.includes('--file-timeout=300000'), 'production bounds each file at five minutes');
-        // Exercise the real runner, reporter and trial verdict with a shortened clock.
-        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=3000' : arg);
+        // Exercise the real runner, reporter and trial verdict with a shortened clock that still
+        // leaves a loaded host's file start-up room inside the slow file's own bound.
+        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=10000' : arg);
       }
       // This regression exercises test processes, not the separately tested container boundary.
       // All executed code belongs to this repository or the two fixtures above.
@@ -265,7 +271,7 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   assert.match(result.logTail, /hung\.test\.ts/);
   // The file bound ended the hung file, not the overall deadline (which would leave no verdict):
   // no wall-clock limit here, so a hot or busy host cannot fail it (GY-3374).
-  assert.match(result.logTail, /test file timed out after 3000ms/);
+  assert.match(result.logTail, /test file timed out after 10000ms/);
   assert.deepEqual(result.retried ?? [], [], 'a named failure is a verdict, not a no-verdict retry');
 });
 
