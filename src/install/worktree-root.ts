@@ -121,27 +121,27 @@ export async function allocateSessionCheckout(base: string, kind: CheckoutKind, 
 
 type Run = ChildRun;
 const git = (repository: string): Run => (command, args) => defaultChildRun(command, args, { cwd: repository });
+/** Give the owner write access to `directory` and every directory below it; a symlink is never followed. */
+export async function writableDirectories(directory: string): Promise<void> {
+  const { mode } = await lstat(directory);
+  if ((mode & 0o700) !== 0o700) await chmod(directory, mode | 0o700);
+  for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await writableDirectories(join(directory, entry.name));
+}
+
+/** GY-3343: removes `path` whole; a refused removal (a read-only tree, as Go's module cache leaves) makes its directories writable and retries. */
+export async function removeTree(path: string): Promise<void> {
+  try { return await rm(path, { recursive: true, force: true }); }
+  catch (error) { if (!['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  await writableDirectories(path);
+  await rm(path, { recursive: true, force: true });
+}
+
 /**
  * Remove one session's checkout: whatever still runs under it, the worktree's registration in the repository, then the whole
  * session directory with its dependency tree and evidence files. Git is asked first so the
  * registration goes with the files; a worktree the session never created, or already removed, is
  * not an error, and the prune afterwards drops whatever registration is left pointing at nothing.
  */
-/**
- * GY-3343: removes `path` whole. A read-only tree (0555 directories, as Go's module cache leaves)
- * cannot be emptied by `rm` alone, so a refused removal makes every directory writable and retries.
- */
-export async function removeTree(path: string): Promise<void> {
-  try { return await rm(path, { recursive: true, force: true }); }
-  catch (error) { if (!['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
-  const writable = async (directory: string): Promise<void> => {
-    await chmod(directory, 0o700).catch(() => {});
-    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) if (entry.isDirectory()) await writable(join(directory, entry.name));
-  };
-  await writable(path);
-  await rm(path, { recursive: true, force: true });
-}
-
 export async function removeSessionCheckout(repository: string, base: string, directory: string, run?: Run) {
   assertManaged(base, directory);
   await stopProcessesUnder(directory);

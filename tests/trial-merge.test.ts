@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
@@ -340,7 +340,7 @@ test('unit:trial-base-run-registry-files-pass — with a stray .git in each shar
   await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
 });
 
-test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and the coordinator\'s tmpdir that no stray node_modules, .git or package.json sits in or above, the filesystem root included, else the suite\'s short durable root (GY-2954), else its session directory, never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; a root that gains one during the trial makes it no verdict; its checkout goes beside it only on durable storage with room; the directories are removed with the checkout, pass or fail, a removal that fails names its directory and drops its owner marker (GY-1565)', async () => {
+test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and the coordinator\'s tmpdir that no stray node_modules, .git or package.json sits in or above, the filesystem root included, else the suite\'s short durable root (GY-2954), else its session directory, never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; a root that gains one during the trial makes it no verdict; its checkout goes beside it only on durable storage with room; the directories are removed with the checkout, pass or fail, a read-only one included (GY-1565, GY-3343)', async () => {
   assert.deepEqual(trialTemporaryRoots('/var/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp']);
   assert.deepEqual(trialTemporaryRoots('/tmp', '/home/me'), ['/tmp', '/home/me/.gy/tmp']);
   assert.deepEqual([...trialLookupEntries], ['node_modules', '.git', 'package.json']);
@@ -436,18 +436,13 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.deepEqual(readdirSync(clean), ['package.json'], 'its directories are removed all the same');
     rmSync(join(clean, 'package.json'));
   }
-  if (usable && process.getuid?.() !== 0) {
-    // A temporary directory that will not go is named, and loses its owner marker, so the tmp reclaim takes it once it ages.
-    const sticking = await trial({ 'tests/a.test.ts': 'x\n', 'stick-tmp': '' }, ['tests/a.test.ts'], 'sticks in its tmp');
-    let left = '';
-    await assert.rejects(sticking.run(), (error: unknown) => {
-      left = error instanceof TrialCleanupError ? error.directory : '';
-      return error instanceof TrialCleanupError && error.verdict?.build === 'pass' && left.startsWith(`${clean}/${trialTemporaryPrefix}`) && error.message.includes(left);
-    });
-    assert.equal(existsSync(left), true);
-    assert.equal(existsSync(tempOwnerMarker(left)), false, 'no live owner marker keeps it');
-    chmodSync(join(left, 'stuck'), 0o700); rmSync(left, { recursive: true });
-    assert.equal(existsSync(sticking.base) ? readdirSync(sticking.base).length : 0, 0, 'the session directory still goes');
+  if (usable) {
+    // GY-3343: a temporary directory the build left read-only goes all the same, and the trial reports no leftover.
+    const sticking = await trial({ 'tests/a.test.ts': 'x\n', 'stick-tmp': '' }, ['tests/a.test.ts'], 'read-only tmp');
+    const verdict = await sticking.run();
+    assert.equal(verdict.build, 'pass', verdict.logTail);
+    assert.deepEqual(readdirSync(clean), [], 'the read-only temporary directory is removed');
+    assert.equal(existsSync(sticking.base) ? readdirSync(sticking.base).length : 0, 0, 'the session directory goes');
   }
 });
 
