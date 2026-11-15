@@ -99,9 +99,9 @@ finally:
         pass
 `;
 
-/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189), under the trial AppArmor profile on an AppArmor host (GY-3339). */
-export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad }) =>
-  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ ...spec, apparmor: appArmorEnabled() ? trialAppArmorProfile : null })];
+/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189), under the trial AppArmor profile on an AppArmor host (GY-3339) unless `apparmor` names another (null: none, as on a remote host, GY-3406). */
+export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad; apparmor?: string | null }) =>
+  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ ...spec, apparmor: spec.apparmor !== undefined ? spec.apparmor : appArmorEnabled() ? trialAppArmorProfile : null })];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = trialImage(), network = 'bridge', deadline?: number, load?: TrialLoad): string[] {

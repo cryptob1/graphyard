@@ -18,6 +18,7 @@ import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
 import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
+import { readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
@@ -229,6 +230,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
+    // GY-3406: test shards run on other hosts over the last 20 trials — the share run remotely, trial
+    // wall time, waits while a host idled, this machine's peak CPU temperature and each host's reading.
+    remoteShards: remoteShardSummary(readRemoteShardRuns(root)),
     // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
     batchGate: gateSummary(gateRecord),
     // GY-3146: what the latest verified batch changed and how to try it.

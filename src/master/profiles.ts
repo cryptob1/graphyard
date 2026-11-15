@@ -337,6 +337,8 @@ export const masterRunSchema = z.object({
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   // GY-3122: the free space every volume Graphyard writes keeps; below it the loop reclaims its own leftovers, then starts no trial or worker (default 30).
   diskFloorGb: z.number().min(0).max(100_000).optional(),
+  // GY-3406: other hosts merge trials fan their test shards out to over SSH: a name and the SSH destination (user@host) of a Linux box with Docker, python3 and this host's key.
+  hosts: z.array(z.object({ name: z.string().trim().min(1).max(100), ssh: z.string().trim().min(1).max(300) }).strict()).max(50).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
