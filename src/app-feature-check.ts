@@ -14,7 +14,7 @@ export function readAppOnboarding(root: string) {
 export function featureMapCase(root: string): CaseFile {
   const app = readAppOnboarding(root);
   if (app.fault) throw new Error(app.fault);
-  const file = 'graphyard.json';
+  const file = `${featureMapCaseId}.json`;
   return { file, definition: parseCase(file, JSON.stringify({
     id: featureMapCaseId, title: 'Reach the real application features', target: 'any', required: true,
     steps: app.features.map(feature => feature.command

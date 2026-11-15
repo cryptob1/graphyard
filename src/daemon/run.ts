@@ -192,6 +192,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // reads it — and told to the supervisor as a keep-alive.
     let progress: () => void = () => {};
     let heartbeat: LoopHeartbeat | undefined;
+    let cycling = false;
     const effects = boundedPersist(namedEffects(markedEffects(raw, () => progress())));
     acquireDaemonLock(state, options.identity, now(), interval());
     state.release = carryUndeclared(state.release, raw.loadedRelease ?? null);
@@ -199,7 +200,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     await supervisorNotify('ready');
     heartbeat = loopHeartbeat(() => void supervisorNotify('alive'), watchdog.windowMs, { log });
     progress = () => {
-      if (state.lock) state.lock = { ...state.lock, heartbeatAt: new Date(now()).toISOString() };
+      if (cycling && state.lock) state.lock = { ...state.lock, heartbeatAt: new Date(now()).toISOString() };
       heartbeat!.mark();
     };
     progress();
@@ -245,7 +246,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         try {
           if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
           phase = 'cycle';
+          cycling = true;
           const result = await runCycle(config, state, effects, now, launcher, log, progress);
+          cycling = false;
+          // Persisting the completed cycle also marks progress; keep that heartbeat at completion.
+          if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt! };
           await noteControlPlane(state, null, now(), effects.composeServer, log);
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
@@ -260,6 +265,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           await noteControlPlane(state, { ...failure, answered: typeof (error as { status?: unknown })?.status === 'number' }, now(), effects.composeServer, log);
           if (state.controlPlane) await effects.persist(state).catch(() => {});
         }
+        cycling = false;
         // The cycle ended, failed or completed: either way the loop is alive and moving (GY-3341).
         progress();
         const deploy = options.root && !stopping ? (options.deployUnit ?? readDeployUnitProcess)() : null;

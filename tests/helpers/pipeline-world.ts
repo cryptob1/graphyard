@@ -46,7 +46,7 @@ function fixtureFiles(extra: Record<string, string>): Record<string, string> {
   return {
     'package.json': JSON.stringify({ name: 'pipeline-fixture', scripts: { build: 'node --eval 0', test: 'node --test --test-reporter=tap proof.cjs' } }),
     'proof.cjs': `const { test } = require('node:test');\ntest('unit:declared', () => {});\n`,
-    'graphyard.json': JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking' }, gate: { core: ['smoke'] }, delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }] } }),
+    'graphyard.json': JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking', serve: { command: `node -e "require('http').createServer((q,r)=>r.end(require('fs').readFileSync('site/index.html'))).listen(43917,'127.0.0.1')"`, url: 'http://127.0.0.1:43917/', readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }], gate: { core: ['smoke'] }, delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }] } }),
     'site/index.html': '<!doctype html><title>fixture</title>\n',
     'e2e/cases/fixture.json': commandCase('fixture', 'node --eval 0'),
     'e2e/cases/smoke.json': commandCase('smoke', `node --eval "process.exit(require('fs').existsSync('broken') ? 1 : 0)"`),

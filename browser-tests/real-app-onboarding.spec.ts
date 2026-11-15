@@ -39,6 +39,7 @@ test('e2e:real-app-onboarding — Setup names the placeholder fault and recogniz
     await save({ e2e: { serve: { command: 'node app.js', url: 'http://127.0.0.1:43911/', readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }] });
     // A stale working tree must not override main.
     await writeFile(join(root, 'graphyard.json'), JSON.stringify({ e2e: { serve: onboardingServe } }));
+    await page.goto(`${baseURL}/#setup`);
     await page.reload();
     await expect(item).toContainText('Project onboarded');
     await expect(item).toHaveAttribute('data-done', 'yes');

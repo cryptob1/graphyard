@@ -10,9 +10,11 @@ import { checkServedApp, featureMapCaseId } from '../src/app-feature-check.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import type { MasterConfig } from '../src/master.js';
+import { batchGatePorts } from '../src/daemon/cycle-batch-gate.js';
+import { gateChecks } from '../src/batch-gate.js';
 import { freePort } from '../src/cli/test-isolation.js';
 
-const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' } }).trim();
+const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' } }).trim();
 test('integration:real-app-onboarding — main declares a real app and feature map; batch and deploy reach its features', async () => {
   const root = await temporaryDirectory('real-app-onboarding');
   git(root, 'init', '-q', '-b', 'main');
@@ -33,11 +35,14 @@ test('integration:real-app-onboarding — main declares a real app and feature m
   await writeFile(join(root, 'app.cjs'), `require('http').createServer((q,r)=>{require('fs').appendFileSync('requests',q.url+'\\n'); r.statusCode=['/','/feature'].includes(q.url)?200:404;r.end('real feature')}).listen(${port},'127.0.0.1')`);
   await save({ e2e: { serve }, featureMap: features });
   const main = git(root, 'rev-parse', 'HEAD');
+  const ports = batchGatePorts({ git: async (args: string[]) => git(root, ...args), now: Date.now } as never, []);
+  for (const whole of [false, true]) assert.ok((await gateChecks(ports, { merges: [] }, main, [], whole)).includes(`e2e:${featureMapCaseId}`), 'every batch includes the real app map, even with no case catalog');
   // A dirty checkout cannot hide or introduce a main onboarding fault.
   await writeFile(join(root, 'graphyard.json'), JSON.stringify({ e2e: { serve: onboardingServe } }));
   assert.equal((await status()).serving.onboarding.onboarded, true);
   await writeFile(join(root, 'graphyard.json'), git(root, 'show', `${main}:graphyard.json`));
-  assert.deepEqual((await batch()).map(({ executed, failed }) => ({ executed, failed })), [{ executed: 1, failed: 0 }]);
+  const result = await batch();
+  assert.deepEqual(result.map(({ executed, failed }) => ({ executed, failed })), [{ executed: 1, failed: 0 }], JSON.stringify(result));
   const { readFile } = await import('node:fs/promises');
   assert.match(await readFile(join(root, 'requests'), 'utf8'), /\/feature/);
   const requests: string[] = [];
@@ -46,6 +51,6 @@ test('integration:real-app-onboarding — main declares a real app and feature m
   try {
     const url = `http://127.0.0.1:${(app.address() as { port: number }).port}`;
     assert.equal((await checkServedApp(root, url, '')).verified, true);
-    assert.deepEqual(requests, ['/feature']);
+    assert.deepEqual(requests, ['/healthz', '/feature']);
   } finally { await new Promise<void>(resolve => app.close(() => resolve())); }
 });

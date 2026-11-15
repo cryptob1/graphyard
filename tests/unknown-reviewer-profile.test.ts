@@ -155,6 +155,7 @@ function upWorld(checkout: string, events: UpEvent[], profiles: { workers: numbe
         fleet: fleetReady
           ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }
           : { roles: [], accounts: [] },
+        serving: { onboarding: { onboarded: true, fault: null, features: [] } },
         setup: { protection: 'off', loop },
       } : null,
       publishOnboarding: async () => null,

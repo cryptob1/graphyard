@@ -195,7 +195,7 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
   await second!.gate;
   await second!.diagnostics;
   assert.equal(fetches, 1, 'the adopted batch fetches nothing: no new run is cut on the newer main');
-  assert.deepEqual(onTip.map(entry => entry.proofs.length), [5, 1, 1], 'the batch\'s whole run ran once, then only the interrupted re-run of the failing check');
+  assert.deepEqual(onTip.map(entry => entry.proofs.length), [6, 1, 1], 'the batch\'s whole run ran once, then only the interrupted re-run of the failing check');
   const adopted = readGateRecord(gateRecordPath(coordinator))!;
   assert.equal(adopted.verified, tip, 'the adopted batch verifies its own candidate tip, not the newer main');
   assert.equal(adopted.inFlight, null);

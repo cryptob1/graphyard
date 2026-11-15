@@ -62,7 +62,8 @@ test('e2e:railway-observed-deploys — master status lists each app\'s versionUr
       { id: 'web', serving: short(deployed), main: short(main), state: 'lagging' },
       { id: 'worker', serving: null, main: short(main), state: 'failed' },
     ], 'an app without a versionUrl is not observed; api is current, web lags, worker\'s endpoint is unreachable');
-    const lines = report.attention.map(item => item.text);
+    const lines = report.attention.map(item => item.text).filter(text => text.startsWith('Application '));
+    assert.match(report.attention.find(item => item.subject === 'e2e.serve')!.text, /Master fault: acme\/huck is not onboarded/);
     assert.equal(lines.length, 2, 'one attention line per lagging or failed app');
     assert.match(lines[0], new RegExp(`^Application web lags main: serves ${short(deployed)}; ${short(webChange)} changed it on main 60 minutes ago`));
     assert.match(lines[1], /^Application worker's versionUrl failed: /);
