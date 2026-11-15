@@ -1,0 +1,14 @@
+{
+  "id": "master-image-paste-delivery",
+  "title": "Pasting a screenshot into the Master page reaches the master on every install",
+  "description": "A real browser against the served dashboard reached over HTTPS on a non-localhost origin (TLS terminated in front of the control plane, as tailscale serve does), with the loop's host bridge and a stub master pane on the host side: a screenshot-sized PNG pasted by keyboard, by the context-menu paste path and by drop is saved under .graphyard/master-inbox/ and the pane receives its absolute path as one bracketed paste, and that path is readable from inside the master session confinement; an image over the size limit and a read-only viewer's paste each show their reason on the page, never silence.",
+  "tags": ["dashboard", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Paste screenshots into the Master page over HTTPS on a non-localhost origin",
+    "run": "npm run test:browser -- browser-tests/master-image-paste-delivery.spec.ts",
+    "timeoutSeconds": 600
+  }]
+}
