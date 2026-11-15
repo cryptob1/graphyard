@@ -95,6 +95,22 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
   assert.equal(message.replies[0].by, 'graphyard-master');
   assert.equal(message.replies[0].text, 'Queued; the loop releases it next');
 
+  // An unanswered message no exchange can push out of the window: one hundred answered messages
+  // later, master status still raises it (it wakes the Master session once, so it may not leave
+  // the list and come back), and the reporter still reads it back, first.
+  const later = await graphyard('message', 'Anything new on the image?');
+  await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL,'huck-master','master.message', json_build_object('text','filled '||n,'thread','filled'||n) FROM generate_series(1,100) n`);
+  await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL,'graphyard-master','master.reply', json_build_object('message', m.seq, 'text','done') FROM events m WHERE m.kind='master.message' AND m.payload->>'thread' LIKE 'filled%'`);
+  const stillRaised = (await masterStatus()).filter(line => line.subject.includes('huck-master'));
+  assert.equal(stillRaised.length, 1, JSON.stringify(stillRaised));
+  assert.equal(stillRaised[0].subject, `message ${later.id} from huck-master`);
+  const mine = (await graphyard('messages')).messages;
+  assert.equal(mine.length, 100);
+  assert.equal(mine[0].id, later.id, 'the unanswered message leads the window');
+  await intentCommand({ id: 'reply', args: [String(later.id), 'Still queued'], print: () => {},
+    masterMutation: (path: string, data: unknown) => api(path, data, coordinator) } as unknown as MasterSession);
+  assert.deepEqual((await masterStatus()).filter(line => line.subject.includes('huck-master')), []);
+
   // Nothing else: release, close, requirements, priority, claim, complete, evidence, registry and lesson.
   const requirementsFile = join(home, 'requirements.json'), evidenceFile = join(home, 'evidence.json');
   await writeFile(requirementsFile, JSON.stringify({ expectedPolicyRevision: 1, reason: 'Widen it', criteria, dependencies: [] }));
@@ -106,6 +122,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
   await refused('priority', created.key, '0', 'Raise it');
   await refused('claim', created.key);
   await refused('complete', created.key, '1', '--head', 'a'.repeat(40));
+  await refused('complete', created.key, '1');
   await refused('evidence', created.key, evidenceFile);
   await refused('master', 'registry');
   await refused('master', 'lesson', 'add', 'Reporters write lessons');

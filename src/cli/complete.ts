@@ -383,8 +383,10 @@ export const completeCommand: CliCommand = {
     // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
     // else derived — so every retry of a submission the control plane did not answer repeats the
     // same request: one the server applied is answered from its receipt, never duplicated.
-    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? `complete:${work.id}:${body.epoch}:${body.head}`;
+    // GY-3344: the checkout is taken first, so a reporter outside one (another install's Master,
+    // which may only file items and message this Master) is refused plainly, not by git's raw error.
     await checkoutRoot(context, `graphyard complete ${work.key}`);
+    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? `complete:${work.id}:${body.epoch}:${body.head}`;
     // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
     // before anything is submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape

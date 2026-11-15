@@ -45,10 +45,14 @@ export const masterMessageRoutes = defineRoutes('master-messages', [
   { method: 'GET', path: '/api/master/messages', async handle({ actor, services }) {
     demand(['reporter', 'admin', 'coordinator', 'reader'].includes(actor.role), 'Only a reporter, the operator, a viewer or the Master reads Master messages', 403);
     const own = actor.role === 'reporter' ? actor.id : null;
+    // Unanswered messages come first: they are what wakes the Master session once and what master
+    // status raises, so a busy exchange of answered messages never pushes one out of the window —
+    // its wake subject would drop and it could be delivered a second time on re-entry.
     const { rows } = await services.engine.store.pool.query(`SELECT m.seq, m.actor, m.payload->>'text' AS text, m.payload->>'thread' AS thread, m.payload->>'to' AS "to", m.created_at,
         COALESCE((SELECT json_agg(json_build_object('id', r.seq, 'by', r.actor, 'text', r.payload->>'text', 'at', r.created_at) ORDER BY r.seq)
           FROM events r WHERE r.kind=$2 AND (r.payload->>'message')::bigint = m.seq), '[]') AS replies
-      FROM events m WHERE m.kind=$1 AND ($3::text IS NULL OR m.actor=$3) ORDER BY m.seq DESC LIMIT 100`, [messageKind, replyKind, own]);
+      FROM events m WHERE m.kind=$1 AND ($3::text IS NULL OR m.actor=$3)
+      ORDER BY EXISTS (SELECT 1 FROM events r WHERE r.kind=$2 AND (r.payload->>'message')::bigint = m.seq), m.seq DESC LIMIT 100`, [messageKind, replyKind, own]);
     // GY-3345: a message without a thread is its own; `to` marks one this Master sent a peer.
     return { messages: rows.map(row => ({ id: Number(row.seq), from: row.actor, ...(row.to ? { to: row.to } : {}), thread: row.thread ?? String(row.seq), text: row.text, at: row.created_at, replies: row.replies })) };
   } },

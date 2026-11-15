@@ -1,5 +1,5 @@
 // Concern: `graphyard master peer` and `master send` — this Master messaging another install's Master through Graphyard (GY-3345).
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 import { atomicPrivateWrite, loadStoredMasterConfig, readCredentialFile } from '../../master/config.js';
 import { masterConfigSchema } from '../../master/profiles.js';
@@ -7,13 +7,16 @@ import { unhandled, type MasterSession } from './session.js';
 
 type Peer = NonNullable<import('../../master/profiles.js').MasterConfig['peers']>[number];
 
+/** One write's Idempotency-Key, from what it writes: a send retried after its response was lost replays the stored copy instead of storing a second. */
+const keyOf = (body: unknown) => createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 36);
+
 /** One call to a peer install as the reporter identity it issued this one; an unreachable or refusing peer is named. */
 async function peerCall(peer: Peer, path: string, body?: unknown) {
   const token = await readCredentialFile(peer.tokenFile);
   let response: Response;
   try {
     response = await fetch(`${peer.url.replace(/\/+$/, '')}/api/${path}`, { method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10_000) });
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(body === undefined ? {} : { 'Idempotency-Key': keyOf(body) }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10_000) });
   } catch (error) {
     const cause = (error as { cause?: { code?: string } }).cause?.code ?? (error instanceof Error ? error.message : String(error));
     throw new Error(`Peer ${peer.name} at ${peer.url} is unreachable (${cause}); nothing was sent or stored`);
@@ -61,7 +64,9 @@ export async function peerCommand(session: MasterSession): Promise<unknown> {
     const thread = answered?.thread ?? randomUUID();
     // The peer stores it first: an unreachable peer fails here and nothing is recorded on either side.
     const sent = await peerCall(peer, 'master/messages', { text, thread });
-    const recorded = replyTo ? await masterMutation(`master/messages/${replyTo}/reply`, { text }) : await masterMutation('master/messages', { text, thread, to: name });
+    // The local record of what was sent answers a retry the same way: one key per write, from its content.
+    const record = replyTo ? { path: `master/messages/${replyTo}/reply`, data: { text } } : { path: 'master/messages', data: { text, thread, to: name } };
+    const recorded = await masterMutation(record.path, record.data, keyOf(record));
     return print({ sent: name, thread, remote: sent.id, ...(replyTo ? { replied: Number(replyTo) } : { id: recorded.id }) });
   }
   return unhandled;

@@ -16,6 +16,7 @@ import { loadMasterConfig, setupMaster } from '../src/master/config.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
+import { messageCauses } from '../src/daemon/master-stalled-delivery.js';
 import { messageThreads } from '../web/pages/master.js';
 import type { Principal } from '../src/model.js';
 
@@ -39,8 +40,8 @@ async function install(name: string, peer: string) {
   let running = true;
   const stop = async () => { if (!running) return; running = false; http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); };
   closers.push(async () => { await stop(); await store.close(); });
-  const api = async (path: string, body?: unknown) => {
-    const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(coordinator)}`, 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const api = async (path: string, body?: unknown, key?: string) => {
+    const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(coordinator)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key ?? crypto.randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const result = await response.json() as any;
     if (!response.ok) throw new Error(JSON.stringify(result));
     return result;
@@ -62,7 +63,7 @@ async function install(name: string, peer: string) {
   /** The real `graphyard master peer|send` subcommand, as this install's Master. */
   const master = async (id: 'peer' | 'send', ...args: string[]) => {
     const printed: any[] = [];
-    await peerCommand({ id, args, print: (value: unknown) => printed.push(value), root, master: await loadMasterConfig(root), masterApi: (path: string) => api(path), masterMutation: (path: string, data: unknown) => api(path, data) } as unknown as MasterSession);
+    await peerCommand({ id, args, print: (value: unknown) => printed.push(value), root, master: await loadMasterConfig(root), masterApi: (path: string) => api(path), masterMutation: (path: string, data: unknown, key?: string) => api(path, data, key) } as unknown as MasterSession);
     return printed[0];
   };
   const attention = async () => (await masterStatusReport(root, await loadMasterConfig(root), path => api(path), async () => { throw new Error('no git in the fixture'); })).attention;
@@ -116,6 +117,10 @@ test('e2e:cross-install-master-messaging — a Master messages another install\'
   await a.cycles(3);
   assert.equal(a.inputs.filter(input => input.includes(answer)).length, 1, JSON.stringify(a.inputs));
   assert.deepEqual((await a.attention()).filter(line => line.subject.includes('install-b')).map(line => line.subject), [`message ${reply.id} from install-b`]);
+  // The same reply, retried after its response was lost, stores nothing more on either side: one key per write, from its content.
+  const written = { a: await a.stored(), b: await b.stored() };
+  await b.master('send', 'install-a', '--reply', String(received.id), ...answer.split(' '));
+  assert.deepEqual({ a: await a.stored(), b: await b.stored() }, written);
 
   // Both sides show the two messages as one thread, in order.
   for (const side of [a, b]) {
@@ -136,4 +141,13 @@ test('e2e:cross-install-master-messaging — a Master messages another install\'
   await assert.rejects(a.master('send', 'install-b', 'Are', 'you', 'there?'), /Peer install-b at http:\/\/127\.0\.0\.1:\d+ is unreachable .*nothing was sent or stored/);
   assert.ok(Date.now() - started < 5_000, `the send failed in ${Date.now() - started} ms`);
   assert.deepEqual({ a: await a.stored(), b: await b.stored() }, before);
+});
+
+test('a message wakes the Master session with the answer path its sender can take', () => {
+  // A configured peer is answered over Graphyard; anyone else only on this install.
+  const peer = messageCauses([{ id: 7, from: 'install-a', text: 'The trial image lacks Go 1.23.', replies: [] }], '/cli', ['install-a'])[0]!;
+  assert.match(peer.detail, /master send install-a --reply 7 TEXT/);
+  const stranger = messageCauses([{ id: 8, from: 'stranger', text: 'Hello there.', replies: [] }], '/cli', ['install-a'])[0]!;
+  assert.match(stranger.detail, /master reply 8 TEXT/);
+  assert.doesNotMatch(stranger.detail, /master send/);
 });
