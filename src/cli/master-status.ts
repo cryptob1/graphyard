@@ -138,7 +138,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .sort((a, b) => Date.parse(b.delivery?.mergedAt ?? b.observation!.mergedAt!) - Date.parse(a.delivery?.mergedAt ?? a.observation!.mergedAt!)).slice(0, 50)
     .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
       events: await itemLedger(masterApi, item.id) })));
-  const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
+  const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
   // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
   let placeholder = false;
   try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }

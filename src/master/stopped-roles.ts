@@ -20,7 +20,7 @@ function nextCommand(fleet: FleetView, role: FleetView['roles'][number], reason:
  * refused for at least a full loop cycle. A role at its concurrency limit with every slot carrying
  * work is busy, not stopped, and raises nothing (the registry's own fleet attention says the same).
  */
-export function stoppedRoles(fleet: FleetView | null, now: number, cycleMs: number): StoppedRole[] {
+export function stoppedRoles(fleet: FleetView | null, now: number, cycleMs: number, currentMaster: string | null = null): StoppedRole[] {
   // A control plane before the registry (or a stand-in answering every path alike) reports no roles.
   if (!fleet || !Array.isArray(fleet.roles)) return [];
   return fleet.roles.flatMap(role => {
@@ -28,6 +28,8 @@ export function stoppedRoles(fleet: FleetView | null, now: number, cycleMs: numb
     if (!reason) return [];
     const full = atConcurrency(reason);
     if (full && role.role !== 'master' && !fleet.attention.some(line => line.startsWith(`role ${role.role} `))) return [];
+    // GY-3346: a master slot held by the loop's own current master session is that session running, not a stop.
+    if (full && role.role === 'master' && currentMaster && fleet.accounts.flatMap(account => account.liveSessions).filter(session => session.role === 'master').every(session => session.id === currentMaster)) return [];
     const recorded = fleet.refusals.findLast(entry => entry.role === role.role && (!fleet.host || entry.host === fleet.host));
     const since = recorded?.reason === reason ? recorded.at : null;
     if (full && (!since || now - Date.parse(since) < cycleMs)) return [];

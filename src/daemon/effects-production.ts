@@ -198,6 +198,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The agent-registry session a review or proof session ran under, ended when the close step
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
+    endRegistrySession: (id, reason) => endRegistrySessionById(current(), id, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: (path, force) => removeAttemptWorktree(root, path, run, force),
     // GY-3341: the attempt worktrees still standing, read from the disk their leftovers live on.

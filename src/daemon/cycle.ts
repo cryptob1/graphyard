@@ -22,7 +22,7 @@ import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normal
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
-import { launchGraceMs } from '../model/registry-sessions.js';
+import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
 import { basename } from 'node:path';
@@ -286,6 +286,23 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
  * an attempt ended by a lapsed lease had not committed, ask the control plane to reconcile each
  * lease that lapsed with nothing submitted, and remove the worktrees of ended attempts.
  */
+/**
+ * GY-3346: a live registry session recorded on another host cannot run here — the install moved,
+ * and nothing on the old host will ever end it — so it gives its role slot back in this close step,
+ * before the same cycle's dispatch and master launch ask the registry for slots.
+ */
+async function endForeignHostSessions(cycle: Cycle) {
+  const { config, effects } = cycle;
+  if (!effects.registry || !effects.endRegistrySession) return;
+  const registry = await effects.registry().catch(() => null);
+  for (const session of liveSessions({ sessions: registry?.sessions ?? [] })) {
+    if (session.host === config.hostId) continue;
+    const key = `close:registry:${session.id}`;
+    try { await effects.endRegistrySession(session.id, `recorded on ${session.host}, this install runs on ${config.hostId}`); await note(cycle, key, 'close', session.work, 'done', `Ended the ${session.role} registry session ${session.id}: recorded on ${session.host}, this install runs on ${config.hostId}`); }
+    catch (error) { await note(cycle, key, 'close', session.work, 'failed', `Could not end the ${session.role} registry session ${session.id} recorded on ${session.host}: ${message(error)}`); }
+  }
+}
+
 async function closeStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock } = cycle;
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
@@ -308,6 +325,7 @@ async function closeStep(cycle: Cycle) {
     }
     await attemptBoundStep(cycle, item, session);
   }
+  await endForeignHostSessions(cycle);
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
     const lease = item.lease;
