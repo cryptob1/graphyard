@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileS
 import { join } from 'node:path';
 import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { dirtyCheckoutPaths, readCoordinatorCheckout } from '../src/master/profiles.js';
-import { hostProcessLaunchTargets, sessionMountNamespaceWorks } from '../src/master/confinement.js';
+import { hostProcessLaunchTargets, masterCredentialMask, peerTokenDirectory, preparePeerExchange, sessionMountNamespaceWorks } from '../src/master/confinement.js';
 import { loopRestartRequestPath } from '../src/daemon/run.js';
 import { confinedMaster } from '../src/cli/master/operations.js';
 import { masterRecords } from '../src/master/conversation.js';
@@ -83,6 +83,36 @@ test('integration:master-session-checkout-readonly — the master session cannot
     const filed = inside(`echo '{}' > ${path}`);
     assert.equal(filed.status, 0, filed.stderr);
   }
+});
+
+test('unit:master-session-peer-grant — a recorded peer\'s token directory is granted writable and its install kept readable, while an unpeered install stays masked', async () => {
+  const base = await temporaryDirectory('master-peer-grant');
+  const { root } = coordinator(base);
+  // Two installs under one config home beside an unrelated third: this one's credential, a peer's
+  // directory holding the token this Master placed for it, and one no configuration names.
+  const configHome = join(base, 'config'), mine = join(configHome, 'a-install'), theirs = join(configHome, 'b-install');
+  mkdirSync(join(mine, 'masters'), { recursive: true });
+  const credentialFile = join(mine, 'masters', `${'x'.repeat(20)}.token`);
+  writeFileSync(credentialFile, 't'.repeat(40), { mode: 0o600 });
+  mkdirSync(join(theirs, 'masters'), { recursive: true });
+  mkdirSync(join(configHome, 'c-install'), { recursive: true });
+  const config = { credentialFile, peers: [{ name: 'b-install', url: 'http://127.0.0.1:4310', tokenFile: join(peerTokenDirectory(mine), 'b-install.token'), configDirectory: theirs }] };
+  // The launch's preparation creates each side's peers directory and returns the peer's to grant.
+  assert.deepEqual(preparePeerExchange(config), [peerTokenDirectory(theirs)]);
+  assert.ok(existsSync(peerTokenDirectory(theirs)) && existsSync(peerTokenDirectory(mine)), 'both installs\' peers directories exist before the confinement binds them');
+  const confinement = await masterSessionConfinement('claude', root, { bwrap: 'bwrap', platform: 'linux', mountNamespaceWorks: true },
+    [join(mine, 'masters'), peerTokenDirectory(theirs)], undefined, masterCredentialMask(config, [], configHome));
+  const words = confinement.wrapper;
+  const granted = words.indexOf(peerTokenDirectory(theirs));
+  assert.ok(granted > 0 && words[granted - 1] === '--bind', 'the peer\'s token directory is bound writable');
+  assert.ok(!words.some((word, index) => word === '--tmpfs' && words[index + 1] === theirs), 'the peer\'s own install directory is not masked: the configuration names it');
+  assert.ok(words.some((word, index) => word === '--tmpfs' && words[index + 1] === join(configHome, 'c-install')), 'an install no configuration names stays masked');
+  // Without the peer recorded, its directory is neither granted nor readable: the session that
+  // first records the peer places nothing and names the rerun (GY-3385).
+  const before = await masterSessionConfinement('claude', root, { bwrap: 'bwrap', platform: 'linux', mountNamespaceWorks: true },
+    [join(mine, 'masters')], undefined, masterCredentialMask({ credentialFile }, [], configHome));
+  assert.ok(!before.wrapper.includes(peerTokenDirectory(theirs)), 'an unrecorded peer\'s directory is not granted');
+  assert.ok(before.wrapper.some((word, index) => word === '--tmpfs' && before.wrapper[index + 1] === theirs), 'an unrecorded peer\'s install directory stays masked');
 });
 
 test('unit:master-session-confinement-refusal — a master launch that cannot carry the confinement is refused, never started unconfined', async () => {

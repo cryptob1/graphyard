@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { masterCredentialMask, peerTokenDirectory, preparePeerExchange, sessionMountNamespaceWorks } from '../src/master/confinement.js';
 import { herdrSessionPaths } from '../src/master/herdr.js';
 import { launchSession } from '../src/master/launch.js';
-import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { loadMasterConfig, setupMaster } from '../src/master/config.js';
 import { worktreeRoot } from '../src/install/worktree-root.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -85,7 +85,7 @@ test(`e2e:master-issues-peer-reporter — a confined Master session issues anoth
     await writeFile(join(root, 'README.md'), 'Fixture.\n');
     git('add', '.'); git('commit', '-qm', 'base');
     await setupMaster(root, { url, token: token(coordinator), cliPath: cli, hostId: 'fixture-host', herdrWorkspace: `w-${name}`,
-      credentialDirectory: join(process.env.GRAPHYARD_CONFIG_HOME!, name, 'masters'), run: { worktreeRoot: await temporaryDirectory(`peer-issue-${name}-worktrees`, scratch) } });
+      credentialDirectory: join(process.env.GRAPHYARD_CONFIG_HOME!, name), run: { worktreeRoot: await temporaryDirectory(`peer-issue-${name}-worktrees`, scratch) } });
     /** The real `graphyard master peer|send` subcommand, as this install's Master runs it in its own session. */
     const command = async (id: 'peer' | 'send', ...args: string[]) => {
       const printed: any[] = [];
@@ -147,7 +147,7 @@ test(`e2e:master-issues-peer-reporter — a confined Master session issues anoth
 
   try {
     const a = await install('install-a'), b = await install('install-b');
-    const directoryOf = (root: string) => dirname(dirname((await loadMasterConfig(root)).credentialFile));
+    const directoryOf = async (root: string) => dirname(dirname((await loadMasterConfig(root)).credentialFile));
     const tokensOf = async (root: string, name: string) => join(peerTokenDirectory(await directoryOf(root)), `${name}.token`);
 
     // The session the loop launched before any peer existed records the peer and names the rerun:
