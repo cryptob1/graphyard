@@ -6,14 +6,16 @@ import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
 import { readDaemonState } from '../../daemon/state.js';
 import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopCheckoutTrust, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
+import { encodeLoopCheckoutTrust, encodeLoopCpu, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopCpuHeader, loopFetchRefusalHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
 import { encodeLoopWhere, loopWhereHeader } from '../../model/where-things-run.js';
 import { loopWhereReport } from '../../master/where.js';
 import { checkoutTrustKey, standingStepFailures, workerGrowthKey } from '../../daemon/cycle.js';
+import { fetchRefusalKey } from '../../daemon/cycle-batch-gate.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
 import { processConnectAccounts } from '../../master/connect-accounts.js';
+import { syncTeamAccess } from '../../master/team-access.js';
 import { recordRunningPin } from '../../master/known-good.js';
 import { installDirectory } from '../../install/secrets.js';
 import { installIdFor } from '../../install/types.js';
@@ -59,10 +61,12 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-3225: and names the standing checkout-trust refusal (an untrusted checkout carrying repository Claude configuration), for the Setup checklist's one item.
     // GY-3293: and names the standing repeated step-failure line (a step failing the same way ten consecutive cycles), for the Setup checklist's Needs you item.
     // GY-3277: and names where this install's parts run — its units, containers, port, URL and directories — for the Setup page's panel.
+    // GY-3348: and names the host's CPU ('some avg60' and steal percent), for the Workers page's two figures.
     const where = await loopWhereReport(root, master);
     const stepFailureLine = (failure: Parameters<typeof encodeLoopStepFailure>[0] | undefined) => failure ? encodeLoopStepFailure(failure) : 'off';
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
-    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), [loopFetchRefusalHeader]: state.actions[fetchRefusalKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[fetchRefusalKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}), [loopCpuHeader]: state.cpuPressure ? encodeLoopCpu({ avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal }) : 'off' });
+    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation,
+      messages: async () => (await masterApi('master/messages', masterToken)).messages ?? [] });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
@@ -77,7 +81,10 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const connects = values.once ? undefined : setInterval(() => {
       if (connecting || !current().url || !current().hostId) return;
       connecting = true;
-      processConnectAccounts(current()).catch(error => console.error(`[graphyard-master] connect-account worker: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { connecting = false; });
+      processConnectAccounts(current()).catch(error => console.error(`[graphyard-master] connect-account worker: ${error instanceof Error ? error.message : String(error)}`))
+        // GY-3294: and carries Setup's team access to this machine's shared record and back (a server without the routes answers 404).
+        .then(() => syncTeamAccess(current())).catch(error => { if (error?.status !== 404) console.error(`[graphyard-master] team access: ${error instanceof Error ? error.message : String(error)}`); })
+        .finally(() => { connecting = false; });
     }, 15_000);
     connects?.unref?.();
     stopping.signal.addEventListener('abort', () => clearInterval(connects));

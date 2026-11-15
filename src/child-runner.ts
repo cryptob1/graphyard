@@ -41,6 +41,8 @@ export interface ChildRunOptions {
   wrapper?: readonly string[];
   /** Kill the child (its group with `group`) once this aborts, as at the timeout: a merge trial whose head is refused or replaced (GY-3099). */
   signal?: AbortSignal;
+  /** Each chunk of captured stderr as it arrives: a trial launcher's waiting line, shown while it waits (GY-3332). */
+  onStderr?: (chunk: string) => void;
 }
 /**
  * The dependency every runtime-calling helper takes. A test hands in a synchronous stub that
@@ -98,7 +100,7 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
     let killTimer: NodeJS.Timeout | undefined;
     const overflow = (stream: string) => { spawnFailure ??= new Error(`${stream} exceeded ${maxBuffer} bytes`); child.kill('SIGKILL'); };
     child.stdout?.on('data', (chunk: Buffer) => { outBytes += chunk.length; if (outBytes > maxBuffer) overflow('stdout'); else out.push(chunk); });
-    child.stderr?.on('data', (chunk: Buffer) => { errBytes += chunk.length; if (errBytes > maxBuffer) overflow('stderr'); else err.push(chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { errBytes += chunk.length; if (errBytes > maxBuffer) overflow('stderr'); else err.push(chunk); options.onStderr?.(chunk.toString('utf8')); });
     const signal = (name: NodeJS.Signals) => { try { if (options.group && child.pid) process.kill(-child.pid, name); else child.kill(name); } catch { /* already gone */ } };
     const kill = () => { signal('SIGTERM'); killTimer = setTimeout(() => signal('SIGKILL'), childKillGraceMs); killTimer.unref?.(); };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);

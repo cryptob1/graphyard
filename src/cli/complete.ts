@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -7,6 +6,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
+import { checkoutRoot } from './context.js';
 import { changeBase, selfVerification } from './verify.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { leadingProof } from '../model/flake-ledger.js';
@@ -48,6 +48,54 @@ export async function submitThroughPause<T>(submit: () => Promise<T>, options: P
   }
 }
 
+/**
+ * GY-3330: how long `complete` keeps resending a submission the control plane has not answered.
+ * A loaded plane (the hwd-backend fault: load ~80, status reads at 54 s) can outlive the CLI's own
+ * request bound (`cliRequestTimeoutMs`, 120 s) on the submit — the attempt's last action — so the
+ * finished head was stranded by nothing but a slow host. The same submission goes again under the
+ * same idempotency key: a request the server did apply is answered from its receipt, already
+ * submitted, rather than refused or duplicated.
+ */
+export const submitRetry = { totalMs: 10 * 60_000, pauseMs: 2_000 };
+/**
+ * Whether a submission failure is the control plane not answering — the request's own timeout
+ * (`AbortSignal.timeout` rejects as a TimeoutError), a refused or reset connection — never the
+ * server's own considered refusal, which `context.api` marks `confirmedRefusal`.
+ */
+export function unansweredSubmit(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || (error as { confirmedRefusal?: unknown }).confirmedRefusal) return false;
+  const { name, message } = error as { name?: unknown; message?: unknown };
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const text = typeof message === 'string' ? message : '';
+  return /^(?:fetch failed|terminated)$/.test(text) || /Control plane unreachable at|operation was aborted due to timeout|socket hang up|ECONNRESET/.test(text);
+}
+const retryBoundText = (ms: number) => ms % 60_000 === 0 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`;
+/**
+ * GY-3330: submit, and while the control plane has not answered — the request timed out or the
+ * connection failed — wait and send the same submission again, one line per retry, for at most
+ * `totalMs` in total. The idempotency key the caller holds across every attempt is what makes the
+ * repeat safe. Any other failure, the server's own refusal and the GitHub pause `submitThroughPause`
+ * bounds among them, is thrown at once.
+ */
+export async function submitUntilAnswered<T>(submit: () => Promise<T>, options: Partial<typeof submitRetry> & { now?: () => number; sleep?: (ms: number) => Promise<unknown>; report?: (text: string) => void } = {}): Promise<T> {
+  const bounds = { ...submitRetry, ...options }, now = options.now ?? Date.now, sleep = options.sleep ?? delay, report = options.report ?? (text => console.error(text));
+  const started = now();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const submitted = await submit();
+      if (attempt > 1) report(`the control plane answered retry ${attempt}: the submission was already recorded — one idempotency key, so one submission`);
+      return submitted;
+    } catch (error) {
+      if (!unansweredSubmit(error)) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      if (now() - started + bounds.pauseMs > bounds.totalMs)
+        throw Object.assign(new Error(`${reason} (complete keeps sending the same head under the same idempotency key for at most ${retryBoundText(bounds.totalMs)}; nothing was duplicated, so run complete again once the control plane answers)`), { cause: error });
+      report(`the control plane has not answered the submission (${reason}); complete sends the same head under the same idempotency key again in ${Math.round(bounds.pauseMs / 1000)}s (retry ${attempt + 1}, at most ${retryBoundText(bounds.totalMs)} in total)`);
+      await sleep(bounds.pauseMs);
+    }
+  }
+}
+
 /** The commit the worktree at `root` has checked out, for `--head` with no SHA. */
 export function worktreeHead(root: string): string {
   const result = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -59,7 +107,8 @@ export function worktreeHead(root: string): string {
  * to the worktree's HEAD. parseArgs has no flag with an optional value, so `--head` and the SHA that
  * follows it (unless the next word is a flag) are taken out before the positionals are parsed.
  */
-export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; head: string } {
+/** The arguments' own validity, before any worktree or control plane is touched: a misused complete (a positional PR number) is refused first. */
+export function completeArgs(args: readonly string[]): { epoch: number; head?: string } {
   const rest: string[] = []; let head: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
@@ -69,9 +118,14 @@ export function completionBody(args: readonly string[], headOf: () => string): {
   }
   const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
   if (positionals[1] !== undefined) throw new Error(`complete submits a commit, never a pull request number: drop ${positionals[1]} and run complete GY-N EPOCH --head [SHA]`);
+  return { epoch: Number(positionals[0]), head };
+}
+
+export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; head: string } {
+  const { epoch, head } = completeArgs(args);
   const sha = (head ?? headOf()).trim();
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--head takes a 40-hex commit, or none for the worktree's HEAD; ${JSON.stringify(sha)} is neither`);
-  return { epoch: Number(positionals[0]), head: sha };
+  return { epoch, head: sha };
 }
 
 /**
@@ -323,13 +377,24 @@ export const completeCommand: CliCommand = {
   help: [
     '  complete GY-N EPOCH [--head [SHA]]  Submit the commit (the worktree\'s HEAD when no SHA is',
     '                                given) and end the lease; gates decide completion. The shared',
-    '                                object store already holds it, so nothing is pushed. Reports',
+    '                                object store already holds it, so nothing is pushed. A submission',
+    '                                the control plane does not answer (its 120 s request bound, a',
+    '                                dropped connection) is resent under one idempotency key for up',
+    '                                to 10 minutes, so a slow plane strands no finished head. Reports',
     '                                what graphyard verify ran on HEAD and its outcome. Refused while',
     '                                GitHub requests are paused, it waits for the named reset and',
     '                                submits again (bounded)',
   ],
   run: async (context, work) => {
-    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
+    // else derived — so every retry of a submission the control plane did not answer repeats the
+    // same request: one the server applied is answered from its receipt, never duplicated.
+    // A misused complete is refused by the arguments alone first, then GY-3344: a reporter outside
+    // a checkout (another install's Master, which may only file items and message this Master) is
+    // told so plainly, before git's raw error, whatever way --head was given.
+    completeArgs(context.args);
+    await checkoutRoot(context, `graphyard complete ${work.key}`);
+    const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? `complete:${work.id}:${body.epoch}:${body.head}`;
     // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
     // before anything is submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
@@ -340,13 +405,14 @@ export const completeCommand: CliCommand = {
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     // GY-2968: what the rerun set aside travels with the submission, for the control plane to
-    // record on the item's history beside it.
-    const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, {
+    // record on the item's history beside it. GY-3330: the whole submission rides out a control
+    // plane slow past the CLI's own request bound — resent under one key until it answers.
+    const submitted = await submitUntilAnswered(() => submitThroughPause(() => context.api(`work/${work.id}/submit`, {
       ...body,
       ...(rerun.flaked.length ? { flaked: rerun.flaked } : {}),
       ...(rerun.baseFailures.length ? { baseFailures: rerun.baseFailures } : {}),
       ...(rerun.note ? { rerunUnjudged: rerun.note } : {}),
-    }, requestId));
+    }, requestId)));
     context.print({ ...submitted, selfVerification: verification });
   },
 };

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { PageHeader } from '../components/page-layout';
 
 /** The delivery flow, one card per step (GY-3295): a short line each, read left to right and top to bottom. */
 const flow: [string, string][] = [
@@ -28,6 +29,8 @@ const outside: [string, string][] = [
   ['Your browser', 'The dashboard, locally or on your tailnet.'],
 ];
 
+/** The printed guides' Markdown tables use the shared table class. */
+const markdownTables = { table: ({ node, ...props }: any) => <table className="sessions-table" {...props}/> };
 const link = (id: string, text: string) => <a href={`#${id}`}>{text}</a>;
 
 /** The FAQ: one folded answer per question a new engineer asks, each with its own address. */
@@ -42,7 +45,7 @@ const faq: [string, string, ReactNode][] = [
   ['faq-deploy', 'How do I deploy my app to Railway or AWS?', <>Graphyard does not deploy your app to Railway or AWS and holds no credentials for them. Let the platform deploy from your main branch: Railway does this from git; on AWS, set up CodePipeline or App Runner to deploy from it. Then add the app to <code>delivery.applications</code> in <code>graphyard.json</code> with a <code>versionUrl</code> that answers the commit it serves, and <code>graphyard master status</code> shows it as current, deploying, lagging or failed.</>],
   ['faq-failure', 'What if a worker fails or a provider’s quota runs out?', <>A session that goes quiet gets one re-prompt. One that still fails ends its attempt, and the loop starts another that continues from the committed work. When a provider says an account hit its limit, Graphyard holds that account until the reset (an hour if none is named) and uses the next account in the same role. Settings → Agents shows every account and its state.</>],
   ['faq-logs', 'Where are the logs, and what is a blocker?', <>Each item’s page keeps every attempt’s output (credentials masked), its reviews, trials and proofs. A blocker is an agent’s reason it cannot continue: the item shows under Blocked and the Master resolves it. On the host, <code>journalctl --user -u graphyard-master-OWNER-NAME.service</code> shows the loop and <code>docker logs graphyard-OWNER-NAME-server-1</code> the server; {link('docs-reference', 'Reference')} lists every part.</>],
-  ['faq-access', 'How do I and my teammates sign in, across installs?', <>Each repository has its own install, with its own dashboard, port and sign-ins. The first install serves at <code>http://127.0.0.1:4310</code>; the next takes the first free port after it, and <code>up --port N</code> picks one. With <code>--share-tailnet</code>, a Tailscale host is also reachable at a tailnet-only HTTPS address, never a public one. Sign in with the link <code>up</code> prints, or <code>graphyard login</code> for a new one. To add a teammate, use <strong>Invite someone</strong> on Setup or <code>graphyard invite NAME --role viewer</code>: a viewer reads everything, a maintainer also files work. The link works once, for ten minutes, on that install only, so invite them on each install they need.</>],
+  ['faq-access', 'How do I and my teammates sign in, across installs?', <>Each repository has its own install, with its own dashboard, port and sign-ins. The first install serves at <code>http://127.0.0.1:4310</code>; the next takes the first free port after it, and <code>up --port N</code> picks one. On a Tailscale host <code>up</code> also serves each install on the tailnet at <code>http://HOST:PORT</code>, its own port, never a public address: one machine, many installs, one port each. Sign in with the link <code>up</code> prints, or <code>graphyard login</code> for a new one. A teammate passes two locks: the machine’s Tailscale share, then this install’s own sign-in. Use <strong>Invite someone</strong> on Setup for one message carrying both, or <code>graphyard invite NAME --role viewer</code> for the sign-in alone: a viewer reads everything, a maintainer also files work. The sign-in link works once, within 24 hours, on that install only, so invite them on each install they need.</>],
   ['faq-decisions', 'Which decisions are left to me?', <>Three kinds: goals and priorities, money and accounts, and sign-ins for people. When an item needs one, it shows under Needs you with the question and a recommended answer; answer it there. Agents decide everything else.</>],
 ];
 
@@ -70,13 +73,12 @@ export default function GuidePage() {
       .then(([video, guide]) => setMedia({ video: video.default, setup: guide.guideText('setup'), infra: guide.guideText('infra') }));
   }, []);
   return <article className="guide">
-    <div className="page-heading"><h1>How Graphyard works</h1></div>
-    <p className="guide-lead">Graphyard is a coding factory. You say what you want built; AI agents build, check, merge and ship it, with no person in the loop.</p>
+    <PageHeader title="How Graphyard works" fact="Graphyard is a coding factory. You say what you want built; AI agents build, check, merge and ship it, with no person in the loop."/>
     <nav className="guide-contents" aria-label="On this page">
       {link('docs-overview', 'Who decides what')}{link('docs-first-item', 'Your first item')}{link('docs-flow', 'How a change ships')}{link('docs-where', 'Where things run')}{link('docs-faq', 'FAQ')}{link('docs-reference', 'Reference')}
     </nav>
 
-    <section id="docs-overview" aria-labelledby="docs-overview-title">
+    <section id="docs-overview" className="panel" aria-labelledby="docs-overview-title">
       <h2 id="docs-overview-title">Who decides what</h2>
       <ul>
         <li><strong>You, the owner</strong>: goals and priorities, money and accounts, and sign-ins for people.</li>
@@ -87,7 +89,7 @@ export default function GuidePage() {
       <p>Your repository is the <strong>managed app</strong>: the product being built. Graphyard is the factory beside it, with its own server, dashboard and database.</p>
     </section>
 
-    <section id="docs-first-item" aria-labelledby="docs-first-item-title">
+    <section id="docs-first-item" className="panel" aria-labelledby="docs-first-item-title">
       <h2 id="docs-first-item-title">Your first item</h2>
       <ol className="guide-journey">
         <li><strong>Check the host.</strong> Linux with Docker, Node, Git and the GitHub CLI; <code>npx @cryptob1/graphyard doctor</code> names anything missing and its fix.</li>
@@ -100,7 +102,7 @@ export default function GuidePage() {
       </ol>
     </section>
 
-    <section id="docs-flow" aria-labelledby="docs-flow-title">
+    <section id="docs-flow" className="panel" aria-labelledby="docs-flow-title">
       <h2 id="docs-flow-title">How a change ships</h2>
       <figure className="guide-figure" aria-labelledby="docs-flow-title">
         <ol className="guide-flow">{flow.map(([step, line]) => <li key={step} className="guide-card"><strong>{step}</strong><span>{line}</span></li>)}</ol>
@@ -108,7 +110,7 @@ export default function GuidePage() {
       {media && <video className="guide-video" src={media.video} controls preload="metadata" aria-label="Walkthrough video: a goal through review, merge trial, deploy and revert"/>}
     </section>
 
-    <section id="docs-where" aria-labelledby="docs-where-title">
+    <section id="docs-where" className="panel" aria-labelledby="docs-where-title">
       <h2 id="docs-where-title">Where things run</h2>
       <figure className="guide-figure guide-where" aria-labelledby="docs-where-title">
         <div className="guide-panel" role="group" aria-label="Your Linux host">
@@ -123,18 +125,18 @@ export default function GuidePage() {
       <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s own names.</p>
     </section>
 
-    <section id="docs-faq" aria-labelledby="docs-faq-title">
+    <section id="docs-faq" className="panel" aria-labelledby="docs-faq-title">
       <h2 id="docs-faq-title">FAQ</h2>
       {faq.map(([id, question, answer]) => <details key={id} id={id} className="guide-faq"><summary>{question}</summary><p>{answer}</p></details>)}
     </section>
 
-    <section id="docs-reference" aria-labelledby="docs-reference-title">
+    <section id="docs-reference" className="panel" aria-labelledby="docs-reference-title">
       <h2 id="docs-reference-title">Reference</h2>
       <details className="guide-faq"><summary>Common commands</summary>
-        <table className="guide-table"><tbody>{commands.map(([command, what]) => <tr key={command}><td><code>{command}</code></td><td>{what}</td></tr>)}</tbody></table>
+        <table className="sessions-table"><tbody>{commands.map(([command, what]) => <tr key={command}><td><code>{command}</code></td><td>{what}</td></tr>)}</tbody></table>
       </details>
-      <details className="guide-faq"><summary>Setup prerequisites and options</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]}>{media.setup}</ReactMarkdown>}</details>
-      <details className="guide-faq"><summary>Every part, with its log command</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]}>{media.infra}</ReactMarkdown>}</details>
+      <details className="guide-faq"><summary>Setup prerequisites and options</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownTables}>{media.setup}</ReactMarkdown>}</details>
+      <details className="guide-faq"><summary>Every part, with its log command</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownTables}>{media.infra}</ReactMarkdown>}</details>
     </section>
   </article>;
 }

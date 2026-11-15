@@ -23,7 +23,7 @@ import { masterConfigSchema, type MasterConfig } from '../../src/master.js';
 import type { Principal, Work } from '../../src/model.js';
 import { server } from '../../src/server.js';
 import { Store } from '../../src/store.js';
-import { databaseUrl } from './postgres.js';
+import { withDatabase } from './postgres.js';
 import { temporaryDirectory } from './temp-dirs.js';
 
 export const repository = 'owner/pipeline';
@@ -82,8 +82,8 @@ async function writeFiles(root: string, files: Record<string, string | null>) {
 export async function pipelineWorld(label: string, extra: Record<string, string> = {}, repo: string = repository): Promise<World> {
   const root = await temporaryDirectory(label);
   const origin = join(root, 'origin.git'), checkout = join(root, 'checkout'), trials = join(root, 'trials');
-  const database = await databaseUrl(label);
-  const store = new Store(database); await store.init();
+  const store = await withDatabase(label); await store.init();
+  const database = store.pool.options.connectionString!;
   const engine = new Engine(store, 120, repo);
   const http: Server = server(engine, [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }, { ...operator, token: adminToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

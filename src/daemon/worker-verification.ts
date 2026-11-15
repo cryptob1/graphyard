@@ -1,6 +1,7 @@
 import { defaultChildRun } from '../child-runner.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { runWorkerCheck } from '../merge-writer/worker-check.js';
+import { heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
 import type { WorkerVerificationJob } from '../server/worker-verification-queue.js';
 
 /**
@@ -18,8 +19,10 @@ export async function moveBranchToHead(root: string, branch: string, head: strin
 
 /** Poll alongside the host loop; trials never hold up supervision or renewal. */
 export function workerVerificationPump(root: string, host: () => string,
-  mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck) {
+  mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck, verify = runWorkerVerification) {
   return async () => {
+    // GY-3304: while the host's heavy work is drained, requests stay queued on the control plane until resume.
+    if (readHeavyDrain(heavyJobsDirectory())) return;
     const jobs: WorkerVerificationJob[] = await mutate('worker-verifications/take', { host: host() });
     for (const job of jobs) {
       void (async () => {
@@ -28,7 +31,8 @@ export function workerVerificationPump(root: string, host: () => string,
           await moveBranchToHead(root, job.branch, job.input.head);
           const result = job.input.mode === 'check'
             ? await check({ root, base: base(), baseBranch: job.baseBranch, key: job.work.key, head: job.input.head, check: job.input.check! })
-            : await runWorkerVerification(root, job.work, job.input, job.baseBranch);
+            : await verify(root, job.work, job.input, job.baseBranch, undefined,
+              line => { void mutate('worker-verifications/progress', { id: job.id, line }).catch(() => {}); });
           reply = { id: job.id, result };
         } catch (error) { reply = { id: job.id, error: error instanceof Error ? error.message : String(error) }; }
         await mutate('worker-verifications/finish', reply);

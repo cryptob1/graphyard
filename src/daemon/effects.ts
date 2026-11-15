@@ -12,6 +12,7 @@ import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
+import type { MasterMessage } from './master-stalled-delivery.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
@@ -83,10 +84,23 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree, forced only when asked (a done item's, a day after its last attempt ended); whether one was removed. */
   removeWorktree?: (path: string, force?: boolean) => Promise<boolean>;
+  /**
+   * GY-3341: the attempt worktrees still standing on this host, from the disk (`GY-N-EPOCH`
+   * directories under `.graphyard/worktrees`) with when each last changed. The close step reclaims
+   * the leftovers of items the loop's snapshot no longer holds; absent, only the snapshot's own
+   * items are reclaimed.
+   */
+  attemptWorktrees?: () => Promise<{ path: string; changedAt: number }[]>;
   /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
   diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
   /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */
   reclaimDisk?: () => Promise<string[]>;
+  /**
+   * GY-3348: the host's CPU reading — the text of /proc/pressure/cpu and /proc/stat, or null where
+   * the pressure file is missing (not Linux), in which case nothing is held. Absent, no reading is
+   * kept and no launch waits on the CPU.
+   */
+  cpuPressure?: () => Promise<{ pressure: string; stat: string | null } | null>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
@@ -95,6 +109,8 @@ export interface DaemonEffects {
   stopOrphanTrials?: () => Promise<string[]>;
   /** Takes back what ended jobs left: owner-gone trial and verification scratch, stopped trial containers with their volumes, and trial build cache older than a day (GY-3188), answering what was removed. */
   reclaimJobLeftovers?: () => Promise<string[]>;
+  /** Removes the install's CLI release copies nothing uses (GY-3334), answering what went, the bytes freed and the copies left with why. */
+  sweepCliReleases?: () => Promise<{ removed: string[]; bytes: number; left: string[] }>;
   /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
   leftoverDisk?: () => Promise<LeftoverDisk>;
   /** Reports the token usage this host's sessions' runtimes printed (GY-3289, usage-capture.ts); `master` is the master session's conversation. */
@@ -107,7 +123,9 @@ export interface DaemonEffects {
    */
   dispatch: (work: Work, profile: WorkerProfile, agents: RuntimeSession[], snapshot: { work: Work[]; now: string }, launch?: { diagnosis?: string; canaries?: CanaryOffer[]; exclude?: string[]; onRuntime?: (kind: string) => void; onRun?: (run: WorkerRun) => Promise<unknown> }) => Promise<unknown>;
   /** The agent registry, read for runtime canaries and launch back-off (GY-3103); absent, neither applies to registry accounts. */
-  registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'>>;
+  registry?: () => Promise<Pick<AgentRegistry, 'runtimes' | 'accounts' | 'roles'> & Partial<Pick<AgentRegistry, 'sessions'>>>;
+  /** Ends one live agent-registry session by id with its reason (GY-3346: a session recorded on another host). */
+  endRegistrySession?: (id: string, reason: string) => Promise<unknown>;
   /** GY-3285: add worker profiles, each under an identity the control plane mints, until `allowed` exist; returns the ones added. */
   growWorkers?: (config: MasterConfig, allowed: number) => Promise<WorkerProfile[]>;
   /**
@@ -134,10 +152,12 @@ export interface DaemonEffects {
   askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
   /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */
   release?: (work: Work, reason: string) => Promise<unknown>;
-  /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). */
-  dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). `held`, while set (GY-3348: the host's CPU is saturated), is the one wait line every launch the tick would make records instead. */
+  dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
+  /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */
+  masterMessages?: () => Promise<MasterMessage[]>;
   personalMasterSession?: (config: MasterConfig) => MasterSessionEffects;
   /** The control-plane merge executor's reads (cycle-merge-writer.ts); absent, the merge writer does nothing. */
   mergeWriter?: MergeWriterReads | null;

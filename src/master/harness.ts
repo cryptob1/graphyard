@@ -132,6 +132,10 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     { rule: 'Bash(git commit:*)', why: 'This session changes nothing in the candidate.' },
     { rule: `Bash(${cli} claim:*)`, why: 'Claiming work would make this principal an implementer.' },
   ];
+  // GY-3331: a product reviewer walks the app with agent-browser, and a confined session's HOME is
+  // private scratch — never the operator's browser profile — so the operator-profile deny below
+  // stays on workers, producers and the master alone.
+  const reviewerSecrets = secrets.filter(entry => entry.rule !== 'Bash(agent-browser *)');
   let allow: HarnessRule[], deny: HarnessRule[];
   if (input.role === 'worker') {
     if (!input.branch) throw new Error('A worker harness names the assigned branch it may push');
@@ -154,7 +158,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },
         { rule: `Bash(git worktree add --detach ${input.checkout}:*)`, why: 'Check the exact head out, read-only, in the checkout Graphyard allocated for this session.' }] : []),
     ];
-    deny = [...secrets, ...noPush,
+    deny = [...reviewerSecrets, ...noPush,
       { rule: `Bash(${cli} evidence:*)`, why: 'A reviewer never submits evidence.' },
       { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'The verdict is posted only through review post, which checks it first.' },
       { rule: 'Edit(./**)', why: 'The review session is read-only.' },

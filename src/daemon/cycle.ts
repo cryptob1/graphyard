@@ -17,14 +17,15 @@ import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
-import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
+import { masterCauses, masterCausePrompt, messageCauses } from './master-stalled-delivery.js';
 import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
-import { launchGraceMs } from '../model/registry-sessions.js';
+import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
+import { basename } from 'node:path';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { dueHumanProofs } from '../model/human-proof.js';
@@ -43,6 +44,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
+import { cpuPressureHeld, cpuPressureStep, cpuWaitingLine } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -69,6 +71,14 @@ export const standingStepFailures = (state: Pick<DaemonState, 'actions'>) =>
 export const stepTimeoutMs = (config: Pick<MasterConfig, 'run'>) => Math.max(60_000, config.run.intervalSeconds * 2_000);
 /** The key the master session's launch is handed to the launcher under. */
 export const masterLaunchKey = 'master:launch';
+/**
+ * GY-3336: how many consecutive failures of the master session's launch — the same error each
+ * time, the runtime's binary missing or its trust prompt unanswerable — before the loop stops
+ * opening a pane per cycle: the third failure starts the backoff and raises one attention line.
+ */
+export const masterLaunchBackoffAfter = 3;
+/** How long the loop waits before retrying the master launch after its `attempts`-th same-way failure: one minute doubling, capped at fifteen. */
+export const masterLaunchRetryMs = (attempts: number) => Math.min(60_000 * 2 ** Math.max(0, attempts - masterLaunchBackoffAfter), 15 * 60_000);
 
 /**
  * The session launcher beside the cycle (GY-616): a launch creates a Herdr pane and registers a
@@ -133,13 +143,21 @@ export interface Cycle {
  * One coordination cycle: snapshot, close, dispatch, merge writer, persist. Each step runs under one
  * timeout; a step that fails is one log line and runs again next cycle. Only a snapshot that cannot be
  * read fails the cycle, since every later step acts on it. A cycle run without the loop's launcher
- * settles its own launches before it persists.
+ * settles its own launches before it persists. Each step that settles touches the lock's heartbeat
+ * (GY-3341): a slow but progressing cycle is alive to its supervisor and to `master status`, while a
+ * loop that makes no progress at all is still the stall both report.
  */
-export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line)) {
+export async function runCycle(config: MasterConfig, state: DaemonState, effects: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line), progress?: () => void) {
   const own = !launcher, launches = launcher ?? new Launcher(Number.POSITIVE_INFINITY);
   if (!own) launches.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const steps: CycleStep[] = [];
   const timeoutMs = stepTimeoutMs(config), stalled: string[] = [];
+  /** A step settled: the cycle reached a new step, so the loop is progressing — say so on the lock (persisted, so `master status` reads it) and to the supervisor. */
+  const settled = () => {
+    if (state.lock) state.lock = { ...state.lock, heartbeatAt: new Date(now()).toISOString() };
+    void effects.persist(state).catch(() => {});
+    progress?.();
+  };
   /** GY-3293: one step's outcome folds into its run of equal failures; the threshold's standing line is raised and cleared here. */
   const noteStep = (name: CycleStep, error?: unknown) => {
     const key = stepFailureKey(name);
@@ -168,9 +186,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     let timer: NodeJS.Timeout | undefined;
     try {
       const value = await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => { stalled.push(name); reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)); }, timeoutMs); timer.unref?.(); })]);
+      settled();
       noteStep(name);
       return value;
     } catch (error) {
+      settled();
       noteStep(name, error);
       if (name === 'snapshot') throw error;
       log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`);
@@ -274,16 +294,51 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
  * an attempt ended by a lapsed lease had not committed, ask the control plane to reconcile each
  * lease that lapsed with nothing submitted, and remove the worktrees of ended attempts.
  */
+/**
+ * GY-3346: a live registry session recorded on another host cannot run here — the install moved,
+ * and nothing on the old host will ever end it — so it gives its role slot back in this close step,
+ * before the same cycle's dispatch and master launch ask the registry for slots.
+ */
+async function endForeignHostSessions(cycle: Cycle) {
+  const { config, effects } = cycle;
+  if (!effects.registry || !effects.endRegistrySession) return;
+  const registry = await effects.registry().catch(() => null);
+  for (const session of liveSessions({ sessions: registry?.sessions ?? [] })) {
+    if (session.host === config.hostId) continue;
+    const key = `close:registry:${session.id}`;
+    try { await effects.endRegistrySession(session.id, `recorded on ${session.host}, this install runs on ${config.hostId}`); await note(cycle, key, 'close', session.work, 'done', `Ended the ${session.role} registry session ${session.id}: recorded on ${session.host}, this install runs on ${config.hostId}`); }
+    catch (error) { await note(cycle, key, 'close', session.work, 'failed', `Could not end the ${session.role} registry session ${session.id} recorded on ${session.host}: ${message(error)}`); }
+  }
+}
+
+/** Bound the runtime call itself, not just its subsequent pane-disappearance polling. */
+async function closeWithin(body: () => void | Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([Promise.resolve().then(body), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('session close timed out after 5s; retrying next cycle')), 5_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 async function closeStep(cycle: Cycle) {
+  // Each pane gets one attempt per cycle, including the later leftover-pane sweep. A slow
+  // runtime must not hold every other session behind it or outlive the step's 60s deadline.
+  const attemptedPanes = new Set<string>();
+  const original = cycle.effects;
+  cycle = { ...cycle, effects: { ...original, closeSession: pane => {
+    attemptedPanes.add(pane);
+    return closeWithin(() => original.closeSession(pane));
+  } } };
   const { config, state, effects, snapshot, clock } = cycle;
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
-  for (const item of snapshot.work) for (const session of item.sessions ?? []) {
-    if (session.host !== config.hostId) continue;
+  await Promise.all(snapshot.work.flatMap(item => (item.sessions ?? []).map(async session => {
+    if (session.host !== config.hostId) return;
     const key = `close:${item.id}:${session.id}`;
-    if (session.state !== 'running' && (item.stage === 'done' || state.actions[key]?.state === 'done')) continue;
+    if (state.actions[key]?.state === 'done' || (session.state !== 'running' && item.stage === 'done')) return;
     const failure = item.stage === 'done' ? null : await workerLaunchHealth(cycle, item, session);
     // A reporter-finished handle can still own a pane. Diagnose it before the same idempotent close.
-    if (session.state !== 'running' && !failure) continue;
+    if (session.state !== 'running' && !failure) return;
     const reason = sessionEnded(item, session, clock) ?? (session.state !== 'running' ? failure : null);
     if (reason) {
       try {
@@ -292,10 +347,11 @@ async function closeStep(cycle: Cycle) {
         await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure ?? `closed by the loop: ${reason}`.slice(0, 500) });
         await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${failure ?? reason}`, session.principal);
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
-      continue;
+      return;
     }
     await attemptBoundStep(cycle, item, session);
-  }
+  })));
+  await endForeignHostSessions(cycle);
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
     const lease = item.lease;
@@ -329,6 +385,22 @@ async function closeStep(cycle: Cycle) {
     if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
     try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
+  }
+  // GY-3341: a settled delivery's worktree never reaches this loop's snapshot again (the coordination
+  // view the loop polls reads open items and what they reference), so the disk names the leftovers:
+  // every `GY-N-EPOCH` tree still standing a day after it last changed, for an item the snapshot no
+  // longer holds, is removed — nothing of a settled delivery will resume in it. A tree the snapshot's
+  // own items own (an open item, or one they reference) is the document pass's alone, and a young
+  // tree is never touched: the snapshot may simply predate the item that just claimed it.
+  if (effects.removeWorktree && effects.attemptWorktrees) for (const leftover of await effects.attemptWorktrees()) {
+    const named = /^(GY-\d+)-(\d+)$/i.exec(basename(leftover.path));
+    if (!named || clock - leftover.changedAt <= finishedWorktreeKeepMs) continue;
+    if (snapshot.work.some(item => item.key.toUpperCase() === named[1].toUpperCase())) continue;
+    const key = `worktree:${named[1].toLowerCase()}-${named[2]}:forced`;
+    const prior = state.actions[key];
+    if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
+    try { if (await effects.removeWorktree(leftover.path, true)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'done', `Removed the worktree ${leftover.path} of settled ${named[1].toUpperCase()} epoch ${named[2]}: it last changed ${Math.round((clock - leftover.changedAt) / 3_600_000)} hour(s) ago and nothing will resume in it`); } }
+    catch (error) { await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'failed', `Could not remove the worktree ${leftover.path} of settled ${named[1].toUpperCase()}: ${message(error)}`); }
   }
   // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
   // the stage it was launched for, or whose pane Herdr no longer reports is over — and so is the
@@ -367,7 +439,7 @@ async function closeStep(cycle: Cycle) {
   if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
     const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
     const pane = agent.pane_id;
-    if (!pane || masters.has(pane) || live.has(pane) || agent.agent_status === 'working') continue;
+    if (!pane || attemptedPanes.has(pane) || masters.has(pane) || live.has(pane) || agent.agent_status === 'working') continue;
     if (!cwd.includes('/.graphyard/worktrees/') && !managedRoots.some(root => cwd.startsWith(root + sep))) continue;
     const gone = !existsSync(cwd), exited = !agent.agent || endedRuntimeStates.includes(agent.agent_status ?? '');
     const due = () => ended.has(pane) || (gone && exited && launched.has(pane));
@@ -398,8 +470,18 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
   tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
+  const releases = await effects.sweepCliReleases?.().catch(error => { cycle.log(`[graphyard-master] the CLI release sweep failed: ${message(error)}`); return null; });
+  if (releases?.removed.length) {
+    tallyLeftovers(state, 'cliReleases', releases.removed.length);
+    tallyLeftovers(state, 'cliReleaseBytes', releases.bytes);
+    await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
+  }
+  if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
+  // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
+  // launches while it is saturated — before anything of this cycle starts one.
+  await cpuPressureStep(cycle);
 }
 
 /**
@@ -532,8 +614,12 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
+  // reviewer or trial starts: one status line names the figure, and running sessions are never
+  // stopped. The first cycle below it launches again on its own.
+  const cpuWaiting = cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure!.avg60) : undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !cpuWaiting && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -579,7 +665,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot);
+  await effects.dispatchTick?.(snapshot, cpuWaiting);
   await masterSession(cycle, open);
 }
 
@@ -747,8 +833,12 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
-  const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? [])];
+  // GY-3345: and each unanswered message another install's Master sent this one. An unreadable list
+  // keeps the messages already delivered, so none is delivered twice.
+  const messages = config.forPerson ? [] : await Promise.resolve(effects.masterMessages?.() ?? []).catch(() => null);
+  const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? []), ...messageCauses(messages ?? [], config.cliPath, config.peers?.map(peer => peer.name) ?? [])];
   const current = new Set(causes.map(cause => cause.key));
+  if (!messages) for (const key of Object.keys(state.master.subjects)) if (key.startsWith('message:')) current.add(key);
   // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
   // while it runs, otherwise an unchanged failure would wake again after every retrial.
   for (const item of open) if (item.mergeLedger?.state === 'intent' && item.mergeLedger.head === item.candidate?.sha && item.mergeLedger.baseTip)
@@ -858,6 +948,10 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
   // GY-3225: a checkout the folder-trust check refuses holds the master session's launch — one
   // standing attention line (untrustedCheckoutRoles) instead of a pane per refused retry.
   if (cycle.checkoutTrustRefused?.has('master')) return;
+  // GY-3336: a launch that failed the same way three times backs off — no new pane per cycle — and
+  // one standing attention line names the failure and when the retry comes while it stands.
+  const standing = state.actions[launchKey];
+  if (standing?.state === 'failed' && standing.attempts >= masterLaunchBackoffAfter && cycle.now() - Date.parse(standing.at) < masterLaunchRetryMs(standing.attempts)) return;
   if (launcher.busy(launchKey)) return;
   launcher.submit(launchKey, [], async sink => {
     try {
@@ -874,7 +968,17 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
         lastWake: causes.length ? { at, causes: causes.map(cause => cause.key).slice(0, 20), heartbeat: false } : null };
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) {
-      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
+      // GY-3336: only a run of the same failure counts toward the backoff; a new error starts the
+      // count over. Both detail forms end with the error's own words, whatever prefixes the loop wrote.
+      const reason = normalizeFailureReason(message(error));
+      const prior = state.actions[launchKey];
+      const same = !!reason && prior?.state === 'failed' && normalizeFailureReason(prior.detail).endsWith(reason);
+      const attempts = same ? (prior.attempts ?? 0) + 1 : 1;
+      const retried = new Date(cycle.now() + masterLaunchRetryMs(Math.max(attempts, masterLaunchBackoffAfter))).toISOString();
+      const detail = attempts >= masterLaunchBackoffAfter
+        ? `The master session's launch failed the same way ${attempts} times, so the loop backs off and retries it at ${retried} instead of opening a pane each cycle: ${message(error)}`
+        : `The master session could not be launched; the next cycle tries again: ${message(error)}`;
+      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: detail.slice(0, actionDetailMax), attempts, cycle: state.cycle }, cycle.now(), effects.persist));
     }
   });
 }

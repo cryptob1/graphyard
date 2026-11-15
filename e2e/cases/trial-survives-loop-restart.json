@@ -1,0 +1,14 @@
+{
+  "id": "trial-survives-loop-restart",
+  "title": "A running merge trial survives repeated loop restarts",
+  "description": "Real temporary Postgres, Git and loop processes with detached slow trial commands: zero, one and three SIGTERM restarts, with main advancing, preserve the attempt, start time and run directory. Install and build run once, tests finish once, and one verdict and merge are recorded within one trial plus restart time.",
+  "tags": ["regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Restart the loop during a slow trial",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-loop-process-restart.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

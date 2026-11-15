@@ -1,0 +1,13 @@
+{
+  "id": "loop-state-dispatch-concurrent",
+  "title": "Persisting the loop's dispatch cursor no longer fails with a 500",
+  "description": "On a real temporary Postgres behind the served API, a second writer persists the dispatch cursor while another writer (the old loop beside a restarted one) is mid-way through its own write and the wait outlives the server's timeout. The loser is answered with a 409 conflict instead of a 500, the loop's client retries it so the stored cursor is the later write, and a loop cycle racing that other writer completes its dispatch step.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Two writers of the dispatch cursor get a conflict and a retry, never a 500",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-state-dispatch-concurrent.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

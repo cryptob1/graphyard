@@ -12,6 +12,7 @@ import { type EnvironmentKind, type MasterConfig } from './profiles.js';
 import { atomicPrivateText } from '../private-file.js';
 import { failureText } from '../disk-space.js';
 import { agentEnvironmentRoot, createAgentEnvironment, discoverAgentEnvironments } from './environments.js';
+import { accountHomeEnvironment } from './runtimes.js';
 
 // Connect an account from the UI (GY-409).
 //
@@ -108,7 +109,9 @@ export async function createPiHome(root: string, name?: string | null): Promise<
 
 /** The one-line smoke prompt inside the login home: healthy when the runtime answers, the provider's error when it does not. */
 export async function runSmokePrompt(provider: ConnectProvider, home: string, options: { runner?: ChildRun; timeoutMs?: number } = {}): Promise<{ healthy: boolean; error: string | null }> {
-  const environment: NodeJS.ProcessEnv = { ...process.env, [provider.smoke.envVariable]: home };
+  // GY-3329: a cursor smoke runs with XDG_CONFIG_HOME on the account home, the environment its
+  // confined sessions read the sign-in under, so what it proves is what a worker gets.
+  const environment: NodeJS.ProcessEnv = { ...process.env, [provider.smoke.envVariable]: home, ...accountHomeEnvironment(provider.runtime, home) };
   if (provider.smoke.envVariable === 'XDG_DATA_HOME') {
     // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.
     const mise = process.env.MISE_DATA_DIR ?? resolve(process.env.XDG_DATA_HOME ?? resolve(homedir(), '.local/share'), 'mise');

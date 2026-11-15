@@ -38,7 +38,7 @@ async function machine(label: string) {
   };
   const launch = (load: { cap?: number; order?: number } = {}) => {
     const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon } });
+      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
     const child = spawn(program!, [...words, 'sleep', '600'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
     let said = '';
     child.stderr!.on('data', chunk => { said += chunk; });
@@ -77,7 +77,7 @@ test(`${proof} — a CPU sensor at 95C holds a start until it cools; a hot non-C
     await host.sensor('nvme', 99_000);
     await host.sensor('coretemp', 95_000);
     const held = host.launch();
-    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C or more'), 'the start says the CPU is hot');
+    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C, at or over its 95C limit'), 'the start says the CPU is hot');
     assert.equal(await host.started(), 0, 'nothing starts while the CPU is at 95C');
     await host.sensor('coretemp', 94_000);
     await host.until(async () => await host.started() === 1, 'the start goes once the sensor clears');

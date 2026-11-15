@@ -80,25 +80,18 @@ export function ShippedToday({ work }: { work: Work[] }) {
 
 /** The agent that built an item: the last implementer, or the lease holder. */
 export const builderOf = (w: Work) => w.implementers?.at(-1) ?? w.lease?.owner ?? null;
-/** A brief confetti burst, a few dozen CSS pieces that remove themselves. None with reduced motion set. */
-export function confetti() {
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const burst = document.createElement('div');
-  burst.className = 'confetti'; burst.setAttribute('aria-hidden', 'true');
-  for (let n = 0; n < 40; n++) {
-    const piece = document.createElement('i');
-    piece.style.cssText = `left:${Math.random() * 100}%;background:hsl(${Math.random() * 360} 90% 60%);animation-delay:${Math.random() * 0.4}s;--drift:${Math.random() * 200 - 100}px`;
-    burst.append(piece);
-  }
-  document.body.append(burst);
-  setTimeout(() => burst.remove(), 2200);
+/** A brief confetti burst, a few dozen CSS pieces that fall once; it lasts as long as the toast it celebrates. None with reduced motion set. */
+function Confetti() {
+  const [pieces] = useState(() => matchMedia('(prefers-reduced-motion: reduce)').matches ? [] : Array.from({ length: 40 }, () => ({
+    left: `${Math.random() * 100}%`, background: `hsl(${Math.random() * 360} 90% 60%)`, animationDelay: `${Math.random() * 0.4}s`, '--drift': `${Math.random() * 200 - 100}px` }) as CSSProperties));
+  return pieces.length ? <div className="confetti" aria-hidden="true">{pieces.map((style, n) => <i key={n} style={style}/>)}</div> : null;
 }
-/** The toast when an item merges while the page is open: who built it and what. The neon pulse (GY-3272) stops under reduced motion. */
+/** The toast when an item merges while the page is open: who built it and what, with confetti. The neon pulse (GY-3272) stops under reduced motion. */
 export function ShippedToast({ item, onClose }: { item: Work; onClose(): void }) {
   const builder = builderOf(item), name = builder ? friendlyName(builder) ?? builder : builder;
-  return <div className="toast pulse" aria-live="polite" data-toast={item.key} onClick={onClose}>
+  return <><div className="toast pulse" aria-live="polite" data-toast={item.key} onClick={onClose}>
     {builder ? <span title={builder}>{name}</span> : 'Graphyard'} shipped “{item.title}” 🎉
-  </div>;
+  </div><Confetti/></>;
 }
 
 /** Whether an item's latest merge trial failed on the head it stands at — the row that earns the glitch flicker (GY-3272). */

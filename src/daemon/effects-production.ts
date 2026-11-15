@@ -1,6 +1,8 @@
 import { sessionInventory } from '../session-inventory.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
@@ -11,8 +13,9 @@ import { fleetRequest } from '../fleet.js';
 import { growWorkerPool } from '../master/worker-pool.js';
 import { endRegistrySlot, endRegistrySessionById, liveMasterSessions } from '../master/registry-slot.js';
 import { dispatchEffects } from '../dispatch/effects.js';
-import { readDispatchCursor, type DispatchCursor } from '../dispatch/cursor.js';
+import { dispatchReadTimeoutMs, readDispatchCursor, type DispatchCursor } from '../dispatch/cursor.js';
 import { runDispatchTick } from '../dispatch/tick.js';
+import { launchBoundMs } from '../master/launch-bound.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
 import { agentToken } from '../master/autonomy.js';
@@ -41,6 +44,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
@@ -65,10 +69,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   fetcher?: typeof fetch;
   /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
   verify?: typeof runWorkerVerification;
+  /** GY-3345: the messages to this install's Master. */
+  messages?: DaemonEffects['masterMessages'];
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
-  let leftoversSweptAt = 0;
+  let leftoversSweptAt = 0, releasesSweptAt = 0;
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
@@ -195,16 +201,38 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The agent-registry session a review or proof session ran under, ended when the close step
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
+    endRegistrySession: (id, reason) => endRegistrySessionById(current(), id, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: (path, force) => removeAttemptWorktree(root, path, run, force),
+    // GY-3341: the attempt worktrees still standing, read from the disk their leftovers live on.
+    attemptWorktrees: async () => {
+      const directory = worktreesDirectory(root);
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
+      return (await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry => {
+        const changedAt = await stat(join(directory, entry.name)).then(info => info.mtimeMs, () => 0);
+        return { path: join(directory, entry.name), changedAt };
+      }))).filter(entry => entry.changedAt > 0);
+    },
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3348: the host's CPU before every launch; null where /proc/pressure/cpu is missing (not Linux).
+    cpuPressure: async () => {
+      const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
+      const pressure = await read('/proc/pressure/cpu');
+      return pressure === null ? null : { pressure, stat: await read('/proc/stat') };
+    },
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
     reclaimJobLeftovers: async () => { if (Date.now() - leftoversSweptAt < 3_600_000) return []; leftoversSweptAt = Date.now(); return reclaimJobLeftovers(run); },
     usage: master => collectUsage(root, current(), master),
+    // GY-3334: hourly, like the job leftovers: the walk reads /proc and every release copy.
+    sweepCliReleases: async () => {
+      if (Date.now() - releasesSweptAt < 3_600_000) return { removed: [], bytes: 0, left: [] };
+      releasesSweptAt = Date.now();
+      return sweepCliReleases(installDirectory(installIdFor(current().repository)), run);
+    },
     leftoverDisk: () => leftoverDisk({ trialRuns: trialRunsDirectory(root), worktrees: worktreesDirectory(root), trialCheckouts: trialCheckoutRoots()[0]! }, run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
@@ -219,10 +247,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),
     setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
-    // still running past its step's timeout is not started twice.
-    dispatchTick: snapshot => ticking ??= (async () => {
+    // still running past its step's timeout is not started twice. `held` (GY-3348) waits every launch
+    // the tick would make while the host's CPU is saturated.
+    dispatchTick: (snapshot, held) => ticking ??= (async () => {
       cursor ??= await readDispatchCursor(root, current());
-      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, headless: deps.headless, coordinatorRoot: deps.coordinatorRoot }));
+      return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run, headless: deps.headless, coordinatorRoot: deps.coordinatorRoot }), Date.now, dispatchReadTimeoutMs, launchBoundMs(current()), held);
     })().finally(() => { ticking = null; }),
     personalMasterSession: config => ({
       ...masterSessionEffects(root, () => config, run),
@@ -230,6 +259,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
+    masterMessages: deps.messages,
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,

@@ -63,6 +63,9 @@ export function stopProcessesUnder(directory: string, options: StopOptions = {})
   return stopTrees(all.filter(row => row.paths.some(path => names.some(name => path === name || path.startsWith(`${name}/`)))), all, options);
 }
 
+/** Every path a live process names: working directories, path arguments and mount points. */
+export const livePaths = (procRoot = '/proc') => hostProcesses(procRoot).flatMap(row => row.paths);
+
 /** `path` lies in an entry of `root` that no longer exists. */
 const inRemovedEntry = (path: string, root: string) => path.startsWith(`${root}/`) && !existsSync(join(root, path.slice(root.length + 1).split('/')[0]));
 

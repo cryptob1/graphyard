@@ -184,10 +184,11 @@ export async function observeHerdrAgents(run?: ChildRun, scope: string | null = 
 
 export async function closeHerdrPane(pane: string, run?: ChildRun, timeoutMs = 5_000, scope: string | null = processScope) {
   assertHerdrScope(pane, scope);
-  await herdrJson(['pane', 'close', pane], run);
   const deadline = Date.now() + timeoutMs;
+  const bounded: ChildRun = (command, args, options) => (run ?? defaultChildRun)(command, args, { ...options, timeoutMs: Math.max(1, deadline - Date.now()) });
+  await herdrJson(['pane', 'close', pane], bounded);
   while (Date.now() < deadline) {
-    const result = await herdrJson(['pane', 'list'], run);
+    const result = await herdrJson(['pane', 'list'], bounded);
     if (!Array.isArray(result.panes)) throw new Error('Herdr did not return a pane inventory after close');
     if (!result.panes.some((candidate: any) => candidate.pane_id === pane)) return;
     await sleep(100);
@@ -216,5 +217,10 @@ export async function stopCreatedHerdrTab(pane: string | undefined, tab: string 
   }
   throw new Error(`Herdr still reports tab ${tab} after close`);
 }
-/** The herdr arguments of a pane's terminal stream: writable `control` (taking over) or read-only `observe`. */
-export const herdrTerminalArgs = (control: boolean, pane: string, cols: string, rows: string) => ['terminal', 'session', control ? 'control' : 'observe', pane, ...(control ? ['--takeover'] : []), '--cols', cols, '--rows', rows];
+/**
+ * The herdr arguments of a pane's terminal stream: `takeover` controls the pane even when another stream
+ * does, `control` only when none does, `observe` watches. Only a controlling stream sizes the pane: an
+ * observer is shown the pane at the width Herdr laid it out at (GY-3313).
+ */
+export const herdrTerminalArgs = (mode: 'takeover' | 'control' | 'observe', pane: string, cols: string, rows: string) =>
+  ['terminal', 'session', mode === 'observe' ? 'observe' : 'control', pane, ...(mode === 'takeover' ? ['--takeover'] : []), '--cols', cols, '--rows', rows];

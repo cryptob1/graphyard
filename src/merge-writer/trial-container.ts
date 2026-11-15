@@ -4,9 +4,9 @@ import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSy
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory, checkoutGitProblem } from '../master/checkout-git.js';
-import { writeFile, readFile } from 'node:fs/promises';
+import { copyFile, writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
-import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
+import { runTrialE2eCases, serveOutputName, type TrialE2eCase } from './e2e-trial.js';
 import { addressPoolsSpent, composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
@@ -166,6 +166,8 @@ export async function containerTrialE2e(input: {
   scratch: string; budgetMs: number; wrapper: readonly string[]; run: ChildRun; log: (line: string) => void;
   networkWrapper: (network: string) => readonly string[];
   origins?: Record<string, string>;
+  /** GY-3343: the trial run's directory, where a serve command's whole output is kept. */
+  runDirectory?: string;
 }): Promise<TrialE2eCase[]> {
   const holds = async (path: string) => {
     try { execFileSync('git', ['-C', input.worktree, 'cat-file', '-e', input.mergeSha + ':' + path], { stdio: 'ignore' }); return true; }
@@ -209,6 +211,9 @@ writeFileSync(${JSON.stringify(result)}, JSON.stringify(cases));
         if ((error as { timedOut?: boolean }).timedOut) throw error;
         return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1, hostFailure: true,
           failingStep: `the E2E runner could not start: ${error instanceof Error ? error.message : String(error)}` }));
+      } finally {
+        const log = serveOutputName(target.id, input.mergeSha);
+        if (input.runDirectory) await copyFile(join(directory, log), join(input.runDirectory, log)).catch(() => {});
       }
     } catch (error) {
       // GY-3316: a network Docker refused for spent address pools is the trial host's fault, not a failed case.

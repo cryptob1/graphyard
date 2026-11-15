@@ -14,6 +14,7 @@ import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
 import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../install/loop-unit.js';
 import type { ChildRun } from '../../child-runner.js';
 import { masterConfinementVariable } from '../../master/launch.js';
+import { heavyDrainLine, heavyJobsDirectory, requestHeavyDrain, resumeHeavyDrain } from '../../master/verification-slots.js';
 
 /** Whether this command runs inside the master session's confinement (GY-1658): its wrapper sets the variable. */
 export const confinedMaster = (env: NodeJS.ProcessEnv = process.env) => env[masterConfinementVariable] === 'master';
@@ -33,6 +34,16 @@ export async function operationsCommand(session: MasterSession, effects: Recover
   if (id === 'restart' && confinedMaster()) {
     await atomicPrivateWrite(loopRestartRequestPath(master), { requestedAt: new Date().toISOString(), requestedBy: String(coordinator?.actor?.id ?? 'master'), reason: args.join(' ') || 'master restart from the confined master session' });
     return print({ requested: true, file: loopRestartRequestPath(master), detail: 'the loop restarts through its unit after its current cycle' });
+  }
+  // GY-3304: drain the host's heavy work for another project's quiet window, and resume it.
+  if (id === 'drain') {
+    if (!args.length) throw new Error('Use master drain REASON (say who asked and for how long)');
+    const drain = requestHeavyDrain(heavyJobsDirectory(), args.join(' '), String(coordinator?.actor?.id ?? master.masterAgentName));
+    return print({ drained: true, ...drain, detail: heavyDrainLine(drain) });
+  }
+  if (id === 'resume') {
+    const lifted = resumeHeavyDrain(heavyJobsDirectory());
+    return print({ resumed: !!lifted, lifted, detail: lifted ? 'New heavy jobs start again from the next loop cycle, each with all its gates' : 'Heavy work was not drained' });
   }
   if (id === 'dispatch') {
     const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });

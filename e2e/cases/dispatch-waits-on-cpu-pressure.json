@@ -1,0 +1,22 @@
+{
+  "id": "dispatch-waits-on-cpu-pressure",
+  "title": "Dispatch waits while the host CPU is saturated, and the Workers page shows CPU pressure and steal",
+  "description": "The loop reads /proc/pressure/cpu before launching anything new: while 'some avg60' is above the one ceiling no worker, reviewer or trial starts, one master status line names the figure, a session already running is untouched, and the first cycle below the ceiling launches again. Where the pressure file is missing (not Linux) the check is skipped. The Workers page shows host CPU pressure (avg60) and steal percent as two small figures in its header at 1280 px and 390 px.",
+  "tags": ["dispatch", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the loop waits on CPU pressure over a real control plane",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/dispatch-waits-on-cpu-pressure.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "the pressure and steal figures on the served Workers page",
+      "run": "npm run test:browser -- browser-tests/workers-cpu-figures.spec.ts",
+      "timeoutSeconds": 420
+    }
+  ]
+}
