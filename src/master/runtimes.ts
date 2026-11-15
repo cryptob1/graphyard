@@ -133,6 +133,8 @@ const builtInAdapters = {
     // `Ask anything…` input prompt and a hint bar opening with `tab agents`.
     screen: /\btab agents\b|Ask anything…/,
     limitNotices: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
+    // Its Z.AI `provider.quota` error names `2026-11-20 12:49:15` with no zone, in UTC, as pi's does (GY-3389).
+    zonelessUtcResets: true,
     home: { variable: 'XDG_DATA_HOME', default: home => process.env.XDG_DATA_HOME ?? resolve(home, '.local/share') },
     usage: (environment, probe, { plan, now }) => zaiAccount(environment, probe, { id: plan, now }),
     sharedPlan: true,

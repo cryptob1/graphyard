@@ -1,8 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { headlessWorkers, type HeadlessWorkers } from './helpers/headless-workers.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { spawnHeadless, startHeadlessSession } from '../src/headless-session.js';
 
 // GY-3389: a spent Claude account ends a headless run at once with its usage-credits result; the
 // account is held and the same dispatch starts the item on the next account, with no launch failure.
@@ -26,4 +28,45 @@ test('e2e:headless-claude-usage-limit — a headless claude usage-credits result
   assert.ok(!sessions.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
   await writeFile(join(workers.homes.get('next')!, 'release'), '');
   await workers.submitted(work.id, 2);
+});
+
+// AC-2: OpenCode on a spent Z.AI plan exits at once printing the provider's quota error; its reset is a UTC wall clock.
+const zaiQuota = '{"type":"provider.quota","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15","status":429}';
+const zaiReset = '2026-11-20T12:49:15.000Z';
+
+test('e2e:headless-claude-usage-limit — a headless opencode worker on a spent Z.AI plan is held until its reset and the same dispatch moves on', async () => {
+  await workers.configure([{ name: 'opencode-spent', kind: 'opencode', printed: zaiQuota }, { name: 'next-z', kind: 'codex', wait: true }]);
+  const work = await workers.readyItem('GY-9671');
+  const launched = await workers.dispatch(work);
+  assert.equal(launched.runtime, 'codex');
+  assert.equal(launched.epoch, 2);
+  const item = await workers.stored(work.id);
+  const spent = item.capacity?.exhaustions?.find(entry => entry.epoch === 1);
+  assert.equal(spent?.account, 'opencode-spent');
+  assert.equal(spent?.resetsAt, zaiReset, 'held until the reset Z.AI named, in UTC');
+  assert.equal((await workers.registry.snapshot(workers.hostId)).accounts.find(entry => entry.name === 'opencode-spent')?.eligible, false, 'the spent account is held');
+  assert.equal(item.blocker, null);
+  assert.ok(!item.sessions!.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
+  await writeFile(join(workers.homes.get('next-z')!, 'release'), '');
+  await workers.submitted(work.id, 2);
+});
+
+test('e2e:headless-claude-usage-limit — a headless opencode reviewer on a spent Z.AI plan is held until its reset and the review runs on the next account', async () => {
+  const scratch = await temporaryDirectory('opencode-review', join(workers.root, '.graphyard'));
+  const [spentBin, nextBin, directory] = [join(scratch, 'spent'), join(scratch, 'next'), join(scratch, 'checkout')];
+  for (const path of [spentBin, nextBin, directory]) await mkdir(path, { recursive: true });
+  // The reviewer said something before the error: that text reply must not hide the quota line.
+  await writeFile(join(spentBin, 'opencode'), `#!/bin/sh\necho '{"type":"text","part":{"text":"Reviewing GY-9672."}}'\necho '${zaiQuota}'\nexit 1\n`, { mode: 0o755 });
+  await writeFile(join(nextBin, 'opencode'), '#!/bin/sh\necho \'{"verdict":"approve"}\'\n', { mode: 0o755 });
+  const holds: { reason: string; resetsAt: string | null }[] = [], moves: string[] = [];
+  const session = await startHeadlessSession({ name: 'review-zai', work: 'GY-9672', subject: 'review', kind: 'opencode', account: 'opencode-a', args: [], environment: { PATH: `${spentBin}:/usr/bin:/bin` },
+    directory, root: workers.root, route: 'review', context: {}, prompt: 'Review GY-9672.', exec: spawnHeadless,
+    holdAccount: async notice => { holds.push(notice); },
+    moveAccount: async (reason, cause) => { moves.push(`${cause}: ${reason}`); return { kind: 'opencode', account: 'opencode-b', args: [], environment: { PATH: `${nextBin}:/usr/bin:/bin` } }; },
+    answer: async output => JSON.parse(output.trim()).verdict as string });
+  assert.equal(await session.settled, 'approve');
+  assert.equal(holds.length, 1);
+  assert.match(holds[0]!.reason, /Limit Exhausted/);
+  assert.equal(holds[0]!.resetsAt, zaiReset);
+  assert.deepEqual(moves.map(move => move.split(':')[0]), ['limit']);
 });
