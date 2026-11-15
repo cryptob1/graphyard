@@ -10,6 +10,7 @@ import { productBriefRoutes } from './routes/product-brief.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
+import { teamAccessRoutes } from './routes/team-access.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
 import { delegationRoutes } from './routes/delegation.js';
 import { validationRoutes } from './routes/validation.js';
@@ -20,6 +21,7 @@ import { scenarioRoutes } from './routes/scenarios.js';
 import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
+import { masterMessageRoutes, reporterScope } from './routes/reporter.js';
 import { staticRoutes } from './static.js';
 import { terminalUpgrade } from './terminal.js';
 export { principalSchema, type Credential } from './principals.js';
@@ -33,9 +35,9 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes]
  * modules ahead of the operator-agent guard authorize their callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = [
-  operatorAgentRoutes,
+  operatorAgentRoutes, teamAccessRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
-  loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, emblemRoutes, usageRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes, productBriefRoutes,
+  loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, emblemRoutes, usageRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes, productBriefRoutes, masterMessageRoutes,
 ];
 
 async function body(req: IncomingMessage, limit = 1_000_000) {
@@ -80,7 +82,7 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
       if (!(lane && confinedLaneProducer(lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname, localRead(req));
-        if (await dispatch([laneProducerScope, ...apiRoutes])) return;
+        if (await dispatch([laneProducerScope, reporterScope, ...apiRoutes])) return;
         return send(404, { error: 'Route not found' });
       }
       await dispatch([staticRoutes]);

@@ -1,0 +1,16 @@
+{
+  "id": "product-review-environment",
+  "title": "A product reviewer that cannot reach the app records could not run, never changes requested",
+  "description": "GY-3331: a product-review launch hands its session GRAPHYARD_URL, the CLI path and a browser tool on PATH, on a codex runtime and on a claude runtime alike; a preflight that finds one missing starts no reviewer and records the review as could not run naming it. A reviewer that reports it could not reach the app records could not run too: the item stays in review on the same head with no rework, another eligible reviewer is tried, and master status shows one attention line. An install whose serving is unconfigured but whose e2e.serve is declared hands the reviewer the URL of the head that command serves; an install with neither owes no walkthrough, and a reviewer that walked a served head and found a fault still requests changes.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product review environment, verdict and serving",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-review-environment.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

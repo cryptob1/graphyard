@@ -1,6 +1,6 @@
 // Concern: the merge writer's trial timeout and `run.mergeWriter` (GY-1524) settings and the defaults they resolve to.
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { availableParallelism, homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { configHome } from '../install/secrets.js';
@@ -11,7 +11,8 @@ export const trialTimeoutMinutes = 20;
 // ---- The merge executor's settings (GY-1524) -------------------------------------------------------
 
 /** How many queued heads the writer trials at once, each alone on the current tip (GY-3120), and the most an install may ask for. */
-export const defaultMergeWriterParallel = 3, maxMergeWriterParallel = 6;
+export const maxMergeWriterParallel = 6;
+export const defaultMergeWriterParallel = Math.min(maxMergeWriterParallel, Math.max(1, Math.floor(availableParallelism() / 2)));
 /** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
 export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 /** The install's fine-grained token by default, for organizations that disable deploy keys: `<config home>/<install>/merge-writer.token` (GY-3220). */

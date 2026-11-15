@@ -12,6 +12,7 @@ import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
 import { BuildLine, ShippedToday } from '../fun';
 import { useGlide } from '../glide';
+import { EmptyState } from '../components/page-layout';
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
@@ -77,7 +78,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
-    {work.length === 0 ? <div className="empty"><h2>The yard is quiet. File a goal and wake the crew.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
+    {work.length === 0 ? <EmptyState title="The yard is quiet. File a goal and wake the crew." action={admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}>Create a work item, say what must be true when it is done, and an agent will pick it up.</EmptyState> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextTile(board ? board.groups['up-next'].filter(match) : []) : groupMeaning[group]}</small>
       </button>)}</div>

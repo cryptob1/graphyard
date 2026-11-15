@@ -72,11 +72,11 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
  * every open request that has none. Each launch is recorded by the launcher's own ledger before
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
-export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, launchBound = launchBoundMs(config)): Promise<DispatchTick> {
-  return dispatchTick(config, cursor, effects, now, readTimeoutMs, launchBound);
+export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, launchBound = launchBoundMs(config), held?: string): Promise<DispatchTick> {
+  return dispatchTick(config, cursor, effects, now, readTimeoutMs, launchBound, held);
 }
 
-async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, launchBound: number): Promise<DispatchTick> {
+async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, launchBound: number, held?: string): Promise<DispatchTick> {
   const snapshot = await boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs);
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
@@ -265,7 +265,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return true;
   };
   // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
-  const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
+  // GY-3348: while `held` names a host condition (the CPU saturated), a request that would launch records that one wait instead — reconciliation and settling go on, only the launch waits.
+  const launchDue = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
     const retry = sessionRetry(records, request.id, now());
     const role = kind === 'review' ? 'reviewer' : 'producer';
     if (retry.settled) {
@@ -304,6 +305,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     wait(kind, item, request, `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
     return false;
   };
+  const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) =>
+    launchDue(kind, item, request, records) && (held ? (wait(kind, item, request, held), false) : true);
   // A reviewer launch must never take a Herdr name a producer
   // launch is taking: both read the tick's inventory, and a name joins it only once its launch
   // returns. A launch holds the agent name of the one profile it is launching on until that name is

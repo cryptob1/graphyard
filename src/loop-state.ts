@@ -16,17 +16,25 @@ export interface LoopStateClient {
 export const loopStateContext = new AsyncLocalStorage<(scope: string) => LoopStateClient>();
 type Config = Pick<MasterConfig, 'url' | 'credentialFile' | 'repository' | 'hostId'>;
 const scopeOf = (config: Config) => createHash('sha256').update(`${config.repository.toLowerCase()}\n${config.hostId ?? hostname()}\n${config.credentialFile}`).digest('hex');
+/** A conflicted write is retried this many times in all, backing off 250 ms more each time (about 10 s overall). */
+export const loopStateWriteAttempts = 9;
 export async function loopStateClient(rootOrConfig: string | Config): Promise<LoopStateClient> {
   const injected = loopStateContext.getStore();
   if (injected) return injected(typeof rootOrConfig === 'string' ? resolve(rootOrConfig) : scopeOf(rootOrConfig));
   const config: Config = typeof rootOrConfig === 'string'
     ? JSON.parse(await readFile(resolve(rootOrConfig, '.graphyard/master.json'), 'utf8')) : rootOrConfig;
   const scope = scopeOf(config);
-  const request = async (kind: LoopStateKind, body?: unknown) => {
+  const request = async (kind: LoopStateKind, body?: unknown, attempt = 1): Promise<any> => {
     const response = await fetch(`${config.url}/api/loop-state/${scope}/${kind}`, {
       method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}`, 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000),
     });
+    // GY-3366: a write that lost a race to another writer of the same record is retried, so it lands after the winner.
+    if (response.status === 409 && body && attempt < loopStateWriteAttempts) {
+      await response.body?.cancel();
+      await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+      return request(kind, body, attempt + 1);
+    }
     if (!response.ok) throw new Error(`Loop state ${kind}: ${response.status} ${await response.text()}`);
     return response.json();
   };
