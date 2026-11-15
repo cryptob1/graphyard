@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -14,6 +14,7 @@ import { copyTemplateCluster } from '../src/e2e/warm-postgres.js';
 import { postgresBinaries, startCluster, type LocalPaths } from '../src/install/local-runtime.js';
 import { installDirectory } from '../src/install/secrets.js';
 import { installIdFor } from '../src/install/types.js';
+import { fakeTransport } from '../src/install/transport.js';
 import { reserveTestPorts } from '../src/cli/test-isolation.js';
 import { moveInstall } from '../src/install/move.js';
 import { proposedRuntimes } from '../src/model/registry.js';
@@ -41,9 +42,9 @@ async function controlPlane(data: string, port: number) {
   return { url, ok, stop };
 }
 
-test('e2e:install-move-host — install move copies the database, files and credentials, sets hostId and re-points every account', async () => {
+test('e2e:install-move-host — install move copies the database, files and credentials, sets hostId, re-points every account, re-creates worktree registrations and provisions the trial image', async () => {
   const scratch = await temporaryDirectory('move-host'), ports = await reserveTestPorts();
-  const configHome = join(scratch, 'config'), root = join(scratch, 'checkout'), masters = join(scratch, 'masters'), units = join(scratch, 'units'), target = join(scratch, 'target');
+  const configHome = join(scratch, 'config'), root = join(scratch, 'checkout'), repo = join(scratch, 'repo'), masters = join(configHome, 'masters'), units = join(scratch, 'units'), target = join(scratch, 'target');
   const directory = installDirectory(installIdFor('owner/project'), configHome), data = join(directory, 'postgres', 'data');
   let running: Awaited<ReturnType<typeof controlPlane>> | null = null;
   try {
@@ -52,13 +53,24 @@ test('e2e:install-move-host — install move copies the database, files and cred
     await copyTemplateCluster(data, ports.base);
     running = await controlPlane(data, ports.base);
     const source = running;
-    execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+    // The checkout is a linked worktree of a main clone, and holds a CLI release copy that is a linked worktree too — the layout a hand move left with dangling registrations.
+    const git = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { stdio: ['ignore', 'ignore', 'ignore'] });
+    await mkdir(repo, { recursive: true });
+    git('init', '-q', '-b', 'main'); await writeFile(join(repo, 'README.md'), 'owner/project\n'); git('add', '.'); git('commit', '-q', '-m', 'root');
+    git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
+    const commit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    git('worktree', 'add', '--detach', '--quiet', root, commit);
     const bound = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-    await setupMaster(root, { url: source.url, token: tokens.master, cliPath: launcher, credentialDirectory: masters, hostId: 'source-host', herdrWorkspace: 'workspace-graphyard' }, bound as typeof fetch);
+    await setupMaster(root, { url: source.url, token: tokens.master, cliPath: launcher, credentialDirectory: configHome, hostId: 'source-host', herdrWorkspace: 'workspace-graphyard' }, bound as typeof fetch);
+    const release = join(root, '.graphyard', 'cli-releases', commit);
+    git('worktree', 'add', '--detach', '--quiet', release, commit);
     const config = JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8'));
     const operatorCredential = join(masters, 'operator-agent.token'), workerCredential = join(scratch, 'workers', 'only-worker.token');
     await mkdir(join(scratch, 'workers'), { recursive: true, mode: 0o700 });
     await writeFile(operatorCredential, `operator-agent-${'a'.repeat(40)}`, { mode: 0o600 }); await writeFile(workerCredential, tokens.worker, { mode: 0o600 });
+    // An operator token no master.json names: the credential directory carries it (the token the hand move missed).
+    const otherOperatorToken = join(masters, 'another-install.token');
+    await writeFile(otherOperatorToken, `another-${'n'.repeat(40)}`, { mode: 0o600 });
     await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...config, operatorAgent: { id: 'master-agent', credentialFile: operatorCredential },
       workers: [{ name: 'only-worker', principal: 'worker', agentName: 'only-worker', mode: 'launch', kind: 'claude', credentialFile: workerCredential, agentArgs: [], approvals: 'auto', environment: {} }] });
     await atomicPrivateWrite(join(root, '.graphyard/connection.json'), { url: source.url, cliPath: launcher, hostId: 'source-host' });
@@ -75,22 +87,29 @@ test('e2e:install-move-host — install move copies the database, files and cred
     assert.equal(existsSync(target), false);
     await source.ok(`work/${item.id}/release`, { epoch: claimed.epoch }, tokens.worker);
 
-    // --plan lists the database, install files and each credential file, and changes nothing.
+    // --plan lists the database, install files, worktree registrations and each credential file, and changes nothing.
     const plan = await moveInstall(root, { to: 'target-host', into: target, plan: true }, dependencies);
     assert.deepEqual(plan.database, { kind: 'directory', path: join(directory, 'postgres') });
-    assert.ok(plan.files.includes(root) && plan.files.includes(directory), 'the checkout and the install directory are listed');
+    assert.ok(plan.files.includes(root) && plan.files.includes(directory) && plan.files.includes(masters), 'the checkout, the install directory and the credential directory are listed');
     assert.deepEqual(plan.credentials, [config.credentialFile, operatorCredential, workerCredential].sort());
+    assert.deepEqual([...plan.worktrees].sort(), [join(repo, '.git', 'worktrees', basename(root)), join(repo, '.git', 'worktrees', commit)].sort());
+    assert.match(plan.trialImage.command!, /'--tag' 'graphyard-trial:local'/);
     assert.deepEqual(plan.accounts, ['claude-a']); assert.deepEqual(plan.refusals, []); assert.equal(plan.applied, false);
     assert.equal(existsSync(target), false, 'the plan copies nothing');
     assert.equal((await source.ok('agent-registry/document', undefined, tokens.master)).accounts[0].credential.host, 'source-host', 'the plan re-points nothing');
     assert.equal(JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8')).hostId, 'source-host');
 
     // Applied to a directory standing in for the target host.
-    const moved = await moveInstall(root, { to: 'target-host', into: target }, dependencies);
+    const docker = fakeTransport();
+    const moved = await moveInstall(root, { to: 'target-host', into: target }, { ...dependencies, transport: docker });
     assert.equal(moved.applied, true); assert.equal(running, null, 'the move stopped the install before copying');
     for (const file of plan.credentials) assert.equal((await stat(join(target, file))).mode & 0o777, 0o600, `${file} is on the target with mode 0600`);
+    assert.equal((await stat(join(target, otherOperatorToken))).mode & 0o777, 0o600, 'the credential directory carries operator tokens master.json does not name');
     for (const file of ['master.json', 'connection.json']) assert.equal(JSON.parse(await readFile(join(target, root, '.graphyard', file), 'utf8')).hostId, 'target-host', `${file} names the target host`);
     assert.ok(existsSync(join(target, data, 'PG_VERSION')), 'the database directory is on the target');
+    for (const entry of plan.worktrees) assert.ok(existsSync(join(target, entry, 'gitdir')), `${entry} is re-created on the target`);
+    const commands = docker.commands.map(recorded => [recorded.program, ...recorded.args].join(' '));
+    assert.ok(commands.some(line => line.startsWith('docker buildx build ') && line.includes('--tag graphyard-trial:local ') && line.endsWith(join(target, root))), `the trial image is built from the copied checkout:\n${commands.join('\n')}`);
 
     // The target's control plane has the database contents, every account on the target host, and none refused for it.
     running = await controlPlane(join(target, data), ports.base);

@@ -1,7 +1,7 @@
 {
   "id": "install-move-host",
   "title": "One command moves an install to another host",
-  "description": "Against a temporary install (its database in the install directory, one registry account, a master with an operator-agent and a worker credential), graphyard install move refuses while an item is leased; --plan lists the database, install files and every credential file and changes nothing; applied to a directory standing in for the target host it stops the install and copies the database, files and credentials (0600), sets hostId to the target in connection.json and master.json, and the target's control plane holds the database contents with every registry account on the target host and none refused for it.",
+  "description": "Against a temporary install (its database in the install directory, one registry account, a master with an operator-agent and a worker credential, its checkout a linked worktree holding a CLI release worktree), graphyard install move refuses while an item is leased; --plan lists the database, install files, worktree registrations, the trial image and every credential file and changes nothing; applied to a directory standing in for the target host it stops the install and copies the database, files, the credential directory and credentials (0600), re-creates the .git/worktrees registrations the checkout and its CLI release point at, provisions the merge-trial image from the copied checkout, sets hostId to the target in connection.json and master.json, and the target's control plane holds the database contents with every registry account on the target host and none refused for it.",
   "tags": ["deployment", "registry"],
   "target": "any",
   "required": true,

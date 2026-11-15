@@ -1,23 +1,29 @@
 // `graphyard install move --to HOST` (GY-3318): one command moves an install to another host. It
 // checks through the running control plane that nothing is leased, trialled or queued to merge,
 // re-points the registry accounts placed on this host, stops the install, copies the database, the
-// install files and every credential file master.json names, rewrites hostId on the target and
-// prints what to start there. The copy is plain rsync, outside any coordination transaction.
+// install files, the credential directory (the operator tokens and the loop's state files beside
+// the coordinator token) and every credential file master.json names, re-creates the Git worktree
+// registrations the checkout and its CLI release copies point at, provisions the merge-trial image
+// on the target, rewrites hostId there and prints what to start. The copy is plain rsync, outside
+// any coordination transaction.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { registryCommand } from '../cli/master-registry.js';
-import { daemonStatePath, readDaemonState } from '../daemon/state.js';
+import { readDaemonState } from '../daemon/state.js';
 import { masterConfigSchema } from '../master/profiles.js';
 import type { AgentRegistry } from '../model/registry.js';
+import { publishedSourceImages } from './adapters.js';
 import { installDirectory } from './secrets.js';
 import { installIdFor } from './types.js';
 import { deployUnitOf, readInstallUnits, userUnitDirectory } from './units.js';
 import { localUnit } from './local.js';
+import { provisionTrialImage, trialImagePlan } from './trial-image.js';
+import { commandFailure, shellQuote, type CommandResult, type RunOptions, type Transport } from './transport.js';
 
 export interface MoveApi { read(path: string): Promise<any>; write(path: string, data: unknown): Promise<any> }
 export interface MoveDependencies {
@@ -30,6 +36,8 @@ export interface MoveDependencies {
   stop?: (commands: string[][]) => Promise<void>;
   /** Runs one program; default spawns it and fails on a nonzero exit. */
   run?: (program: string, args: string[]) => Promise<void>;
+  /** Docker for the trial image; default runs it on the target — over SSH, or directly for a stand-in directory. */
+  transport?: Transport;
 }
 
 const run = (program: string, args: string[]) => new Promise<void>((accept, reject) => {
@@ -38,6 +46,16 @@ const run = (program: string, args: string[]) => new Promise<void>((accept, reje
   child.stderr.on('data', chunk => { error += chunk; });
   child.on('error', reject);
   child.on('close', code => code === 0 ? accept() : reject(new Error(`${program} ${args.join(' ')} exited with ${code}: ${error.trim().split('\n').slice(-3).join(' ')}`)));
+});
+
+/** Runs one program and captures its output, as the trial-image provisioning needs. */
+const capture = (program: string, args: string[], options: RunOptions = {}): Promise<CommandResult> => new Promise(accept => {
+  const child = spawn(program, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: options.timeout });
+  let stdout = '', stderr = '';
+  child.stdout?.on('data', chunk => { stdout += chunk; });
+  child.stderr?.on('data', chunk => { stderr += chunk; });
+  child.on('error', error => accept({ stdout, stderr: `${stderr}${stderr ? '\n' : ''}${error.message}`, code: 1 }));
+  child.on('close', code => accept({ stdout, stderr, code: code ?? 1 }));
 });
 
 /** Every `credentialFile` master.json names, wherever it sits (master, operator agent, workers, reviewers, producers, upstream). */
@@ -60,6 +78,48 @@ function masterApi(url: string, token: string): MoveApi {
   return { read: path => call(path), write: (path, data) => call(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(data) }) };
 }
 
+/** A linked worktree's `.git` names the registration Git keeps for it: `gitdir: <gitdir>/worktrees/<name>`. */
+const gitdirPointer = (tree: string): string | null => {
+  try {
+    const match = /^gitdir: (.+)$/m.exec(readFileSync(join(tree, '.git'), 'utf8'));
+    return match ? resolve(match[1].trim()) : null;
+  } catch { return null; }
+};
+/**
+ * The worktree registrations the copy leaves dangling on the target (GY-3317): every copied tree
+ * that is a linked worktree — the checkout itself and each CLI release copy under it — points at a
+ * `<gitdir>/worktrees/<name>` entry that the rsync of the trees does not carry, so the move copies
+ * each entry too. Registrations already inside a carried directory (a checkout that is its own
+ * main repository) went with the copy and are left alone.
+ */
+function worktreeRegistrations(root: string, carried: string[]): string[] {
+  const releases = join(root, '.graphyard', 'cli-releases');
+  const trees = [root, ...(existsSync(releases) ? readdirSync(releases, { withFileTypes: true }) : []).filter(entry => entry.isDirectory()).map(entry => join(releases, entry.name))];
+  return [...new Set(trees.map(gitdirPointer).filter((entry): entry is string => !!entry && existsSync(entry)))]
+    .filter(entry => !carried.some(base => entry === base || entry.startsWith(`${base}/`)));
+}
+
+/** Docker commands of the move run on the target: through SSH for a real move, directly for a stand-in directory. */
+function targetTransport(to: string, into: string | undefined, exec: (program: string, args: string[]) => Promise<void>): Transport {
+  return {
+    description: into ? resolve(into) : `${to} over SSH`,
+    async exec(program, args, options = {}) {
+      const result = into ? await capture(program, args, options) : await capture('ssh', [to, [program, ...args].map(shellQuote).join(' ')], options);
+      if (result.code !== 0 && !options.allowFailure) throw commandFailure(program, result);
+      return result;
+    },
+    async putFile(path, content, mode) {
+      if (into) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await writeFile(path, content, { mode }); return; }
+      const scratch = await mkdtemp(join(tmpdir(), 'graphyard-move-'));
+      try {
+        const staged = join(scratch, basename(path));
+        await writeFile(staged, content, { mode });
+        await exec('rsync', ['-a', '--mkpath', `--chmod=F${mode.toString(8)}`, staged, `${to}:${path}`]);
+      } finally { await rm(scratch, { recursive: true, force: true }); }
+    },
+  };
+}
+
 /** The move of the install whose checkout is ROOT to host TO; `into` writes the target's files under that directory instead of `TO:` over SSH. */
 export async function moveInstall(root: string, options: { to: string; into?: string; plan?: boolean }, dependencies: MoveDependencies = {}) {
   root = resolve(root);
@@ -73,14 +133,21 @@ export async function moveInstall(root: string, options: { to: string; into?: st
   const postgres = join(directory, 'postgres'), local = existsSync(postgres);
   const volume = `graphyard-${installId}_graphyard-data`, volumeArchive = join(directory, 'graphyard-data.tar');
   const database = local ? { kind: 'directory' as const, path: postgres } : { kind: 'volume' as const, volume, archive: volumeArchive };
+  // The coordinator token's directory also holds the operator tokens beside it and the loop's
+  // daemon state and cursor files, none of which master.json names (~/.config/graphyard/masters).
+  const credentialDirectory = dirname(config.credentialFile);
+  const carried = [root, directory, ...(credentialDirectory === directory || credentialDirectory.startsWith(`${directory}/`) ? [] : [credentialDirectory])];
+  const worktrees = worktreeRegistrations(root, carried);
+  const directories = [...carried, ...worktrees];
   let units: { master: string; deploy: string } | null = null;
   try { const recorded = readInstallUnits(root, dependencies.unitDirectory); units = { master: recorded.master, deploy: deployUnitOf(recorded) }; } catch { /* no units recorded: nothing to stop or copy */ }
   const unitDirectory = dependencies.unitDirectory ?? userUnitDirectory();
   const unitNames = [...(units ? [units.master, units.deploy] : []), ...(local ? [localUnit(installId)] : [])];
   const unitFiles = unitNames.map(name => join(unitDirectory, name)).filter(file => existsSync(file));
-  const daemonState = daemonStatePath(config);
-  const files = [root, directory, ...unitFiles, ...(existsSync(daemonState) ? [daemonState] : [])];
+  const files = [...directories, ...unitFiles];
   const credentials = [...credentialFiles(stored)].sort();
+  const published = publishedSourceImages(root)?.trial ?? null;
+  const trialImage = trialImagePlan({ sourceRoot: root }, published);
 
   const api = dependencies.api ?? masterApi(config.url, await readCredentialFile(config.credentialFile));
   const { work } = await api.read('work-snapshot') as { work: { key: string; lease?: { owner: string } | null }[] };
@@ -99,7 +166,8 @@ export async function moveInstall(root: string, options: { to: string; into?: st
     ...(unitNames.length ? ['systemctl --user daemon-reload', `systemctl --user enable --now ${unitNames.join(' ')}`] : []),
     `cd ${root} && graphyard master status`,
   ];
-  const plan = { from, to, target: options.into ? resolve(options.into) : `${to} over SSH`, database, files, credentials, accounts, refusals, stop: stop.map(command => command.join(' ')), start };
+  const plan = { from, to, target: options.into ? resolve(options.into) : `${to} over SSH`, database, files, worktrees, credentials, accounts, refusals,
+    trialImage: { title: trialImage.title, command: trialImage.command }, stop: stop.map(command => command.join(' ')), start };
   if (options.plan) return { ...plan, applied: false, next: refusals.length ? 'Wait until nothing is leased, trialled or queued, then rerun without --plan' : 'Rerun without --plan to move the install' };
   if (refusals.length) throw new Error(`The install cannot move while work is in flight: ${refusals.join('; ')}`);
 
@@ -110,7 +178,8 @@ export async function moveInstall(root: string, options: { to: string; into?: st
   const exec = dependencies.run ?? run;
   const copy = (path: string, extra: string[] = []) => exec('rsync', ['-a', '--mkpath', ...extra, path, destination(path)]);
   if (!local) await exec('docker', ['run', '--rm', '-v', `${volume}:/data`, '-v', `${directory}:/out`, 'postgres:17-alpine', 'tar', '-C', '/data', '-cf', '/out/graphyard-data.tar', '.']);
-  for (const path of files) await (path === root ? copy(`${path}/`, ['--exclude', '/.graphyard/worktrees/']) : path === directory ? copy(`${path}/`) : copy(path));
+  for (const path of directories) await (path === root ? copy(`${path}/`, ['--exclude', '/.graphyard/worktrees/']) : copy(`${path}/`));
+  for (const file of unitFiles) await copy(file);
   for (const file of credentials) await copy(file, ['--chmod=F600']);
   // hostId names the target in both files the target's CLI and loop read.
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-move-'));
@@ -121,5 +190,7 @@ export async function moveInstall(root: string, options: { to: string; into?: st
       await exec('rsync', ['-a', '--mkpath', '--chmod=F600', rewritten, destination(file)]);
     }
   } finally { await rm(scratch, { recursive: true, force: true }); }
+  // The target's completes and merge trials run in the trial image, so the move leaves it provisioned there (GY-3318).
+  await provisionTrialImage({ transport: dependencies.transport ?? targetTransport(to, options.into, exec), sourceRoot: options.into ? destination(root) : root }, published);
   return { ...plan, applied: true, next: `On ${to}, run: ${start.join(' && ')}` };
 }
