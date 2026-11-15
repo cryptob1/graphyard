@@ -25,7 +25,7 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -36,8 +36,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -116,6 +116,14 @@ export const loopStepFailureHeader = 'X-Graphyard-Loop-Step-Failure';
 export const encodeLoopStepFailure = encodeLoopCheckoutTrust;
 /** The standing repeated step-failure line a loop read names, or null when it names none, `off`, or one that does not parse. */
 export const loopStepFailure = loopCheckoutTrust;
+/**
+ * The header on the loop's coordination reads naming the standing fetch refusal (GY-3336): the
+ * remote refuses the base branch's fetch and the loop backs off, URI-encoded, or `off` while none
+ * stands. /api/status serves it as `setup.fetchRefusal` and the Setup checklist shows it as one
+ * item while it stands, quoting the remote's refusal and the fix.
+ */
+export const loopFetchRefusalHeader = 'X-Graphyard-Loop-Fetch-Refusal';
+export const loopFetchRefusal = loopCheckoutTrust;
 
 /**
  * The installation's loop as the control plane knows it: seen reading, else — only while this process

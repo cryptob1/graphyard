@@ -6,7 +6,8 @@ import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
-import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
+import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
+import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
@@ -147,6 +148,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const reworked = reworkAttention(open);
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
+  // GY-3336: the remote refusing the fetch of the base branch — one line quoting the remote's
+  // refusal and the fix — while the loop's backoff stands.
+  const fetchRefused = state?.actions[fetchRefusalKey]?.state === 'failed' ? [{ subject: 'the repository', text: state.actions[fetchRefusalKey]!.detail, next: 'Authorise the merge writer\'s access as the line names; the loop fetches again once its backoff passes and clears this' }] : [];
+  // GY-3336: the master session's launch failing the same way three times — one line while the
+  // loop's backoff stands, instead of a failed pane per cycle.
+  const launchRefused = state?.actions[masterLaunchKey];
+  const launchBackoff = launchRefused?.state === 'failed' && launchRefused.attempts >= masterLaunchBackoffAfter
+    ? [{ subject: 'the master session', text: launchRefused.detail, next: 'Repair the cause the failure names; the loop launches the master again once its backoff passes' }] : [];
   // GY-3293: a cycle step failing the same way ten consecutive cycles — attention naming the step
   // and the error, raised by the loop itself (the same line the dashboard's Setup page carries as
   // its Needs you item), so it reaches the operator even with no master session to prompt.
@@ -154,7 +163,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...stepFailureAttention, ...fetchRefused, ...launchBackoff, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

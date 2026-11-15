@@ -69,6 +69,14 @@ export const standingStepFailures = (state: Pick<DaemonState, 'actions'>) =>
 export const stepTimeoutMs = (config: Pick<MasterConfig, 'run'>) => Math.max(60_000, config.run.intervalSeconds * 2_000);
 /** The key the master session's launch is handed to the launcher under. */
 export const masterLaunchKey = 'master:launch';
+/**
+ * GY-3336: how many consecutive failures of the master session's launch — the same error each
+ * time, the runtime's binary missing or its trust prompt unanswerable — before the loop stops
+ * opening a pane per cycle: the third failure starts the backoff and raises one attention line.
+ */
+export const masterLaunchBackoffAfter = 3;
+/** How long the loop waits before retrying the master launch after its `attempts`-th same-way failure: one minute doubling, capped at fifteen. */
+export const masterLaunchRetryMs = (attempts: number) => Math.min(60_000 * 2 ** Math.max(0, attempts - masterLaunchBackoffAfter), 15 * 60_000);
 
 /**
  * The session launcher beside the cycle (GY-616): a launch creates a Herdr pane and registers a
@@ -824,6 +832,10 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
   // GY-3225: a checkout the folder-trust check refuses holds the master session's launch — one
   // standing attention line (untrustedCheckoutRoles) instead of a pane per refused retry.
   if (cycle.checkoutTrustRefused?.has('master')) return;
+  // GY-3336: a launch that failed the same way three times backs off — no new pane per cycle — and
+  // one standing attention line names the failure and when the retry comes while it stands.
+  const standing = state.actions[launchKey];
+  if (standing?.state === 'failed' && standing.attempts >= masterLaunchBackoffAfter && cycle.now() - Date.parse(standing.at) < masterLaunchRetryMs(standing.attempts)) return;
   if (launcher.busy(launchKey)) return;
   launcher.submit(launchKey, [], async sink => {
     try {
@@ -840,7 +852,17 @@ function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string, 
         lastWake: causes.length ? { at, causes: causes.map(cause => cause.key).slice(0, 20), heartbeat: false } : null };
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) {
-      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
+      // GY-3336: only a run of the same failure counts toward the backoff; a new error starts the
+      // count over. Both detail forms end with the error's own words, whatever prefixes the loop wrote.
+      const reason = normalizeFailureReason(message(error));
+      const prior = state.actions[launchKey];
+      const same = !!reason && prior?.state === 'failed' && normalizeFailureReason(prior.detail).endsWith(reason);
+      const attempts = same ? (prior.attempts ?? 0) + 1 : 1;
+      const retried = new Date(cycle.now() + masterLaunchRetryMs(Math.max(attempts, masterLaunchBackoffAfter))).toISOString();
+      const detail = attempts >= masterLaunchBackoffAfter
+        ? `The master session's launch failed the same way ${attempts} times, so the loop backs off and retries it at ${retried} instead of opening a pane each cycle: ${message(error)}`
+        : `The master session could not be launched; the next cycle tries again: ${message(error)}`;
+      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: detail.slice(0, actionDetailMax), attempts, cycle: state.cycle }, cycle.now(), effects.persist));
     }
   });
 }

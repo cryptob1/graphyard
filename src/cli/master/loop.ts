@@ -6,10 +6,11 @@ import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
 import { readDaemonState } from '../../daemon/state.js';
 import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopCheckoutTrust, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
+import { encodeLoopCheckoutTrust, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopFetchRefusalHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
 import { encodeLoopWhere, loopWhereHeader } from '../../model/where-things-run.js';
 import { loopWhereReport } from '../../master/where.js';
 import { checkoutTrustKey, standingStepFailures, workerGrowthKey } from '../../daemon/cycle.js';
+import { fetchRefusalKey } from '../../daemon/cycle-batch-gate.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
@@ -54,7 +55,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-3277: and names where this install's parts run — its units, containers, port, URL and directories — for the Setup page's panel.
     const where = await loopWhereReport(root, master);
     const stepFailureLine = (failure: Parameters<typeof encodeLoopStepFailure>[0] | undefined) => failure ? encodeLoopStepFailure(failure) : 'off';
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), [loopFetchRefusalHeader]: state.actions[fetchRefusalKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[fetchRefusalKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}) });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
