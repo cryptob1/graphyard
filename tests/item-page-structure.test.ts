@@ -126,7 +126,7 @@ test('unit:item-page-sections — the plate leads with the why sentence, the evi
   // The change: linked and described without pull request wording, inside the collapsed details.
   const change = html.slice(html.indexOf('aria-label="Change"'), html.indexOf('aria-label="Tests"'));
   assert.ok(html.indexOf('aria-label="Change"') > technical, 'the change is technical detail');
-  assert.match(change, /<dt>Link<\/dt><dd><a class="pr-open" href="https:\/\/github\.com\/[^"]+\/pull\/42" target="_blank" rel="noopener noreferrer" aria-label="The change on GitHub for GY-171">Open on GitHub ↗<\/a>/);
+  assert.match(change, /<dt>Link<\/dt><dd><a class="pr-open candidate-link" href="https:\/\/github\.com\/[^"]+\/pull\/42" target="_blank" rel="noopener noreferrer" aria-label="The change on GitHub for GY-171">Open on GitHub ↗<\/a>/);
   assert.match(change, /<code class="sha" title="d{40}">d{8}<\/code>/);
   assert.match(change, /<dt>Changes<\/dt><dd>1 file<\/dd>/);
   assert.match(change, /<dt>Checks<\/dt><dd>test passed · typecheck passed<\/dd>/);

@@ -239,9 +239,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // Work closed without merging has no state: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
-  // The why, in plain words and without the pull request: the plate names none (GY-3392).
+  // The state sentence, in plain words and without the pull request: the plate names none (GY-3392).
   // A parked request says what it is about once; its card below carries the ask (GY-1408), so neither line restates it.
-  const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
+  const stateSentence = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
     : group === 'moving' ? `${steps.label}.`
       // Waiting work is described by what it waits for, never by who last held it.
       : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a builder.' : 'Released for work; waiting for a builder.')
@@ -288,7 +288,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.reworkRequested && item.lastRework?.reason && <p className="notice" data-rework-reason>Sent back because: {item.lastRework.reason}</p>}
       <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label && !waitingOnYou.length ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
-      <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={why}/></p>
+      <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={stateSentence}/></p>
       {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
@@ -320,7 +320,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {left.length > 0 && <section aria-label="What is left"><h3>What is left</h3>{left.map(leftGroup)}</section>}
       <section aria-label="Change"><h3>Change</h3>
         {item.candidate ? <dl className="facts">
-          {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`The change on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
+          {prUrl && <div><dt>Link</dt><dd><a className="pr-open candidate-link" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`The change on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
           <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
           {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
           <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>

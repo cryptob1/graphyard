@@ -51,7 +51,7 @@ img.mark{display:block;width:32px;height:36px;border:0;border-radius:0;object-fi
 .facts{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;margin:0 0 14px;font-size:12px}.facts>div{display:contents}.facts dt{color:var(--text-2)}.facts dd{margin:0;min-width:0}
 .blocking-now{border-left:3px solid var(--needs-you);padding:8px 12px;background:var(--raised);color:var(--needs-you);font-size:13px}
 .steps{list-style:none;padding:0;margin:8px 0;font-size:12px}.steps>li{padding:6px 0;color:var(--text-2)}.steps>li.done{color:var(--text-2)}.steps>li.current{color:var(--needs-you);font-weight:600}.steps li ul{font-weight:400;margin:6px 0 0;padding-left:20px;color:var(--text-2)}.steps li p{font-weight:400;margin:4px 0 0 18px;font-size:12px}
-.later-steps,.more-details,.edit-menu{margin:14px 0;font-size:12px}.later-steps summary,.more-details summary,.edit-menu summary{cursor:pointer;color:var(--up-next);font-weight:600;padding:6px 0}.later-steps ul{padding-left:20px;color:var(--text-2);line-height:1.7}
+.more-details,.edit-menu{margin:14px 0;font-size:12px}.more-details summary,.edit-menu summary{cursor:pointer;color:var(--up-next);font-weight:600;padding:6px 0}
 .edit-menu{border:1px solid var(--border);border-radius:7px;padding:4px 14px 12px}.edit-menu button{margin:8px 8px 0 0;font-size:12px;padding:9px 13px}
 .criterion-text{color:var(--text)}.proof-markers{list-style:none;padding:0;margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11px}.marker-pass{color:var(--text-2)}.marker-fail{color:var(--blocked)}.marker-pending{color:var(--needs-you)}
 abbr.term{text-decoration:underline dotted var(--text-2);text-underline-offset:3px;cursor:help}
@@ -184,7 +184,7 @@ img.mark{width:26px;height:26px}
 .trial-pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--space-3)}
 .trial-shot{margin:0;display:flex;flex-direction:column;gap:var(--space-2)}
 .trial-shot figcaption{font-size:var(--type-small);color:var(--text-2)}
-.panel .later-steps{margin:0}.panel .later-steps .left-step{margin-top:var(--space-3)}
+.panel .left-step{margin-top:var(--space-3)}
 .criterion-full summary{cursor:pointer;list-style:none}.criterion-full summary::-webkit-details-marker{display:none}.criterion-full[open] summary .criterion-text{display:none}.criterion-full p{margin:6px 0 0;font-size:var(--type-small);color:var(--text)}
 .criterion-mark{display:inline-block;width:1.2em;color:var(--needs-you)}.criterion-met .criterion-mark{color:var(--shipped)}
 .activity-list{list-style:none;margin:0;padding:0;font-size:var(--type-body);line-height:1.8;color:var(--text)}

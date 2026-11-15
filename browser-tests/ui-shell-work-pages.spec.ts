@@ -18,7 +18,7 @@ async function seed(url: string) {
   return file(3, 'Export costs as a spreadsheet'); // left in Backlog: its page's primary action is Release to ready
 }
 
-/** The shell as rendered: the title's element and style, the section heading style, the card and table classes, and what the first screen shows. */
+/** The shell as rendered: the title's element and style, the section heading style, the card and table classes, and what the first screen shows. The item page's primary fact sits under its plate heading, in Where it is now (GY-3392). */
 async function shell(page: Page, card: string) {
   return page.evaluate(card => {
     const style = (node: Element | null) => { if (!node) return null; const s = getComputedStyle(node); return { font: s.fontSize, weight: s.fontWeight, spacing: s.letterSpacing, family: s.fontFamily, color: s.color }; };
@@ -30,12 +30,13 @@ async function shell(page: Page, card: string) {
     const sidebar = document.querySelector('.sidebar')!.getBoundingClientRect();
     const available = innerWidth - (sidebar.width < innerWidth ? sidebar.width : 0);
     const cardNode = document.querySelector(card);
+    const fact = heading?.querySelector('.page-fact') ?? document.querySelector('.where-now .page-fact');
     return {
       scrolled: scrollY,
       titleTag: title?.tagName, titleInHeading: !!title?.closest('.page-heading'), title: style(title),
       section: style(cardNode?.querySelector(':scope > h2') ?? null), cardClass: cardNode?.classList.contains('panel') ?? false,
       tables: [...document.querySelectorAll('main table')].map(table => table.className),
-      firstScreen: { title: onFirstScreen(title), fact: onFirstScreen(heading?.querySelector('.page-fact') ?? null), action: onFirstScreen(action) },
+      firstScreen: { title: onFirstScreen(title), fact: onFirstScreen(fact), action: onFirstScreen(action) },
       action: action?.textContent?.trim() ?? null,
       widths: [heading, cardNode].map(node => (box(node)?.width ?? 0) / available),
       sideways: document.documentElement.scrollWidth - innerWidth,
@@ -69,9 +70,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
 
       await page.locator('[data-group-section="backlog"] > summary').click();
       await page.locator(`[data-row="${backlog.key}"]`).click();
-      await expect(page.getByRole('heading', { name: 'Export costs as a spreadsheet', level: 1 })).toBeVisible(settled);
+      // GY-3392: the page leads with the item's why sentence; the pipeline state answers below it.
+      await expect(page.getByRole('heading', { name: 'People finish the task faster.', level: 1 })).toBeVisible(settled);
       await page.evaluate(() => window.scrollTo(0, 0));
-      const item = await shell(page, '[aria-label="What is left"]');
+      const item = await shell(page, 'article.item-page section[aria-label="Activity"]');
 
       for (const [name, read] of [['Work', work], ['item', item]] as const) {
         expect(read.scrolled, `${name} opens at the top`).toBe(0);
