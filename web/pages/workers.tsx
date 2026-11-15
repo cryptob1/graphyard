@@ -135,7 +135,7 @@ export function SessionPanel({ row, item, now, release, token, setSelected }: { 
       <button type="button" className="text-button session-item" title={item?.title ?? shortShas(row.subject)} onClick={() => setSelected(row.workId)}><span className="mono">{row.key}</span>{item ? <> {item.title}</> : null}</button>
       <span className="muted">{doing(row, item, now, release)} · {row.runtime} on {row.host}</span>
     </div>
-    {run ? <LiveRun workId={row.workId} run={run} token={token} live={row.state === 'running' && !row.stale && !row.leftOn}/> : <Attach row={row}/>}
+    {run ? <LiveRun workId={row.workId} run={run} token={token}/> : <Attach row={row}/>}
   </td></tr>;
 }
 
@@ -233,7 +233,8 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
     {view.running.length ? table(view.running, 'Agent sessions') : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
     <ProjectMemorySection memory={status?.projectMemory}/>
-    <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
+    {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
+    <details className="finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? table(view.finished, 'Ended sessions') : <p className="muted">No session has ended yet.</p>}
     </details>
     <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>

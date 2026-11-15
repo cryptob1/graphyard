@@ -7,6 +7,7 @@ import { server } from '../../src/server.js';
 import { bridgeTerminals } from '../../src/master/terminal-bridge.js';
 import { workerRunsDirectory } from '../../src/headless-session.js';
 import { runTranscript } from '../../src/model/sessions.js';
+import { runFiles } from '../../src/runner/pi.js';
 import type { Principal } from '../../src/model.js';
 
 /**
@@ -38,6 +39,7 @@ const record = (item: string, handle: Record<string, unknown>) => engine.execute
 // Six builders, each on its own claimed item with a long title the row truncates.
 const builders = ['ada-worker', 'juno-worker', 'pixel-worker', 'milo-worker', 'nova-worker', 'otto-worker'];
 const items: { id: string; key: string; title: string }[] = [];
+const handles: Record<string, unknown>[] = [];
 for (let index = 0; index < builders.length; index++) {
   const principal = builders[index]!;
   const worker: Principal = { id: principal, role: 'worker', runtime: 'claude' };
@@ -48,8 +50,10 @@ for (let index = 0; index < builders.length; index++) {
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   items.push({ id: item.id, key: item.key, title: item.title });
   const lines = index === 0 ? [...Array(40).keys()].map(n => `line ${n + 1} of the long run`) : [`working on ${item.key}`];
-  await record(item.id, { id: `${principal}:1`, kind: 'implementation', principal, agentName: `work-${principal}`,
-    transcript: runTranscript(openRun(item.key, 1, principal, 'implementation', lines)), subject: `${item.key}: ${item.title}` });
+  const handle = { id: `${principal}:1`, kind: 'implementation', principal, agentName: `work-${principal}`,
+    transcript: runTranscript(openRun(item.key, 1, principal, 'implementation', lines)), subject: `${item.key}: ${item.title}` };
+  handles.push(handle);
+  await record(item.id, handle);
 }
 // A reviewer and a producer on the last item's head, beside its builder, and the master's
 // coordination session: open, headless, nothing to attach to — its row opens the Master page.
@@ -67,4 +71,11 @@ http.listen(0, '127.0.0.1', () => {
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   void bridgeTerminals(url, 'test-coordinator', stop.signal, () => process.send!({ url, first: runs[0]!.id, session: `${builders[0]}:1`, master: 'master-1:1' }), undefined, site);
 });
-process.on('message', () => { stop.abort(); http.close(() => { void store.close().finally(() => process.exit(0)); }); http.closeAllConnections(); });
+// 'end' ends the first builder's run, as its process exiting and the observer seeing it would.
+process.on('message', async message => {
+  if (message === 'end') {
+    writeFileSync(runFiles(runs[0]!.directory).exit, '0');
+    await record(items[0]!.id, { ...handles[0], state: 'finished', observed: 'ended' });
+    process.send!('ended');
+    return;
+  } stop.abort(); http.close(() => { void store.close().finally(() => process.exit(0)); }); http.closeAllConnections(); });

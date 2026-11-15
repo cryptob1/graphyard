@@ -109,7 +109,15 @@ test('e2e:workers-page-live-session — one compact row per agent; opening it sh
     }
     // A card opens the same live view under itself.
     await phone.locator(`tr[data-session="${session}"]`).click();
-    await expect(phone.getByLabel('Session output')).toContainText('a fresh line the run just printed', settled);
+    const phoneOutput = phone.getByLabel('Session output');
+    await expect(phoneOutput).toContainText('a fresh line the run just printed', settled);
+    // When the watched run ends, its view stays open under its row in Ended, saying so, each line once.
+    const ended = once(child, 'message'); child.send('end'); await ended;
+    await expect(phone.locator('.live-run-state')).toHaveText(/the run has ended/, settled);
+    await expect(phone.getByRole('table', { name: 'Ended sessions' }).locator(`tr[data-view-of="${session}"]`)).toBeVisible();
+    const text = await phoneOutput.innerText();
+    expect(text.split('line 1 of the long run').length - 1, 'the log is shown once, not appended again').toBe(1);
+    expect(text.split('a fresh line the run just printed').length - 1, 'the fresh line is shown once').toBe(1);
     await phone.close();
   } finally {
     const ended = once(child, 'exit'); child.send('stop'); await ended;

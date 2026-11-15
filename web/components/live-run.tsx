@@ -4,22 +4,30 @@ type RunLogChunk = { run: { account: string | null; kind: string }; lines: { at:
 
 /**
  * One headless run's output, live (GY-3314): read from the item's run-log endpoint — the same
- * chunked read the item page's worker runs use — polled from its cursor while the run is open, so
- * what the agent prints arrives without a reload. The view follows the tail and lets the reader
+ * chunked read the item page's worker runs use — polled from its cursor until the log says the run
+ * ended, so what the agent prints arrives without a reload. The cursor lives as long as the view of
+ * one run: a session going stale or seen again changes nothing here, and only a new run or token
+ * reads the log afresh, replacing what was shown. One read runs at a time. The view follows the tail and lets the reader
  * scroll the earlier output back; scrolling away from the bottom stops the following until the
  * reader returns to it. It is read-only: nothing here writes to the run, and no control can type.
  */
-export default function LiveRun({ workId, run, token, live }: { workId: string; run: string; token: string; live: boolean }) {
+export default function LiveRun({ workId, run, token }: { workId: string; run: string; token: string }) {
   const [lines, setLines] = useState<RunLogChunk['lines'] | null>(null);
   const [error, setError] = useState('');
-  const [ended, setEnded] = useState(!live);
+  const [ended, setEnded] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const cursor = useRef(0), following = useRef(true), endedRef = useRef(false);
   const view = useRef<HTMLPreElement>(null);
   useEffect(() => {
-    let active = true;
+    let active = true, reading = false;
     cursor.current = 0; following.current = true; endedRef.current = false;
+    setLines(null);
     const read = async () => {
+      if (reading) return;
+      reading = true;
+      try { await readChunks(); } finally { reading = false; }
+    };
+    const readChunks = async () => {
       const fresh: RunLogChunk['lines'] = [];
       // Chunk by chunk to the end, bounded: a view never pulls an unbounded log.
       for (let chunks = 0; chunks < 32; chunks++) {
@@ -38,11 +46,10 @@ export default function LiveRun({ workId, run, token, live }: { workId: string; 
       else setLines(previous => previous ?? []);
     };
     void read();
-    // A run still printing is polled; a run that ended is whole after the first read.
-    if (!live) return () => { active = false; };
+    // Polled until the log says the run ended; after that it is whole.
     const timer = setInterval(() => { if (!endedRef.current) void read(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [workId, run, token, live]);
+  }, [workId, run, token]);
   // Follow the tail unless the reader scrolled the earlier output up.
   useEffect(() => { if (following.current && view.current) view.current.scrollTop = view.current.scrollHeight; }, [lines]);
   const scrolled = () => { const element = view.current!; following.current = element.scrollTop + element.clientHeight >= element.scrollHeight - 24; };
