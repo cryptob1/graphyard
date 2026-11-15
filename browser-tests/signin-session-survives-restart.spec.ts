@@ -3,6 +3,10 @@ import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { signInProcess } from '../tests/helpers/sign-in-process';
 
 test('e2e:signin-session-survives-restart — login link remains signed in after server restart and sign-out revokes it', async ({ page }) => {
+  // The GY-3306 revert restored every sibling's budget but this spec's was lost in it: booting
+  // embedded Postgres plus a forked server — twice, for the restart — takes several times the
+  // 30 s suite default under the full parallel suite on a loaded trial host.
+  test.setTimeout(120_000);
   const database = await signInDatabase();
   let http = await signInProcess(database.url);
   // The dashboard first renders only after the sign-in link is redeemed and the status, work
