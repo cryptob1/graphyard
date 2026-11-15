@@ -9,6 +9,7 @@ import DeliverySlices from '../components/delivery-slices';
 import LiveRun from '../components/live-run';
 import { shortShas } from '../candidate';
 import { Agent } from '../fun';
+import { EmptyState, PageHeader } from '../components/page-layout';
 
 /**
  * The Workers tab (GY-116, one compact line per agent since GY-3314): every agent session across
@@ -182,7 +183,7 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 function ProjectMemorySection({ memory }: { memory?: any }) {
   if (!memory || (!memory.notes?.length && !memory.changes?.length)) return null;
   const count = (memory.notes?.length ?? 0) + (memory.changes?.length ?? 0);
-  return <details className="finished-sessions project-memory" data-project-memory open>
+  return <details className="panel finished-sessions project-memory" data-project-memory open>
     <summary>Shared project memory <span className="count">{count}</span></summary>
     <div className="memory-content">
       {memory.notes?.length ? (
@@ -234,19 +235,16 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
   const cpuFigures = cpu ? [cpu.avg60 === null ? null : `Host CPU pressure ${Math.round(cpu.avg60)}% · steal ${cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}`,
     cpu.celsius == null ? null : `${cpu.avg60 === null ? 'Host CPU ' : ''}temperature ${Math.round(cpu.celsius)}°C`].filter(Boolean).join(' · ') : '';
   return <>
-    <div className="page-heading"><div>
-      <h1>Workers</h1>
-      <p className="summary">{openCount} agent {openCount === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p>
-      {cpuFigures ? <p className="summary host-cpu" data-host-cpu>{cpuFigures}</p> : null}
-    </div></div>
-    {view.running.length ? table(view.running, 'Agent sessions') : <p className="muted">No agent session is open.</p>}
+    <PageHeader title="Workers" fact={`${openCount} agent ${openCount === 1 ? 'session' : 'sessions'} open.${stale ? ` ${stale} not seen recently.` : ''} ${view.finished.length} ended.`}>
+      {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
+    {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
-    <details className="finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
+    <details className="panel finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? table(view.finished, 'Ended sessions') : <p className="muted">No session has ended yet.</p>}
     </details>
-    <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
+    <details className="panel finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
       {view.principals.length ? <Accounts principals={view.principals} setSelected={setSelected}/> : <p className="muted">No agent has worked here yet.</p>}
     </details>
     <DeliverySlices status={status}/>

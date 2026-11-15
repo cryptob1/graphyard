@@ -1,6 +1,7 @@
 import { defaultChildRun } from '../child-runner.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { runWorkerCheck } from '../merge-writer/worker-check.js';
+import { readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
 import type { WorkerVerificationJob } from '../server/worker-verification-queue.js';
 
 /**
@@ -20,6 +21,8 @@ export async function moveBranchToHead(root: string, branch: string, head: strin
 export function workerVerificationPump(root: string, host: () => string,
   mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck, verify = runWorkerVerification) {
   return async () => {
+    // GY-3304: while the host's heavy work is drained, requests stay queued on the control plane until resume.
+    if (readHeavyDrain(verificationSlotsDirectory(base()))) return;
     const jobs: WorkerVerificationJob[] = await mutate('worker-verifications/take', { host: host() });
     for (const job of jobs) {
       void (async () => {

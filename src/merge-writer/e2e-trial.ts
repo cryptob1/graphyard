@@ -13,7 +13,7 @@ import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { type Application } from '../project-applications.js';
 import { isPlaceholderServe, onboardingCaseId, placeholderServeRefusal } from '../model/onboarding-work.js';
-import { commandApplication, serveHead, type CommandApplication, type ServedApplication } from './serve-head.js';
+import { commandApplication, serveHead, ServeCommandError, type CommandApplication, type ServedApplication } from './serve-head.js';
 
 /** How one bound case came out of the trial's run against the served head. */
 export interface TrialE2eCase {
@@ -24,7 +24,7 @@ export interface TrialE2eCase {
   missing?: boolean;
   /** The step that failed, as the runner names it, or why the case could not run. */
   failingStep?: string | null;
-  /** GY-3265: the failing step's last lines of output, secrets redacted; the diagnostics' filing carries them, the trial record does not. */
+  /** GY-3265, GY-3343: the failing step's last lines of output, secrets redacted; a serve command that never served carries them so the refusal names why (the diagnostics' filing carries them the same way; the Graphyard record a trial posts still strips them). */
   output?: string[];
   /** GY-3180: the case's browser or runner could not start, so the head was never judged: the trial ends with no verdict. */
   hostFailure?: boolean;
@@ -52,6 +52,9 @@ export async function keptScreenshot(outcome: Pick<CaseOutcome, 'attemptResults'
 
 /** Why a case cannot run and the trial refuses the head: the declaration to add. */
 export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve": { "command", "url", "readySeconds" } } in graphyard.json, or declare a previewable application in delivery.applications';
+
+/** GY-3343: the file a serve command's whole output is kept in, beside the trial's run. */
+export const serveOutputName = (id: string, sha: string) => `serve-${id}-${sha.slice(0, 12)}.log`;
 
 /** What serves the head while the cases run, and how it is stopped. */
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
@@ -179,7 +182,7 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
     else {
       // The cases' token reaches the head's processes, so a serve command's application can accept it.
       const serving = serveHead(input.worktree, target, { sha: input.mergeSha, env: { ...input.env, GRAPHYARD_E2E_TOKEN: token }, budgetMs: input.budgetMs, wrapper: input.wrapper, log: input.log,
-        scratch: join(input.scratch, `compose-${target.id}`), project: composeProjectName(`trial-e2e-${target.id}`, input.mergeSha) });
+        outputFile: join(input.scratch, serveOutputName(target.id, input.mergeSha)), scratch: join(input.scratch, `compose-${target.id}`), project: composeProjectName(`trial-e2e-${target.id}`, input.mergeSha) });
       // Whatever started is closed whatever happened while it came up: `served` holds it first.
       served = { origin: '', close: serving.close, ended: serving.ended };
       served.origin = await serving.ready;
@@ -239,7 +242,9 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
     const why = error instanceof Error ? error.message : String(error);
     input.log(`the E2E cases could not run against the served head: ${why}`);
     const named = new Set(cases.map(entry => entry.proof));
-    for (const proof of proofs) if (!named.has(proof)) cases.push({ proof, case: proof.slice(4), executed: 0, failed: 1, failingStep: why });
+    // GY-3343: a serve command that never served keeps its last lines in the result; its whole output is in the trial run directory.
+    const serve = error instanceof ServeCommandError ? { failingStep: `${why}; its whole output is in the trial run directory as ${serveOutputName(target.id, input.mergeSha)}`, output: error.output } : { failingStep: why };
+    for (const proof of proofs) if (!named.has(proof)) cases.push({ proof, case: proof.slice(4), executed: 0, failed: 1, ...serve });
     return cases;
   } finally {
     await served?.close().catch(error => input.log(`the served head was not stopped cleanly: ${error instanceof Error ? error.message : String(error)}`));

@@ -6,10 +6,13 @@ import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
-import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
+import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
+import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
 import { cpuWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
+import { heavyDrainLine, readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
+import { worktreeRoot } from '../install/worktree-root.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -69,6 +72,9 @@ export async function npmPublishedVersion(run: ChildRun): Promise<string> {
 }
 
 /** The `master status` page. `run` reads main's tip from the checkout's remote-tracking ref; the deploy unit fetches it. */
+/** GY-3304: the drain record the loop and every session's heavy run read, beside the host's verification slots. */
+export const heavyDrainDirectory = (root: string, master: Pick<MasterConfig, 'repository' | 'run'>) => verificationSlotsDirectory(worktreeRoot(root, master));
+
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, run: ChildRun = defaultChildRun) {
   // An unreachable control plane (GY-2966) is reported, not thrown: since when, the server's last exit and the free disk space, as the loop recorded them.
   let unreachable: string | null = null;
@@ -156,15 +162,32 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       next: 'Fix what the review names (its GRAPHYARD_URL, the Graphyard CLI, or a browser tool on the reviewer\'s PATH), or route product review to a runtime that has them' }];
   });
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
+  // GY-3304: a drain stands until master resume; it names why and who asked.
+  const drain = readHeavyDrain(heavyDrainDirectory(root, master));
+  const drained = drain ? [{ subject: 'heavy work', text: heavyDrainLine(drain), next: 'graphyard master resume once the quiet window is over' }] : [];
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
+  // GY-3336: the remote refusing the fetch of the base branch — one line quoting the remote's
+  // refusal and the fix — while the loop's backoff stands.
+  const fetchRefused = state?.actions[fetchRefusalKey]?.state === 'failed' ? [{ subject: 'the repository', text: state.actions[fetchRefusalKey]!.detail, next: 'Authorise the merge writer\'s access as the line names; the loop fetches again once its backoff passes and clears this' }] : [];
+  // GY-3336: the master session's launch failing the same way three times — one line while the
+  // loop's backoff stands, instead of a failed pane per cycle.
+  const launchRefused = state?.actions[masterLaunchKey];
+  const launchBackoff = launchRefused?.state === 'failed' && launchRefused.attempts >= masterLaunchBackoffAfter
+    ? [{ subject: 'the master session', text: launchRefused.detail, next: 'Repair the cause the failure names; the loop launches the master again once its backoff passes' }] : [];
   // GY-3293: a cycle step failing the same way ten consecutive cycles — attention naming the step
   // and the error, raised by the loop itself (the same line the dashboard's Setup page carries as
   // its Needs you item), so it reaches the operator even with no master session to prompt.
+  // GY-3344: each message a reporter (another install's Master) sent that the Master has not replied to, naming the sender.
+  // GY-3345: one this Master sent a peer is not; a peer's message is answered with master send, which carries the reply back.
+  const messages: { id: number; from: string; to?: string; text: string; at: string; replies: unknown[] }[] = unreachable ? [] : await Promise.resolve().then(() => masterApi('master/messages')).then(body => Array.isArray(body?.messages) ? body.messages : [], () => []);
+  const messageAttention = messages.filter(message => !message.to && !message.replies.length).reverse().map(message => ({ subject: `message ${message.id} from ${message.from}`,
+    text: `${message.from} wrote ${formatAge(message.at, now)} ago: ${message.text}`, next: master.peers?.some(peer => peer.name === message.from)
+      ? `Act on it, then graphyard master send ${message.from} --reply ${message.id} TEXT (or master reply ${message.id} TEXT to dismiss it without sending)` : `Act on it, then graphyard master reply ${message.id} TEXT` }));
   const stepFailureAttention = standingStepFailures(state ?? { actions: {} }).map(detail => ({ subject: 'the master loop', text: detail, next: 'Read the loop journal for the failing step and repair its cause; the alert clears on the first cycle the step succeeds' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -179,6 +202,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       : { on: false },
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
+    heavyDrain: drain,
     // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
     // same figures the Workers page shows, with the hottest CPU sensor (GY-3373) — and the one
     // waiting line while launches are held.

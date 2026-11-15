@@ -4,7 +4,7 @@
  */
 export const providers = ['compose', 'local'] as const;
 export type Provider = (typeof providers)[number];
-export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer';
+export type Role = 'admin' | 'coordinator' | 'worker' | 'reader' | 'producer' | 'reporter';
 /** The session kind a principal declares, as the server's principal schema accepts it. */
 export type DeclaredSessionKind = 'human' | 'ai';
 

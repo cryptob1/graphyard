@@ -1,0 +1,14 @@
+{
+  "id": "loop-unit-runs-current-release",
+  "title": "The loop unit always runs the current release, and master restart goes through it",
+  "description": "A stub systemctl answers for the user manager: master init writes the unit naming the install's one stable launcher, and after an upgrade publishes a new release the unrewritten unit ExecStart resolves to the new release; master restart with the unit present restarts it and starts no detached loop, stops a unit it must pass over before any detached loop, and runs detached only where no systemd user manager answers; doctor names the unit and the fix when its ExecStart resolves to an old release or to another install's, and when a loop is crash-looping on the master lock.",
+  "tags": ["regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "The loop unit runs the current release and master restart goes through it",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-unit-runs-current-release.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

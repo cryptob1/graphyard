@@ -1,0 +1,14 @@
+{
+  "id": "events-retention-bounded",
+  "title": "Events retention is cheap and the events table stays small",
+  "description": "On the temporary Postgres with 200,000 seeded events (each a copy of its real writer's row), one retention pass deletes in batches of at most 2,000 rows, every statement it runs finishes under 2 s (the slowest is printed), /healthz stays healthy and /api/events answers under 2 s throughout, and afterwards no heartbeat or loop-state row past the 14-day window remains while every create row, recent save and recent loop-state row does. The average stored heartbeat and loop-state row stays under 600 and 400 bytes: loop-state rows name the ids that changed, not the records kept in loop_state.",
+  "tags": ["control-plane"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "one bounded retention pass over 200,000 events while the plane keeps answering",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/events-retention-bounded.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

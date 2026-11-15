@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { PageHeader } from '../components/page-layout';
 
 /** The delivery flow, one card per step (GY-3295): a short line each, read left to right and top to bottom. */
 const flow: [string, string][] = [
@@ -28,6 +29,8 @@ const outside: [string, string][] = [
   ['Your browser', 'The dashboard, locally or on your tailnet.'],
 ];
 
+/** The printed guides' Markdown tables use the shared table class. */
+const markdownTables = { table: ({ node, ...props }: any) => <table className="sessions-table" {...props}/> };
 const link = (id: string, text: string) => <a href={`#${id}`}>{text}</a>;
 
 /** The FAQ: one folded answer per question a new engineer asks, each with its own address. */
@@ -70,13 +73,12 @@ export default function GuidePage() {
       .then(([video, guide]) => setMedia({ video: video.default, setup: guide.guideText('setup'), infra: guide.guideText('infra') }));
   }, []);
   return <article className="guide">
-    <div className="page-heading"><h1>How Graphyard works</h1></div>
-    <p className="guide-lead">Graphyard is a coding factory. You say what you want built; AI agents build, check, merge and ship it, with no person in the loop.</p>
+    <PageHeader title="How Graphyard works" fact="Graphyard is a coding factory. You say what you want built; AI agents build, check, merge and ship it, with no person in the loop."/>
     <nav className="guide-contents" aria-label="On this page">
       {link('docs-overview', 'Who decides what')}{link('docs-first-item', 'Your first item')}{link('docs-flow', 'How a change ships')}{link('docs-where', 'Where things run')}{link('docs-faq', 'FAQ')}{link('docs-reference', 'Reference')}
     </nav>
 
-    <section id="docs-overview" aria-labelledby="docs-overview-title">
+    <section id="docs-overview" className="panel" aria-labelledby="docs-overview-title">
       <h2 id="docs-overview-title">Who decides what</h2>
       <ul>
         <li><strong>You, the owner</strong>: goals and priorities, money and accounts, and sign-ins for people.</li>
@@ -87,7 +89,7 @@ export default function GuidePage() {
       <p>Your repository is the <strong>managed app</strong>: the product being built. Graphyard is the factory beside it, with its own server, dashboard and database.</p>
     </section>
 
-    <section id="docs-first-item" aria-labelledby="docs-first-item-title">
+    <section id="docs-first-item" className="panel" aria-labelledby="docs-first-item-title">
       <h2 id="docs-first-item-title">Your first item</h2>
       <ol className="guide-journey">
         <li><strong>Check the host.</strong> Linux with Docker, Node, Git and the GitHub CLI; <code>npx @cryptob1/graphyard doctor</code> names anything missing and its fix.</li>
@@ -100,7 +102,7 @@ export default function GuidePage() {
       </ol>
     </section>
 
-    <section id="docs-flow" aria-labelledby="docs-flow-title">
+    <section id="docs-flow" className="panel" aria-labelledby="docs-flow-title">
       <h2 id="docs-flow-title">How a change ships</h2>
       <figure className="guide-figure" aria-labelledby="docs-flow-title">
         <ol className="guide-flow">{flow.map(([step, line]) => <li key={step} className="guide-card"><strong>{step}</strong><span>{line}</span></li>)}</ol>
@@ -108,7 +110,7 @@ export default function GuidePage() {
       {media && <video className="guide-video" src={media.video} controls preload="metadata" aria-label="Walkthrough video: a goal through review, merge trial, deploy and revert"/>}
     </section>
 
-    <section id="docs-where" aria-labelledby="docs-where-title">
+    <section id="docs-where" className="panel" aria-labelledby="docs-where-title">
       <h2 id="docs-where-title">Where things run</h2>
       <figure className="guide-figure guide-where" aria-labelledby="docs-where-title">
         <div className="guide-panel" role="group" aria-label="Your Linux host">
@@ -123,18 +125,18 @@ export default function GuidePage() {
       <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s own names.</p>
     </section>
 
-    <section id="docs-faq" aria-labelledby="docs-faq-title">
+    <section id="docs-faq" className="panel" aria-labelledby="docs-faq-title">
       <h2 id="docs-faq-title">FAQ</h2>
       {faq.map(([id, question, answer]) => <details key={id} id={id} className="guide-faq"><summary>{question}</summary><p>{answer}</p></details>)}
     </section>
 
-    <section id="docs-reference" aria-labelledby="docs-reference-title">
+    <section id="docs-reference" className="panel" aria-labelledby="docs-reference-title">
       <h2 id="docs-reference-title">Reference</h2>
       <details className="guide-faq"><summary>Common commands</summary>
-        <table className="guide-table"><tbody>{commands.map(([command, what]) => <tr key={command}><td><code>{command}</code></td><td>{what}</td></tr>)}</tbody></table>
+        <table className="sessions-table"><tbody>{commands.map(([command, what]) => <tr key={command}><td><code>{command}</code></td><td>{what}</td></tr>)}</tbody></table>
       </details>
-      <details className="guide-faq"><summary>Setup prerequisites and options</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]}>{media.setup}</ReactMarkdown>}</details>
-      <details className="guide-faq"><summary>Every part, with its log command</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]}>{media.infra}</ReactMarkdown>}</details>
+      <details className="guide-faq"><summary>Setup prerequisites and options</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownTables}>{media.setup}</ReactMarkdown>}</details>
+      <details className="guide-faq"><summary>Every part, with its log command</summary>{media && <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownTables}>{media.infra}</ReactMarkdown>}</details>
     </section>
   </article>;
 }

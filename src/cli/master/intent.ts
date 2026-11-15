@@ -38,6 +38,11 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     if (!args[0] || !/^[0-3]$/.test(args[1] ?? '') || !args.slice(2).join(' ').trim()) throw new Error('Use master priority GY-N 0|1|2|3 REASON');
     return print(await masterMutation(`work/${encodeURIComponent(args[0])}/priority`, { priority: Number(args[1]), reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
   }
+  // GY-3344: the Master answers a message a reporter sent it; the reporter reads it with graphyard messages.
+  if (id === 'reply') {
+    if (!/^\d+$/.test(args[0] ?? '') || !args.slice(1).join(' ').trim()) throw new Error('Use master reply MESSAGE-ID TEXT');
+    return print(await masterMutation(`master/messages/${args[0]}/reply`, { text: args.slice(1).join(' ') }));
+  }
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, forPerson: master.forPerson, token: () => agentToken(root, master, 'operatorAgent') }));
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);

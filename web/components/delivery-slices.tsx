@@ -1,5 +1,6 @@
 import SessionBadge from './session-badge';
 import Term from './term';
+import { PageHeader } from './page-layout';
 
 /**
  * Delivery slices (GY-31), once a slice has a lead: who leads each slice, its engineers, what they
@@ -9,7 +10,7 @@ import Term from './term';
 export default function DeliverySlices({ status }: { status: any }) {
   const slices = (status?.delegation?.slices ?? []).filter((slice: any) => slice.lead);
   if (!slices.length) return null;
-  return <section aria-label="Delivery slices"><h2><Term term="delivery slice">Delivery slices</Term></h2><div className="cards">{status.delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
+  return <section className="panel" aria-label="Delivery slices"><h2><Term term="delivery slice">Delivery slices</Term></h2><div className="cards">{status.delegation.slices.map((slice: any) => <div className="slice-card" key={slice.id}>
     <div className="card-top"><span>{slice.name}</span>{slice.lead ? <SessionBadge kind={slice.lead.sessionKind} suffix="lead"/> : <span className="identity none">No lead assigned</span>}</div>
     <h3>{slice.lead ? slice.lead.displayName ?? slice.lead.id : 'Unassigned'}</h3>
     <p>{(slice.engineers ?? slice.workers).length} active engineers · {slice.workers.length} {slice.workers.length === 1 ? 'claimed item' : 'claimed items'} · {slice.bottlenecks.length} {slice.bottlenecks.length === 1 ? 'bottleneck' : 'bottlenecks'}</p>
@@ -28,10 +29,11 @@ const previewLabel: Record<string, string> = { local: 'Local preview', off: 'No 
 export function DeliveryDefaults({ status }: { status: any }) {
   const project = status?.project;
   const delivery = project?.delivery;
-  return <><header><div className="breadcrumb">Delivery</div></header>
+  const apps = delivery?.applications.length ?? 0;
+  return <><PageHeader title="Delivery" fact={delivery ? `${previewLabel[delivery.previews] ?? delivery.previews} · ${apps ? `${apps} ${apps === 1 ? 'application' : 'applications'} declared` : 'no application declared'} · ${delivery.productionVerification ? 'live release verified' : 'no production verification'}.`
+      : project?.error ? 'The delivery declaration is refused.' : 'Reading the delivery settings…'}/>
     <section className="panel" aria-label="Delivery defaults"><h2>Delivery defaults</h2>
       {project?.error && <p className="error" role="alert">The project's delivery declaration is refused: {project.error}</p>}
-      {!delivery && !project?.error && <p className="muted">Loading the project's delivery settings…</p>}
       {delivery && <dl className="facts">
         <dt>Previews</dt><dd>{previewLabel[delivery.previews] ?? delivery.previews}</dd>
         <dt>Candidate size</dt><dd>{delivery.candidateMaxChanges ? `At most ${delivery.candidateMaxChanges} changes per candidate` : 'Any number of changes'}</dd>

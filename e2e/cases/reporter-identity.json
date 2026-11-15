@@ -1,0 +1,11 @@
+{
+  "id": "reporter-identity",
+  "title": "A reporter identity lets another install's Master file items and messages here, and nothing else",
+  "description": "On the real control plane over a temporary Postgres, a principal of role reporter, holding only GRAPHYARD_URL and a token file in a directory that is not a checkout, creates an item with the CLI and gets its key; the item is unreleased, in backlog and attributed to the reporter. Its message to this install's Master appears once in master status attention naming the sender; after the Master replies, the reporter reads back its item's stage and the reply. The same principal is refused with a plain reason on release, close, requirements, priority, claim, complete, evidence, registry and lesson, and cannot read another item.",
+  "tags": ["api", "work", "identity"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "reporter files, messages, reads back and is refused the rest", "run": "node --import tsx tests/helpers/run-tests.ts tests/reporter-identity.test.ts", "timeoutSeconds": 300 }
+  ]
+}

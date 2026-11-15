@@ -1,7 +1,7 @@
 import { trialCpuMonitor } from './trial-cpu.js';
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
-// verification runs each size themselves alone; the launcher (trial-container.ts) is what they share.
+// verification runs share the launcher (trial-container.ts); trials also divide their CPU lanes.
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { availableParallelism, homedir } from 'node:os';
@@ -11,15 +11,18 @@ import { join } from 'node:path';
 export const defaultDiskFloorGb = 30;
 export const diskFloorBytes = (config: { run: { diskFloorGb?: number } }) => (config.run.diskFloorGb ?? defaultDiskFloorGb) * 1e9;
 
-/** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test concurrency. */
-export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
-/** Normal headroom for the trials' serve/session containers, reduced with the host's usable CPU. */
+/** One lane per allocated core (GY-3352); sharing keeps at least two lanes unless files or memory cap it. */
+export const trialShardLanes = (cores: number) => Math.max(2, Math.floor(cores));
+/** Two lanes per busy trial (GY-3352), bounded by the host and any configured upper bound. */
+export const trialSlotCount = (cores: number, requested: number, affordableFiles: number | null = null) =>
+  Math.max(1, Math.min(requested, Math.floor(cores / 2), affordableFiles === null ? Infinity : Math.floor(affordableFiles / 2)));
+/** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
 const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
-export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, trialShardLanes(cores)) * usable / cores));
+export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
 /** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */
 export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
-/** A start waits while the hottest CPU sensor reads this or more. */
+/** GY-3376: a start waits while a CPU sensor reads 3C under its own critical (else max) temperature; this is the limit for a sensor that reports neither. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
@@ -59,9 +62,19 @@ def read(path):
             return file.read().strip()
     except OSError:
         return ''
+def limit(path):
+    for kind in ('_crit', '_max'):
+        value = read(path.replace('_input', kind))
+        if value.isdigit() and int(value) > 0:
+            return int(value) // 1000 - 3
+    return load['hotCelsius']
 def hottest():
-    readings = [read(path) for path in glob.glob(load['hwmon'] + '/*/temp*_input') if read(os.path.dirname(path) + '/name') in cpu_sensors]
-    return max([int(reading) // 1000 for reading in readings if reading.isdigit()], default=0)
+    # (reading, limit) of the first CPU sensor at or over its own limit, else None.
+    for path in glob.glob(load['hwmon'] + '/*/temp*_input'):
+        reading = read(path)
+        if reading.isdigit() and read(os.path.dirname(path) + '/name') in cpu_sensors and int(reading) // 1000 >= limit(path):
+            return int(reading) // 1000, limit(path)
+    return None
 def free(path):
     try:
         return int(subprocess.check_output(['df', '--output=avail', '-B1', path], stderr=subprocess.DEVNULL).split()[-1])
@@ -71,8 +84,8 @@ def gb(size):
     return '%.1f GB' % (size / 1e9)
 def pressure():
     hot = hottest()
-    if hot >= load['hotCelsius']:
-        return 'a CPU sensor reads ' + str(hot) + 'C, at or over ' + str(load['hotCelsius']) + 'C', False
+    if hot:
+        return 'a CPU sensor reads ' + str(hot[0]) + 'C, at or over its ' + str(hot[1]) + 'C limit', False
     for source, target, readonly in spec['mounts']:
         space = None if readonly else free(source)
         if space is not None and space < load['floorBytes']:

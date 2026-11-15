@@ -1,5 +1,6 @@
 import { masterGuide } from '../master/guide.js';
 import { defineCommands } from './registry.js';
+import { checkoutRoot } from './context.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
@@ -9,6 +10,7 @@ import { registryHelp } from './master-registry.js';
 import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
+import { peerCommand } from './master/peers.js';
 import { fleetCommand } from './master/fleet.js';
 import { emblemCommand } from './master/emblem.js';
 import { confinedMaster, operationsCommand } from './master/operations.js';
@@ -42,6 +44,10 @@ export const masterCommands = defineCommands([
       '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
       '  master status                 One page: the serving commit against main, open items, the',
       '                                merge writer, live sessions and free worker profiles',
+      '  master drain REASON           Let running heavy jobs finish and start no new merge trial, batch',
+      '                                gate, declared check, worker verification or session suite on',
+      '                                this host until master resume (another project\'s quiet window)',
+      '  master resume                 Lift the drain: queued heavy jobs start again with all their gates',
       '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
       '  master lesson add TEXT [--for workers] | remove ID | list',
       '                                Record a durable lesson the master reads on every launch;',
@@ -67,19 +73,24 @@ export const masterCommands = defineCommands([
       '                                Apply intent at once with the master\'s identity',
       '  master hold GY-N REASON       Hold a released item out of dispatch; its worker keeps its lease',
       '  master message GY-N TEXT      Message the item\'s worker; shown and acknowledged at its next sync',
+      '  master reply MESSAGE-ID TEXT  Reply to a message a reporter sent this Master (master status lists them)',
+      '  master peer add NAME URL --token-file PATH | list | remove NAME',
+      '                                Another install this Master messages, with a reporter token it issued',
+      '  master send NAME TEXT         Message a peer install\'s Master; --reply MESSAGE-ID answers one of its messages',
       '  master priority GY-N 0|1|2|3 REASON  Change priority with an audit reason',
       '  master attest GY-N PROOF REASON  Attest a manual: proof on the exact current head',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
       '                                (ISO, at most 30 days away) and clear its blocker; no worker launch',
       ...closeHelp,
-      '  master restart                Restart this host\'s master loop detached',
+      '  master restart                Restart this host\'s master loop through its unit, detached',
+      '                                only where no systemd user manager runs one',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
       ...registryHelp,
     ],
     async run(context) {
       const { id } = context;
-      const root = context.repositoryRoot();
+      const root = await checkoutRoot(context, `graphyard master ${id ?? ''}`.trimEnd());
       // The master's role instructions lead the guide.
       if (id === 'guide') return console.log(`${masterInstructions}\n${masterGuide}`);
       if (id === 'init') return masterInit(context, root);
@@ -87,7 +98,7 @@ export const masterCommands = defineCommands([
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.
-      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, emblemCommand, usageCommand, lessonsCommand, briefCommand, operationsCommand, loopCommand];
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, peerCommand, fleetCommand, emblemCommand, usageCommand, lessonsCommand, briefCommand, operationsCommand, loopCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },

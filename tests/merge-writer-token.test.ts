@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from '../src/install/index.js';
 import { installDirectory } from '../src/install/secrets.js';
 import { writeMergeToken } from '../src/install/merge-token.js';
-import { defaultMergeTokenFile, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
+import { defaultMergeWriterParallel, defaultMergeTokenFile, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { mergeAskpassName, mergeWriterRemote, pushArgs, pushEnvironment } from '../src/merge-writer/executor.js';
 import { trialHiddenPaths } from '../src/merge-writer/trial.js';
 import { credentialMaskFor } from '../src/master/confinement.js';
@@ -46,15 +46,15 @@ test('unit:tests/merge-writer-token.test.ts — the token file is 0600, its askp
 test('unit:tests/merge-writer-token.test.ts — exactly one of deployKeyFile, tokenFile and pushAuth is set', async () => {
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKeyFile: '/k', tokenFile: '/t' }), /one merge-writer credential/);
   assert.throws(() => mergeWriterSettingsSchema.parse({ tokenFile: '/t', pushAuth: 'gh' }), /one merge-writer credential/);
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { tokenFile: '~/t' } }, 'owner-project', '/home/loop'), { tokenFile: '/home/loop/t', parallel: 3 });
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { pushAuth: 'gh' } }, 'owner-project', '/home/loop'), { pushAuth: 'gh', parallel: 3 });
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '/k' } }, 'owner-project', '/home/loop'), { deployKeyFile: '/k', parallel: 3 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { tokenFile: '~/t' } }, 'owner-project', '/home/loop'), { tokenFile: '/home/loop/t', parallel: defaultMergeWriterParallel });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { pushAuth: 'gh' } }, 'owner-project', '/home/loop'), { pushAuth: 'gh', parallel: defaultMergeWriterParallel });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '/k' } }, 'owner-project', '/home/loop'), { deployKeyFile: '/k', parallel: defaultMergeWriterParallel });
   const home = await temporaryDirectory('merge-token-home');
   assert.ok(mergeWriterSettings({}, 'owner-project', home).deployKeyFile, 'no token file: the deploy key');
   const tokenFile = defaultMergeTokenFile('owner-project', home);
   mkdirSync(join(home, '.config', 'graphyard', 'owner-project'), { recursive: true });
   writeFileSync(tokenFile, TOKEN);
-  assert.deepEqual(mergeWriterSettings({}, 'owner-project', home), { tokenFile, parallel: 3 }, 'the install\'s stored token is the credential');
+  assert.deepEqual(mergeWriterSettings({}, 'owner-project', home), { tokenFile, parallel: defaultMergeWriterParallel }, 'the install\'s stored token is the credential');
 });
 
 test('unit:tests/merge-writer-token.test.ts — the token file is hidden from trials and masked from confined sessions', () => {

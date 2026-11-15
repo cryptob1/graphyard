@@ -1,0 +1,22 @@
+{
+  "id": "cross-install-master-messaging",
+  "title": "Masters on different installs message each other through Graphyard, with replies",
+  "description": "Two real control planes on their own temporary Postgres databases, each issuing the other a reporter identity: install A adds B as a peer; A's master send is stored on B, delivered once to B's Master session by B's loop cycle and named once in B's master status attention; B's master send --reply reaches A the same way, both sides show the two messages as one thread in order, and B's attention line is gone. With B stopped, A's send fails at once naming B and stores nothing. A real browser on the served dashboard shows the receiving install's Master page thread — the sender install's name, the message and the reply in order — at 1280 px and 390 px with no horizontal page scroll.",
+  "tags": ["api", "master", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Two installs' Masters message and reply through Graphyard; an unreachable peer fails at once",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/cross-install-master-messaging.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "The receiving install's Master page shows the thread at 1280 px and 390 px",
+      "run": "npm run test:browser -- browser-tests/cross-install-master-messaging.spec.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
