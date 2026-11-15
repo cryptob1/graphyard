@@ -44,6 +44,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
@@ -71,7 +72,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
-  let leftoversSweptAt = 0;
+  let leftoversSweptAt = 0, releasesSweptAt = 0;
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
@@ -223,6 +224,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
     reclaimJobLeftovers: async () => { if (Date.now() - leftoversSweptAt < 3_600_000) return []; leftoversSweptAt = Date.now(); return reclaimJobLeftovers(run); },
     usage: master => collectUsage(root, current(), master),
+    // GY-3334: hourly, like the job leftovers: the walk reads /proc and every release copy.
+    sweepCliReleases: async () => {
+      if (Date.now() - releasesSweptAt < 3_600_000) return { removed: [], bytes: 0, left: [] };
+      releasesSweptAt = Date.now();
+      return sweepCliReleases(installDirectory(installIdFor(current().repository)), run);
+    },
     leftoverDisk: () => leftoverDisk({ trialRuns: trialRunsDirectory(root), worktrees: worktreesDirectory(root), trialCheckouts: trialCheckoutRoots()[0]! }, run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
