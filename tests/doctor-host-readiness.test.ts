@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { setupFromZeroChecks, setupLine } from '../src/setup-from-zero.js';
+import { setupLine } from '../src/setup-from-zero.js';
+import { accountRuntimeChecks, gitRemoteCheck, herdrPluginCheck } from '../src/host-readiness.js';
 import { remoteFetchProbe } from '../src/master/worktrees.js';
 
 // GY-3351: doctor checks, on a temporary home, every registry account's runtime executable and PATH
@@ -22,10 +23,11 @@ async function host(pluginEnabled: boolean, remote: string) {
   return { home, bin, empty, root };
 }
 
-const lines = async (root: string, bin: string, document: any) => (await setupFromZeroChecks({
-  root, env: { PATH: `${bin}:/usr/bin:/bin` }, status: null, environments: root, sandbox: () => null, loopCode: null, systemctl: () => '', platform: 'darwin',
-  registry: { document, host: 'host-a' }, remote: () => remoteFetchProbe(root),
-})).filter(check => ['account-runtime', 'herdr-plugin', 'git-remote'].includes(check.id)).map(setupLine);
+const lines = async (root: string, bin: string, document: any) => {
+  const path = `${bin}:/usr/bin:/bin`;
+  const plugin = await herdrPluginCheck(path);
+  return [...(plugin ? [plugin] : []), ...accountRuntimeChecks(document, 'host-a', path), gitRemoteCheck(await remoteFetchProbe(root))].map(setupLine);
+};
 
 test('e2e:doctor-host-readiness — a missing runtime executable, a missing PATH entry, a missing Herdr plugin and a failing remote each yield one line with the fix', async () => {
   const { home, bin, empty, root } = await host(false, join(await temporaryDirectory('doctor-host-no-remote'), 'absent.git'));

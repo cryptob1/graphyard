@@ -10,6 +10,7 @@ import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setu
 import { readLandlockAbi } from '../landlock.js';
 import { trialTemporaryRootReport, trialTestGateStatus } from '../merge-writer/trial.js';
 import { browserToolStatus } from '../browser-tool.js';
+import { accountRuntimeChecks, gitRemoteCheck, herdrPluginCheck } from '../host-readiness.js';
 import { remoteFetchProbe } from '../master/worktrees.js';
 import { loadStoredMasterConfig } from '../master/config.js';
 
@@ -37,15 +38,19 @@ export async function runDoctor(context: CliContext) {
     proposal: stored?.proposal ?? null,
   });
   // The machine-local prerequisites the README's setup steps depend on (GY-1352), each naming its step.
-  // GY-3351: every registry account on this host, as the loop launches it, and one read of origin.
-  const document = live ? await api('agent-registry/document').catch(() => null) : null;
-  const host = (await loadStoredMasterConfig(root).catch(() => null))?.hostId ?? context.individualHostId();
-  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi,
-    registry: document ? { document, host } : null, remote: () => remoteFetchProbe(root) });
+  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi });
   const browserTool = browserToolStatus();
   checks.push({ id: 'agent-browser', status: browserTool.present ? 'pass' : 'fail',
     detail: browserTool.path ? `product reviews use ${browserTool.path}` : 'agent-browser is missing from the product review PATH',
     step: browserTool.install ?? '' });
+  // GY-3351: every registry account's runtime on this host, the Herdr plugin, and one read of origin.
+  const path = process.env.PATH ?? '';
+  const plugin = await herdrPluginCheck(path);
+  if (plugin) checks.push(plugin);
+  const document = live ? await api('agent-registry/document').catch(() => null) : null;
+  const host = (await loadStoredMasterConfig(root).catch(() => null))?.hostId ?? context.individualHostId();
+  if (document) checks.push(...accountRuntimeChecks(document, host, path));
+  checks.push(gitRemoteCheck(await remoteFetchProbe(root)));
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and
   // an undeployed merge are the next actions; until then the checklist's own gap comes first.

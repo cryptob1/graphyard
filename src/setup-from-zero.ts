@@ -24,7 +24,6 @@ import { landlockRefusal } from './landlock.js';
 import { MINIMUM_NODE_MAJOR } from './install/local.js';
 import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
 import { trialContainerLaunch, trialImage } from './merge-writer/trial-container.js';
-import { accountRuntimeChecks, gitRemoteCheck, herdrPluginCheck, type HostRegistry } from './host-readiness.js';
 
 /**
  * The prerequisites that `graphyard doctor` can check from this machine (GY-1352).
@@ -77,10 +76,6 @@ export interface SetupFromZeroInput {
   nodeVersion?: string;
   /** GY-3339: starts a nested sandbox in a trial container; null when it starts, else its output. Asked only on an AppArmor host. */
   trialSandbox?: () => string | null;
-  /** GY-3351: the agent registry and this host's id; each account on this host gets its runtime lines when given. */
-  registry?: { document: HostRegistry; host: string } | null;
-  /** GY-3351: one read of origin (remoteFetchProbe): null when it answered, else git's failure; the git-remote line appears only when given. */
-  remote?: () => Promise<string | null>;
   /** GY-3337: the loop-lock refusal doctor reads; the record beside the config when unset here. */
   lockRefusal?: LockRefusal | null;
 }
@@ -353,10 +348,6 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   lines.push(await herdrCheck(env.PATH ?? ''));
-  const plugin = await herdrPluginCheck(env.PATH ?? '');
-  if (plugin) lines.push(plugin);
-  if (input.registry) lines.push(...accountRuntimeChecks(input.registry.document, input.registry.host, env.PATH ?? ''));
-  if (input.remote) lines.push(gitRemoteCheck(await input.remote()));
   if (input.landlockAbi) {
     const read = input.landlockAbi; let abi = 0;
     const refusal = landlockRefusal(() => (abi = read()));
