@@ -4,7 +4,7 @@ import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { checkoutRelease, publishedImages } from '../release.js';
 import { localAdapter } from './local.js';
-import { provisionTrialImage, trialImagePlan } from './trial-image.js';
+import { provisionTrialAppArmor, provisionTrialImage, trialAppArmorPlan, trialImagePlan } from './trial-image.js';
 
 export interface AdapterContext {
   provider: Provider;
@@ -326,6 +326,7 @@ export const composeAdapter: ProviderAdapter = {
     const published = publishedSourceImages(ctx.sourceRoot), build = ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ');
     return [
       trialImagePlan(ctx, published?.trial ?? null),
+      ...trialAppArmorPlan(),
       published
         ? { id: 'provider.image', target: 'provider', title: `Pull the Graphyard image ${published.server} as ${ctx.image}, or build it from ${ctx.sourceRoot} when it is not published`, state: 'update', command: `docker image pull ${published.server} && docker tag ${published.server} ${ctx.image} || ${build}` }
         : { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: build },
@@ -335,6 +336,7 @@ export const composeAdapter: ProviderAdapter = {
   async provision(ctx) {
     const published = publishedSourceImages(ctx.sourceRoot);
     await provisionTrialImage(ctx, published?.trial ?? null);
+    await provisionTrialAppArmor(ctx);
     if (published && (await ctx.transport.exec('docker', ['image', 'pull', published.server], { allowFailure: true, timeout: 1_800_000 })).code === 0) {
       // The install keeps naming, pruning and rolling back its own tag; the registry's name is dropped, the layers stay.
       await ctx.transport.exec('docker', ['tag', published.server, ctx.image]);

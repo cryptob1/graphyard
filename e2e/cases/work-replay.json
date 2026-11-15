@@ -1,7 +1,7 @@
 {
   "id": "work-replay",
   "title": "Replay work moving through the yard",
-  "description": "A served dashboard backed by a fixture control plane and real history shows stages at the beginning, middle and end, includes two-day-old movement in the three-day window, plays and pauses, and shows end-state counts with reduced motion or Fun off.",
+  "description": "A served dashboard backed by a fixture control plane and real history shows stages at the beginning, middle and end, includes two-day-old movement in the three-day window, plays and pauses, and shows end-state counts with reduced motion.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

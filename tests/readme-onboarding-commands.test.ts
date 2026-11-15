@@ -8,10 +8,9 @@ const start = readme.split('## Quick start\n')[1]?.split('\n## ')[0] ?? '';
 const cli = new URL('../src/cli.ts', import.meta.url);
 const help = (...args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', cli.pathname, ...args], { encoding: 'utf8' });
 
-test('unit:readme-onboarding-commands — the Quick start is one command, and it uses commands and flags advertised by this CLI', () => {
-  // GY-3214: setup is the one command a fresh host runs; nothing is cloned, installed or put on PATH first.
-  assert.deepEqual([...start.matchAll(/```sh\n([^`]+)```/g)].map(match => match[1]!.trim()), ['npx @cryptob1/graphyard up --repo OWNER/NAME']);
-  assert.doesNotMatch(start, /npm ci|clone Graphyard|on your PATH/);
+test('unit:readme-onboarding-commands — the Quick start uses commands and flags advertised by this CLI', () => {
+  // GY-3323: the checkout path comes first; GY-3214's one npx command follows once published (readme-quick-start-runs).
+  assert.ok(start.includes('npx @cryptob1/graphyard up --repo OWNER/NAME'));
   const up = help('up', '--help');
   const all = help('--help');
   const command = start.match(/graphyard up ([^\n`]+)/)?.[1];

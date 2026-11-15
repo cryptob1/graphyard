@@ -48,25 +48,25 @@ test('unit:tests/leftovers-report.test.ts — the day tallies what each sweep re
   const state = emptyDaemonState(config);
   await runCycle(config, state, effects, Date.now, undefined, log);
   assert.equal(state.leftovers.day, '2030-04-01');
-  assert.deepEqual(state.leftovers.counts, { processes: 2, trialContainers: 1, reclaimed: 3, panes: 1, worktrees: 1 });
+  assert.deepEqual(state.leftovers.counts, { processes: 2, trialContainers: 1, reclaimed: 3, panes: 1, worktrees: 1, networks: 0, cliReleases: 0, cliReleaseBytes: 0 });
   assert.equal(state.leftovers.report, null, 'a fresh cursor marks its day and reports nothing');
   tick(60_000);
   await runCycle(config, state, effects, Date.now, undefined, log);
   // The pane and worktree were already handled; processes and trial containers are stopped again.
-  assert.deepEqual(state.leftovers.counts, { processes: 4, trialContainers: 2, reclaimed: 3, panes: 1, worktrees: 1 });
+  assert.deepEqual(state.leftovers.counts, { processes: 4, trialContainers: 2, reclaimed: 3, panes: 1, worktrees: 1, networks: 0, cliReleases: 0, cliReleaseBytes: 0 });
   assert.equal(lines.filter(line => line.includes('leftovers report')).length, 0);
   tick(10 * 60_000);
   await runCycle(config, state, effects, Date.now, undefined, log);
-  assert.deepEqual(state.leftovers.report, { day: '2030-04-01', counts: { processes: 6, trialContainers: 3, reclaimed: 3, panes: 1, worktrees: 1 }, disk, at: '2030-04-02T00:01:00.000Z' });
+  assert.deepEqual(state.leftovers.report, { day: '2030-04-01', counts: { processes: 6, trialContainers: 3, reclaimed: 3, panes: 1, worktrees: 1, networks: 0, cliReleases: 0, cliReleaseBytes: 0 }, disk, at: '2030-04-02T00:01:00.000Z' });
   assert.equal(state.leftovers.day, '2030-04-02');
-  assert.deepEqual(state.leftovers.counts, { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 });
+  assert.deepEqual(state.leftovers.counts, { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0, networks: 0, cliReleases: 0, cliReleaseBytes: 0 });
   tick(60_000);
   await runCycle(config, state, effects, Date.now, undefined, log);
   const reports = lines.filter(line => line.includes('leftovers report'));
   assert.equal(reports.length, 1, 'one journal line carries the report, exactly once');
   assert.deepEqual(JSON.parse(reports[0]!.slice(reports[0]!.indexOf('{'))), state.leftovers.report);
   assert.equal((state.leftovers.report as { day: string } | null)?.day, '2030-04-01', 'the report stands until the next day ends');
-  assert.deepEqual(state.leftovers.counts, { processes: 2, trialContainers: 1, reclaimed: 0, panes: 0, worktrees: 0 });
+  assert.deepEqual(state.leftovers.counts, { processes: 2, trialContainers: 1, reclaimed: 0, panes: 0, worktrees: 0, networks: 0, cliReleases: 0, cliReleaseBytes: 0 });
 });
 
 test('unit:tests/leftovers-report.test.ts — disk readings are recursive bytes of each directory and docker system df sizes of graphyard-trial images and the build cache, null when unreadable', async () => {
@@ -112,7 +112,7 @@ test('unit:tests/leftovers-report.test.ts — master status shows the latest rep
   await runCycle(status, state, effects, Date.now, undefined, log);
   const report = (await masterStatusReport(root, status, unreachable, async () => '')).leftovers;
   assert.equal(report?.day, '2030-04-01');
-  assert.deepEqual(report?.counts, { processes: 4, trialContainers: 2, reclaimed: 3, panes: 1, worktrees: 1 });
+  assert.deepEqual(report?.counts, { processes: 4, trialContainers: 2, reclaimed: 3, panes: 1, worktrees: 1, networks: 0, cliReleases: 0, cliReleaseBytes: 0 });
   assert.equal(report?.at, '2030-04-02T00:10:00.000Z');
   assert.deepEqual(Object.keys(report!.disk), ['trialRuns', 'worktrees', 'trialCheckouts', 'trialImages', 'buildCache']);
   assert.ok(report!.disk.trialRuns! >= 2048, String(report!.disk.trialRuns));

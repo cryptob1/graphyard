@@ -8,7 +8,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { carryUndeclared } from './state.js';
 import { actionLine, acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 export { actionLine } from './state.js';
-import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopHeartbeat, loopLiveness, markedEffects, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan, type LoopHeartbeat } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from '../install/loop-unit.js';
@@ -181,14 +181,28 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   for (const signal of signals) host.on(signal, stop);
   const unlisten = () => { for (const signal of signals) host.off(signal, stop); };
   try {
-    const effects = boundedPersist(namedEffects(raw));
+    // GY-3341: the supervisor's watchdog is fed on progress — every effect that answers, every step
+    // that settles, every cycle that completes — so a slow but progressing cycle outlasts its
+    // watchdog window without being killed, and only a loop that makes no progress at all goes silent.
+    const watchdog = watchdogPlan(options.environment ?? process.env, interval());
+    if (watchdog.refusal) log(`[graphyard-master] ${watchdog.refusal}`);
+    const supervisorNotify = async (beat: 'ready' | 'alive') => { if (!watchdog.supervised) return; try { await raw.notify?.(beat); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } };
+    // Progress, once the loop has told its supervisor it is ready (systemd takes WATCHDOG=1 only
+    // after READY=1): recorded on the lock — persisted at each step's settle, so `master status`
+    // reads it — and told to the supervisor as a keep-alive.
+    let progress: () => void = () => {};
+    let heartbeat: LoopHeartbeat | undefined;
+    const effects = boundedPersist(namedEffects(markedEffects(raw, () => progress())));
     acquireDaemonLock(state, options.identity, now(), interval());
     state.release = carryUndeclared(state.release, raw.loadedRelease ?? null);
     await effects.persist(state);
-    const watchdog = watchdogPlan(options.environment ?? process.env, interval());
-    if (watchdog.refusal) log(`[graphyard-master] ${watchdog.refusal}`);
-    const notify = async (beat: 'ready' | 'alive') => { if (!watchdog.supervised) return; try { await effects.notify?.(beat); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } };
-    await notify('ready');
+    await supervisorNotify('ready');
+    heartbeat = loopHeartbeat(() => void supervisorNotify('alive'), watchdog.windowMs, { log });
+    progress = () => {
+      if (state.lock) state.lock = { ...state.lock, heartbeatAt: new Date(now()).toISOString() };
+      heartbeat!.mark();
+    };
+    progress();
     await adoptHeadlessRuns(effects, log);
     const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
       const entry = noteUnhandled(state, error, origin, now());
@@ -231,7 +245,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         try {
           if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
           phase = 'cycle';
-          const result = await runCycle(config, state, effects, now, launcher, log);
+          const result = await runCycle(config, state, effects, now, launcher, log, progress);
           await noteControlPlane(state, null, now(), effects.composeServer, log);
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
@@ -246,7 +260,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           await noteControlPlane(state, { ...failure, answered: typeof (error as { status?: unknown })?.status === 'number' }, now(), effects.composeServer, log);
           if (state.controlPlane) await effects.persist(state).catch(() => {});
         }
-        await notify('alive');
+        // The cycle ended, failed or completed: either way the loop is alive and moving (GY-3341).
+        progress();
         const deploy = options.root && !stopping ? (options.deployUnit ?? readDeployUnitProcess)() : null;
         const deployCause = deploy && deployRestartCause(options.root!, deploy, serving => state.actions[`deploy-unit-restart:${serving}`]?.state === 'done');
         if (deploy && deployCause) {
@@ -285,6 +300,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
       await launcher.idle();
       for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
+      heartbeat?.stop();
       unlisten();
       host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
       log(`[graphyard-master] stopping: left ${detachRuns()} headless run(s) running, detached, for the next loop to adopt`);

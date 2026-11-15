@@ -38,7 +38,7 @@ async function machine(label: string) {
   };
   const launch = (load: { cap?: number; order?: number } = {}) => {
     const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon } });
+      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
     const child = spawn(program!, [...words, 'sleep', '600'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
     let said = '';
     child.stderr!.on('data', chunk => { said += chunk; });
@@ -77,7 +77,7 @@ test(`${proof} — a CPU sensor at 95C holds a start until it cools; a hot non-C
     await host.sensor('nvme', 99_000);
     await host.sensor('coretemp', 95_000);
     const held = host.launch();
-    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C or more'), 'the start says the CPU is hot');
+    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C, at or over 95C'), 'the start says the CPU is hot');
     assert.equal(await host.started(), 0, 'nothing starts while the CPU is at 95C');
     await host.sensor('coretemp', 94_000);
     await host.until(async () => await host.started() === 1, 'the start goes once the sensor clears');
@@ -183,4 +183,25 @@ test(`${proof} — a trial's compose-network container counts under the same loa
   const network = spec(boundary('container:abc'));
   assert.equal(network.network, 'container:abc');
   assert.deepEqual(network.load, load);
+});
+
+
+test('e2e:trial-overload-timeout-retrial — a reduced cap counts running containers in higher-numbered slots', async () => {
+  const host = await machine('load-cap-reduced');
+  try {
+    const first = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 1, 'first started');
+    const second = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 2, 'second started');
+    const third = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 3, 'third started');
+    host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 4, 'fourth started');
+    await host.end(first.child); await host.end(second.child);
+    const waiting = host.launch({ cap: 2 });
+    await host.until(() => waiting.said().includes('cap of 2 trial containers'), 'the lower cap counts the two still running');
+    assert.equal(await host.started(), 4, 'free low slots do not grant extra capacity');
+    await host.end(third.child);
+    await host.until(async () => await host.started() === 5, 'a start fits once the running count falls below two');
+  } finally { await host.close(); }
 });

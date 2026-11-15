@@ -1,11 +1,12 @@
+import { trialCpuMonitor, trialOverloadFault, type TrialCpuReading } from './trial-cpu.js';
 // Concern: the merge writer's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statfsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
+import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
 import { affectedPackages, buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
@@ -23,8 +24,9 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
-import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
-import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
+import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
+import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
+import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -228,8 +230,25 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync) =>
-  roots.find(root => exists(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync,
+  volatile: (path: string) => string | null = volatileFilesystem) =>
+  roots.find(root => exists(root) && !volatile(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
+/**
+ * GY-3332: the temporary root trials use on this host, for doctor: a memory-backed root is passed over
+ * (a trial's scratch would compete with workers for RAM, and a tmpfs smaller than the disk floor
+ * would hold every start forever), and the chosen one fails when its volume is too small ever to keep the floor free.
+ */
+export function trialTemporaryRootReport(root: string, { roots = trialTemporaryRoots(), exists = existsSync, volatile = volatileFilesystem,
+  size = path => { try { const info = statfsSync(path); return Number(info.blocks) * Number(info.bsize); } catch { return null; } } }: {
+  roots?: readonly string[]; exists?: (path: string) => boolean; volatile?: (path: string) => string | null; size?: (path: string) => number | null } = {}) {
+  const floor = diskFloorBytes({ run: (() => { try { return JSON.parse(readFileSync(join(root, '.graphyard', 'master.json'), 'utf8')).run ?? {}; } catch { return {}; } })() });
+  const chosen = trialTemporaryRoot('the trial session directory', roots, exists, volatile);
+  const skipped = roots.filter(path => exists(path) && volatile(path)).map(path => `${path} is a ${volatile(path)}, so trials do not use it`);
+  const bytes = exists(chosen) ? size(chosen) : null;
+  const fits = bytes === null || bytes >= floor;
+  return { path: chosen, skipped, status: fits ? 'pass' as const : 'fail' as const,
+    ...(fits ? {} : { fix: `${chosen} holds ${(bytes! / 1e9).toFixed(1)} GB in all, under the ${(floor / 1e9).toFixed(1)} GB disk floor, so trials there would wait forever: move ${durableTemporaryRoot()} to a larger durable volume, or lower run.diskFloorGb in .graphyard/master.json` }) };
+}
 /**
  * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
  * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
@@ -510,14 +529,46 @@ export class TrialReadOnlyError extends Error {
  */
 export const trialHostFaultPrefix = 'Trial-host fault';
 export class TrialHostFaultError extends Error {
-  constructor(readonly phase: string, readonly host: string) {
-    super(`${trialHostFaultPrefix}: the trial's ${phase} step could not fetch from ${host}, rerun included; this is the trial host's network, not the head's`);
+  /** `host` the fetch failed from; null for a launcher that gave up waiting on the host's load (GY-3332), whose `reading` names why. */
+  constructor(readonly phase: string, readonly host: string | null, reading?: string) {
+    super(host ? `${trialHostFaultPrefix}: the trial's ${phase} step could not fetch from ${host}, rerun included; this is the trial host's network, not the head's`
+      : `${trialHostFaultPrefix}: the trial's ${phase} step could not start its container: ${reading}; this is the trial host's load, not the head's`);
     this.name = 'TrialHostFaultError';
   }
 }
+/**
+ * GY-3339: a trial step whose nested sandbox AppArmor denied — the trial host's AppArmor, not the
+ * head's. Like a fetch fault it reaches no verdict, is not retried, and the loop reports it upstream.
+ */
+export const trialSandboxFaultLead = `${trialHostFaultPrefix}: a nested sandbox could not start in the trial container`;
+export class TrialSandboxFaultError extends Error {
+  constructor(readonly phase: string, readonly line: string) {
+    super(`${trialSandboxFaultLead} during the ${phase} step (${line}); this is the trial host's AppArmor, not the head's: ${trialAppArmorFix}`);
+    this.name = 'TrialSandboxFaultError';
+  }
+}
+/** Whether an error, or the message it crossed a process boundary as, is a nested-sandbox trial-host fault. */
+export const trialSandboxFault = (error: unknown) => error instanceof Error && error.message.startsWith(trialSandboxFaultLead);
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/**
+ * GY-3316: Docker refused the trial's network because leaked networks spent its address pools — the
+ * trial host, not the head. Like a fetch fault it reaches no verdict and is not retried: the head
+ * stays queued and the loop reports the fault, naming how many preview networks the host holds.
+ */
+export class TrialNetworkPoolError extends Error {
+  constructor(readonly networks: number | null) {
+    super(`${trialHostFaultPrefix}: Docker could not create the trial's network (${addressPoolsSpent}); ${networks ?? 'an unknown number of'} Graphyard preview networks are on the trial host`);
+    this.name = 'TrialNetworkPoolError';
+  }
+}
+/** The preview-network count a network-pool fault names, from the error or the message it crossed a process boundary as; null for any other error. */
+export const trialNetworkPoolFault = (error: unknown): string | null =>
+  new RegExp(`^${trialHostFaultPrefix}: Docker could not create the trial's network .*; (.+) Graphyard preview networks`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/** `error` as a network-pool fault when Docker refused a network for spent address pools, else null. */
+const networkPoolFault = async (error: unknown, env: Record<string, string>) => (error instanceof Error ? error.message : String(error)).includes(addressPoolsSpent)
+  ? new TrialNetworkPoolError((error as { previewNetworks?: number | null }).previewNetworks ?? await previewNetworkCount(dockerEnvironment(env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }))) : null;
 const localHost = /^(?:localhost|127\.[\d.]+|0\.0\.0\.0|::1|\[::1\])$/i;
 /**
  * The external host a failed step's output shows a network fetch failure to, or null: a resolver or
@@ -657,6 +708,8 @@ export interface RunTrialInput {
   groupSize?: number;
   /** The host's CPUs the shards are sized to (GY-1832); `availableParallelism()` unless a test names a count. */
   cores?: number;
+  /** Host counters around each step; tests can supply /proc/stat readings. */
+  cpu?: () => TrialCpuReading | null;
   /** The host's memory the shards' files in flight are bounded by (GY-1832); `readHostMemory` unless a test names a reading. */
   memory?: () => Promise<HostMemoryReading | null>;
   /** How many times a trial that reached no verdict is tried again; `trialRetries` unless a test names another. */
@@ -688,6 +741,8 @@ export interface RunTrialInput {
    * candidate is run against the base tip and keeps its before screenshot.
    */
   e2eFrom?: string;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it; such a case runs against that URL. */
+  e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -904,7 +959,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || trialOverloadFault(error) || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -996,7 +1051,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       log.push(`the base tip's ${trialDockerfile} does not build and this head replaces it: the trial runs in this head's image`);
       chosen = own;
     }
-    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge'), chosen ?? undefined);
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), chosen ?? undefined);
     wrapper = boundary();
   };
   const log: string[] = [];
@@ -1039,15 +1094,23 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const child = async (phase: TrialTimeoutError['phase'], command: string, args: string[], options: { env?: NodeJS.ProcessEnv; entries?: string[] } = {}): Promise<Ended> => {
     const entries = options.entries ?? log;
     let out: string;
+    const cpuBefore = cpu.sample();
     if (input.signal?.aborted) throw input.signal.reason;
     try { out = String(await run(command, args, { cwd: worktree, env: (options.env ?? env) as Record<string, string>, timeoutMs: remaining(), ...(wrapper ? { wrapper } : {}), ...(input.signal ? { signal: input.signal } : {}) })); }
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
+      cpu.finish(stepLabel, cpuBefore, !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out), line => entries.push(line));
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      // GY-3332: a container start that gave up waiting on host pressure is no verdict on the head.
+      const fault = trialContainerFault(out);
+      if (fault) throw new TrialHostFaultError(phase, null, fault.slice(fault.indexOf(': ') + 2));
+      const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
+      if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;
     }
+    cpu.finish(stepLabel, cpuBefore, now() >= deadline, line => entries.push(line));
     entries.push(`$ ${command} ${args.join(' ')}\n${out}`);
     if (now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
     return { ok: true, out, status: 0, signal: null, cause: undefined };
@@ -1201,6 +1264,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let started: CheckServices;
     try { started = await (input.services ?? startCheckServices)({ checkout: worktree, services: check.services, scratch: temporary!, env, key: input.key ?? 'trial', timeoutMs: remaining() }); }
     catch (error) {
+      const fault = await networkPoolFault(error, env);
+      if (fault) throw fault;
       const why = `the services of check ${check.check} did not start: ${error instanceof Error ? error.message : String(error)}`;
       log.push(why);
       return { services: why };
@@ -1226,11 +1291,14 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       enterStep('tests: e2e');
       const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
       if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
+      const cpuBefore = cpu.sample();
       const ran = await containerTrialE2e({
-        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-      });
+      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
+      const failures = ran.filter(entry => entry.failed);
+      cpu.finish(stepLabel, cpuBefore, failures.length > 0 && failures.every(entry => /timed?\s*out|did not answer .* within \d+s|timeout/i.test(entry.failingStep ?? '')), line => log.push(line));
       // The laid-over files served the cases only: the checks that follow test the base tip as it is.
       if (added.length) await run('git', ['-C', worktree, 'rm', '-q', '-f', '--', ...added], { timeoutMs: remaining() });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.
@@ -1309,7 +1377,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // including a partial-record run that finished some files and printed a named failure for another
     // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
     // shard named one: a named failing test is the merge's, and stays a failing verdict.
-    const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
+    const cores = cpu.cores();
     const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
     const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
@@ -1375,7 +1443,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const { paths: _paths, ...only } = named;
       return await runChecks([only]);
     } catch (error) {
-      if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
+      if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError || trialOverloadFault(error)) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
       // A checkout git could not make, a list or link the host could not write: the host's failure, not the merge's (GY-1832), so no verdict.
@@ -1383,8 +1451,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     }
   };
   // The checkout goes whatever the trial did; a removal that fails is reported, never swallowed.
+  const cpu = trialCpuMonitor(input.cpu, input.cores);
   let settled: { verdict: TrialRun } | { error: unknown };
-  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; } finally { closeStep(); }
+  try { settled = { verdict: await trial() }; } catch (error) { settled = { error }; } finally { cpu.close(); closeStep(); }
   // An attempt that reached no verdict keeps the phase it ended in and every phase's time (GY-1832).
   if ('error' in settled && typeof settled.error === 'object' && settled.error) attemptContext.set(settled.error, { phase, phases: enter() });
   // A root that was clean when chosen and is not now may have shadowed the trial's lookups: whatever it answered is no verdict.

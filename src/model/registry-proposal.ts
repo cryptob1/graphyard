@@ -9,7 +9,10 @@ import type { FleetRoleName, FleetRuntime } from './registry.js';
 export const proposedRuntimes: readonly FleetRuntime[] = [
   { name: 'claude', description: 'Claude Code', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR', modelFlag: '--model', login: 'CLAUDE_CONFIG_DIR={home} claude, then /login', loginFile: '.credentials.json', toolsFlag: '--allowedTools' } },
   { name: 'codex', description: 'OpenAI Codex CLI', launch: { kind: 'codex', args: [], environment: {}, homeVariable: 'CODEX_HOME', modelFlag: '--model', login: 'CODEX_HOME={home} codex login', loginFile: 'auth.json' } },
-  { name: 'cursor', description: 'Cursor agent CLI', launch: { kind: 'cursor', args: [], environment: {}, homeVariable: 'CURSOR_CONFIG_DIR', modelFlag: '--model', login: 'CURSOR_CONFIG_DIR={home} agent login', loginFile: 'cli-config.json' } },
+  // GY-3329: cursor-agent reads its sign-in from `$XDG_CONFIG_HOME/cursor/auth.json`, never from
+  // CURSOR_CONFIG_DIR, so its login runs with XDG_CONFIG_HOME on the account home too and the
+  // sign-in's arrival there is what completes the login.
+  { name: 'cursor', description: 'Cursor agent CLI', launch: { kind: 'cursor', args: [], environment: {}, homeVariable: 'CURSOR_CONFIG_DIR', modelFlag: '--model', login: 'CURSOR_CONFIG_DIR={home} XDG_CONFIG_HOME={home} agent login', loginFile: 'cursor/auth.json' } },
   { name: 'opencode', description: 'OpenCode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: null, login: 'XDG_DATA_HOME={home} opencode auth login', loginFile: 'opencode/auth.json' } },
   // Pi keeps each environment (`pi-a`, `pi-b`) under PI_CODING_AGENT_DIR and reads its provider key
   // from that home at run time; a registry account of it runs in a terminal session or on the headless runner.
