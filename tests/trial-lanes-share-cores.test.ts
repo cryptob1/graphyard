@@ -12,7 +12,7 @@ import * as trialLoad from '../src/merge-writer/trial-load.js';
 const { trialSlotCount } = trialLoad;
 import * as writer from '../src/daemon/cycle-merge-writer.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-const { busyTrialSlots, mergeWriterIdle, mergeWriterStep, trialShareAllowance } = writer;
+const { mergeWriterIdle, mergeWriterStep, trialShareAllowance } = writer;
 import { bootstrapGate, gateRecordPath, writeGateRecord } from '../src/batch-gate.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -69,6 +69,7 @@ test('e2e:trial-lanes-share-cores — real trial sizing shares 24 cores and reta
 });
 
 for (const withGate of [false, true]) test(`e2e:trial-lanes-share-cores — ${withGate ? 'with gate' : 'ample host'}: six Postgres queued candidates obey host slots and record real trial lanes; a batch gate occupies a slot`, { timeout: 120_000 }, async () => {
+  const { busyTrialSlots } = await import('../src/daemon/trial-slots.js');
   const store = await withDatabase('trial-lanes-share-cores'); await store.init();
   const fixture = await repository(), state = emptyDaemonState(config);
   const now = Date.now(), at = new Date(now).toISOString();

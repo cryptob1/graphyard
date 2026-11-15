@@ -4,7 +4,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
-import { batchGateBusySlots } from './cycle-batch-gate.js';
+import { batchGateBusySlots, busyTrialSlots } from './trial-slots.js';
 import { trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import type { ChildRun } from '../child-runner.js';
@@ -193,9 +193,6 @@ interface RunningTrial { heads: { key: string; head: string }[]; controller: Abo
 /** GY-3182: every flight running beside the cycle; a free slot starts another without waiting for the rest to settle. */
 const flights = new WeakMap<DaemonState, Set<Flight>>();
 const flightsOf = (state: DaemonState) => { let live = flights.get(state); if (!live) flights.set(state, live = new Set()); return live; };
-/** Busy merge/revert heads plus the gate and its diagnostics, including the starting trial. */
-export const busyTrialSlots = (state: DaemonState) =>
-  (state.mergeWriter.inFlights?.length ?? (state.mergeWriter.inFlight ? 1 : 0)) + batchGateBusySlots(state);
 const flying = (state: DaemonState) => (flights.get(state)?.size ?? 0) > 0;
 /** GY-3182: a serve revert waits for the flights running to settle, and while it waits no new flight starts. */
 const revertWaiting = new WeakSet<DaemonState>();

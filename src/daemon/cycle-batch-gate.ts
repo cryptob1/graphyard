@@ -10,10 +10,11 @@ import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, tri
 import { gateTrialKey, trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import { availableParallelism } from 'node:os';
-import { busyTrialSlots, type MergeWriterReads } from './cycle-merge-writer.js';
+import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
+import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
@@ -180,8 +181,6 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
-export const batchGateBusySlots = (state: object) => Number(!!flights.get(state)?.gate) + Number(!!flights.get(state)?.diagnostics);
 const stopped = new WeakSet<object>();
 /** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
 export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
