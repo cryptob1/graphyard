@@ -25,7 +25,9 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu }
+/** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu and the steal percent from /proc/stat. */
+export interface LoopCpu { avg60: number; steal: number | null }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -36,8 +38,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; cpu?: LoopCpu | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -124,6 +126,28 @@ export const loopStepFailure = loopCheckoutTrust;
  */
 export const loopFetchRefusalHeader = 'X-Graphyard-Loop-Fetch-Refusal';
 export const loopFetchRefusal = loopCheckoutTrust;
+
+/**
+ * The header on the loop's coordination reads naming the host's CPU (GY-3348): 'some avg60' from
+ * /proc/pressure/cpu and the steal percent from /proc/stat, URI-encoded JSON, or `off` where the
+ * pressure file is missing (not Linux). The control plane keeps the latest beside the loop's
+ * presence for /api/status, so the Workers page shows the two figures beside the sessions they
+ * explain — a host at 94 percent pressure is why nothing new is launching.
+ */
+export const loopCpuHeader = 'X-Graphyard-Loop-Cpu';
+export const encodeLoopCpu = (cpu: LoopCpu) => encodeURIComponent(JSON.stringify(cpu));
+/** The host CPU a loop read names, or null when it names none, `off`, or one that does not parse. */
+export function loopCpu(header: string | string[] | undefined): LoopCpu | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value.length > 500) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown };
+    const avg60 = Number(parsed.avg60), steal = parsed.steal === null || parsed.steal === undefined ? null : Number(parsed.steal);
+    return Number.isFinite(avg60) && avg60 >= 0 && avg60 <= 100
+      ? { avg60, steal: steal !== null && Number.isFinite(steal) && steal >= 0 ? Math.min(steal, 100) : null }
+      : null;
+  } catch { return null; }
+}
 
 /**
  * The installation's loop as the control plane knows it: seen reading, else — only while this process

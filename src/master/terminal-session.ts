@@ -44,14 +44,24 @@ export function terminalStream(request: TerminalRequest, handlers: TerminalHandl
           emit({ type: 'scrollback', data: history });
           const { spawn } = await import('node:child_process');
           if (stopped) return;
-          const call = herdrInvocation(herdrTerminalArgs(request.control, pane, request.cols, request.rows), instance);
-          const opened = child = spawn(call.command, call.args, { env: call.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
-          let stderr = '';
-          opened.stderr!.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-300); });
-          opened.on('error', error => { if (child === opened && !stopped) handlers.exit(error.message); });
-          opened.on('exit', code => { if (child === opened && !stopped) handlers.exit(stderr.trim() || `herdr exited with code ${code}`); });
-          createInterface({ input: opened.stdout! }).on('line', line => { if (child === opened && !stopped) handlers.line(line); });
-          for (const command of pendingInput.splice(0)) opened.stdin!.write(`${JSON.stringify(command)}\n`);
+          // A read-only viewer still sizes the pane so the agent draws at the page's width (GY-3313): it
+          // controls the pane when no other stream does (the server never forwards its input), and watches
+          // when one does. The operator's stream takes over.
+          const open = (mode: 'takeover' | 'control' | 'observe') => {
+            const call = herdrInvocation(herdrTerminalArgs(mode, pane!, request.cols, request.rows), instance);
+            const opened = child = spawn(call.command, call.args, { env: call.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+            let stderr = '';
+            opened.stderr!.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-300); });
+            opened.on('error', error => { if (child === opened && !stopped) handlers.exit(error.message); });
+            opened.on('exit', code => { if (child === opened && !stopped) handlers.exit(stderr.trim() || `herdr exited with code ${code}`); });
+            createInterface({ input: opened.stdout! }).on('line', line => {
+              if (child !== opened || stopped) return;
+              if (mode === 'control' && line.includes('already has an attached client')) { child = undefined; opened.stdin?.end(); return open('observe'); }
+              handlers.line(line);
+            });
+            for (const command of pendingInput.splice(0)) opened.stdin!.write(`${JSON.stringify(command)}\n`);
+          };
+          open(request.control ? 'takeover' : 'control');
         }
       }
     } catch (error) { if (!stopped) handlers.exit(error instanceof ChildProcessError && (error.cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'herdr is not installed where the server runs, and no host supervisor is connected to stream it' : error instanceof Error ? error.message : String(error)); }

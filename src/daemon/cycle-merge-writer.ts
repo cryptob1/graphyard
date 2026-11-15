@@ -25,6 +25,7 @@ import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-fai
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
+import { cpuPressureHeld } from './cpu-pressure.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -583,8 +584,9 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   if (revertState.held?.serve === serve) return false;
   if (flying(state)) { revertWaiting.add(state); return false; }
   // GY-3122: below the disk floor no new trial starts — the revert flight's trial is the loop's
-  // most disk-heavy one — and an owed retrial keeps its place until room returns.
-  if (state.diskHeadroom) return false;
+  // most disk-heavy one — and an owed retrial keeps its place until room returns. GY-3348: a
+  // saturated CPU holds it just the same.
+  if (state.diskHeadroom || cpuPressureHeld(state)) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
   // An owed retrial waits the base-failure hold like a base-held head (executor.ts GY-1834)
@@ -1032,8 +1034,9 @@ export async function mergeWriterStep(cycle: Cycle) {
       // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
       const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === runnable[0]?.id) ?? null;
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
-      // GY-3122: below the disk floor no new trial starts; one in flight settles.
-      const due = next?.candidate && !state.diskHeadroom && (reads.admit?.() ?? true) ? next : null;
+      // GY-3122: below the disk floor no new trial starts; one in flight settles. GY-3348: so does
+      // a saturated CPU — the trial would time out into rework, the episode this reading answers.
+      const due = next?.candidate && !state.diskHeadroom && !cpuPressureHeld(state) && (reads.admit?.() ?? true) ? next : null;
       // GY-3120: the first `parallel` heads in queue order are trialled at once, each alone on the current tip; the flight is named by the first.
       // A yielding head (GY-2079) merges alone, so its timeouts are its own.
       const yields = (work: Work) => yielding.has(`${work.key}:${work.candidate?.sha.toLowerCase()}`);
