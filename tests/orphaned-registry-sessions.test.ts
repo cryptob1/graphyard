@@ -334,6 +334,7 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
       let tick: Awaited<ReturnType<typeof runDispatchTick>> | undefined;
       const failures: string[] = [];
       await runCycle(config, state, { ...real, masterSession: undefined, mergeWriter: null,
+        cpuPressure: async () => null, // the host's CPU is not under test (GY-3373): a hot host's hold line is no failure here
         dispatchTick: async snapshot => { tick = await real.dispatchTick!(snapshot) as typeof tick; },
       }, () => clock, undefined, line => failures.push(line));
       assert.deepEqual(failures, []);

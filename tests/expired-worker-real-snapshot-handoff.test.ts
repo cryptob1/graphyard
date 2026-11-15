@@ -115,6 +115,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
   // the coordination read is the server's own coordination view, and the dispatch is the next
   // worker's claim whose returned document builds the handoff, exactly as the dispatcher's
   // preparation does (GY-2956: the prompt reads the claimed document, not the older snapshot).
+  // The host's CPU reads nothing (GY-3373): a hot trial host must not hold this redispatch.
   const closed: string[] = [], launched: { key: string; epoch: number; handoff: string }[] = [];
   const snapshot = async () => {
     const response = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(coordinator)}`, 'X-Graphyard-View': 'coordination' } });
@@ -140,6 +141,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
       return { pane: null, epoch: next.epoch };
     },
     dispatchTick: async () => {}, sweepCheckouts: async () => {}, masterSession: undefined, mergeWriter: null,
+    cpuPressure: async () => null,
   };
   const state: DaemonState = emptyDaemonState(config);
 

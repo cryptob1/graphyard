@@ -204,9 +204,10 @@ export const daemonStateSchema = z.object({
   /**
    * GY-3348: the host's CPU as the last cycle read it — 'some avg60' from /proc/pressure/cpu, the
    * steal percent since the cycle before, and the /proc/stat counters the next reading measures
-   * from. While avg60 is over the ceiling (daemon/cpu-pressure.ts) no new worker, reviewer or trial
-   * starts. Null where the pressure file is missing (not Linux), so nothing is held and the pages
-   * show no figures.
+   * from. GY-3373: the hottest CPU sensor rides the same record. While avg60 is over the ceiling
+   * or the sensor at the launch limit (daemon/cpu-pressure.ts) no new worker, reviewer or trial
+   * starts. Null where neither is readable (not Linux), so nothing is held and the pages show no
+   * figures.
    */
   cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
     stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null),

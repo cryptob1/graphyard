@@ -36,7 +36,7 @@ export async function hottestCpuCelsius(hwmon = '/sys/class/hwmon'): Promise<num
   const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');
   const readings = (await Promise.all((await readdir(hwmon).catch(() => [] as string[])).map(async sensor => {
     if (!cpuSensorNames.includes(await read(join(hwmon, sensor, 'name')))) return [];
-    const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => /^temp\d+_input$/.test(name));
+    const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => name.startsWith('temp') && name.endsWith('_input'));
     return (await Promise.all(inputs.map(name => read(join(hwmon, sensor, name))))).filter(text => /^\d+$/.test(text)).map(text => Math.floor(Number(text) / 1000));
   }))).flat();
   return readings.length ? Math.max(...readings) : null;
