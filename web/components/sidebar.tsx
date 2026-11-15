@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { sections, viewFor, type primaryEntry } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
-import { setFun, useFun } from '../fun';
 import { setTheme, useTheme } from '../theme';
 
 type Entry = NonNullable<ReturnType<typeof primaryEntry>>;
@@ -29,7 +28,6 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
   const go = (id: string) => { setSelected(null); setView(id); setOpen(false); };
   const current = viewFor(view).section;
   const actor = status?.actor;
-  const fun = useFun();
   const theme = useTheme();
   return <aside className={open ? 'sidebar open' : 'sidebar'}><div className="sidebar-inner">
     <div className="sidebar-head">
@@ -45,7 +43,7 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
     <div className="sidebar-bottom">
       <span className="connection"><span className={`dot ${connected ? 'live' : ''}`}/>{connected ? `Live · updated ${lastUpdated ?? 'now'}` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</span>
       {actor && <span className="signed-in" title="Signed in as">{actor.id} · {actor.role}</span>}
-      <span className="sidebar-links"><button type="button" className="text-button" aria-label="Delivery" title="Delivery defaults" onClick={() => go('delivery')}><NavIcon name="delivery"/></button><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><button type="button" className="text-button theme-button" aria-label={`Switch theme to ${theme === 'night' ? 'Daylight' : 'Night Yard'}`} title="Night Yard is the default look; Daylight is the light one" onClick={() => setTheme(theme === 'night' ? 'daylight' : 'night')}>{theme === 'night' ? '☀ Daylight' : '☾ Night Yard'}</button><button type="button" className="text-button" aria-pressed={fun} title="Agent names, a line about building, and the Night Yard motion and celebrations" onClick={() => setFun(!fun)}>Fun</button><button type="button" className="text-button" onClick={signOut}>{dashboard.token ? 'Sign out' : 'Sign in'}</button></span>
+      <span className="sidebar-links"><button type="button" className="text-button" aria-label="Delivery" title="Delivery defaults" onClick={() => go('delivery')}><NavIcon name="delivery"/></button><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><button type="button" className="text-button theme-button" aria-label={`Switch theme to ${theme === 'night' ? 'Daylight' : 'Night Yard'}`} title="Night Yard is the default look; Daylight is the light one" onClick={() => setTheme(theme === 'night' ? 'daylight' : 'night')}>{theme === 'night' ? '☀ Daylight' : '☾ Night Yard'}</button><button type="button" className="text-button" onClick={signOut}>{dashboard.token ? 'Sign out' : 'Sign in'}</button></span>
     </div>
   </div></aside>;
 }

@@ -4,18 +4,18 @@ import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
-import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, type Release } from '../release.js';
+import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, releaseIdentityPath, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
-import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
+import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts, type StoppedPlanePorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
 import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
@@ -423,6 +423,24 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
   }
 }
 
+/** GY-3347: the compose stack's stopped-plane recovery, as the watch drives it: one real /healthz
+ * probe of the server, `docker compose up -d` in the install's compose directory — the stack's own
+ * image is the commit the record serves — and the down-then-up recreate after a failure meaning
+ * the old Docker network id is gone. The database volume is never touched.
+ */
+export function stoppedPlanePorts(url: string, composeDirectory: string, run: ChildRun): StoppedPlanePorts {
+  const compose = async (args: string[], timeoutMs = 300_000) => String(await run('docker', ['compose', ...args], { cwd: composeDirectory, timeoutMs }));
+  return {
+    health: async () => {
+      const response = await fetch(`${url.replace(/\/+$/, '')}/healthz`, { signal: AbortSignal.timeout(10_000) });
+      const body = await response.json().catch(() => null) as { ok?: unknown } | null;
+      if (!response.ok || body?.ok !== true) throw new Error(`/healthz ${response.ok ? 'reports the server unhealthy' : `answered HTTP ${response.status}`}`);
+    },
+    up: async () => (await compose(['up', '-d'])).trim(),
+    recreate: async () => `${await compose(['down'])}${await compose(['up', '-d'])}`.trim(),
+  };
+}
+
 /** The deploy watch builds isolated per-commit CLI artifacts, redeploys through the existing install
  * plan/apply flow, and publishes the launcher pointer only after strict health passes. Published
  * artifacts (including the legacy build checkout) are retained for in-flight CLI/server processes.
@@ -472,6 +490,9 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
     schema: async commit => revisionSchema(cliRoot, commit),
     database: () => databaseSchemaOf(url),
+    // GY-3347: the compose stack this install's control plane runs as, brought back up when its
+    // health fails and the pass has nothing to deploy.
+    ...(install.provider === 'compose' ? { stoppedPlane: stoppedPlanePorts(url, join(directory, 'compose'), input.run) } : {}),
   };
 }
 
@@ -487,6 +508,7 @@ export const upgradeCommands = defineCommands([{
     '                                generated files, and check /healthz, to Graphyard\'s main tip',
     '                                (or the dated release VERSION);',
     '                                --plan prints the steps only; a failure names its step and rollback',
+    '  upgrade --repair-identity     Restore a moved CLI release’s local commit stamp.',
     '  upgrade --watch [--once] [--checkout DIR]',
     '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
     '                                each new base tip, build, restart, check /healthz, and roll back',
@@ -503,6 +525,17 @@ export const upgradeCommands = defineCommands([{
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
+    if (flags.includes('--repair-identity')) {
+      const root = resolve(installationRoot), commit = basename(root);
+      if (basename(dirname(root)) !== 'cli-releases' || !/^[0-9a-f]{40}$/i.test(commit)) {
+        throw new Error('Identity repair requires an installed cli-releases/<commit> directory; run graphyard upgrade from a readable Graphyard checkout');
+      }
+      const file = releaseIdentityPath(root);
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, commit.toLowerCase());
+      console.log(`Restored CLI release identity: ${file}`);
+      return;
+    }
     if (flags.includes('--watch')) {
       const repoRoot = context.repositoryRoot();
       await migrateHerdr(repoRoot);

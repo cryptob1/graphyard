@@ -15,7 +15,7 @@ import type { DaemonEffects } from './effects.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import { workerVerificationPrefix, workerVerificationRoot, workerVerificationTimeoutMs } from '../merge-writer/worker-verification.js';
 import { trialBuilder } from '../install/trial-image.js';
-import { sweepComposePreviews } from '../compose-preview.js';
+import { composeProjectPrefix, sweepComposePreviews } from '../compose-preview.js';
 import { trialShareAllowance } from './cycle-merge-writer.js';
 import { defaultMergeWriterParallel } from '../master/merge-writer-settings.js';
 
@@ -72,11 +72,14 @@ export async function graphyardVolumes(paths: string[]): Promise<Volume[]> {
   return volumes;
 }
 
+/** The networks of trials' Compose projects (check services and E2E groups): `graphyard-preview-trial-…`. */
+const trialNetworkPrefix = `${composeProjectPrefix}trial-`;
+
 /**
  * GY-3188: what every ended job leaves, taken back by the loop's sweep: trial temporary, home and
  * checkout directories and worker verification allocations whose owner marker names a process
  * that is gone (a running one's are kept), stopped `graphyard-trial-` containers with their
- * anonymous volumes, preview and trial Compose projects whose owner is gone, and Graphyard's own
+ * anonymous volumes, preview and trial Compose projects whose owner is gone, trial networks no container uses, and Graphyard's own
  * trial-image build cache older than a day (its dedicated builder only). What was removed, by name.
  */
 export async function reclaimJobLeftovers(run: ChildRun, roots: { temporary?: string[]; checkouts?: string[]; verification?: string[] } = {}): Promise<string[]> {
@@ -92,6 +95,15 @@ export async function reclaimJobLeftovers(run: ChildRun, roots: { temporary?: st
     }
   } catch { /* no Docker on this host: nothing of Graphyard's there to reclaim */ }
   try { removed.push(...(await sweepComposePreviews({ docker: async (args, options) => String(await run('docker', args, options)) })).map(project => `compose project ${project}`)); } catch { /* the next sweep */ }
+  // GY-3316: a trial network no container uses any more — its trial ended without removing it — is removed, so leaks never spend Docker's address pools.
+  try {
+    const names = (await docker(['network', 'ls', '--filter', `name=${trialNetworkPrefix}`, '--format', '{{.Name}}'])).filter(name => name.startsWith(trialNetworkPrefix));
+    for (const line of names.length ? await docker(['network', 'inspect', '--format', '{{.Name}}\t{{len .Containers}}', ...names]) : []) {
+      const [name = '', containers] = line.split('\t');
+      if (containers !== '0' || !name.startsWith(trialNetworkPrefix)) continue;
+      try { await docker(['network', 'rm', name]); removed.push(`network ${name}`); } catch { /* attached since, or already gone */ }
+    }
+  } catch { /* no Docker on this host */ }
   try {
     const pruned = (await docker(['buildx', 'prune', '--builder', trialBuilder, '--filter', 'until=24h', '--force'])).find(line => /^Total:/i.test(line));
     if (pruned && !/:\s*0\s*B?$/i.test(pruned)) removed.push(`trial build cache older than a day (${pruned.replace(/^Total:\s*/i, '')})`);

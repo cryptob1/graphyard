@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { DaemonState, LeftoverCounts, LeftoverDisk } from './state.js';
 
-export const emptyLeftoverCounts = (): LeftoverCounts => ({ processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 });
+export const emptyLeftoverCounts = (): LeftoverCounts => ({ processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0, networks: 0 });
 
 /** Adds what one sweep stopped or removed to the day's counts. */
 export function tallyLeftovers(state: DaemonState, kind: keyof LeftoverCounts, count = 1) {
