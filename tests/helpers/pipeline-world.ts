@@ -25,6 +25,7 @@ import { server } from '../../src/server.js';
 import { Store } from '../../src/store.js';
 import { withDatabase } from './postgres.js';
 import { temporaryDirectory } from './temp-dirs.js';
+import { freePort } from '../../src/cli/test-isolation.js';
 
 export const repository = 'owner/pipeline';
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -42,11 +43,11 @@ export const commandCase = (id: string, run: string) => JSON.stringify({ id, tit
  * trials never contend for one), a TAP proof file, the bound `fixture` case and the `smoke` case
  * (gate.core), which fails once a commit holds the file `broken`; `extra` adds files.
  */
-function fixtureFiles(extra: Record<string, string>): Record<string, string> {
+function fixtureFiles(extra: Record<string, string>, port: number): Record<string, string> {
   return {
     'package.json': JSON.stringify({ name: 'pipeline-fixture', scripts: { build: 'node --eval 0', test: 'node --test --test-reporter=tap proof.cjs' } }),
     'proof.cjs': `const { test } = require('node:test');\ntest('unit:declared', () => {});\n`,
-    'graphyard.json': JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking', serve: { command: `node -e "require('http').createServer((q,r)=>r.end(require('fs').readFileSync('site/index.html'))).listen(43917,'127.0.0.1')"`, url: 'http://127.0.0.1:43917/', readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }], gate: { core: ['smoke'] }, delivery: { mode: 'local', applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }] } }),
+    'graphyard.json': JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking', serve: { command: `node -e "require('http').createServer((q,r)=>r.end(require('fs').readFileSync('site/index.html'))).listen(${port},'127.0.0.1')"`, url: `http://127.0.0.1:${port}/`, readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }], gate: { core: ['smoke'] }, delivery: { mode: 'local', cases: Object.fromEntries(['fixture', 'smoke', ...Object.keys(extra).filter(file => file.startsWith('e2e/cases/')).map(file => file.slice('e2e/cases/'.length, -5))].map(id => [id, 'site'])), applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }] } }),
     'site/index.html': '<!doctype html><title>fixture</title>\n',
     'e2e/cases/fixture.json': commandCase('fixture', 'node --eval 0'),
     'e2e/cases/smoke.json': commandCase('smoke', `node --eval "process.exit(require('fs').existsSync('broken') ? 1 : 0)"`),
@@ -92,7 +93,7 @@ export async function pipelineWorld(label: string, extra: Record<string, string>
   execFileSync('git', ['clone', '-q', origin, checkout], { stdio: 'ignore' });
   git(checkout, 'config', 'user.name', 'Fixture'); git(checkout, 'config', 'user.email', 'fixture@example.com');
   await writeFile(join(checkout, '.gitignore'), '.graphyard/\n');
-  await writeFiles(checkout, fixtureFiles(extra));
+  await writeFiles(checkout, fixtureFiles(extra, await freePort()));
   git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'base'); git(checkout, 'push', '-q', 'origin', 'main');
   const base = git(origin, 'rev-parse', 'main');
   git(checkout, 'checkout', '-q', '--detach');

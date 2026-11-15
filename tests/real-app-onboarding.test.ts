@@ -54,3 +54,24 @@ test('integration:real-app-onboarding — main declares a real app and feature m
     assert.deepEqual(requests, ['/healthz', '/feature']);
   } finally { await new Promise<void>(resolve => app.close(() => resolve())); }
 });
+
+test('integration:real-app-onboarding — Graphyard maps its real dashboard and APIs', async () => {
+  const { withDatabase } = await import('./helpers/postgres.js');
+  const { Engine } = await import('../src/engine.js');
+  const { server } = await import('../src/server.js');
+  const { featureMapCase } = await import('../src/app-feature-check.js');
+  const { runCases } = await import('../src/e2e/runner.js');
+  const { parseRepositoryConfig } = await import('../src/model-boundary/documentation.js');
+  const { readFile } = await import('node:fs/promises');
+  assert.ok(parseRepositoryConfig(await readFile('graphyard.json', 'utf8')).featureMap?.length, 'the installer accepts the feature map');
+  const store = await withDatabase('real_app_graphyard');
+  await store.init();
+  const http = server(new Engine(store, 120, 'cryptob1/graphyard'), [{ id: 'fixture-operator', role: 'admin', sessionKind: 'human', token: 'fixture-operator-token' }]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  try {
+    const mapped = featureMapCase(process.cwd());
+    assert.ok(mapped.definition.steps.length >= 5, 'the product features are mapped, not just readiness');
+    const report = await runCases([mapped], { root: process.cwd(), url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: 'fixture-operator-token' });
+    assert.equal(report.cases[0].verdict, 'passed', JSON.stringify(report.cases[0].failingStep));
+  } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
+});

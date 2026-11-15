@@ -108,7 +108,7 @@ function accountItems(status: any | null): SetupItem[] {
   if (fetchRefusal) items.push({ id: 'fetch-refusal', title: 'Authorise the repository for the merge writer', done: false, human: true, line: fetchRefusal, action: { kind: 'wait', label: 'Check again' } });
   const app = status?.serving?.onboarding;
   items.push({ id: 'real-app', title: app?.onboarded ? 'Project onboarded' : 'Project not onboarded', done: app?.onboarded === true, human: false,
-    line: app?.onboarded ? 'The real application and its feature map are declared.' : `Master fault: ${status?.repository ?? 'This project'} — ${app?.fault ?? 'Waiting for the real application and feature map on main.'}`, action: null });
+    line: app?.onboarded ? 'The real application and its feature map are declared.' : `Master fault: ${status?.repository ?? 'This project'} — ${app?.fault?.startsWith('Placeholder serve:') ? 'Placeholder serve runs none of the application.' : 'The real application serve or feature map is missing.'} The Master will arrange the fix.`, action: null });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',

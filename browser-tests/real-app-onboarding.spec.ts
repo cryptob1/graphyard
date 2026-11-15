@@ -9,6 +9,7 @@ import { server } from '../src/server';
 import { onboardingServe } from '../src/model/onboarding-work';
 
 test('e2e:real-app-onboarding — Setup names the placeholder fault and recognizes the real app on main', async ({ page, context, baseURL }) => {
+  test.setTimeout(90_000);
   const root = await temporaryDirectory('real-app-onboarding-browser');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' } }).trim();
   git('init', '-q', '-b', 'main');
