@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { cancelScratchRuns, piRunner, processIdentity, readRunMeta, runAlive } from './pi.js';
@@ -60,6 +61,12 @@ export const registeredRun = (name: string) => { prune(); return runs.get(name) 
 export const liveRun = (name: string) => { const entry = registeredRun(name); return entry && entry.endedAt === null ? entry : null; };
 /** Every registered run this process is watching that has not ended. */
 export const liveRuns = () => { prune(); return [...runs.values()].filter(entry => entry.endedAt === null); };
+/**
+ * GY-3401: the test parallelism a session launched now gets — the host's cores shared among the
+ * sessions already running, never below two. Exported to the session as VITEST_MAX_WORKERS, which
+ * `npm test` (tests/helpers/run-tests.ts) takes as its --test-concurrency.
+ */
+export const sessionTestBudget = (cores = availableParallelism(), running = liveRuns().length) => Math.max(2, Math.floor(cores / Math.max(1, running)));
 
 /** Test seam: forget every run. */
 export function clearRuns() { for (const entry of runs.values()) if (entry.endedAt === null) entry.run.cancel('the registry was cleared'); runs.clear(); watched.clear(); }
