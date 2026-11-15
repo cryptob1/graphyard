@@ -65,6 +65,9 @@ for (const data of ['seeded', 'empty'] as const) for (const viewport of [{ width
         if (!response) return route.abort('connectionrefused').catch(() => {});
         await route.fulfill({ response }).catch(() => {});
       });
+      // The Master terminal's socket would reach the static preview server, not the plane: it is answered here and
+      // left silent, as the terminal's own cases (master-page-terminal, master-terminal-fills-page) drive the real one.
+      await page.routeWebSocket(/\/api\/terminal/, () => {});
       await page.setViewportSize(viewport);
       const { code } = await (await fetch(`${http.url}/api/sign-in-links`, { method: 'POST', headers: operator })).json() as { code: string };
       await page.goto('/#sign-in=' + code);
