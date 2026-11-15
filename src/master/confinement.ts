@@ -203,11 +203,26 @@ const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (is
  * runs from another install's directory keeps only its checkout, read-only.
  */
 export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
-  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined });
+  // GY-3385: a peer's configDirectory keeps that install masked — only its peers directory is bound in, never its credentials.
+  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined, peers: (config as { peers?: { tokenFile: string }[] }).peers?.map(peer => peer.tokenFile) });
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
   return { configHome: '', extraPaths: [], own: [], cli: keptCli(config, operatorHome),
     hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
+}
+
+/** GY-3385: the `peers` directory of an install's config directory — where the reporter tokens exchanged between two installs on a host live, each placed by the issuing side. */
+export const peerTokenDirectory = (installDirectory: string) => join(installDirectory, 'peers');
+/**
+ * GY-3385: the peer exchange a master session's launch prepares — this install's own `peers`
+ * directory created (so a peer's session can place a token in it), and each recorded peer's
+ * returned for the launch to grant writable, where this Master places the tokens it issues.
+ */
+export function preparePeerExchange(config: { credentialFile: string; peers?: readonly { configDirectory?: string }[] | null }): string[] {
+  const foreign = [...new Set((config.peers ?? []).flatMap(peer => peer.configDirectory ? [peer.configDirectory] : []))];
+  for (const directory of [peerTokenDirectory(dirname(dirname(resolve(config.credentialFile)))), ...foreign.map(peerTokenDirectory)])
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return foreign.map(peerTokenDirectory);
 }
 
 /**
