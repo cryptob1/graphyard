@@ -326,8 +326,8 @@ test('unit:ui-workers-page — Workers is one compact table of agent sessions (a
   assert.match(css, /\.sessions-table td,\.sessions-table th\[scope=row\]\{[^}]*overflow-wrap:anywhere/);
   assert.match(css, /\.sessions-table\.workers tr\[data-session\] th\[scope=row\],\.sessions-table\.workers tr\[data-session\] td\{height:44px/);
   assert.match(css, /\.sessions-table\.workers \.row-open \.row-title\{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\}/);
-  const phone = /@media\(max-width:650px\)\{\.sessions-table,[^\n]*/.exec(css)?.[0] ?? '';
-  assert.match(phone, /display:block;width:100%/); assert.match(phone, /\.sessions-table thead\{display:none\}/); assert.match(phone, /td::before\{content:attr\(data-label\)/);
+  const phone = /@media\(max-width:650px\)\{\.sessions-table:not\(\.figures\),[^\n]*/.exec(css)?.[0] ?? ''; // a table of figures stays a table (GY-3322)
+  assert.match(phone, /display:block;width:100%/); assert.match(phone, /\.sessions-table:not\(\.figures\) thead\{display:none\}/); assert.match(phone, /td::before\{content:attr\(data-label\)/);
   const cards = /\.sessions-table\.workers tr\[data-session\]\{display:block[^}]*border-radius[^}]*\}/.exec(css)?.[0] ?? '';
   assert.ok(cards, 'on a phone each agent is one card');
   for (const label of ['Agent', 'Working on', 'State', 'Age']) assert.match(builder, new RegExp(`data-label="${label}"`));
