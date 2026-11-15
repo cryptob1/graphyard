@@ -1,0 +1,11 @@
+{
+  "id": "loop-config-self-repair",
+  "title": "The loop never writes a config it cannot read, and repairs one it can't load",
+  "description": "On a fixture install with a registry worker role of 8 accounts at concurrency 16 (128 allowed): the worker pool grows only to the profile schema's maximum of 100 and the config still loads; a pre-GY-3285 registry whose worker concurrency 16 meant a total upgrades to 2 per account (ceil(16/8)); a master.json holding 101 loop-minted profiles is repaired by the next cycle — the newest minted removed until it parses — which then completes; and a cycle step failing identically for 10 consecutive cycles raises a dashboard Needs you alert and an attention line naming the error, without the master session.",
+  "tags": ["dispatch", "workers", "config"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "pool ceiling, registry upgrade, config repair, step-failure alert", "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-config-self-repair.test.ts", "timeoutSeconds": 600 }
+  ]
+}

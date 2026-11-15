@@ -21,7 +21,7 @@ test('e2e:signin-session-survives-restart — login link remains signed in after
     // page's request and can take the Playwright worker down with it.
     await page.route('**/*', async route => {
       const { pathname } = new URL(route.request().url());
-      await route.fetch(pathname.startsWith('/api/') ? { url: http.url + pathname } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+      await route.fetch(pathname.startsWith('/api/') ? { url: http.url + pathname } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => {});
     });
     const response = await fetch(http.url + '/api/sign-in-links', { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } });
     const { code } = await response.json() as { code: string };
