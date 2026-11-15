@@ -287,6 +287,11 @@ test('e2e:onboard-new-repository-faults — an execvp failure names the missing 
   await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', command, pane.run, { ...pane.bounds(), timeoutMs: 5_000 }),
     (error: unknown) => error instanceof SessionStartError && error.startCase === 'exited' && /its command names claude, which is not installed on this host/.test(error.message));
   assert.deepEqual(pane.keys, [], 'a missing executable is never answered');
+
+  // The echoed launch command has scrolled off the screen: the execvp line alone still names it.
+  const scrolled = new StubPane('claude', screen.split('\n').slice(1).join('\n'), null, () => 4100);
+  await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', command, scrolled.run, { ...scrolled.bounds(), timeoutMs: 5_000 }),
+    (error: unknown) => error instanceof SessionStartError && error.startCase === 'exited' && /its command names claude, which is not installed on this host/.test(error.message));
 });
 
 test('e2e:onboard-new-repository-faults — a launch that fails the same way three times is retried with backoff and shown as one attention line', async () => {

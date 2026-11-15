@@ -449,7 +449,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // exit's own words even when the launch command has scrolled off the screen (bwrap: execvp
   // claude: No such file or directory).
   const missingExecutable = /\bexecvp\s+(\S+):\s*No such file or directory/.exec(screen ?? '');
-  if ((printed || missingExecutable) && await readForeground() === 'shell') return { state: 'exited', agent, detail: missingExecutable && !printed ? `the ${kind} runtime's command names ${missingExecutable[1]}, which is not installed on this host` : `the ${kind} runtime exited back to the shell before it was ready`, line: printed ? printed.join(' | ') : `${missingExecutable![1]}: No such file or directory` };
+  if ((printed || missingExecutable) && await readForeground() === 'shell') return { state: 'exited', agent, detail: missingExecutable && !printed ? `the ${kind} runtime's command names ${missingExecutable[1]}, which is not installed on this host` : `the ${kind} runtime exited back to the shell before it was ready`, line: printed ? printed.join(' | ') : missingExecutable![0] };
   // Tool-manager trust happens before the agent exists. Never hold it as agent consent,
   // grant global trust, or let a name assigned to this shell consume a worker lease.
   if (/^\s*mise(?:\s+(?:ERROR|WARN))?[^\n]*\b(?:not trusted|trust config|config[^\n]*trust)/im.test(screen ?? '')) return {
