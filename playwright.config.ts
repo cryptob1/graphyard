@@ -12,5 +12,7 @@ export default defineConfig({
   // GY-3272: Night Yard's ambient motion (rain, streaks, the boot veil) would run on every page of
   // every test; the suite runs with reduced motion, and the specs that prove the motion ask for it.
   use: { baseURL: `http://127.0.0.1:${port}`, headless: true, reducedMotion: 'reduce', screenshot: process.env.E2E_SCREENSHOTS_DIR ? 'on' : 'off' },
-  webServer: { command: `${vite('build')} && ${vite(`preview --host 127.0.0.1 --port ${port} --strictPort`)}`, url: `http://127.0.0.1:${port}`, reuseExistingServer: false },
+  // The server step builds the bundle first; a loaded trial host spent 52 s in that build alone, past
+  // the 60 s default, so the wait allows three minutes.
+  webServer: { command: `${vite('build')} && ${vite(`preview --host 127.0.0.1 --port ${port} --strictPort`)}`, url: `http://127.0.0.1:${port}`, reuseExistingServer: false, timeout: 180000 },
 });

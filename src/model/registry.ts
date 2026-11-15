@@ -77,6 +77,13 @@ export interface FleetRefusal { at: string; role: string; host: string; work: st
 
 export interface AgentRegistry {
   version: 1; revision: number; updatedAt: string | null;
+  /**
+   * GY-3293: on every registry this code appends, and read as its absence on one an older release
+   * wrote: before GY-3285 the worker role's concurrency was a total, and reading it as per-account
+   * multiplied the fleet's worker limit by its accounts. An unmarked document is converted on read
+   * (agent-registry.ts `upgradeWorkerConcurrency`).
+   */
+  workerConcurrencyPerAccount?: true;
   runtimes: FleetRuntime[]; models: FleetModel[]; accounts: FleetAccount[]; roles: FleetRole[];
   /** Live sessions and the most recently ended ones, bounded; the ledger holds every selection. */
   sessions: FleetSession[];
