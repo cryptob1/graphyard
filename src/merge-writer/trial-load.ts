@@ -1,3 +1,4 @@
+import { trialCpuMonitor } from './trial-cpu.js';
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs each size themselves alone; the launcher (trial-container.ts) is what they share.
@@ -12,10 +13,10 @@ export const diskFloorBytes = (config: { run: { diskFloorGb?: number } }) => (co
 
 /** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test concurrency. */
 export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
-/** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
+/** Normal headroom for the trials' serve/session containers, reduced with the host's usable CPU. */
 const minimumTrialContainers = 6;
-/** The containers a host runs at once: one per trial lane, whichever trials they serve. */
-export const trialContainerCap = (cores = availableParallelism()) => Math.max(minimumTrialContainers, trialShardLanes(cores));
+/** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
+export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, trialShardLanes(cores)) * usable / cores));
 /** A start waits while the hottest CPU sensor reads this or more. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
@@ -35,9 +36,10 @@ export const trialVerificationBoundSeconds = 10 * 60;
 export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number; waitBoundSeconds: number | null }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
-export async function trialLoad(root: string, who: keyof typeof trialStartOrder): Promise<TrialLoad> {
+const hostCpu = trialCpuMonitor();
+export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: trialSlots(), cap: trialContainerCap(), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
+  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
     pressureBoundSeconds: trialPressureBoundSeconds, waitBoundSeconds: who === 'verification' ? trialVerificationBoundSeconds : null };
 }
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
@@ -88,11 +90,30 @@ def take_slot():
         if probe is None:
             return None
         os.close(probe)
-    for slot in range(load['cap']):
-        fd = locked('slot-' + str(slot), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if fd is not None:
-            return fd
-    return None
+    # A lower cap must count containers already holding higher-numbered slots. Serialize
+    # counting and claiming, so simultaneous starts cannot both spend the same free capacity.
+    admission = locked('admission', fcntl.LOCK_EX)
+    spare = None
+    try:
+        names = set(os.path.basename(path) for path in glob.glob(os.path.join(load['slots'], 'slot-*')))
+        names.update('slot-' + str(slot) for slot in range(load['cap']))
+        occupied = 0
+        for name in sorted(names):
+            fd = locked(name, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fd is None:
+                occupied += 1
+            elif spare is None:
+                spare = fd
+            else:
+                os.close(fd)
+        if occupied < load['cap']:
+            return spare
+        if spare is not None:
+            os.close(spare)
+        return None
+    finally:
+        os.close(admission)
+
 def admit():
     # The kernel drops a flock with its last holder, so a killed launcher leaves no slot and no place in the queue.
     os.makedirs(load['slots'], exist_ok=True)
