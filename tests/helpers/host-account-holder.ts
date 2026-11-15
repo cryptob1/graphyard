@@ -14,7 +14,8 @@ try {
   if (!account) throw new Error('the selection named no registry account');
   await appendFile(input.ready, JSON.stringify({ account: account.name, session: account.fleet.session, install: config.repository }) + '\n');
   // The registry session and the host-level record stay held until this process is killed.
-  await new Promise(() => {});
+  // A pending promise alone would let Node exit; the interval keeps the process — and its lock — alive.
+  setInterval(() => {}, 60_000);
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exit(1);

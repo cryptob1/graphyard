@@ -112,7 +112,7 @@ async function holdFromChild(): Promise<{ account: string; session: string }> {
 test('e2e:host-shared-account-limits — an install alone on the host is unaffected', async () => {
   const alone = await select(1);
   assert.equal(alone.account!.name, 'shared-a');
-  assert.deepEqual(await hostAccountSessions(home), [], 'no other install holds the account');
+  assert.deepEqual((await hostAccountSessions(home)).map(session => session.install), ['owner/two'], 'only its own session holds the account');
   await alone.release!('the lone install selected and released');
   assert.deepEqual(await hostAccountSessions(home), [], 'the record went with the session');
 });
@@ -125,7 +125,7 @@ test('e2e:host-shared-account-limits — a live session of the first install hol
   assert.equal(sessions[0]!.install, 'owner/one');
   // The second install's own selection passes the account over: one home, one session, every install counted.
   await assert.rejects(select(1), (error: Error) => {
-    assert.match(error.message, /shared-a is at its session limit \(1 of 1 live, held by the Graphyard install owner\/one\)/);
+    assert.match(error.message, /shared-a is at its session limit \(1 of 1 live, 1 held by the Graphyard install owner\/one\)/);
     return true;
   });
   // And its registry names the other install as the holder, in the refusal it recorded.
