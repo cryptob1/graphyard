@@ -24,10 +24,10 @@ test('unit:tests/trial-timeout-scales-with-share.test.ts — a trial sharing the
   await reads.trial('b'.repeat(40), [], item);
   await reads.trial('c'.repeat(40), [], item, undefined, undefined, undefined, undefined, 1);
   assert.deepEqual(launched, [
-    { timeoutMs: 3 * defaultMs, cores: Math.max(1, Math.floor(availableParallelism() / 3)) },
+    { timeoutMs: 3 * defaultMs, cores: Math.max(2, Math.floor(availableParallelism() / 3)) },
     { timeoutMs: defaultMs },
     { timeoutMs: defaultMs },
   ]);
-  assert.deepEqual(trialShareAllowance(3, 1000), { timeoutMs: 3000, cores: Math.max(1, Math.floor(availableParallelism() / 3)) }, 'an explicit deadline scales by the share too');
+  assert.deepEqual(trialShareAllowance(3, 1000), { timeoutMs: 3000, cores: Math.max(2, Math.floor(availableParallelism() / 3)) }, 'an explicit deadline scales by the share too');
   assert.deepEqual(trialShareAllowance(undefined), { timeoutMs: defaultMs });
 });

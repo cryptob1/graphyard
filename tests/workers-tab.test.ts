@@ -216,10 +216,10 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   const order = [...view.running, ...view.finished].map(row => html.indexOf(`data-session="${row.id}"`));
   assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), `rows in order: ${order}`);
   assert.match(html, /3 agent sessions open\. 1 not seen recently\. 5 ended\./);
-  assert.match(html, /<details class="finished-sessions"><summary>Ended <span class="count">5<\/span><\/summary>/);
+  assert.match(html, /<details class="panel finished-sessions"><summary>Ended <span class="count">5<\/span><\/summary>/);
   assert.ok(html.indexOf('<details') < html.indexOf('data-session="proof-gy-15"'), 'ended rows are inside the collapsed section');
   // The per-account summary is folded below the sessions table, never a second table on the first screen (GY-161, AC-9).
-  assert.ok(html.indexOf('aria-label="Agent sessions"') < html.indexOf('<details class="finished-sessions accounts">') && html.indexOf('<details class="finished-sessions accounts">') < html.indexOf('aria-label="Principals"'), 'the summary is folded below');
+  assert.ok(html.indexOf('aria-label="Agent sessions"') < html.indexOf('<details class="panel finished-sessions accounts">') && html.indexOf('<details class="panel finished-sessions accounts">') < html.indexOf('aria-label="Principals"'), 'the summary is folded below');
   // One line per worker, reviewer or producer principal: the one with two finished sessions and one running is on the running one.
   const byName = Object.fromEntries(view.principals.map(entry => [entry.principal, entry]));
   assert.deepEqual(Object.keys(byName).sort(), ['graphyard-codex-1', 'herdr-worker-1', 'reviewer-a', 'worker-b']);

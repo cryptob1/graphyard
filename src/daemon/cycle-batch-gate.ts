@@ -7,11 +7,15 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey } from '../merge-writer/trial-load.js';
+import { gateTrialKey, trialSlotCount } from '../merge-writer/trial-load.js';
+import { trialAffordableFiles } from '../merge-writer/trial.js';
+import { availableParallelism } from 'node:os';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
+import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
+import { faultItem } from './control-plane.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
@@ -114,18 +118,9 @@ async function gateEnvironments(reads: MergeWriterReads, commit: string, cases: 
 export const pinningProof = (key: string) =>
   `unit:${key.slice(key.indexOf(':') + 1).toLowerCase().replace(/^test:tests\//, '').replace(/\.test\.ts$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-pinned`;
 
-/**
- * The bug item a gate filing creates (GY-3160): AC-1 binds a new pinning test, which fails on the
- * base, so the bug trial reproduces the defect there; create-work-item, which passes on any base, is
- * a separate preservation criterion.
- */
-export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) => ({
-  title: input.title.slice(0, 200), type: 'bug' as const, priority: 1, description: input.description, dependencies: [],
-  criteria: [
-    { id: 'AC-1', text: `${input.title} is fixed at its cause, not skipped or weakened; a new test pins it and fails without the fix`.slice(0, 2000), proofs: [pinningProof(input.key)] },
-    { id: 'AC-2', text: 'The batch gate passes again and creating a work item still works', proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] },
-  ],
-  reason: `Filed by the batch gate on ${baseBranch}` });
+/** A batch gate filing's item: its pinning test is named from its check. */
+export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) =>
+  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: 'manual:batch-gate-repaired' }, reason: `Filed by the batch gate on ${baseBranch}` });
 
 /** The gate's ports over the merge writer's reads. */
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
@@ -178,7 +173,6 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
 const stopped = new WeakSet<object>();
 /** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
 export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
@@ -211,7 +205,8 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  */
 export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'now' | 'log'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
-  if (!reads?.git || !gate) return null;
+  // GY-3304: while the host's heavy work is drained no gate or diagnostics run starts; the batch waits on its record.
+  if (!reads?.git || !gate || reads.drain?.()) return null;
   const file = gateRecordPath(gate.root);
   const live = flights.get(cycle.state) ?? { gate: null, diagnostics: null };
   flights.set(cycle.state, live);
@@ -220,7 +215,10 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reads));
     await writeGateRecord(file, record);
   }
-  const ports = batchGatePorts({ ...reads, git: reads.git }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
+  const ports = batchGatePorts({ ...reads, git: reads.git,
+    trial: (sha, files, item, base, step, timing, heads, _share, signal, timeout) =>
+      reads.trial(sha, files, item, base, step, timing, heads, Math.max(1, busyTrialSlots(cycle.state)), signal, timeout),
+  }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
@@ -256,7 +254,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('publish-tag', 'done', `Pushed ${tag}; GitHub Actions publishes the package and images`);
     } catch (error) { note('publish-tag', 'failed', `Could not push the release tag: ${message(error)}`); }
   }
-  if (!live.gate) {
+  const slots = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? Infinity, await trialAffordableFiles(reads.memory));
+  if (!live.gate && busyTrialSlots(cycle.state) < slots) {
     const current = record;
     live.gate = (async () => {
       try {
@@ -287,6 +286,9 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.gate = null; }
     })();
   }
+  // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy
+  // trial slot (trial-slots.ts): the merge flights and the gate size around them, and their own trial
+  // takes its share of the lanes.
   if (!live.diagnostics) {
     live.diagnostics = (async () => {
       try {

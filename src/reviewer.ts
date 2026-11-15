@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, basename, delimiter, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -55,7 +55,7 @@ import type { E2eServe } from './model/repository-policy.js';
 import { servingReport } from './deploy-watch.js';
 import { commandApplication, serveHead } from './merge-writer/serve-head.js';
 import { runEnvironment } from './runner/pi.js';
-import { statSync } from 'node:fs';
+import { browserInstallCommand, browserToolName, provisionBrowserTool } from './browser-tool.js';
 export { controlPlaneFindingSection } from './review-prompt.js';
 export { reviewStandard, reviewStandards, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
 export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection, criteriaVerdictRule } from './review-prompt.js';
@@ -533,19 +533,7 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
   return null;
 }
 
-/** GY-3331: the browser tool a product review walks the app with, as the E2E runner drives it. */
-export const browserToolName = 'agent-browser';
-/** Resolves the browser tool on a PATH, or null when no directory of it holds an executable one. */
-export function browserToolOnPath(environment: { PATH?: string } = process.env): string | null {
-  for (const directory of (environment.PATH ?? '').split(delimiter)) {
-    if (!directory) continue;
-    try {
-      const tool = resolve(directory, browserToolName);
-      if (existsSync(tool) && statSync(tool).isFile() && statSync(tool).mode & 0o111) return tool;
-    } catch { /* an unreadable directory holds nothing to find */ }
-  }
-  return null;
-}
+export { browserToolName, browserToolOnPath } from './browser-tool.js';
 /**
  * GY-3331: why a product-review launch cannot give its session the three things its own
  * environment owes it — the control plane's address, the CLI it posts through, and a browser tool
@@ -553,11 +541,12 @@ export function browserToolOnPath(environment: { PATH?: string } = process.env):
  * not run with the missing thing named, retried on another eligible reviewer, and raised as one
  * attention line; it never becomes a change request and never reaches the item's worker.
  */
-export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null): string | null {
+export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null, installError?: string | null): string | null {
   if (!config.url) return 'GRAPHYARD_URL is unset: this launch cannot tell its reviewer the control plane\'s address; set url with graphyard master setup';
   const unreachable = cliUnreachableRefusal(config, mask);
   if (unreachable) return unreachable;
-  if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} on this host`;
+  if (!tool && installError) return `no browser tool on the session's PATH (agent-browser), and ${installError}; the loop tries the install again in 15 minutes, or run: ${browserInstallCommand()}`;
+  if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} with: ${browserInstallCommand()}`;
   return null;
 }
 /** GY-3331: how the launcher records a could-not-run product review on the item, with the loop's own coordinator credential. */
@@ -1067,8 +1056,11 @@ export async function launchReview(root: string, work: Work, profileName: string
         // checks the three before anything starts; a launch that cannot give them records the
         // review as could not run with the missing thing named and starts no reviewer.
         if (product) {
-          const tool = (dependencies.browserTool ?? browserToolOnPath)({ PATH: process.env.PATH });
-          const refusal = productLaunchRefusal(config, credentialMask, tool);
+          // GY-3370: a host without the tool installs it once, here, and the review goes on.
+          let installError: string | null = null;
+          const tool = dependencies.browserTool ? dependencies.browserTool({ PATH: process.env.PATH })
+            : await provisionBrowserTool().catch((error: Error) => { installError = error.message; return null; });
+          const refusal = productLaunchRefusal(config, credentialMask, tool, installError);
           if (refusal) {
             await (dependencies.recordCouldNotRun ?? recordCouldNotRunReview)(config, work, { reviewer: reviewerIdentity, sha: binding.sha, baseSha: binding.baseSha, reason: refusal }).catch(() => { /* the launch refusal itself is reported; the record is retried with it */ });
             throw new Error(`The product review of ${binding.key} could not run: ${refusal}`);

@@ -1,0 +1,14 @@
+{
+  "id": "loop-files-deploy-fault",
+  "title": "A fault the loop files for itself is accepted: a failed deploy is filed, not refused for lacking an e2e proof",
+  "description": "Runs the real loop cycle with a control-plane upgrade failing at restart on record and the production upstream filer pointed at a control plane served on a temporary Postgres: the first cycle files exactly one bug item, accepted by the filing validation, carrying a criterion with an e2e proof; a second cycle files nothing more. Every other fault kind the loop files (stalled step, trial host, trial image, trial sandbox, trial network, flake, known red) is built by the same faultItem and accepted by the served API.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "File a failed deploy and every other loop fault kind through the served API",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-files-deploy-fault.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
