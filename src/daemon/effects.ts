@@ -108,6 +108,8 @@ export interface DaemonEffects {
   stopOrphanTrials?: () => Promise<string[]>;
   /** Takes back what ended jobs left: owner-gone trial and verification scratch, stopped trial containers with their volumes, and trial build cache older than a day (GY-3188), answering what was removed. */
   reclaimJobLeftovers?: () => Promise<string[]>;
+  /** Removes the install's CLI release copies nothing uses (GY-3334), answering what went, the bytes freed and the copies left with why. */
+  sweepCliReleases?: () => Promise<{ removed: string[]; bytes: number; left: string[] }>;
   /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
   leftoverDisk?: () => Promise<LeftoverDisk>;
   /** Reports the token usage this host's sessions' runtimes printed (GY-3289, usage-capture.ts); `master` is the master session's conversation. */
