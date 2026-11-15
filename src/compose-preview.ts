@@ -327,15 +327,20 @@ export const checkServiceVariables = (services: readonly CheckService[]): Record
  * isolated-trial mode compose E2E groups use; its children join the network of the first service's
  * container, as a Compose E2E group's do. A start that fails removes what it started.
  */
-export async function startCheckServices(input: { checkout: string; services: readonly CheckService[]; scratch: string; env: Record<string, string>; key: string; timeoutMs: number }): Promise<CheckServices> {
+export async function startCheckServices(input: { checkout: string; services: readonly CheckService[]; scratch: string; env: Record<string, string>; key: string; timeoutMs: number; docker?: Docker }): Promise<CheckServices> {
   const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }), first = input.services[0]!;
   const project = composeProjectName('trial-services-' + input.key, randomUUID());
   const stack = composeStack({ checkout: input.checkout, file: first.file, service: first.service, port: first.port, project, environment, variables: {},
-    bounds: composeBounds(), isolatedTrial: true, scratch: await mkdtemp(join(input.scratch, 'services-')), checkServices: input.services.map(entry => entry.service) });
+    bounds: composeBounds(), isolatedTrial: true, scratch: await mkdtemp(join(input.scratch, 'services-')), checkServices: input.services.map(entry => entry.service), docker: input.docker });
   try {
     await stack.start(AbortSignal.timeout(input.timeoutMs), input.timeoutMs);
-    return { network: 'container:' + await composeServiceContainer(project, first.service, { env: environment, timeoutMs: input.timeoutMs }), close: () => stack.close() };
-  } catch (error) { await stack.close().catch(() => {}); throw error; }
+    return { network: 'container:' + await composeServiceContainer(project, first.service, { docker: input.docker, env: environment, timeoutMs: input.timeoutMs }), close: () => stack.close() };
+  } catch (error) {
+    await stack.close().catch(() => {});
+    // GY-3316: a network refused for spent address pools carries how many preview networks the daemon holds.
+    if (error instanceof Error && error.message.includes(addressPoolsSpent)) Object.assign(error, { previewNetworks: await previewNetworkCount(environment, input.docker) });
+    throw error;
+  }
 }
 
 /**
@@ -379,6 +384,13 @@ export async function removeComposeProject(project: string, options: { docker?: 
 }
 
 const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean);
+/** GY-3316: Docker's refusal of a new network once leaked networks have spent its address pools. */
+export const addressPoolsSpent = 'all predefined address pools have been fully subnetted';
+/** GY-3316: how many Graphyard preview networks the daemon holds; null when it cannot be read. */
+export async function previewNetworkCount(env: Record<string, string>, docker: Docker = defaultDocker): Promise<number | null> {
+  try { return lines(await docker(['network', 'ls', '--format', '{{.Name}}', '--filter', `name=${composeProjectPrefix}`], { env, timeoutMs: 30_000 })).filter(name => name.startsWith(composeProjectPrefix)).length; }
+  catch { return null; }
+}
 /** What of `project` the daemon still holds: container ids, volume and network names, and the ids of images built for it. */
 export async function composeLeftovers(project: string, options: { docker?: Docker; env?: Record<string, string> } = {}) {
   const docker = options.docker ?? defaultDocker, env = options.env ?? dockerEnvironment({ PATH: process.env.PATH ?? '' });

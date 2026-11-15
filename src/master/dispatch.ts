@@ -131,6 +131,9 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (parkedOnHuman(work)) throw new Error(`${dispatchHumanWait} (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.criteria.length) throw new Error('Waiting on the master: writing the criteria');
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  // GY-3335: a finished head a blocked worker named is the loop's to resubmit once the blocker is
+  // cleared — no worker session can finish it faster than re-running `complete` on unchanged work.
+  if (work.finishedBlockerHead) throw new Error(`Dispatch waits for the loop to resubmit the finished head ${work.finishedBlockerHead.head.slice(0, 12)} ${work.key}'s blocker named`);
   if (work.hold) throw new Error(`Dispatch skips ${work.key}: held by ${work.heldBy}: ${work.holdReason}`);
   // GY-1760: an item only the master side can satisfy is never handed to a worker — not by the
   // loop's dispatch step, not by a hand launch — whoever released it, so its master-only steps

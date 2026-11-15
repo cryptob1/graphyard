@@ -1,0 +1,11 @@
+{
+  "id": "ui-shell-work-pages",
+  "title": "The Work page and a work item page share one page shell, lead with their fact and action, use the width and never scroll sideways",
+  "description": "A real browser at 1440 px and at 390 px signs in to a real control plane serving the built dashboard, with seeded items. The Work page and a work item page put the same title element in the same page heading, the same section heading style and the same card class; any table carries the one table class. The first screen shows the page title, its primary fact and its primary action without scrolling; at 1440 px the content spans at least 85 percent of the width beside the sidebar; at 390 px the page never scrolls sideways; and no console error is logged.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "walk the Work page and an item page at 1440 px and 390 px", "run": "npm run test:browser -- browser-tests/ui-shell-work-pages.spec.ts", "timeoutSeconds": 240 }
+  ]
+}

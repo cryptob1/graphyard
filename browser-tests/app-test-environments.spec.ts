@@ -29,7 +29,7 @@ test('e2e:app-test-environments — the Tests view\'s Where tests run block show
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   await context.route('**/*', async route => {
     const { pathname, search } = new URL(route.request().url());
-    await route.fetch(pathname.startsWith('/api/') ? { url: url + pathname + search } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+    await route.fetch(pathname.startsWith('/api/') ? { url: url + pathname + search } : {}).then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => {});
   });
   // The checkout the control plane serves: a declared environment, the loop's environment state and its batch gate record.
   const checkout = await temporaryDirectory('app-test-environments-ui');
