@@ -2,6 +2,7 @@ import { privateFile, readCredentialFile, assertOutsideWorktrees, atomicPrivateW
 export { privateFile, readCredentialFile, assertOutsideWorktrees, atomicPrivateWrite, atomicPrivateText } from '../private-file.js';
 // Concern: loading, validating and saving the master config, its credential files and profiles, and live reload.
 import { randomUUID, createHash } from 'node:crypto';
+import type { z } from 'zod';
 import { lstat, readFile, realpath, chmod, mkdir } from 'node:fs/promises';
 import { resolve, isAbsolute } from 'node:path';
 import { homedir, hostname } from 'node:os';
@@ -33,15 +34,48 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
   // A checkout no install or master init has configured names the step that writes it (GY-1352), not a bare lstat ENOENT.
   await privateFile(file).catch((error: any) => { throw error?.code === 'ENOENT' ? Object.assign(new Error(`${file} does not exist: run graphyard install --apply, or graphyard master init --token-stdin, in this checkout first`), { code: 'ENOENT' }) : error; });
   const stored = JSON.parse(await readFile(file, 'utf8'));
-  // GY-3292: a file the loop grew past the limit before the cap stays readable; the profiles past it
-  // are the newest generated spares, and the next profile write saves the trimmed list.
-  if (Array.isArray(stored?.workers)) stored.workers = stored.workers.slice(0, MAX_WORKER_PROFILES);
-  const config = masterConfigSchema.parse(stored);
+  const parsed = masterConfigSchema.safeParse(stored);
+  // GY-3293: a file that will not load because of worker profiles past the schema's maximum is
+  // repaired by removing the ones the loop added itself until it loads — written back once, naming
+  // what was removed — so a pool that overgrew cannot fail every cycle and every command. The
+  // trim GY-3292 applied in memory (a file the pre-cap loop grew past the limit, never marking its
+  // profiles) is the repair's fallback once the loop's own marked entries are exhausted.
+  const config = parsed.success ? parsed.data : await repairGrownWorkers(file, stored, parsed.error);
   config.url = serverOrigin(config.url);
   const repositoryRoot = resolve(root), credentialFile = resolve(config.credentialFile);
   if (!isAbsolute(config.credentialFile) || credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error('Master credential file must be outside the repository and use an absolute path');
   config.credentialFile = credentialFile;
   return config;
+}
+
+/**
+ * GY-3293: the master.json a loop overgrew past its schema — worker profiles past
+ * `MAX_WORKER_PROFILES` — repaired by removing worker profiles until the file parses again: the
+ * loop's own first, newest first (`minted`, worker-pool.ts), so an operator's profiles never go
+ * for them; then, on a file the pre-mark loop grew (GY-3292's cap came later than its growth),
+ * the newest of all. The repaired file is written back through the schema, and the removal is
+ * said on stderr (the loop's journal) naming what went. Any other parse failure is thrown
+ * unchanged: removing worker profiles cannot repair it, and nothing is written.
+ */
+async function repairGrownWorkers(file: string, raw: unknown, error: z.ZodError): Promise<MasterConfig> {
+  const attempt = structuredClone(raw) as { workers?: unknown[] };
+  const minted = (profile: unknown) => typeof profile === 'object' && profile !== null && (profile as { minted?: unknown }).minted === true;
+  if (!Array.isArray(attempt.workers)) throw error;
+  const removed: string[] = [];
+  for (;;) {
+    const next = masterConfigSchema.safeParse(attempt);
+    if (next.success) {
+      await atomicPrivateWrite(file, next.data);
+      console.error(`[graphyard] ${file} did not load (${error.issues[0]?.message ?? 'it did not parse'}); removed the loop-grown worker profile${removed.length === 1 ? '' : 's'} ${removed.join(', ')} and the config loads again`);
+      return next.data;
+    }
+    // The loop's own newest minted profile; with none left to remove, GY-3292's pre-cap growth is
+    // repaired by dropping the newest of all, down to the limit the schema holds.
+    const at = attempt.workers.some(minted) ? attempt.workers.map(minted).lastIndexOf(true) : attempt.workers.length > MAX_WORKER_PROFILES ? attempt.workers.length - 1 : -1;
+    if (at < 0) throw error;
+    removed.unshift(String((attempt.workers[at] as { name?: unknown; principal?: unknown }).name ?? (attempt.workers[at] as { principal?: unknown }).principal ?? at));
+    attempt.workers.splice(at, 1);
+  }
 }
 export async function externalCredential(root: string, file: string, label: string) {
   if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
@@ -227,7 +261,11 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
   }
   if (config.workers.some(worker => worker.name === profile.name || worker.agentName === profile.agentName || worker.principal === profile.principal)) throw new Error('Worker profile name, agent name, and principal must be unique');
   if (config.workers.length >= MAX_WORKER_PROFILES) throw new Error(`master.json already holds the most worker profiles, ${MAX_WORKER_PROFILES}`);
-  config.workers.push(profile); await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+  config.workers.push(profile);
+  // GY-3293: the loop never writes a config it cannot read — the whole file revalidates through
+  // the schema before the write, so a write that would not load back is refused here (reported by
+  // the dispatch step's one attention line) instead of leaving a master.json nothing can load.
+  await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), masterConfigSchema.parse(config));
   return { added: profile.name, principal: profile.principal, mode: profile.mode, workers: config.workers.length,
     launch: profile.mode === 'launch' ? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment) : null };
 }
