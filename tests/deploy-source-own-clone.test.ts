@@ -22,6 +22,7 @@ async function otherCheckout(root: string) {
   git(other, 'init', '-q', '-b', 'main');
   git(other, 'commit', '-q', '--allow-empty', '-m', 'first');
   git(other, 'remote', 'add', 'origin', 'https://example.invalid/graphyard.git');
+  git(other, 'config', 'url./srv/graphyard.git.insteadOf', 'https://example.invalid/graphyard.git');
   return other;
 }
 
@@ -44,7 +45,8 @@ test('a worktree deploy source is replaced by a standalone clone at the same com
   await ensureDeployCheckout(checkout, other, defaultChildRun);
   assert.ok(lstatSync(join(checkout, '.git')).isDirectory(), 'the deploy source has its own .git directory');
   assert.equal(git(checkout, 'rev-parse', 'HEAD'), commit, 'the clone is at the commit the worktree was at');
-  assert.equal(git(checkout, 'remote', 'get-url', 'origin'), 'https://example.invalid/graphyard.git');
+  assert.equal(git(checkout, 'config', '--get', 'remote.origin.url'), 'https://example.invalid/graphyard.git', 'origin stays the source\'s remote');
+  assert.equal(git(checkout, 'remote', 'get-url', 'origin'), '/srv/graphyard.git', 'with its URL rewrite');
   assert.equal(readlinkSync(join(checkout, '.graphyard', 'cli-current')), '/published-release', 'the release pointer stays with the install');
   assert.equal((await deploySourceCheck(install))?.status, 'pass');
 

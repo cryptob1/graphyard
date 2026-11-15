@@ -242,19 +242,22 @@ export const deployHealth = (cliRoot: string, url: string, attempts = 36, pauseM
  * store, never a worktree of another checkout, so moving or deleting the launcher's checkout (or
  * another install's) cannot break this deploy. The first run fetches the source's HEAD into a fresh
  * repository; a checkout left as a linked worktree (its .git a file) is replaced by one at the same
- * commit. origin keeps the source's remote, which the watch fetches main from.
+ * commit. origin and its URL rewrites stay the source's, so the watch fetches main as before.
  */
 export async function ensureDeployCheckout(checkout: string, source: string, run: ChildRun) {
   const dotGit = join(checkout, '.git');
   if (existsSync(dotGit) && statSync(dotGit).isDirectory()) return;
   const linked = existsSync(dotGit), from = linked ? checkout : source, next = `${checkout}.clone`;
   const git = async (...args: string[]) => String(await run('git', args, { timeoutMs: 1_800_000 })).trim();
-  const origin = await git('-C', from, 'remote', 'get-url', 'origin').catch(() => null);
+  // Raw, as servedRepository reads it: get-url would expand an insteadOf rewrite, which comes along as config.
+  const origin = await git('-C', from, 'config', '--get', 'remote.origin.url').catch(() => null);
+  const rewrites = (await git('-C', from, 'config', '--local', '--get-regexp', '^url\\.').catch(() => '')).split('\n').filter(Boolean);
   await rm(next, { recursive: true, force: true });
   await mkdir(next, { recursive: true });
   await git('-C', next, 'init', '--quiet');
   await git('-C', next, 'fetch', '--quiet', resolve(from), 'HEAD');
   await git('-C', next, 'checkout', '--quiet', '--detach', 'FETCH_HEAD');
+  for (const line of rewrites) { const at = line.indexOf(' '); await git('-C', next, 'config', '--add', line.slice(0, at), line.slice(at + 1)); }
   if (origin) await git('-C', next, 'remote', 'add', 'origin', origin);
   if (linked) {
     // The release pointer publishCliRelease left beside the old checkout stays with the install.
