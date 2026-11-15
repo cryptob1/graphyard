@@ -1,0 +1,13 @@
+{
+  "id": "trial-lanes-share-cores",
+  "title": "Concurrent trials share the host's cores",
+  "description": "Real trial sizing on 24 cores, memory-limited slot selection with six Postgres queued candidates, batch-gate occupancy and recorded lane counts.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "trial lanes and admission share CPU and memory",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-lanes-share-cores.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
