@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3287 AC-1: Master is the left menu's second top-level entry, opening the master's live page,
 // named Master (GY-3307) — no longer only a sub-page under Workers.
@@ -13,6 +14,7 @@ test('e2e:master-in-left-menu — Master is the second left-menu entry, opens th
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(work, NOW, null) });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
