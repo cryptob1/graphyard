@@ -15,7 +15,7 @@ export function PageHeader({ title, fact, actions, children }: { title: ReactNod
 
 export function PageSection({ title, count, actions, label, className, children }: { title: ReactNode; count?: ReactNode; actions?: ReactNode; label?: string; className?: string; children?: ReactNode }) {
   return <section className={className ? `panel ${className}` : 'panel'} aria-label={label}>
-    <h2>{title}{count !== undefined && <span className="count">{count}</span>}{actions && <span className="push">{actions}</span>}</h2>
+    <h2>{typeof title === 'string' && count !== undefined ? `${title} ` : title}{count !== undefined && <span className="count">{count}</span>}{actions && <span className="push">{actions}</span>}</h2>
     {children}
   </section>;
 }
