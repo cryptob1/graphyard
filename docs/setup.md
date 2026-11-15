@@ -5,7 +5,7 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 ## Host
 
 - Docker and Compose: on an AppArmor host up loads the `graphyard-trial` profile with sudo.
-- Docker and Compose are needed even for `--local`; merge trials run in them.
+- Docker and Compose are needed even for `--local`; test merges run in them.
 
 ## Accounts and access
 

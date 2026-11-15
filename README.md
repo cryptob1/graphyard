@@ -2,12 +2,12 @@
 
 **Run AI coding agents like Claude Code and Codex, ship each goal to production with independent review and proof.**
 
-[![Graphyard walkthrough: goal through review, merge trial, deploy, revert](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
+[![Graphyard walkthrough: goal through review, test merge, deploy, revert](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
 ## Why Graphyard
 
 - **You decide goals, money, credentials.**
-- **Every change is proven.** Workers build, agents review, heads are trialled on main.
+- **Every change is proven.** Workers build, agents review, every head is test-merged on main.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
 Prerequisites: Linux 7.0+ with Landlock ABI 9+ (`uname -r`; Ubuntu 26.04: `sudo apt install linux-image-oem-7.3`); Node 24+/npm (`node --version`, `npm --version`; Ubuntu/Debian: `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt install nodejs`, Arch: `sudo pacman -S nodejs npm`, macOS: `brew install node@24`); Git (`git --version`, `git remote -v`); Docker (`docker version`, `docker compose version`); GitHub CLI (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`; install: `curl -fsSL https://herdr.dev/install.sh | sh`); systemd (`systemctl --user status`). [Setup guide](docs/setup.md).
