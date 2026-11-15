@@ -248,6 +248,12 @@ test('integration:deploy-predecessor-watcher — a running predecessor watcher u
     assert.equal(await activeCliRoot(legacy), cliReleasePath(directory, b)); await check(); await check(checkout);
     assert.match(restartCause({ credentialFile: join(base, 'token'), cliPath: join(legacy, 'bin/graphyard.mjs') }, checkout, a) ?? '', /deploy unit serves/);
     assert.equal(await ports.head(), b); assert.deepEqual(previews, [b]);
+    // GY-3337: the first publication moves the unit once onto the install's one stable launcher,
+    // which starts whatever release the install serves; from there publications move only what the
+    // launcher resolves to, never the unit text again.
+    const migrated = await alignLoopUnit(unitInput, { home, temporaryDirectories: [], run: (command, args) => args.includes('is-enabled') ? 'enabled' : args.includes('is-active') ? 'active' : args.includes('show-user') ? 'yes' : '' });
+    assert.equal(migrated.wrote, 'updated');
+    assert.ok((await readFile(join(unitDirectory, units.master), 'utf8')).includes(join(directory, 'bin/graphyard.mjs')), 'the unit names the install launcher, never a release path');
     const aligned = await alignLoopUnit(unitInput, { home, run: () => { throw new Error('unchanged units must not restart'); } });
     assert.equal(aligned.wrote, 'unchanged');
 
