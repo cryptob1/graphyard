@@ -83,6 +83,13 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree, forced only when asked (a done item's, a day after its last attempt ended); whether one was removed. */
   removeWorktree?: (path: string, force?: boolean) => Promise<boolean>;
+  /**
+   * GY-3341: the attempt worktrees still standing on this host, from the disk (`GY-N-EPOCH`
+   * directories under `.graphyard/worktrees`) with when each last changed. The close step reclaims
+   * the leftovers of items the loop's snapshot no longer holds; absent, only the snapshot's own
+   * items are reclaimed.
+   */
+  attemptWorktrees?: () => Promise<{ path: string; changedAt: number }[]>;
   /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
   diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
   /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */
@@ -123,6 +130,13 @@ export interface DaemonEffects {
   composeServer?: () => ComposeServer | null | Promise<ComposeServer | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
+  /**
+   * GY-3335: resubmits one finished head a worker named in a blocker its own complete failed on:
+   * runs the same verification complete runs on this host, then submits the head as the item's
+   * next attempt (`POST work/:id/resubmit`) — or clears the record when the verification failed
+   * on the change, so the item goes to a worker. Absent, such items wait for a worker as today.
+   */
+  resubmit?: (work: Work, head: string) => Promise<{ submitted: boolean; detail: string }>;
   /** Records one real-world check on Needs you for the item's head (GY-2986). */
   askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
   /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */

@@ -139,7 +139,8 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       };
       // Text goes in as one bracketed paste, never a raw ^V; a file or image is uploaded and its saved path pasted.
       const deliver = async (files: File[], pasted: string) => {
-        if (!writable) { setReason('Paste refused: read-only, only the operator and maintainers can type into the master'); return; }
+        // A paste that cannot be delivered says why: a read-only viewer, or a terminal still (re)connecting.
+        if (!writable) { setReason(socket?.readyState === WebSocket.OPEN ? 'Paste refused: read-only, only the operator and maintainers can type into the master' : 'Not pasted: the terminal is reconnecting; paste again once it says you can type'); return; }
         for (const file of files) {
           if (file.size > 20 * 1024 * 1024) { setReason('Not pasted: files are limited to 20 MB'); continue; }
           const data = await new Promise<string>(done => { const reader = new FileReader(); reader.onload = () => done(String(reader.result).split(',')[1] ?? ''); reader.readAsDataURL(file); });

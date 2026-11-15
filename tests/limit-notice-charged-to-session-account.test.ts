@@ -14,7 +14,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // selection — and the same notice held it again after the master set it available; a free
 // model's own allowance marked an OpenCode plan spent.
 
-test('unit:limit-notice-charged-to-session-account — a notice holds only its session\'s account, once, and a free-model notice holds no plan', async () => {
+test('unit:limit-notice-charged-to-session-account — a notice holds only its session\'s account, once, and a free-model notice holds its account', async () => {
   const root = await temporaryDirectory('limit-notice-session-account');
   const credentialFile = join(root, 'coordinator.token');
   await writeFile(credentialFile, 'token', { mode: 0o600 });
@@ -54,10 +54,10 @@ test('unit:limit-notice-charged-to-session-account — a notice holds only its s
   assert.ok(await holdRepeatedLimitAccount(config, later as any, now + 6_000, { registry: released }), 'a fresh notice after the release holds it again');
   assert.equal(observed.length, 1);
 
-  // A free model's own allowance is not the account's plan.
+  // GY-3302: a free model's allowance spends the account that runs it (hwd-backend retried one across six items).
   const free = 'Free usage limit reached. Upgrade or subscribe to OpenCode Go to keep using this model.';
-  assert.equal(detectRuntimeExhaustion(`working...\n${free}\n`, 'opencode', now), null);
-  assert.equal(detectExhaustion(`${free}\n`, now), null);
-  assert.equal(providerLimit(free, now), null);
+  assert.ok(detectRuntimeExhaustion(`working...\n${free}\n`, 'opencode', now));
+  assert.ok(detectExhaustion(`${free}\n`, now));
+  assert.ok(providerLimit(free, now));
   assert.ok(detectRuntimeExhaustion('Usage limit reached · limit resets 1pm\n', 'claude', now), 'a plan notice still holds');
 });

@@ -112,13 +112,22 @@ export const leaseCommands = defineCommands([
   {
     name: 'blocked',
     scope: 'work',
-    help: ["  blocked GY-N EPOCH REASON     Set blocker and end this attempt, keeping uncommitted work", "                                as a WIP commit; the loop clears routine causes itself; '-' clears"],
+    help: ["  blocked GY-N EPOCH [--finished] REASON", "                                Set blocker and end this attempt, keeping uncommitted work", "                                as a WIP commit; the loop clears routine causes itself; '-' clears.", "                                --finished, from this worktree, also records its HEAD as finished", "                                work: after the unblock the loop itself re-runs complete's", "                                verification and submits that head, with no worker session"],
     // A blocker ends the attempt (GY-1008): what it had not committed is kept first, as a WIP commit
     // on its own branch, so the next attempt's request can name it.
+    // GY-3335: `--finished` records the head that attempt finished at — a complete that failed on
+    // the host, not the change — which the loop resubmits itself once the blocker is cleared.
     run: async (context, work) => {
-      const epoch = Number(context.args[0]), reason = context.args[1] === '-' ? null : context.args.slice(1).join(' ');
+      const rest: string[] = []; let finished = false;
+      for (const argument of context.args) {
+        if (argument === '--finished') { finished = true; continue; }
+        rest.push(argument);
+      }
+      const epoch = Number(rest[0]), reason = rest[1] === '-' ? null : rest.slice(1).join(' ');
       const partialWork = reason ? keepBlockedWork(work, epoch) : null;
-      return context.print(await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) }));
+      if (finished && (!reason || !partialWork?.commit))
+        throw new Error(`--finished records the head this attempt finished at, so it runs from ${work.key} attempt ${epoch}'s own worktree with a reason; run plain blocked GY-N EPOCH REASON instead`);
+      return context.print(await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}), ...(finished && partialWork?.commit ? { finishedHead: partialWork.commit } : {}) }));
     },
   },
   {

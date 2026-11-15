@@ -4,8 +4,7 @@ import { boardStatus, boardWork, NOW } from './ui-board';
 
 // GY-3272 AC-1: Night Yard is the default look, Daylight is selectable and remembered, both hold
 // WCAG AA for text (the audit below walks every visible text element), and with reduced motion the
-// rain, glitch and pulse animations do not run — with motion on, they do, and Fun off skips the
-// glitch and the pulse.
+// rain, glitch and pulse animations do not run — with motion on, they do.
 const ledger = (item: any, state: string) => ({ key: item.key, state, head: item.candidate.sha, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: null, events: 1 });
 /** The board fixture with one row whose merge trial failed on its own head: the glitch row. */
 const auditWork = () => boardWork().map(item => item.key === 'GY-15' ? { ...item, mergeLedger: ledger(item, 'refused') } : item);
@@ -95,22 +94,15 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   expect(await background(page)).toEqual([7, 11, 20]);
   expect(await rain(page)).toBe('gy-rain');
   expect(await grain(page)).toContain('svg');
-  // AC-5: the playful copy names the agents runners; plain labels keep their words, and the Master page's title reads Master either way (GY-3307).
-  await expect(page.locator('.city-strip')).toContainText('runners on shift');
+  // The strip counts agents working; a builder's row gets its friendly name, and the Master page's title reads Master (GY-3307).
+  await expect(page.locator('.city-strip')).toContainText('agents working');
   await expect(page.locator('[data-row="GY-14"] .row-who')).toContainText('Theo is running GY-14');
   await page.keyboard.press('Control+k');
   await page.getByLabel('Search commands').fill('Master');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
-  // The playful names are Fun's: with Fun off the strip and the row use the app's own words, and the title stays Master.
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
-  await expect(page.locator('.city-strip')).toContainText('agents working');
-  await expect(page.locator('.city-strip')).not.toContainText('runners');
   await page.keyboard.press('g');
   await page.keyboard.press('w');
-  await expect(page.locator('[data-row="GY-14"] .row-who')).not.toContainText('is running');
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
   // The audit covers the page an operator reads most: the Work board, an item page, the palette, the shortcut sheet.
   await expectAA(page, 'the Work page at night');
@@ -173,7 +165,7 @@ test('e2e:night-yard-theme — with reduced motion the rain, the glitch flicker 
   await expect(page.locator('.confetti')).toHaveCount(0);
 });
 
-test('e2e:night-yard-theme — with motion on a failed trial glitches and a ship pulses; Fun off skips both', async ({ page }) => {
+test('e2e:night-yard-theme — with motion on a failed trial glitches and a ship pulses', async ({ page }) => {
   test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   const state = await serve(page, auditWork());
@@ -185,13 +177,4 @@ test('e2e:night-yard-theme — with motion on a failed trial glitches and a ship
   const toast = page.locator('[data-toast="GY-14"]');
   await expect(toast).toBeVisible(live);
   expect(await toast.evaluate(element => getComputedStyle(element).animationName)).toBe('gy-neon');
-  await toast.click();
-  // Fun off: the row stops flickering and the ship carries no pulse.
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(page.locator('.work-row.glitch')).toHaveCount(0);
-  state.work = state.work.map(item => item.key === 'GY-16' ? merged(item) : item);
-  const plain = page.locator('[data-toast="GY-16"]');
-  await expect(plain).toBeVisible(live);
-  expect(await plain.evaluate(element => getComputedStyle(element).animationName)).toBe('none');
-  await expect(page.locator('.confetti')).toHaveCount(0);
 });

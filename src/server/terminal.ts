@@ -28,20 +28,27 @@ const text = (value: unknown) => frame(1, Buffer.from(JSON.stringify(value)));
 const accept = (req: IncomingMessage, socket: Duplex, protocol: string) => socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade',
   `Sec-WebSocket-Accept: ${createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}`,
   ...(protocol ? [`Sec-WebSocket-Protocol: ${protocol}`] : []), '', ''].join('\r\n'));
-/** Calls ON for each client frame (masked, as a browser sends them) arriving on SOCKET. */
+/** Calls ON for each client message (masked, as a browser sends them) arriving on SOCKET. A browser
+ * fragments a large message (Chrome splits one over 131 KB — a pasted screenshot's upload), so
+ * continuation frames are reassembled into the single message they are; a control frame, never
+ * fragmented itself, is delivered at once even between a message's fragments. */
 const readFrames = (socket: Duplex, on: (opcode: number, payload: Buffer) => void) => {
-  let pending = Buffer.alloc(0);
+  let pending = Buffer.alloc(0), fragmented: { opcode: number; payload: Buffer } | null = null;
   socket.on('data', (chunk: Buffer) => {
     pending = Buffer.concat([pending, chunk]);
     for (;;) {
       if (pending.length < 2) return;
-      const opcode = pending[0]! & 15; let length = pending[1]! & 127, offset = 2;
+      const fin = (pending[0]! & 128) !== 0, opcode = pending[0]! & 15; let length = pending[1]! & 127, offset = 2;
       if (length === 126) { if (pending.length < 4) return; length = pending.readUInt16BE(2); offset = 4; }
       else if (length === 127) { if (pending.length < 10) return; length = Number(pending.readBigUInt64BE(2)); offset = 10; }
       if (pending.length < offset + 4 + length) return;
-      const mask = pending.subarray(offset, offset + 4), payload = Buffer.from(pending.subarray(offset + 4, offset + 4 + length)).map((byte, index) => byte ^ mask[index % 4]!);
+      const mask = pending.subarray(offset, offset + 4), payload = Buffer.from(pending.subarray(offset + 4, offset + 4 + length).map((byte, index) => byte ^ mask[index % 4]!));
       pending = pending.subarray(offset + 4 + length);
-      on(opcode, Buffer.from(payload));
+      if (opcode >= 8) { on(opcode, payload); continue; }
+      let message = fragmented;
+      if (message) { if (opcode !== 0) return void socket.destroy(); message.payload = Buffer.concat([message.payload, payload]); }
+      else message = fragmented = { opcode, payload };
+      if (fin) { on(message.opcode, message.payload); fragmented = null; }
     }
   });
 };

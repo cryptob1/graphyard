@@ -1,0 +1,11 @@
+{
+  "id": "costs-page-priced",
+  "title": "The Costs page states spend in dollars, 'at least' beside an unpriced model, in aligned tables",
+  "description": "A real browser at 1280 px and at 390 px opens the served dashboard's Costs page over stubbed usage for three models: two on the bundled price sheet, one on none. Every total card shows 'at least' the priced tokens' cost, one line under the cards names the unpriced model and its tokens, the priced rows of By role, By model and By account show dollars, only the wholly unpriced row reads 'price unknown', and no card shows a per-shipped-item figure. With all three priced the cards show exact dollars and a per-shipped-item figure. Every numeric column's header and cells end at the same right edge within 2 px, and the page never scrolls sideways.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "read the Costs page partly and wholly priced at 1280 px and 390 px", "run": "npm run test:browser -- browser-tests/costs-page-priced.spec.ts", "timeoutSeconds": 240 }
+  ]
+}

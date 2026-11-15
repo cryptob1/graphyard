@@ -2,8 +2,8 @@ import { useSyncExternalStore } from 'react';
 
 /**
  * The dashboard's two looks (GY-3272): Night Yard, the neo-noir default — near-black blue, neon
- * accents, rain and grain — and Daylight, the plain light theme. The choice is the browser's own
- * (like the Fun toggle, web/fun.tsx): remembered under graphyard.theme, applied as
+ * accents, rain and grain — and Daylight, the plain light theme. The choice is the browser's own:
+ * remembered under graphyard.theme, applied as
  * `<html data-theme>` before the dashboard renders, so the stylesheet's Night Yard effects key
  * off `html:not([data-theme='daylight'])` and a fresh visitor gets Night Yard with no flash.
  */

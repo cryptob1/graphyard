@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { demand, type Evidence, type Principal, type Work } from '../model.js';
 import { evaluate } from '../model-boundary/gates.js';
 import { foldMergeLedger, previewVerdictSchema, trialFlakedSchema } from '../model-boundary/merge-ledger.js';
-import { readOnlyTrialBlocker } from '../model/merge-queue.js';
+import { readOnlyTrialBlocker, trialOverloadPrefix } from '../model/merge-queue.js';
 import { mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model-boundary/actions.js';
 import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
@@ -225,6 +225,17 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     work!.mergeLedger = await foldItemLedger(db, work!, data);
     // GY-3229: a trial that could not write a read-only file system is the host's fault: one blocker naming the path, never a rework.
     if (data.kind === 'trial' && data.outcome === 'host-failure' && data.reason.startsWith(readOnlyTrialBlocker) && !work!.blocker) { work!.blocker = data.reason; work!.blockedAt = now.toISOString(); }
+    // Count durable trials of this head, inside the same transaction as the record. Three host
+    // faults need the master's attention; none is evidence for rework of the implementation.
+    if (data.kind === 'trial' && data.outcome === 'host-failure' && data.head === candidate && data.reason.startsWith(trialOverloadPrefix) && !work!.blocker) {
+      const counted = await db.query(`SELECT count(*) AS count FROM events WHERE work_id=$1 AND kind=$2
+        AND payload->>'head'=$3 AND payload->>'outcome'='host-failure' AND starts_with(payload->>'reason', $4)`,
+      [work!.id, mergeTrialKind, data.head, trialOverloadPrefix]);
+      if (Number(counted.rows[0].count) >= 3) {
+        work!.blocker = `${trialOverloadPrefix} three trials of this head stopped on host overload; master must resolve the host before retrying. ${data.reason}`;
+        work!.blockedAt = now.toISOString();
+      }
+    }
     // GY-2965: the trial is a trusted producer of its E2E case runs. Every case that ran is recorded on the
     // item as trusted evidence bound to the merge commit it ran against — a pass and a fail both keep their
     // run in the case's Tests-page history; only a pass can stand behind the proof, and only through the

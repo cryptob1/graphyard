@@ -494,6 +494,9 @@ test('integration:trial-run-build-and-tests — a merge that changes the lockfil
 });
 
 test('integration:trial-run-build-and-tests — a trial that outruns its time budget is no verdict: runTrial rejects with TrialTimeoutError naming the phase, and the checkout is still removed', async () => {
+  // Pin a healthy host: this checks the deadline itself, not overload attribution.
+  let ticks = 0;
+  const cpu = () => ({ total: ++ticks * 100, idle: ticks * 90, steal: 0, load: 0, at: ticks * 1000 });
   const repo = await fixture();
   const head = repo.commitOnBase({ 'src/a.ts': 'export {};\n' }, 'slow head');
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
@@ -504,14 +507,14 @@ test('integration:trial-run-build-and-tests — a trial that outruns its time bu
     if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('npm run build did not finish within 1000ms and was killed'), { timedOut: true, stdout: 'building…', stderr: '' });
     return defaultChildRun(command, args, options as never);
   }) as never;
-  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run }),
+  await assert.rejects(runTrial({ cpu, root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run }),
     (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'build' && /timed out during its build/.test(error.message) && error.logTail.includes('building…'));
   assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0, 'the trial checkout is removed after a timeout');
   assert.equal(gitIn(repo.root, 'worktree', 'list').split('\n').length, 1);
   // A deadline that passed while a child ran to completion ends the trial the same way.
   let clock = 0;
   const slow = ((command: string, args: string[], options: unknown) => { if (command === 'npm' && args[0] === 'run') clock += 200_000; return defaultChildRun(command, args, options as never); }) as never;
-  await assert.rejects(runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: slow, now: () => clock }),
+  await assert.rejects(runTrial({ cpu, root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['src/a.ts'], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run: slow, now: () => clock }),
     (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'build' && error.durationMs === 200_000);
   assert.equal(existsSync(base) ? readdirSync(base).length : 0, 0);
 });

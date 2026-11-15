@@ -1,3 +1,4 @@
+import { trialOverloadFault } from '../merge-writer/trial-cpu.js';
 import { timedMergePorts, trialStepMedians } from './trial-timings.js';
 import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, pendingReworkSchema, unconfirmedRecordSchema, mergeWriterStateSchema, emptyMergeWriterState, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
@@ -12,7 +13,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
@@ -24,7 +25,7 @@ import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-fai
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
-import { reportTrialHostFault, reportTrialImageFault } from './control-plane.js';
+import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
 
@@ -56,7 +57,7 @@ export interface MergeWriterReads extends MergePorts {
    */
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
   /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
-  gate?: { root: string; repository: string; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
+  gate?: { root: string; repository: string; /** GY-3296: the app environment lifecycle; absent, the loop's own over the root's state file. */ environments?: ReturnType<typeof import('../app-environments.js').environmentLifecycle>; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
   /**
    * GY-3199: publishes `commit` at `refs/graphyard/verified` on this checkout's origin with the
    * merge writer's deploy key alone, like every other push — the ref every install's deploy watch
@@ -123,7 +124,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, ...(item.environments ? { e2eOrigins: item.environments } : {}), key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         ...trialShareAllowance(share, timeoutMs) });
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
@@ -855,10 +856,24 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads' trials passed (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head yields its turn and is tried after every other queued head`);
+          } else if (trialOverloadFault(error)) {
+            action('failed', `Merge of ${itemKey} head ${head} stopped on ${message(error)}; no rework; the same head retries until three overloaded trials raise a blocker to the master`);
+            const attentionKey = `trial-overload:${itemKey}:${head}`;
+            if (!state.actions[attentionKey]) performed.push(storeAction(state, attentionKey, { kind: 'attention', work: itemKey, principal: null,
+              state: 'failed', detail: `${itemKey}: ${message(error)}; the same head is queued again. After three overloaded trials the master must resolve the host.`,
+              attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
           } else if (trialRepositoryImageFault(error)) {
             // GY-3275: the repository's own trial image could not be built: no verdict on the head, reported upstream like a fetch fault (GY-3249).
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             await reportTrialImageFault(cycle);
+          } else if (trialNetworkPoolFault(error) !== null) {
+            // GY-3316: Docker refused the trial's network for spent address pools: no verdict on the head, reported once.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            await reportTrialNetworkFault(cycle, trialNetworkPoolFault(error)!);
+          } else if (trialSandboxFault(error)) {
+            // GY-3339: AppArmor denied the trial's nested sandbox: no verdict on the head, reported upstream once per repository.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            await reportTrialSandboxFault(cycle);
           } else if (trialHostFaultHost(error)) {
             // GY-3249: the trial host could not reach a host the build needs: no verdict on the head, reported upstream once per host.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
