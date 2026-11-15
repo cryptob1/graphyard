@@ -13,6 +13,9 @@ export function productReviewNeed(work: Work): { needed: boolean; reason: string
   if (standing?.review.verdict === 'approved') return standing.carried
     ? { needed: false, state: 'carried', reason: `product review of ${short(standing.review.sha)} carried: only non-UI files changed since` }
     : { needed: false, state: 'approved', reason: `product approved ${short(candidate.sha)}` };
+  // A could-not-run verdict (GY-3331) answered nothing: the request stands and another eligible
+  // reviewer is tried, on the same head — never a rework, never a change request.
+  if (standing?.review.verdict === 'could-not-run') return { needed: true, state: 'required', reason: `the product review of ${short(candidate.sha)} could not run: ${standing.review.findings.split('\n')[0]!.slice(0, 400)}; another eligible reviewer is tried` };
   if (standing) return { needed: false, state: standing.review.verdict, reason: `product review ${standing.review.verdict === 'changes-requested' ? 'requested changes' : 'rejected'} on ${short(candidate.sha)}; ${standing.review.verdict === 'changes-requested' ? 'the next head is reviewed afresh' : 'the item is owed to the master'}` };
   return { needed: true, state: 'required', reason: `product review of ${short(candidate.sha)} is required before this user-facing feature merges` };
 }

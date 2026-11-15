@@ -29,6 +29,10 @@ export interface Services {
   responder: Responder | null;
   /** The single-use admin sign-in a self-contained install deployed (GY-717): the claim's SHA-256 and the credential it yields. */
   signinClaim?: { hash: string; principal: string; token: string } | null;
+  /** The server's clock (sign-in and invite expiry); Date.now unless an embedder controls time. */
+  clock?: () => number;
+  /** GY-3294: the port this install is published on, for team access (routes/team-access.ts). */
+  teamAccess?: { port: string | null };
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */

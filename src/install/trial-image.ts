@@ -3,6 +3,7 @@ import type { AdapterContext } from './adapters.js';
 import type { PlanAction } from './types.js';
 import { pulledTrialImageFile, trialContainerImage } from '../merge-writer/trial-container.js';
 import { shellQuote } from './transport.js';
+import { appArmorEnabled, trialAppArmorLoadCommand, trialAppArmorProfile, trialAppArmorProfilePath, trialAppArmorProfileText } from '../merge-writer/trial-apparmor.js';
 
 /** GY-3188: trial images build on Graphyard's own builder, so its cache is pruned without touching another project's. */
 export const trialBuilder = 'graphyard-trial';
@@ -22,4 +23,18 @@ export const provisionTrialImage = async (ctx: AdapterContext, published: string
   await rm(marker, { force: true });
   if ((await ctx.transport.exec('docker', ['buildx', 'inspect', trialBuilder], { allowFailure: true })).code !== 0) await ctx.transport.exec('docker', trialBuilderCreateArgs);
   await ctx.transport.exec('docker', trialImageBuildArgs(ctx.sourceRoot), { timeout: 1_800_000 });
+};
+/** GY-3339: on an AppArmor host, the profile trial containers run under (merge-writer/trial-apparmor.ts); none elsewhere. */
+export const trialAppArmorPlan = (enabled = appArmorEnabled()): PlanAction[] => enabled ? [{
+  id: 'provider.trial-apparmor', target: 'provider', state: 'update', command: trialAppArmorLoadCommand,
+  title: `Load the AppArmor profile ${trialAppArmorProfile} (flags=(unconfined) with userns) at ${trialAppArmorProfilePath}, loaded again on boot, so merge-trial tests can start nested sandboxes; other containers keep docker-default`,
+}] : [];
+export const provisionTrialAppArmor = async (ctx: AdapterContext, enabled = appArmorEnabled()) => {
+  if (!enabled) return;
+  try {
+    await ctx.transport.exec('sudo', ['-n', 'tee', trialAppArmorProfilePath], { input: trialAppArmorProfileText });
+    await ctx.transport.exec('sudo', ['-n', 'apparmor_parser', '-r', '-W', trialAppArmorProfilePath]);
+  } catch (error) {
+    throw new Error(`AppArmor is enabled on this host, and merge trials need the ${trialAppArmorProfile} profile loaded, which needs root (${error instanceof Error ? error.message : String(error)}). Run: ${trialAppArmorLoadCommand}; then rerun the installer`);
+  }
 };

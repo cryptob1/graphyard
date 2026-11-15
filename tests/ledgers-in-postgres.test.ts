@@ -10,7 +10,7 @@ import { registryFixture } from './helpers/registry-fixture.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { loadMasterConfig, saveProducerProfile } from '../src/master.js';
+import { loadMasterConfig, masterConfigSchema, saveProducerProfile } from '../src/master.js';
 import { launchReview } from './helpers/pending-review.js';
 import { readReviewLedger, reconcileReviews, reviewRecordSchema, saveReviewLedger } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, reconcileProducers, producerRecordSchema, saveProducerLedger } from '../src/producer.js';
@@ -18,6 +18,8 @@ import { dispatchCursorPath, emptyDispatchCursor, readDispatchCursor, writeDispa
 import { runDispatchTick } from '../src/dispatch/tick.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
+import { storedLoopState } from '../src/server/loop-state.js';
+import { advisoryLocks } from '../src/store/locks.js';
 import type { DispatchEffects } from '../src/dispatch/effects.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 
@@ -120,4 +122,27 @@ test('ledgers-in-postgres: first cycle migrates legacy files, resumes attempts a
   } finally {
     await host.cleanup();
   }
+});
+
+test('ledgers-in-postgres: a loop-state write never waits on the coordination lock (GY-3341)', async t => {
+  const store = await withDatabase('loop_state_coordination_lock'); await store.init();
+  t.after(async () => { await store.close(); });
+  const cursor = emptyDispatchCursor(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'machine-a', masterAgentName: 'gmp', workers: [] }));
+  cursor.ticks = 3;
+  // Another session holds the fleet advisory lock, as a slow host's coordination batches do.
+  const holder = await store.pool.connect();
+  try {
+    await holder.query('BEGIN');
+    await holder.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]);
+    // Executor bookkeeping is not a coordination decision: the write settles while the fleet lock is
+    // held. Waiting on it (the base tip) outlived the pool's 60 s statement timeout on a slow host,
+    // and the control plane answered the loop's own cursor save with a 500.
+    const fiveSeconds = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the loop-state write waited on the coordination lock')), 5_000));
+    await assert.doesNotReject(Promise.race([storedLoopState(store, { id: 'loop', role: 'coordinator' }, '00'.padEnd(64, '0')).write('dispatch', [cursor]), fiveSeconds]));
+  } finally {
+    await holder.query('ROLLBACK');
+    holder.release();
+  }
+  const saved = (await store.pool.query(`SELECT data->>'ticks' AS ticks FROM loop_state WHERE kind='dispatch'`)).rows[0];
+  assert.equal(saved.ticks, '3', 'the write landed while the coordination lock was held elsewhere');
 });

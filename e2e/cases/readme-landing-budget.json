@@ -1,0 +1,14 @@
+{
+  "id": "readme-landing-budget",
+  "title": "README stays within its word budget and the setup guide carries what it leaves out",
+  "description": "Reads README.md and docs/setup.md: the README is 290 words or fewer and links docs/setup.md, and every fact moved out of the README (AppArmor trial profile, headless runtimes, --push-auth gh, viewer invites, publishing) is in the setup guide.",
+  "tags": ["docs", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "README budget and setup guide facts",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/readme-landing-budget.test.ts",
+    "timeoutSeconds": 120
+  }]
+}

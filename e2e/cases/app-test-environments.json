@@ -1,0 +1,9 @@
+{
+  "id": "app-test-environments",
+  "title": "A declared app test environment is provisioned per batch gate from the trusted base, and its faults never condemn a candidate",
+  "description": "Runs the app test environments regression over fake provider commands and a real git repository: the batch gate's lifecycle provisions a declared environment from the trusted base commit for the exact candidate commit and run id, hands its URL to the case and tears it down with the same identity, while undeclared cases stay on local; max-concurrent holds across competing gate runs and exhaustion waits without a failed check or revert; a provisioning outage and a teardown failure are environment faults while a real assertion failure stays a test failure; after a loop restart list reaps leaked owned instances and keeps the active one; a candidate's rewritten lifecycle never runs, the 0600 install secret is masked from candidate, worker and reviewer paths and redacted from logs and records.",
+  "tags": ["delivery", "e2e"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "app test environments regression", "run": "node --import tsx tests/helpers/run-tests.ts tests/app-test-environments.test.ts", "timeoutSeconds": 600 }]
+}

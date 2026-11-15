@@ -1,0 +1,11 @@
+{
+  "id": "workers-page-live-session",
+  "title": "The Workers page: one compact line per agent, with a live read-only view of its headless session",
+  "description": "A real browser on the served dashboard against the real control plane with nine stubbed open headless sessions. At 1280 px each agent occupies one table row no taller than 44 px naming the agent, the item key with a truncated title, a state of at most three words and its age, with no text clipped by the viewport's right edge and no horizontal page scroll; at 390 px each agent is one card and the page does not scroll sideways. Opening a row shows that session's run output, output appended to the run appears in the view without a reload, the earlier output is reachable by scrolling, and the view offers no input. The master's row opens the Master page.",
+  "tags": ["dashboard", "workers"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "compact worker rows and live session views on the served dashboard", "run": "npm run test:browser -- browser-tests/workers-page-live-session.spec.ts", "timeoutSeconds": 300 }
+  ]
+}

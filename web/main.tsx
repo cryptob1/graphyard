@@ -14,13 +14,12 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { idempotencyKey } from './idempotency-key';
-import { ShippedToast, confetti, bootFun } from './fun';
+import { ShippedToast, confetti } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
 import KeyboardNav from './keyboard';
 
 applyTheme();
-bootFun();
 boot();
 
 /**

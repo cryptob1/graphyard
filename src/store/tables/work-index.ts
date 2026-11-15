@@ -11,9 +11,10 @@ import { coordinationDocument, coordinationRelevance, coordinationTrimSql, detoa
  * Every snapshot used to load every whole document (17.7 MB on the live ledger) to decide what
  * a handful of live items needed. The index holds what those decisions select on — key, stage,
  * priority, revision, the pull request and its state,
- * and when an action row is next due — and, for a settled delivery (`settledSql`), the summary the
- * coordination view serves in place of its document, so the coordination snapshot reads the index
- * plus only the live items' documents, and an idle claim poll reads the index alone.
+ * and when an action row is next due — and when the item merged (`merged_at`, the window the
+ * loop's own read keeps recent merges for, GY-3341), and, for a settled delivery (`settledSql`),
+ * the summary the coordination view serves in place of its document, so the coordination snapshot
+ * reads the index plus only the live items' documents, and an idle claim poll reads the index alone.
  *
  * A cache, not ledger state: a backup does not carry it and a restore rebuilds it through the
  * trigger. The migration rebuilds every row whenever the projection itself changes (its digest is
@@ -46,11 +47,11 @@ const projection = `CREATE OR REPLACE FUNCTION graphyard_timestamptz(value text)
 CREATE OR REPLACE FUNCTION graphyard_number(value jsonb) RETURNS numeric LANGUAGE sql IMMUTABLE AS $work_index$
   SELECT CASE WHEN jsonb_typeof(value) = 'number' THEN (value #>> '{}')::numeric END $work_index$;
 CREATE OR REPLACE FUNCTION graphyard_index_work(p_id uuid, p_number bigint, p_document jsonb) RETURNS void LANGUAGE sql AS $work_index$
-INSERT INTO work_index AS i(id, number, key, stage, priority, revision, pr, pr_state, due_at, settled, summary, trimmed, peers)
+INSERT INTO work_index AS i(id, number, key, stage, priority, revision, pr, pr_state, due_at, merged_at, settled, summary, trimmed, peers)
 SELECT p_id, p_number, d.document->>'key', d.document->>'stage', ${number("d.document->'priority'")},
   ${number("d.document->'revision'")}, ${number("d.document->'candidate'->'pr'")},
   CASE WHEN d.document->'observation'->'merged' = 'true'::jsonb THEN 'merged' ELSE d.document->'observation'->>'prState' END,
-  ${dueAt}, s.settled, x.summary,
+  ${dueAt}, graphyard_timestamptz(COALESCE(d.document->'delivery'->>'mergedAt', d.document->'observation'->>'mergedAt')), s.settled, x.summary,
   CASE WHEN s.settled THEN ${coordinationTrimSql('x.summary', 0)} END,
   jsonb_build_object('lease', d.document->'lease', 'resources', COALESCE(d.document->'exclusiveResources', '[]'::jsonb) || COALESCE(d.document->'plannedFiles', '[]'::jsonb),
     'files', COALESCE(d.document->'observation'->'files', '[]'::jsonb),
@@ -65,7 +66,7 @@ CROSS JOIN ${coordinationRelevance(0)}
 CROSS JOIN LATERAL (SELECT CASE WHEN s.settled THEN ${coordinationDocument({ keep: 0, settled: true })} END AS summary) x
 ON CONFLICT (id) DO UPDATE SET number = EXCLUDED.number, key = EXCLUDED.key, stage = EXCLUDED.stage, priority = EXCLUDED.priority,
   revision = EXCLUDED.revision, pr = EXCLUDED.pr, pr_state = EXCLUDED.pr_state,
-  due_at = EXCLUDED.due_at, settled = EXCLUDED.settled, summary = EXCLUDED.summary, trimmed = EXCLUDED.trimmed, peers = EXCLUDED.peers
+  due_at = EXCLUDED.due_at, merged_at = EXCLUDED.merged_at, settled = EXCLUDED.settled, summary = EXCLUDED.summary, trimmed = EXCLUDED.trimmed, peers = EXCLUDED.peers
 $work_index$;
 CREATE OR REPLACE FUNCTION graphyard_work_index_sync() RETURNS trigger LANGUAGE plpgsql AS $work_index$
 BEGIN PERFORM graphyard_index_work(NEW.id, NEW.number, NEW.document); RETURN NULL; END $work_index$;`;
@@ -77,13 +78,17 @@ export const workIndex = defineTable({
   ddl: `CREATE TABLE IF NOT EXISTS work_index (
   id uuid PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE, number bigint NOT NULL,
   key text, stage text, priority numeric, revision numeric,
-  pr numeric, pr_state text, due_at timestamptz,
+  pr numeric, pr_state text, due_at timestamptz, merged_at timestamptz,
   settled boolean NOT NULL DEFAULT false, summary jsonb, trimmed jsonb
 );
 DO $work_index$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'work_index'::regclass AND attname = 'peers' AND NOT attisdropped) THEN
     LOCK TABLE work_items IN SHARE ROW EXCLUSIVE MODE;
     ALTER TABLE work_index ADD COLUMN peers jsonb NOT NULL DEFAULT '{}'::jsonb;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'work_index'::regclass AND attname = 'merged_at' AND NOT attisdropped) THEN
+    LOCK TABLE work_items IN SHARE ROW EXCLUSIVE MODE;
+    ALTER TABLE work_index ADD COLUMN merged_at timestamptz;
   END IF;
 END $work_index$;
 ${projection}

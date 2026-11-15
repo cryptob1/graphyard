@@ -19,6 +19,10 @@ export function storedLoopState(store: Store, actor: Principal, scope: string): 
       authorize();
       const parsed = records.map(record => schemas[kind].parse(record));
       if (!parsed.length && !removed.length) return;
+      // GY-3341: executor bookkeeping takes no coordination lock. The write is not a coordination
+      // decision — it touches no work item — but it used to queue behind the fleet advisory lock
+      // anyway, and on a host slow enough for coordination batches to hold that lock for minutes
+      // the wait outlived the pool's statement timeout and the control plane answered 500.
       await store.transaction(async db => {
         for (const record of parsed) {
           const id = kind === 'dispatch' ? 'cursor' : (record as { id: string }).id;
@@ -27,7 +31,7 @@ export function storedLoopState(store: Store, actor: Principal, scope: string): 
         }
         if (removed.length) await db.query('DELETE FROM loop_state WHERE scope=$1 AND kind=$2 AND id=ANY($3::text[])', [scope, kind, removed]);
         await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [actor.id, `loop-state.${migrate ? 'migrated' : 'saved'}`, JSON.stringify({ scope, kind, records: parsed, removed })]);
-      });
+      }, { coordinationLock: false });
     },
   };
 }
