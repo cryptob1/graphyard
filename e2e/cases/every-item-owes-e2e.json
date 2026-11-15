@@ -16,7 +16,7 @@
       "name": "a chore with no e2e proof is refused",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: chore without proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "chore",
@@ -54,7 +54,7 @@
       "name": "a bug with no e2e proof is refused",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: bug without proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "bug",
@@ -88,7 +88,7 @@
       "name": "a feature with no e2e proof is refused",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: feature without proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "feature",
@@ -122,7 +122,7 @@
       "name": "the opt-out sentence does not excuse a chore",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: chore opt-out {{case}} {{run}}",
         "description": "No user-facing change: the refactor moves code without changing behaviour.",
         "type": "chore",
@@ -156,7 +156,7 @@
       "name": "the opt-out sentence does not excuse a bug",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: bug opt-out {{case}} {{run}}",
         "description": "No user-facing change: the refactor moves code without changing behaviour.",
         "type": "bug",
@@ -190,7 +190,7 @@
       "name": "the opt-out sentence does not excuse a feature",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: feature opt-out {{case}} {{run}}",
         "description": "No user-facing change: headless control-plane work only.",
         "type": "feature",
@@ -224,7 +224,7 @@
       "name": "a chore with an e2e proof is accepted",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: chore with proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "chore",
@@ -258,7 +258,7 @@
       "name": "a bug with an e2e proof is accepted",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: bug with proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "bug",
@@ -292,7 +292,7 @@
       "name": "a feature with an e2e proof is accepted",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "Filing-rule probe: feature with proof {{case}} {{run}}",
         "description": "Created by the every-item-owes-e2e E2E case.",
         "type": "feature",

@@ -470,9 +470,12 @@ export const destructivePromptGuidance = 'Never give rm or mv a glob or variable
  * inside its worktree.
  */
 export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
+/** GY-3382: the item's two lead sentences, read before building and stayed inside; an item from before them has neither. */
+export const workerLeadSection = (work: Partial<Pick<Work, 'why' | 'simplest'>>) => work.why || work.simplest
+  ? `Read why and simplest first and stay inside them. Why: ${work.why ?? 'not stated'} Simplest: ${work.simplest ?? 'not stated'} ` : '';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -487,7 +490,7 @@ export function workerPrompt(
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: baseSha ?? undefined });
   const standards = reviewStandards(work);
-  return `Implement ${work.key}: ${work.title}. Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
+  return `Implement ${work.key}: ${work.title}. ${workerLeadSection(work)}Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
     + attemptBoundSection(config.run, work, epoch)
     + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
     + installed

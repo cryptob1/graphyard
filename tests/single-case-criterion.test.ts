@@ -45,7 +45,7 @@ const api = async (path: string, data?: unknown, key: string = randomUUID()) => 
 };
 
 test('unit:single-case-criterion-warned-at-create — the create succeeds with exactly one single-case warning naming the pinned criterion, in the response and on the item', async () => {
-  const created = await api('work', { title: 'Single-case create', type: 'chore', priority: 3, criteria: [single, multi] });
+  const created = await api('work', { why: 'w', simplest: 's', title: 'Single-case create', type: 'chore', priority: 3, criteria: [single, multi] });
   assert.equal(created.stage, 'backlog', 'the create succeeds');
   assert.deepEqual(created.warnings, [warningOf('AC-1')], 'exactly one warning, naming the first criterion');
   const read = await api(`work/${created.id}`);
@@ -53,7 +53,7 @@ test('unit:single-case-criterion-warned-at-create — the create succeeds with e
 });
 
 test('unit:single-case-criterion-warned-at-create — several named cases carry no warning, and a revision rejudges the warning from the revised criteria', async () => {
-  const created = await api('work', { title: 'No single case', type: 'chore', priority: 3, criteria: [multi] });
+  const created = await api('work', { why: 'w', simplest: 's', title: 'No single case', type: 'chore', priority: 3, criteria: [multi] });
   assert.equal(created.warnings, undefined, 'three named seeds carry no warning');
   assert.equal((await api(`work/${created.id}`)).warnings, undefined);
   const revised = await api(`work/${created.id}/requirements`, { expectedPolicyRevision: created.policyRevision, reason: 'Narrow the check', criteria: [single], dependencies: [], exclusiveResources: [] });

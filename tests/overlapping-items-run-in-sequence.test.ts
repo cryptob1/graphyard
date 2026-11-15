@@ -42,7 +42,7 @@ const ok = async (bearer: string, method: 'GET' | 'POST', path: string, body?: u
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return result.body;
 };
-const file = (title: string, plannedFiles?: string[]) => ok(token(operator.id), 'POST', 'work', {
+const file = (title: string, plannedFiles?: string[]) => ok(token(operator.id), 'POST', 'work', { why: 'w', simplest: 's',
   title, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:overlapping-items-run-in-sequence', 'e2e:fixture'] }],
   policy: { checks: ['test'], review: true }, ...(plannedFiles ? { plannedFiles } : {}),
 }) as Promise<Work>;
