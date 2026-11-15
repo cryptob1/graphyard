@@ -87,6 +87,8 @@ export const caseSchema = z.object({
   /** Secrets the operator keeps for this case (GY-1536), exposed to its steps only as variables and `{{secret:NAME}}`. */
   secrets: z.array(variable.max(100)).max(20).default([]),
   steps: z.array(step).min(1).max(50),
+  /** GY-3296: where the app under test runs — `local` (the trial's serve or application), or a name graphyard.json's e2e.environments declares. */
+  environment: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'an environment name is lower-case letters, digits and -').default('local'),
 }).strict().superRefine((entry, context) => {
   if (!entry.steps.some(s => s.kind !== 'browser' || s.action === 'expectText')) context.addIssue({ code: 'custom', path: ['steps'], message: 'a case checks something: at least one http, command or agent step or browser expectText step' });
   if (new Set(entry.secrets).size !== entry.secrets.length) context.addIssue({ code: 'custom', path: ['secrets'], message: 'a secret is declared once' });

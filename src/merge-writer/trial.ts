@@ -23,8 +23,9 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
-import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
+import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
+import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -515,9 +516,39 @@ export class TrialHostFaultError extends Error {
     this.name = 'TrialHostFaultError';
   }
 }
+/**
+ * GY-3339: a trial step whose nested sandbox AppArmor denied — the trial host's AppArmor, not the
+ * head's. Like a fetch fault it reaches no verdict, is not retried, and the loop reports it upstream.
+ */
+export const trialSandboxFaultLead = `${trialHostFaultPrefix}: a nested sandbox could not start in the trial container`;
+export class TrialSandboxFaultError extends Error {
+  constructor(readonly phase: string, readonly line: string) {
+    super(`${trialSandboxFaultLead} during the ${phase} step (${line}); this is the trial host's AppArmor, not the head's: ${trialAppArmorFix}`);
+    this.name = 'TrialSandboxFaultError';
+  }
+}
+/** Whether an error, or the message it crossed a process boundary as, is a nested-sandbox trial-host fault. */
+export const trialSandboxFault = (error: unknown) => error instanceof Error && error.message.startsWith(trialSandboxFaultLead);
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/**
+ * GY-3316: Docker refused the trial's network because leaked networks spent its address pools — the
+ * trial host, not the head. Like a fetch fault it reaches no verdict and is not retried: the head
+ * stays queued and the loop reports the fault, naming how many preview networks the host holds.
+ */
+export class TrialNetworkPoolError extends Error {
+  constructor(readonly networks: number | null) {
+    super(`${trialHostFaultPrefix}: Docker could not create the trial's network (${addressPoolsSpent}); ${networks ?? 'an unknown number of'} Graphyard preview networks are on the trial host`);
+    this.name = 'TrialNetworkPoolError';
+  }
+}
+/** The preview-network count a network-pool fault names, from the error or the message it crossed a process boundary as; null for any other error. */
+export const trialNetworkPoolFault = (error: unknown): string | null =>
+  new RegExp(`^${trialHostFaultPrefix}: Docker could not create the trial's network .*; (.+) Graphyard preview networks`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/** `error` as a network-pool fault when Docker refused a network for spent address pools, else null. */
+const networkPoolFault = async (error: unknown, env: Record<string, string>) => (error instanceof Error ? error.message : String(error)).includes(addressPoolsSpent)
+  ? new TrialNetworkPoolError((error as { previewNetworks?: number | null }).previewNetworks ?? await previewNetworkCount(dockerEnvironment(env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }))) : null;
 const localHost = /^(?:localhost|127\.[\d.]+|0\.0\.0\.0|::1|\[::1\])$/i;
 /**
  * The external host a failed step's output shows a network fetch failure to, or null: a resolver or
@@ -688,6 +719,8 @@ export interface RunTrialInput {
    * candidate is run against the base tip and keeps its before screenshot.
    */
   e2eFrom?: string;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it; such a case runs against that URL. */
+  e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -904,7 +937,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -1046,6 +1079,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const ended = endedOf(error, out);
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
+      if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;
     }
     entries.push(`$ ${command} ${args.join(' ')}\n${out}`);
@@ -1201,6 +1236,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let started: CheckServices;
     try { started = await (input.services ?? startCheckServices)({ checkout: worktree, services: check.services, scratch: temporary!, env, key: input.key ?? 'trial', timeoutMs: remaining() }); }
     catch (error) {
+      const fault = await networkPoolFault(error, env);
+      if (fault) throw fault;
       const why = `the services of check ${check.check} did not start: ${error instanceof Error ? error.message : String(error)}`;
       log.push(why);
       return { services: why };
@@ -1227,10 +1264,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
       if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
       const ran = await containerTrialE2e({
-        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-      });
+      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
       // The laid-over files served the cases only: the checks that follow test the base tip as it is.
       if (added.length) await run('git', ['-C', worktree, 'rm', '-q', '-f', '--', ...added], { timeoutMs: remaining() });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.

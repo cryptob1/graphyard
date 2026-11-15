@@ -18,7 +18,7 @@ import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgres
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from './loop-unit.js';
 import { SERVER_PORT, type EnvValue, type PreflightItem } from './types.js';
 import { withLocalBin } from '../herdr-host.js';
-import { provisionTrialImage, trialImagePlan } from './trial-image.js';
+import { provisionTrialAppArmor, provisionTrialImage, trialAppArmorPlan, trialImagePlan } from './trial-image.js';
 
 /** How the runtime is kept alive on this machine. A test supervisor runs it in-process. */
 export interface LocalSupervisor {
@@ -219,6 +219,7 @@ export const localAdapter: ProviderAdapter = {
     const local = settings(ctx);
     return [
       trialImagePlan(ctx, publishedSourceImages(ctx.sourceRoot)?.trial ?? null),
+      ...trialAppArmorPlan(),
       { id: 'provider.provision.database', target: 'provider', state: observation.database ? 'satisfied' : 'create',
         title: `Create the embedded Postgres cluster under ${local.paths.postgres} (directory 0700, password file 0600) on 127.0.0.1:${local.postgresPort}; no Docker`,
         command: `initdb --pgdata=${local.paths.data} --auth=scram-sha-256 --username=graphyard --pwfile=${local.paths.passwordFile}` },
@@ -233,6 +234,7 @@ export const localAdapter: ProviderAdapter = {
   },
   async provision(ctx) {
     await provisionTrialImage(ctx, publishedSourceImages(ctx.sourceRoot)?.trial ?? null);
+    await provisionTrialAppArmor(ctx);
     const { paths } = settings(ctx);
     await mkdir(paths.postgres, { recursive: true, mode: 0o700 });
     await chmod(paths.postgres, 0o700);

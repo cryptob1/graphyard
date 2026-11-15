@@ -7,11 +7,12 @@ import { checkoutGitDirectory, checkoutGitProblem } from '../master/checkout-git
 import { writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
 import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
-import { composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
+import { addressPoolsSpent, composeBounds, composeProjectName, composeServiceContainer, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { trialAdmission, type TrialLoad } from './trial-load.js';
+import { appArmorEnabled, trialAppArmorProfile } from './trial-apparmor.js';
 
 export const trialContainerImage = 'graphyard-trial:local';
 /** GY-3214: where an install names the published trial image it pulled for the release tree at `root`. */
@@ -41,6 +42,7 @@ docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
+        *(['--security-opt=apparmor=' + spec['apparmor']] if spec.get('apparmor') else []),
         '--ulimit', 'core=0', '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
@@ -97,9 +99,9 @@ finally:
         pass
 `;
 
-/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189). */
+/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189), under the trial AppArmor profile on an AppArmor host (GY-3339). */
 export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad }) =>
-  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify(spec)];
+  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ ...spec, apparmor: appArmorEnabled() ? trialAppArmorProfile : null })];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = trialImage(), network = 'bridge', deadline?: number, load?: TrialLoad): string[] {
@@ -163,19 +165,20 @@ export async function containerTrialE2e(input: {
   worktree: string; mergeSha: string; proofs: readonly string[]; env: Record<string, string>;
   scratch: string; budgetMs: number; wrapper: readonly string[]; run: ChildRun; log: (line: string) => void;
   networkWrapper: (network: string) => readonly string[];
+  origins?: Record<string, string>;
 }): Promise<TrialE2eCase[]> {
   const holds = async (path: string) => {
     try { execFileSync('git', ['-C', input.worktree, 'cat-file', '-e', input.mergeSha + ':' + path], { stdio: 'ignore' }); return true; }
     catch { return false; }
   };
-  return runTrialE2eCases({ ...input, holds, runGroup: async (target, proofs, group) => {
+  return runTrialE2eCases({ ...input, holds, runGroup: async (target, proofs, group, given) => {
     const deadline = Date.now() + group.budgetMs;
     const left = () => Math.max(1, deadline - Date.now());
     let stack: ReturnType<typeof composeStack> | undefined;
-    let origin: string | undefined;
+    let origin: string | undefined = given;
     let wrapper = input.wrapper;
     try {
-      if ('kind' in target && target.kind === 'compose') {
+      if (!origin && 'kind' in target && target.kind === 'compose') {
         const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' });
         // Unpredictable project identities prevent collisions between parallel trials of a head.
         const project = composeProjectName('trial-e2e-' + target.id, randomUUID());
@@ -208,6 +211,8 @@ writeFileSync(${JSON.stringify(result)}, JSON.stringify(cases));
           failingStep: `the E2E runner could not start: ${error instanceof Error ? error.message : String(error)}` }));
       }
     } catch (error) {
+      // GY-3316: a network Docker refused for spent address pools is the trial host's fault, not a failed case.
+      if (error instanceof Error && error.message.includes(addressPoolsSpent)) throw error;
       return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1,
         failingStep: error instanceof Error ? error.message : String(error) }));
     } finally { await stack?.close(); }
