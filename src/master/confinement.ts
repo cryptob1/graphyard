@@ -1,6 +1,6 @@
 // Concern: OS-level host filesystem and coordinator confinement for every launched role.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { slotsDirectoryVariable } from './verification-slots.js';
@@ -303,14 +303,15 @@ export const repositoryReadonlyPaths = (root: string): string[] => {
  * confined session cannot read: every entry of the checkout's parent except the checkout itself,
  * every entry a declared path covers, every symlink (its target stays as reachable as the
  * read-only host makes any other tree of the host user's), and every entry the wrapper mounts
- * under (a masked entry carries no mount point of its own). A parent that is the user's home, the
- * host's temporary directory (the session's scratch already replaces it inside the namespace) or
+ * under (a masked entry carries no mount point of its own). A parent that is the user's home or
  * `/` masks nothing: the host user's home keeps its ordinary files readable, its credential paths
- * masked on their own.
+ * masked on their own, and the scratch the session runs on already replaces the temporary
+ * directories (`/tmp`, `/var/tmp`) inside the namespace, so a checkout directly under one has no
+ * sibling there to mask.
  */
 const siblingMaskEntries = (root: string, declared: readonly string[], mounted: readonly string[]): string[] => {
   const parent = dirname(root);
-  if (parent === '/' || [homedir(), tmpdir()].some(above => canonicalPath(parent) === canonicalPath(above))) return [];
+  if (parent === '/' || parent === '/tmp' || parent === '/var/tmp' || canonicalPath(parent) === canonicalPath(homedir())) return [];
   let names: string[];
   try { names = readdirSync(parent); } catch { return []; /* an unreadable parent hides its entries already */ }
   return names.filter(name => name !== basename(root)).map(name => join(parent, name))
