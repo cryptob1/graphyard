@@ -26,8 +26,8 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
 export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu }
-/** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu and the steal percent from /proc/stat. */
-export interface LoopCpu { avg60: number; steal: number | null }
+/** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373). */
+export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -141,11 +141,10 @@ export function loopCpu(header: string | string[] | undefined): LoopCpu | null {
   const value = Array.isArray(header) ? header[0] : header;
   if (!value || value.length > 500) return null;
   try {
-    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown };
-    const avg60 = Number(parsed.avg60), steal = parsed.steal === null || parsed.steal === undefined ? null : Number(parsed.steal);
-    return Number.isFinite(avg60) && avg60 >= 0 && avg60 <= 100
-      ? { avg60, steal: steal !== null && Number.isFinite(steal) && steal >= 0 ? Math.min(steal, 100) : null }
-      : null;
+    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown; celsius?: unknown };
+    const figure = (raw: unknown, max: number) => { const value = raw === null || raw === undefined ? NaN : Number(raw); return Number.isFinite(value) && value >= 0 ? Math.min(value, max) : null; };
+    const avg60 = figure(parsed.avg60, 100), celsius = figure(parsed.celsius, 200);
+    return avg60 === null && celsius === null ? null : { avg60, steal: figure(parsed.steal, 100), celsius };
   } catch { return null; }
 }
 

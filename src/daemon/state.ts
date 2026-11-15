@@ -204,12 +204,15 @@ export const daemonStateSchema = z.object({
   /**
    * GY-3348: the host's CPU as the last cycle read it — 'some avg60' from /proc/pressure/cpu, the
    * steal percent since the cycle before, and the /proc/stat counters the next reading measures
-   * from. While avg60 is over the ceiling (daemon/cpu-pressure.ts) no new worker, reviewer or trial
-   * starts. Null where the pressure file is missing (not Linux), so nothing is held and the pages
-   * show no figures.
+   * from. GY-3373: the hottest CPU sensor rides the same record. While avg60 is over the ceiling
+   * or the sensor at the launch limit (daemon/cpu-pressure.ts) no new worker, reviewer or trial
+   * starts. Null where neither is readable (not Linux), so nothing is held and the pages show no
+   * figures.
    */
-  cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100), steal: z.number().min(0).max(100).nullable(),
-    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null) }).strict().nullable().default(null),
+  cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
+    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null),
+    /** GY-3373: the hottest CPU sensor in whole degrees; null where none is readable. */
+    celsius: z.number().nullable().default(null) }).strict().nullable().default(null),
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()

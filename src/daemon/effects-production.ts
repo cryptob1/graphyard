@@ -44,6 +44,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { hottestCpuCelsius } from './cpu-pressure.js';
 import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
@@ -217,11 +218,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
-    // GY-3348: the host's CPU before every launch; null where /proc/pressure/cpu is missing (not Linux).
+    // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
-      const pressure = await read('/proc/pressure/cpu');
-      return pressure === null ? null : { pressure, stat: await read('/proc/stat') };
+      return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await hottestCpuCelsius() };
     },
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
