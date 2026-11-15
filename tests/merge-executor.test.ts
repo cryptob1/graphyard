@@ -263,7 +263,11 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
   assert.deepEqual(criterionProofs(item({})), ['unit:item-works', 'integration:item-holds'], 'manual proofs have no test file to run');
   // The trial itself, over a runner that answers each phase; the run-tests call gets the TAP reporter and the widened list.
   const base = await temporaryDirectory('merge-trial-base');
-  const tap = ['TAP version 13', '# Subtest: tests/a.test.ts', '    ok 1 - unit:alpha-works — the thing', '    not ok 2 - integration:beta-holds — more', '    1..2', 'not ok 1 - tests/a.test.ts', '# Subtest: tests/proof.test.ts', '    ok 1 - unit:alpha-works — again', '    ok 2 - unit:alpha-works-not-this — a longer title is another proof', '    1..2', 'ok 2 - tests/proof.test.ts', '1..2', ''].join('\n');
+  const tapByFile: Record<string, string[]> = {
+    'tests/a.test.ts': ['# Subtest: tests/a.test.ts', '    ok 1 - unit:alpha-works — the thing', '    not ok 2 - integration:beta-holds — more', '    1..2', 'not ok 1 - tests/a.test.ts'],
+    'tests/proof.test.ts': ['# Subtest: tests/proof.test.ts', '    ok 1 - unit:alpha-works — again', '    ok 2 - unit:alpha-works-not-this — a longer title is another proof', '    1..2', 'ok 1 - tests/proof.test.ts'],
+  };
+  const tap = Object.values(tapByFile).flat().join('\n');
   let listed: string[] = [], runnerArgs: string[] = [];
   const runner = recordingRun(async (command, args) => {
     if (command === 'git' && args.includes('worktree') && args.includes('add')) {
@@ -274,13 +278,16 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs') { assert.deepEqual(args.slice(1), ['affected', 'src/app.ts']); return 'affected: 1 of 5 test files are affected by 1 changed file(s)\ntests/a.test.ts\n'; }
     if (command === 'node' && args.includes('tests/helpers/run-tests.ts')) {
       runnerArgs = args;
-      listed = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).split('\n').filter(Boolean);
-      throw childFailure(1, tap, '');
+      const group = (await readFile(args[args.indexOf('--files-from') + 1]!, 'utf8')).split('\n').filter(Boolean);
+      listed.push(...group);
+      const output = ['TAP version 13', ...group.flatMap(file => tapByFile[file]!), `1..${group.length}`, ''].join('\n');
+      if (group.includes('tests/a.test.ts')) throw childFailure(1, output, '');
+      return output;
     }
     return '';
   });
   const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', temporaryRoots: [await temporaryDirectory('executor-trial')], checkoutRoots: [], run: runner.run, remove: async () => {}, cores: 2 });
-  assert.deepEqual(listed, ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
+  assert.deepEqual(listed.sort(), ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
   assert.deepEqual(runnerArgs.slice(runnerArgs.indexOf('tests/helpers/run-tests.ts') + 1, runnerArgs.indexOf('--files-from')), ['--test-reporter=tap', '--test-reporter-destination=stdout'], 'the run is read as TAP');
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');
   assert.deepEqual([verdict.build, verdict.tests], ['pass', { passed: 1, failed: ['tests/a.test.ts'], files: 2 }]);

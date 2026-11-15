@@ -7,11 +7,14 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey } from '../merge-writer/trial-load.js';
+import { gateTrialKey, trialSlotCount } from '../merge-writer/trial-load.js';
+import { trialAffordableFiles } from '../merge-writer/trial.js';
+import { availableParallelism } from 'node:os';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
+import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
 import { faultItem } from './control-plane.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
@@ -196,7 +199,6 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const flights = new WeakMap<object, { gate: Promise<void> | null; diagnostics: Promise<void> | null }>();
 const stopped = new WeakSet<object>();
 /** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
 export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
@@ -257,7 +259,10 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reading));
     await writeGateRecord(file, record);
   }
-  const ports = batchGatePorts({ ...reading, git }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
+  const ports = batchGatePorts({ ...reading, git,
+    trial: (sha, files, item, base, step, timing, heads, _share, signal, timeout) =>
+      reads.trial(sha, files, item, base, step, timing, heads, Math.max(1, busyTrialSlots(cycle.state)), signal, timeout),
+  }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
@@ -293,7 +298,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('publish-tag', 'done', `Pushed ${tag}; GitHub Actions publishes the package and images`);
     } catch (error) { note('publish-tag', 'failed', `Could not push the release tag: ${message(error)}`); }
   }
-  if (!live.gate) {
+  const slots = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? Infinity, await trialAffordableFiles(reads.memory));
+  if (!live.gate && busyTrialSlots(cycle.state) < slots) {
     const current = record;
     live.gate = (async () => {
       try {
@@ -324,6 +330,9 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.gate = null; }
     })();
   }
+  // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy
+  // trial slot (trial-slots.ts): the merge flights and the gate size around them, and their own trial
+  // takes its share of the lanes.
   if (!live.diagnostics) {
     live.diagnostics = (async () => {
       try {

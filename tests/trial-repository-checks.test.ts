@@ -498,7 +498,7 @@ test('unit:trial-declared-selection — a non-Node repository selects and shards
   ];
   const repo = await managedRepo({ 'graphyard.json': JSON.stringify({ delivery: { mergeGate: { preMerge } } }) });
   assert.deepEqual(trialTestGateStatus(repo.root), { configured: true, via: 'checks', checks: ['ui', 'specs'] });
-  const commands: string[] = [];
+  const commands: string[] = [], selected: string[] = [];
   const run: typeof defaultChildRun = async (command, args, options) => {
     if (command === 'git') return defaultChildRun(command, args, options);
     commands.push(command);
@@ -508,13 +508,15 @@ test('unit:trial-declared-selection — a non-Node repository selects and shards
     }
     if (command === 'check-specs') {
       const files = readFileSync(args[args.indexOf('--files-from') + 1]!, 'utf8').trim().split('\n');
-      assert.deepEqual(files, ['spec/a.spec.js', 'spec/b.spec.js']);
+      assert.equal(files.length, 1, 'each allocated core runs one shard');
+      selected.push(...files);
       writeFileSync(args[args.indexOf('--durations') + 1]!, files.map(file => JSON.stringify({ file, passed: true, durationMs: 1 })).join('\n'));
     }
     return '';
   };
   const verdict = await runTrial({ root: repo.root, base: await temporaryDirectory('declared-trial'), mergeSha: repo.base,
     changedFiles: ['frontend/app.js'], timeoutMs: 60_000, run, retries: 0, cores: 2, checkoutRoots: [] });
-  assert.deepEqual(commands, ['check-ui', 'select-specs', 'check-specs']);
+  assert.deepEqual(commands, ['check-ui', 'select-specs', 'check-specs', 'check-specs']);
+  assert.deepEqual(selected.sort(), ['spec/a.spec.js', 'spec/b.spec.js']);
   assert.deepEqual(verdict.tests, { passed: 3, failed: [], files: 3 });
 });
