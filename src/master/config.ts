@@ -32,7 +32,13 @@ export async function recordedMasterUrl(root: string): Promise<string | null> {
 async function readMasterConfig(root: string): Promise<MasterConfig> {
   const file = resolve(root, '.graphyard/master.json');
   // A checkout no install or master init has configured names the step that writes it (GY-1352), not a bare lstat ENOENT.
-  await privateFile(file).catch((error: any) => { throw error?.code === 'ENOENT' ? Object.assign(new Error(`${file} does not exist: run graphyard install --apply, or graphyard master init --token-stdin, in this checkout first`), { code: 'ENOENT' }) : error; });
+  const info = await lstat(file).catch((error: any) => { throw error?.code === 'ENOENT' ? Object.assign(new Error(`${file} does not exist: run graphyard install --apply, or graphyard master init --token-stdin, in this checkout first`), { code: 'ENOENT' }) : error; });
+  if (!info.isFile() || info.uid !== process.getuid?.()) throw new Error(`${file} must be a regular file owned by this user`);
+  // GY-3349: the loop and CLI own this file, so a mode an operator's save widened is repaired, not refused.
+  if (info.mode & 0o077) {
+    await chmod(file, 0o600);
+    console.error(`[graphyard] ${file} had mode 0${(info.mode & 0o777).toString(8)}; set it to 0600`);
+  }
   const stored = JSON.parse(await readFile(file, 'utf8'));
   const parsed = masterConfigSchema.safeParse(stored);
   // GY-3293: a file that will not load because of worker profiles past the schema's maximum is

@@ -1,4 +1,4 @@
-import { takeWorkerVerifications, finishWorkerVerification } from '../worker-verification-queue.js';
+import { takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
 import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
@@ -43,6 +43,11 @@ export const workRoutes = defineRoutes('work', [
   { method: 'POST', path: '/api/worker-verifications/finish', async handle(context) {
     return finishWorkerVerification(context.services, context.actor, await parseJson(context));
   } },
+  { method: 'POST', path: '/api/worker-verifications/progress', async handle(context) {
+    return progressWorkerVerification(context.services, context.actor, await parseJson(context));
+  } },
+  // GY-3332: what the host's launcher has said so far about this item's verification, for `complete` to print while it waits.
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/worker-verification$/, handle: async ({ actor, services }, [id]) => ({ lines: workerVerificationLines(services, actor, decodeURIComponent(id!)) }) },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
     async handle(context, [id]) {
