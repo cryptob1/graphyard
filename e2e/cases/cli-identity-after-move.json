@@ -1,0 +1,16 @@
+{
+  "id": "cli-identity-after-move",
+  "title": "After a host move the plain CLI still passes the version check",
+  "description": "A temporary install's CLI release worktree and managed checkout are copied to a second directory standing in for a new host, with hostId re-pointed and the source checkout the release's .git names gone. status GY-1 --json from the copied checkout succeeds against the server; with the release identity file removed, the refusal names the file and the repair command, and running it makes status succeed. A CLI really older than the server is still refused.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Run the copied CLI release against the server before and after removing its identity file",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/cli-identity-after-move.test.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}

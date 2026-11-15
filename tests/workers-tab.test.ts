@@ -5,20 +5,21 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import type { SessionHandle } from '../src/model/sessions.js';
-import { localAttachCommand, remoteAttachCommand, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
+import { localAttachCommand, remoteAttachCommand, sessionState, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
+import { releaseView } from '../src/model/release.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';
-import WorkersPage, { roleWords, spent } from '../web/pages/workers.js';
+import WorkersPage, { SessionPanel, spent } from '../web/pages/workers.js';
 import TopBar from '../web/components/top-bar.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 
 /**
- * GY-116: a Workers tab shows every agent session, what it is on, how long it has spent, and a
- * copyable command to attach to it. Each test is named for the proof it produces:
- * integration:workers-tab-lists-every-session, unit:attach-command-remote-form,
- * integration:workers-tab-per-principal-summary, unit:stale-session-marked and
- * manual:workers-tab-docs-review.
+ * GY-116: a Workers tab shows every agent session as one compact line — the agent, its item with
+ * a truncated title, a state of at most three words and its age (GY-3314) — and opening a row
+ * shows that session's live view or its attach commands. Each test is named for the proof it
+ * produces: integration:workers-tab-lists-every-session, unit:attach-command-remote-form,
+ * integration:workers-tab-per-principal-summary and unit:stale-session-marked.
  *
  * The page is rendered over the checked-in dashboard fixture with handles added to three of its
  * items, and read as static markup: what a test asserts is the derivation and what is drawn,
@@ -90,8 +91,14 @@ const copies = (html: string, sessionId: string) => {
   return [...row.slice(0, row.indexOf('</tr>')).matchAll(/data-copy="([^"]*)"/g)].map(match => unescape(match[1]));
 };
 const rowOf = (html: string, sessionId: string) => { const start = html.indexOf(`data-session="${sessionId}"`); assert.ok(start >= 0, `row for ${sessionId}`); return html.slice(start, html.indexOf('</tr>', start)); };
+/** One session's unfolded panel, as a row click renders it. */
+const panelOf = (work: Work[], sessionId: string) => {
+  const view = workersView(work, new Date(NOW));
+  const row = [...view.running, ...view.finished].find(entry => entry.id === sessionId)!;
+  return renderToStaticMarkup(createElement(SessionPanel, { row, item: work.find(item => item.id === row.workId), now: NOW, release: releaseView(undefined), token: 'fixture', setSelected: noop }));
+};
 
-test('integration:workers-tab-lists-every-session — a top-level Workers tab lists every handle across every item with its item, role kind and time spent, live for a running handle and fixed for a finished one', async () => {
+test('integration:workers-tab-lists-every-session — a top-level Workers tab lists every handle as one compact line: the agent, its item with a truncated title, a state of at most three words and how long it has held it', async () => {
   // Registered after Shipped; since GY-161 it is its own sidebar entry, so no tab row repeats it.
   const ids = views.map(view => view.id);
   assert.ok(ids.indexOf('workers') > ids.indexOf('shipped'), `registered after Shipped: ${ids.join(', ')}`);
@@ -109,36 +116,48 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
   assert.deepEqual([...new Set(handles.map(entry => entry.handle.kind))].sort(), ['coordination', 'implementation', 'proof', 'review'], 'four kinds');
   const html = render(work);
   const expectedRole: Record<string, string> = { implementation: 'worker', review: 'reviewer', proof: 'producer' };
+  const view = workersView(work, new Date(NOW));
+  const rowInView = (id: string) => [...view.running, ...view.finished].find(entry => entry.id === id)!;
   for (const { work: item, handle } of handles) {
     const row = rowOf(html, handle.id);
     assert.ok(row.includes(`data-work="${item.key}"`), `${handle.id} names ${item.key}`);
-    assert.match(row, new RegExp(`<span class="mono">${item.key}</span> ${item.title}</button>`), `${handle.id} links to its item`);
+    assert.match(row, new RegExp(`<span class="mono">${item.key}</span> <span class="row-title">${item.title}</span></button>`), `${handle.id} shows its item's key and title`);
+    // The full title stays one hover away (GY-3314: the row truncates it, the title attribute carries it whole).
+    assert.ok(row.includes(`title="${item.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')}"`), `${handle.id} carries its full title on hover`);
     const role = expectedRole[handle.kind] ?? 'master';
-    // The role in plain words (GY-161): builds code, reviews code, proves requirements, runs the loop.
-    assert.ok(row.includes(`data-role="${role}"`) && row.includes(`<td data-label="Role">${roleWords[role as keyof typeof roleWords]}</td>`), `${handle.id} is a ${role}`);
-    assert.ok(row.includes(handle.subject), `${handle.id} shows its subject`);
-    assert.ok(row.includes(handle.host) && row.includes(handle.principal), `${handle.id} shows host and principal`);
-    const spentMs = handle.state === 'running' ? NOW - Date.parse(handle.startedAt) : Date.parse(handle.endedAt!) - Date.parse(handle.startedAt);
-    assert.ok(row.includes(`data-spent="${spentMs}"`) && row.includes(`>${spent(spentMs)}<`), `${handle.id} spent ${spent(spentMs)}`);
+    assert.ok(row.includes(`data-role="${role}"`), `${handle.id} is a ${role}`);
+    assert.ok(row.includes(handle.principal) && row.includes(handle.host), `${handle.id} shows host and principal`);
+    // The state is the session's own, in at most three words, with how long it has held it (sessionState).
+    const state = sessionState(rowInView(handle.id), item, NOW);
+    assert.ok(state.words.split(/\s+/).length <= 3, `${handle.id}: "${state.words}" is at most three words`);
+    assert.ok(row.includes(`data-state="${state.words}"`), `${handle.id} shows ${state.words}`);
+    const age = spent(NOW - Date.parse(state.since));
+    assert.ok(row.includes(`>${age}<`), `${handle.id} has held it for ${age}`);
   }
-  // The worker on GY-14 has spent an hour and a half, live; the producer on GY-15 spent exactly an hour, fixed.
-  assert.match(rowOf(html, 'graphyard-codex-1:1'), />1h 30m 00s</);
-  assert.match(rowOf(html, 'proof-gy-15'), />1h 00m 00s</);
-  // Live means it moves with the clock: a later `now` lengthens the running row and leaves the finished one alone.
-  const later = workersView(work, new Date(NOW + 7_000));
-  assert.equal(later.running.find(row => row.id === 'graphyard-codex-1:1')!.spentMs, 90 * minute + 7_000);
-  assert.equal(later.finished.find(row => row.id === 'proof-gy-15')!.spentMs, hour);
+  // The state words by role (GY-3314): a builder builds, a reviewer is in review, the master runs the loop, a stale session is not seen.
+  const words = (id: string, key: string) => sessionState(rowInView(id), work.find(item => item.key === key)!, NOW).words;
+  assert.equal(words('graphyard-codex-1:1', 'GY-14'), 'Building');
+  assert.equal(words('review-gy-14', 'GY-14'), 'In review');
+  assert.equal(words('approver-gy-15', 'GY-15'), 'Runs the loop');
+  assert.equal(words('worker-b:2', 'GY-13'), 'Not seen');
+  assert.equal(words('proof-gy-15', 'GY-15'), 'Ended');
+  // A builder sent back names the round it is on, from when the item was sent back.
+  const rework = fixture();
+  const sent = rework.find(item => item.key === 'GY-14')!;
+  Object.assign(sent, { reworkRequested: true, pipeline: { attempts: [], submittedAt: at(-3 * hour), resubmittedAt: null, reworkRounds: 3, interventions: { blocked: 0, requirements: 0 } } });
+  const round = sessionState(rowInView('graphyard-codex-1:1'), sent, NOW);
+  assert.deepEqual([round.words, round.since], ['Rework 3', at(90_000 - 30 * minute)], 'the third round, since the claim that took it');
   // The page ticks without a reload: the clock hook adds the seconds since the last poll on a one-second interval.
   const page = await read('web/pages/workers.tsx');
   assert.match(page, /setInterval\(\(\) => setTick/);
   assert.match(page, /const now = useLiveNow\(observedAt\)/);
-  // The columns of the Workers design (GY-161): agent, role, the item, what it is doing, since when, health.
-  for (const column of ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']) assert.ok(html.includes(`<th scope="col">${column}</th>`), column);
+  // The columns of the compact Workers line (GY-3314): the agent, the item, the state, the age.
+  for (const column of ['Agent', 'Working on', 'State', 'Age']) assert.ok(html.includes(`<th scope="col">${column}</th>`), column);
   // Nothing on the page names a runtime as its source, and it reads as prose to a newcomer.
   assert.ok(visibleWords(html).length > 0);
 });
 
-test('unit:attach-command-remote-form — every running row copies a local attach command and a remote form built from its host through Herdr\'s remote machinery, byte for byte; a finished row offers its transcript instead', async () => {
+test('unit:attach-command-remote-form — a session in a pane offers its local attach command and a remote form built from its host through Herdr\'s remote machinery in its unfolded panel, byte for byte; a headless run shows its log instead', async () => {
   const running = { state: 'running' as const, host: 'vishrog', attach: 'herdr pane attach w1V:pJD --workspace w1V' };
   const remote = 'herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog';
   // Herdr 0.9.1 has no `pane attach`: the recorded pane is attached with `agent attach`, which takes a workspace-qualified pane ID.
@@ -153,26 +172,37 @@ test('unit:attach-command-remote-form — every running row copies a local attac
   assert.equal(remoteAttachCommand({ ...running, state: 'finished' }), null);
   assert.equal(remoteAttachCommand({ ...running, attach: null }), null);
 
-  const html = render(fixture());
-  // The worker's row: exactly the two commands, in that order, and nothing else to copy.
-  assert.deepEqual(copies(html, 'graphyard-codex-1:1'), ['herdr agent attach w1V:pJD', remote]);
-  const row = rowOf(html, 'graphyard-codex-1:1');
-  assert.ok(row.includes('data-copy="herdr --machine vishrog agent focus w1V:pJD &amp;&amp; herdr --remote vishrog"'), 'the escaped attribute is the command');
-  assert.equal(Buffer.compare(Buffer.from(copies(html, 'graphyard-codex-1:1')[1]), Buffer.from(remote)), 0, 'byte for byte');
-  assert.match(row, />Copy local<\/button>/); assert.match(row, />Copy remote<\/button>/);
+  const work = fixture();
+  const workerPanel = panelOf(work, 'graphyard-codex-1:1');
+  // The worker's panel: exactly the two commands, in that order, and nothing else to copy.
+  assert.deepEqual([...workerPanel.matchAll(/data-copy="([^"]*)"/g)].map(match => unescape(match[1])), ['herdr agent attach w1V:pJD', remote]);
+  assert.ok(workerPanel.includes('data-copy="herdr --machine vishrog agent focus w1V:pJD &amp;&amp; herdr --remote vishrog"'), 'the escaped attribute is the command');
+  assert.match(workerPanel, />Copy local<\/button>/); assert.match(workerPanel, />Copy remote<\/button>/);
   // The copy is one click on the text alone: the button writes its data-copy text and nothing more.
   const page = await read('web/pages/workers.tsx');
   assert.match(page, /navigator\.clipboard\.writeText\(text\)/);
   assert.match(page, /data-copy=\{text\}/);
   // A finished handle offers its transcript path, not an attach command.
-  assert.deepEqual(copies(html, 'proof-gy-15'), ['/home/agent/.graphyard/transcripts/proof-gy-15.md']);
-  assert.match(rowOf(html, 'proof-gy-15'), />Copy transcript path<\/button>/);
-  assert.doesNotMatch(rowOf(html, 'proof-gy-15'), /Copy local|Copy remote/);
+  const endedPanel = panelOf(work, 'proof-gy-15');
+  assert.deepEqual([...endedPanel.matchAll(/data-copy="([^"]*)"/g)].map(match => unescape(match[1])), ['/home/agent/.graphyard/transcripts/proof-gy-15.md']);
+  assert.match(endedPanel, />Copy transcript path<\/button>/);
+  assert.doesNotMatch(endedPanel, /Copy local|Copy remote/);
+  assert.match(endedPanel, /evidence submitted/);
   // A running handle without an attach command, and a finished one without a transcript, say so.
-  assert.match(rowOf(html, 'graphyard-codex-1:gy-13'), /no transcript recorded/);
+  assert.match(panelOf(work, 'graphyard-codex-1:gy-13'), /no transcript recorded/);
   const bare = fixture(); bare.find(w => w.key === 'GY-15')!.sessions!.find(h => h.id === 'approver-gy-15')!.attach = null;
-  assert.match(rowOf(render(bare), 'approver-gy-15'), /no attach command recorded/);
-  assert.deepEqual(copies(render(bare), 'approver-gy-15'), []);
+  assert.match(panelOf(bare, 'approver-gy-15'), /no attach command recorded/);
+  assert.deepEqual([...panelOf(bare, 'approver-gy-15').matchAll(/data-copy="([^"]*)"/g)].map(match => unescape(match[1])), []);
+  // A headless run (transcript `run:<uuid>`) is its log, read live, and no attach command is offered beside it (GY-3314).
+  const headless = fixture();
+  const run = '0f0e0d0c-1111-4222-8333-444455556666';
+  headless.find(w => w.key === 'GY-14')!.sessions!.find(h => h.id === 'graphyard-codex-1:1')!.transcript = `run:${run}`;
+  const logPanel = panelOf(headless, 'graphyard-codex-1:1');
+  assert.match(logPanel, new RegExp(`data-run="${run}"`));
+  assert.doesNotMatch(logPanel, /Copy local|Copy remote|no attach command/);
+  // The compact row carries no attach buttons at all: everything to copy sits in the opened panel.
+  const html = render(work);
+  for (const { handle } of every(work)) assert.deepEqual(copies(html, handle.id), [], `${handle.id} row has nothing to copy`);
 });
 
 test('integration:workers-tab-per-principal-summary — running rows first by time spent descending, finished rows collapsed with a count, and one line per principal naming its current item and epoch, how long, and its sessions in the last 24 hours', () => {
@@ -211,7 +241,7 @@ test('integration:workers-tab-per-principal-summary — running rows first by ti
   assert.match(summary, /idle<\/span><\/td><td data-label="For">—<\/td><td data-label="Sessions today">1<\/td>/);
 });
 
-test('unit:stale-session-marked — a running handle not seen inside the threshold is badged as recorded running, not seen since its updatedAt; one seen two minutes ago is not; a handle the liveness sweep ended shows the outcome and why', () => {
+test('unit:stale-session-marked — a running handle not seen inside the threshold is badged Not seen since its last observation; one seen two minutes ago is live; a handle the liveness sweep ended shows the outcome and why', () => {
   assert.equal(sessionStaleThresholdMs, 15 * minute, 'the documented default');
   const now = new Date(NOW);
   assert.deepEqual(staleSession({ state: 'running', updatedAt: at(-40 * minute) }, now), { since: at(-40 * minute), idleMs: 40 * minute });
@@ -222,20 +252,22 @@ test('unit:stale-session-marked — a running handle not seen inside the thresho
 
   const html = render(fixture());
   const stale = rowOf(html, 'worker-b:2');
-  // Stale in plain words, never "running" (GY-161, AC-9).
-  assert.match(stale, new RegExp(`<span class="health stale" data-health="stale" data-stale="worker-b:2"><span class="health-dot" aria-hidden="true"></span>Not seen for 40m 00s</span>`));
-  assert.doesNotMatch(stale, /running|Active/i);
+  // Stale reads as its state, never "running" (GY-161, AC-9): the dot is marked and the sentence is one hover away.
   assert.ok(stale.startsWith('data-session="worker-b:2" data-work="GY-13" data-role="worker" class="stale"'), 'the row itself is marked');
+  assert.match(stale, /<span class="health stale" data-health="stale" data-stale="worker-b:2"[^>]*title="Not seen for 40m 00s[^"]*"><span class="health-dot" aria-hidden="true"><\/span><\/span>/);
+  assert.match(stale, /data-state="Not seen"/);
+  assert.ok(stale.includes('>40m 00s<'), 'its age is how long it has not been seen');
+  assert.doesNotMatch(stale, /data-health="live"|>Building<|running|Active/i);
   const fresh = rowOf(html, 'graphyard-codex-1:1');
-  assert.doesNotMatch(fresh, /data-stale|not seen since/i);
-  assert.match(fresh, /<span class="health live" data-health="live"><span class="health-dot" aria-hidden="true"><\/span>Seen 2m 00s ago<\/span>/);
+  assert.doesNotMatch(fresh, /data-stale/);
+  assert.match(fresh, /<span class="health live" data-health="live"[^>]*title="Seen 2m 00s ago"[^>]*><span class="health-dot" aria-hidden="true"><\/span><\/span>/);
   assert.match(html, /1 not seen recently/);
-  // Ended by liveness reconciliation: said in plain words, the rule that closed it on the element and the recorded outcome in its title.
+  // Ended by liveness reconciliation: said in plain words in the ended row's hover, the rule that closed it on the element and the recorded outcome in its title.
   const reconciled = rowOf(html, 'review-gy-13');
-  assert.match(reconciled, /data-health="ended" data-reconciled="vanished" title="vanished: the herdr runtime on vishrog has not reported pane w1V:p9 for 95s[^"]*"><span class="health-dot" aria-hidden="true"><\/span>Ended · stopped responding<\/span>/);
-  // A session that ended on its own shows its outcome as what it did, without that attribution.
-  assert.match(rowOf(html, 'proof-gy-15'), /<td data-label="Doing now">evidence submitted<\/td>/);
-  assert.match(rowOf(html, 'proof-gy-15'), />Finished<\/span>/);
+  assert.match(reconciled, /data-health="ended" data-reconciled="vanished" title="Ended · stopped responding · vanished: the herdr runtime on vishrog has not reported pane w1V:p9 for 95s[^"]*"><span class="health-dot" aria-hidden="true"><\/span><\/span>/);
+  assert.match(reconciled, /data-state="Ended"/);
+  // A session that ended on its own reads as ended too, without that attribution.
+  assert.match(rowOf(html, 'proof-gy-15'), /data-state="Ended"/);
+  assert.match(rowOf(html, 'proof-gy-15'), /data-health="ended"/);
   assert.doesNotMatch(rowOf(html, 'proof-gy-15'), /data-reconciled/);
 });
-
