@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { maxMergeWriterParallel } from '../master/merge-writer-settings.js';
-/** How many queued heads, how many refusals, how many pending rework requests and how many trial-timeout yields `state.mergeWriter` keeps. */
+/** How many queued heads, how many refusals, how many pending rework requests and how many trial-timeout records `state.mergeWriter` keeps. */
 export const mergeWriterKeptQueue = 50, mergeWriterKeptRefusals = 20, mergeWriterKeptReworks = 50, mergeWriterKeptTimeouts = 50;
 /** GY-2079: the trial timeouts a head is refused to rework after, counted only on trials where another queued head passed since the head's previous timeout (a timeout alone measures the host, not the merge). */
 export const mergeWriterTrialTimeoutRefusals = 2;
@@ -34,7 +34,7 @@ const attemptProgressSchema = z.object({ at: instant, what: z.string().max(2000)
 const revertFlightSchema = z.object({ serve: shaField, mergeSha: shaField, revertSha: shaField, baseTip: shaField,
   failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable() }).strict();
 export type RevertFlight = z.infer<typeof revertFlightSchema>;
-/** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first (a trial-timeout yield last, GY-2079), the merge in flight, the newest refusals, the reworks still to be confirmed, and the heads yielding their queue turn. */
+/** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first, the merge in flight, the newest refusals, the reworks still to be confirmed, and the trial timeouts counted toward a refusal. */
 export const mergeWriterStateSchema = z.object({
   trials: z.array(z.object({ mergeSha: shaField, startedAt: instant, finishedAt: instant, heads: z.array(z.object({ key: z.string(), head: shaField }).strict()),
     steps: z.array(z.object({ step: z.string(), durationMs: z.number().min(0) }).strict()) }).strict()).max(20).optional(),
@@ -55,7 +55,7 @@ export const mergeWriterStateSchema = z.object({
   progress: attemptProgressSchema.optional(),
   /** GY-2053: the writer's own motion bound, its worst case for one flight (one trial timeout plus a cycle); the owed-decision readers hold a held head inside it. Absent until the writer step first runs. */
   motionBoundMs: z.number().int().min(0).optional(),
-  /** GY-2079: the heads whose merge trial timed out, yielding their queue turn until they leave the queue; absent until one does. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
+  /** GY-2079: the heads whose merge trial timed out, kept until they leave the queue; absent until one does. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
   timeouts: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, at: instant, count: z.number().int().min(1).max(100_000), othersPassed: z.boolean(), reason: z.string().max(2000).nullable() }).strict()).max(mergeWriterKeptTimeouts).optional(),
   /** GY-1852: record writes whose reply was lost, replayed with their exact input before anything new starts; absent until one is. */
   unconfirmed: z.array(unconfirmedRecordSchema).max(mergeWriterKeptUnconfirmed).optional(),
