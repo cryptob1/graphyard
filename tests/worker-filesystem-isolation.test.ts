@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { headlessConfinementWrapper, masterSessionConfinement, prepareConfinedGitPaths, startAgentSession } from '../src/master/launch.js';
 import { runTrialAttempt, trialConfinement } from '../src/merge-writer/trial.js';
@@ -24,10 +24,7 @@ async function fixture(maskedCoordinator = false) {
   const base = await temporaryDirectory('fs', process.cwd());
   const config = join(base, 'config'), runtime = join(config, 'own');
   const root = maskedCoordinator ? join(config, 'deploy') : join(base, 'repo');
-  // GY-3384: entries directly beside the checkout are unreadable to a confined session, so the
-  // protected host trees the probe reads sit outside the checkout's parent, where the read-only
-  // host keeps them visible and unwritable as before.
-  const home = await temporaryDirectory('fs-home', dirname(base)), unrelated = await temporaryDirectory('fs-other', dirname(base)), slots = join(base, '.verification-slots');
+  const home = join(base, 'home'), unrelated = join(base, 'other'), slots = join(base, '.verification-slots');
   for (const path of [root, home, unrelated, runtime, slots]) mkdirSync(path, { recursive: true });
   for (const directory of [home, unrelated]) writeFileSync(join(directory, 'sentinel'), 'protected\n');
   writeFileSync(join(config, 'operator.token'), 'operator-secret');

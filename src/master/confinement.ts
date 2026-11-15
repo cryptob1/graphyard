@@ -289,8 +289,8 @@ const repositoryMaskPaths = (root: string): string[] => {
 };
 /** GY-3384: the absolute or `~/` sibling paths the repository's own graphyard.json declares readable
  * (`confinement.readonlyPaths`): checkouts beside the project — a private dependency, a read-only
- * key — that confined sessions keep as readable as the read-only host itself while every unlisted
- * sibling stays unreadable; an unreadable declaration adds none. */
+ * key — that confined sessions keep as readable as the read-only host itself; once any is declared,
+ * every unlisted sibling is unreadable. An unreadable declaration adds none. */
 const repositoryReadonlyPaths = (root: string): string[] => {
   try {
     const declared = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.confinement?.readonlyPaths;
@@ -468,13 +468,15 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  // GY-3384: beside the checkout a session reads only what the repository declares. Every other
+  // GY-3384: a repository that declares `confinement.readonlyPaths` reads only those beside its
+  // checkout; one that declares none keeps the read-only host as before. Every other
   // sibling entry of the checkout's parent is masked unreadable with the same exact-path words as
   // the credential mask, before every re-exposure, so the checkout, its Git directories, the
   // session's own directories and every writable grant stay as reachable as before. An entry the
   // wrapper itself mounts under is never masked: a masked entry carries no mount point of its own.
   const mounted = [...writable, ...commonGitDir, ...sharedDirectories, ...own, ...shared, ...kept, ...cli, ...herdr, ...busSockets].filter(path => isAbsolute(path));
-  const siblings = siblingMaskEntries(root, repositoryReadonlyPaths(root), mounted);
+  const declared = repositoryReadonlyPaths(root);
+  const siblings = declared.length ? siblingMaskEntries(root, declared, mounted) : [];
   if (siblings.length && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
   const siblingMasks = siblings.length ? credentialMaskWords({ configHome: '', extraPaths: [], own: [], cli: [], hostPaths: siblings }, [root, directory], blank) : [];
   return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks, ...siblingMasks,
