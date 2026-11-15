@@ -1,0 +1,13 @@
+{
+  "id": "cursor-confined-sign-in",
+  "title": "Confined cursor workers sign in on a host with no desktop keyring",
+  "description": "With a stub cursor-agent that reads its sign-in the way the real one does on a keyring-less host ($XDG_CONFIG_HOME/cursor/auth.json, falling back to $HOME/.config, never CURSOR_CONFIG_DIR), under real bubblewrap: a confined worker launch for a cursor account whose sign-in exists authenticates; a second account cannot read the first account's sign-in; and an account with no usable sign-in under confinement is reported by the smoke test and the account health as not logged in, naming the account and the login command, and is not selected for launch.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined cursor sign-in",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/cursor-confined-sign-in.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

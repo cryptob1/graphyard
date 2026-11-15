@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
 import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
+import { accountHomeEnvironment } from '../master/runtimes.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../registry-tools.js';
 import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied } from './registry.js';
@@ -71,7 +72,9 @@ export function narrowRunner(pi: unknown, credentialMask?: CredentialMask, coord
 export function registryHeadlessLaunch(account: FleetLaunchAccount) {
   const { contract, policy, modelId } = account.fleet;
   const args = [...contract.args, ...(policy?.args ?? []), ...registryToolsArgs(account)];
-  const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}) };
+  // GY-3329: a cursor account's home rides on XDG_CONFIG_HOME as well, the sign-in
+  // cursor-agent reads under confinement living at `$XDG_CONFIG_HOME/cursor/auth.json`.
+  const environment: Record<string, string> = { ...contract.environment, ...(contract.homeVariable && account.home ? { [contract.homeVariable]: account.home } : {}), ...accountHomeEnvironment(account.kind, account.home) };
   return { command: contract.kind, model: modelId ?? defaultPiModel, args, environment };
 }
 /**
