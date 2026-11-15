@@ -146,7 +146,7 @@ test(`${proof} — a verification start that must wait prints the reason through
   let taken = false;
   const pump = workerVerificationPump(root, () => 'test', mutate, () => 'main', undefined, async (_root, _work, _input, _base, _parent, progress) => {
     taken = true;
-    await verificationStep('true', [], { env: host.env, timeoutMs: 60_000, wrapper: host.words([allocation], host.load(trialStartOrder.verification, { cap: 1, waitBoundSeconds: 8 })) }, progress);
+    await verificationStep('true', [], { env: host.env, timeoutMs: 60_000, wrapper: host.words([allocation], host.load(trialStartOrder.verification, { cap: 1, waitBoundSeconds: 8 })) }, progress!);
     throw new Error('the start never ran');
   });
   const shown: { at: number; line: string }[] = [];

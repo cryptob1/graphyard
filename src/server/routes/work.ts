@@ -47,7 +47,7 @@ export const workRoutes = defineRoutes('work', [
     return progressWorkerVerification(context.services, context.actor, await parseJson(context));
   } },
   // GY-3332: what the host's launcher has said so far about this item's verification, for `complete` to print while it waits.
-  { method: 'GET', path: /^\/api\/work\/([^/]+)\/worker-verification$/, handle: ({ actor, services }, [id]) => ({ lines: workerVerificationLines(services, actor, decodeURIComponent(id!)) }) },
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/worker-verification$/, handle: async ({ actor, services }, [id]) => ({ lines: workerVerificationLines(services, actor, decodeURIComponent(id!)) }) },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
     async handle(context, [id]) {
