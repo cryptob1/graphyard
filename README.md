@@ -10,7 +10,7 @@
 - **Every change is proven.** Workers build, agents review, heads are trialled on main.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
-Prerequisites (Linux host): Linux 7.0+ with Landlock ABI 9+ (`uname -r`); Node/npm (`node --version`, `npm --version`); Git durable SSH checkout (`git --version`, `git remote -v`); Docker and Compose (merge trials need them even `--local`) (`docker version`, `docker compose version`); GitHub CLI admin login (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`); systemd (`systemctl --user status`). `graphyard guide setup` explains.
+Prerequisites (Linux host): Linux 7.0+ with Landlock ABI 9+ (`uname -r`); Node/npm (`node --version`, `npm --version`); Git durable SSH checkout (`git --version`, `git remote -v`); Docker and Compose (merge trials need them even `--local`) (`docker version`, `docker compose version`; on an AppArmor host up loads the `graphyard-trial` profile with sudo); GitHub CLI admin login (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`); systemd (`systemctl --user status`). `graphyard guide setup` explains.
 
 ## Quick start
 
@@ -24,7 +24,7 @@ The Setup link connects worker and reviewer accounts, file goals under **New wor
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
-`graphyard guide infra` lists every part with its log command; the Setup page shows this install's own names.
+`graphyard guide infra` lists every part and its logs, and where the app under test runs versus the test runner.
 
 ## Learn more
 

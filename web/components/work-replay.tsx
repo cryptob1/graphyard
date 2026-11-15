@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { replayColumns, type WorkReplay } from '../../src/server/work-replay';
-import { Agent, useFun } from '../fun';
+import { Agent } from '../fun';
 
 function ReplayPanel({ api, onOpen }: { api(path: string): Promise<any>; onOpen(id: string): void }) {
   const request = useRef(api); request.current = api;
   const [hours, setHours] = useState(24), [data, setData] = useState<WorkReplay | null>(null);
   const [error, setError] = useState(''), [position, setPosition] = useState(1000), [playing, setPlaying] = useState(false);
-  const fun = useFun();
   const [reduced, setReduced] = useState(() => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches);
-  const motion = fun && !reduced;
+  const motion = !reduced;
   useEffect(() => {
     const media = matchMedia('(prefers-reduced-motion: reduce)');
     const changed = () => setReduced(media.matches);
