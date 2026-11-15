@@ -1,0 +1,11 @@
+{
+  "id": "pages-seeded-review",
+  "title": "Every dashboard page shows its seeded items, fits the width and reads in plain words, at 1440 px and 390 px",
+  "description": "GY-3396: a real browser loads the seed fixture (a sanitized copy of this install's data: work in every stage, sessions, costs, a verified release, test cases, the product brief, one scoped identity) and walks every page the dashboard router lists at 1440 px and 390 px, then walks them again with nothing to list. Every page that lists what the control plane holds shows its seeded items: its screenshot differs from the empty-state one. No page scrolls sideways at either width. No page's visible text outside a folded Details section contains trial, epoch, lease or builder, and no page logs a console error. One seeded item page is reviewed the same way. The case fails on the base tip, whose pages still say 'in trial' in the top strip and 'Merge trial of' on item pages.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "review every dashboard page seeded and empty at 1440 px and 390 px", "run": "npm run test:browser -- browser-tests/pages-seeded-review.spec.ts", "timeoutSeconds": 900 }
+  ]
+}

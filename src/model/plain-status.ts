@@ -51,7 +51,7 @@ export function plainReason(reason: string, gate: string, now: number, work?: Wo
     [/ has no way to serve a head/, () => 'Its end-to-end proof needs a served head, and the repository does not say how to serve one yet', true],
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
-    [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
+    [/^No workspace registered$/, () => 'The worker has not said where the code lives yet'],
     [/^Verified clean Codex review/, () => 'Waiting for the Codex reviewer to approve the latest code'],
     [/^Every configured reviewer profile is exhausted/, () => 'No reviewer is available — more reviewers are needed', true],
     [/^Verified approval from reviewer profile (\S+) is required/, m => `Waiting for reviewer ${m[1]} to approve the latest code`],
@@ -133,9 +133,9 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
  * kind has one, so a kind nobody thought about still reads as a step rather than as its own name.
  */
 const stepWords: Record<string, string> = {
-  dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
+  dispatch: 'handing it to a worker', 'request-review': 'asking for a review',
   'request-rework': 'sending it back for changes',
-  resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
+  resync: 're-reading it from GitHub', reclaim: 'freeing it from its last worker', merge: 'merging it',
   attention: 'getting somebody to decide it',
 };
 

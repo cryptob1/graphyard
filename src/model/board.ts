@@ -142,7 +142,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or decide it with its own identity' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
-    return held ? { who: 'Nobody yet', does: held.text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
+    return held ? { who: 'Nobody yet', does: held.text } : { who: 'Graphyard (assigns a worker)', does: 'Hands it to the next free worker' };
   }
   const steps = prSteps(work, now, release);
   return { who: steps.who, does: steps.label };
@@ -154,7 +154,7 @@ export function upNextHold(work: Work, all: Work[], now: number): { kind: 'depen
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready', now).text };
   const window = observationWindowHold(work, new Date(now)); if (window) return { kind: 'window', text: `Waiting for its observation window: the reading it owes can first exist at ${window.notBefore}` };
-  const observing = loopObservation(work, new Date(now), all); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no builder is assigned` };
+  const observing = loopObservation(work, new Date(now), all); if (observing) return { kind: 'observation', text: `Waiting for ${observing.waitingFor}; no worker is assigned` };
   const held = resourceConflicts(work, all, now);
   if (!held.length) return null;
   return { kind: 'resource', text: `Waiting for ${[...new Set(held.map(entry => entry.key))].join(', ')} to release ${[...new Set(held.map(entry => entry.resource))].join(', ')}: an exclusive resource it needs` };
@@ -180,9 +180,9 @@ export const actorRoles = ['worker', 'reviewer', 'producer', 'master', 'executor
 export type ActorRole = typeof actorRoles[number];
 /** Every `who` label `nextActor`, `prSteps` and `waitsOn` write, with the role it names. */
 export const roleOf: Readonly<Record<string, ActorRole>> = {
-  You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
+  You: 'human-only', 'Master agent': 'master', 'Worker agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // Control-plane steps (executor) and inactive states (held).
-  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
+  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a worker)': 'executor', 'Automated checks': 'executor',
   'Nobody yet': 'held', 'Nobody — it was closed': 'held', 'Nobody — it is live': 'held', 'Nobody — it has merged': 'held',
 };
 

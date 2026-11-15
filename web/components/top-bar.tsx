@@ -9,16 +9,17 @@ import type { Work } from '../../src/model';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
- * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
- * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped today.
+ * The city-at-night strip (GY-3272): how many agents are on shift, how many changes are out for a
+ * test merge and how many shipped tonight, read off the same snapshot the page below shows. The
+ * numbers carry data attributes with exactly what the sentence says, so a reader (and a test)
+ * checks the words against the counts the Workers page and the ledger read, in the app's own
+ * words: agents working, shipped today.
  */
 export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
   const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
   return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
     <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} working
-    <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
+    <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> test merge{inTrial === 1 ? '' : 's'}
     <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped today
   </p>;
 }

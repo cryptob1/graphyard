@@ -19,7 +19,7 @@ export const plainStageLines: Record<PlainStage, string> = {
   Waiting: 'Waiting (build) — no worker holds it and no session runs; master status names why when the reason is known (GY-3095).',
   Building: 'Building (build) — a worker holds it and is writing the change.',
   Testing: 'Testing (test, acceptance) — automated checks or proofs are running on the handed-in change.',
-  'In review': 'In review (review) — someone other than the builder is judging the change.',
+  'In review': 'In review (review) — someone other than the worker is judging the change.',
   Merging: 'Merging (merge) — the merge writer is queuing or trying the change onto main.',
   'Merged, not live yet': 'Merged, not live yet (done) — merged; the app has not been seen serving it.',
   Live: 'Live (done) — the app serves it; no verdict names this item.',

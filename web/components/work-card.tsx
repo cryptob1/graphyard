@@ -57,7 +57,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}
-    <span className="row-who" title="Who acts next">{item.lease?.owner && actor.who === 'Builder agent'
+    <span className="row-who" title="Who acts next">{item.lease?.owner && actor.who === 'Worker agent'
       ? <><Agent id={item.lease.owner}/> is running {item.key}</>
       : actor.who}</span>
     <span className="row-time">{timed ? <StatusAge held={held}/> : group === 'needs-you' && waited !== null ? <span className="waited">Waiting {formatDuration(waited / 60000)}</span> : null}</span>

@@ -49,20 +49,20 @@ test('unit:ui-four-states — prSteps returns exactly the four states Todo, Doin
   const todo = prSteps(find('GY-13', work), NOW);
   assert.equal(todo.current, 'todo');
   assert.deepEqual(segments(todo), 'current,pending,pending,pending');
-  assert.equal(todo.label, 'Not started · waiting for a builder');
-  assert.equal(todo.who, 'Graphyard (assigns a builder)');
+  assert.equal(todo.label, 'Not started · waiting for a worker');
+  assert.equal(todo.who, 'Graphyard (assigns a worker)');
   // A recorded blocker holds an unstarted item off the workers: the row's why names the fault and
   // the master agent clears it (the blocked row reads that, not the state label).
   const blocked = prSteps(find('GY-17', work), NOW);
   assert.equal(blocked.current, 'todo');
-  assert.equal(blocked.label, 'Not started · waiting for a builder');
+  assert.equal(blocked.label, 'Not started · waiting for a worker');
 
-  // Doing: a worker holds it and has not handed in. GY-14 is a builder at work.
+  // Doing: a worker holds it and has not handed in. GY-14 is a worker at work.
   const doing = prSteps(find('GY-14', work), NOW);
   assert.equal(doing.current, 'doing');
   assert.deepEqual(segments(doing), 'done,current,pending,pending');
-  assert.equal(doing.label, 'Building · the builder is writing the code');
-  assert.equal(doing.who, 'Builder agent');
+  assert.equal(doing.label, 'Building · the worker is writing the code');
+  assert.equal(doing.who, 'Worker agent');
 
   // Checking: handed in, until the merge — its label names what it waits on. GY-22 waits on CI.
   const checking = prSteps(find('GY-22', work), NOW);
@@ -77,7 +77,7 @@ test('unit:ui-four-states — prSteps returns exactly the four states Todo, Doin
   // A requested rework says so in the Checking label; the hand-in stands until the merge.
   const changes = { ...find('GY-15', work), gates: find('GY-15', work).gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
   assert.equal(prSteps(changes, NOW).current, 'checking');
-  assert.equal(prSteps(changes, NOW).label, 'In review · sent back for changes, waiting for a builder');
+  assert.equal(prSteps(changes, NOW).label, 'In review · sent back for changes, waiting for a worker');
   // A blocker recorded after the hand-in is the Checking label's news, and the master agent clears it.
   const held = { ...find('GY-22', work), gates: find('GY-22', work).gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Staging credentials expired'] } : gate) } as Work;
   assert.equal(prSteps(held, NOW).label, 'In review · held by a recorded blocker');
