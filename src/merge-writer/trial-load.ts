@@ -1,6 +1,6 @@
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
-// verification runs each size themselves alone; the launcher (trial-container.ts) is what they share.
+// verification runs share the launcher (trial-container.ts); trials also divide their CPU lanes.
 import { readFile } from 'node:fs/promises';
 import { availableParallelism, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -9,12 +9,15 @@ import { join } from 'node:path';
 export const defaultDiskFloorGb = 30;
 export const diskFloorBytes = (config: { run: { diskFloorGb?: number } }) => (config.run.diskFloorGb ?? defaultDiskFloorGb) * 1e9;
 
-/** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test concurrency. */
-export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
+/** One lane per allocated core; sharing keeps at least two lanes unless files or memory cap it. */
+export const trialShardLanes = (cores: number) => Math.max(2, Math.floor(cores));
+/** Two lanes per busy trial, bounded by the host and any configured upper bound. */
+export const trialSlotCount = (cores: number, requested: number, affordableFiles: number | null = null) =>
+  Math.max(1, Math.min(requested, Math.floor(cores / 2), affordableFiles === null ? Infinity : Math.floor(affordableFiles / 2)));
 /** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
 const minimumTrialContainers = 6;
 /** The containers a host runs at once: one per trial lane, whichever trials they serve. */
-export const trialContainerCap = (cores = availableParallelism()) => Math.max(minimumTrialContainers, trialShardLanes(cores));
+export const trialContainerCap = (cores = availableParallelism()) => Math.max(minimumTrialContainers, Math.floor(cores / 2));
 /** A start waits while the hottest CPU sensor reads this or more. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
