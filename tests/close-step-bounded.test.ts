@@ -21,7 +21,7 @@ test('e2e:close-step-bounded — one hung and one failed close do not strand ten
     const coordinator = { id: 'loop', role: 'coordinator', sessionKind: 'ai' } as const;
     const item = await engine.execute(operator, 'create', null, { title: 'Ended sessions', type: 'chore', criteria: [{ id: 'AC-1', text: 'Close sessions', proofs: ['e2e:close-step-bounded'] }] }, randomUUID());
     // Seed an ended attempt's handles; subsequent session writes use the real engine and history.
-    item.sessions = Array.from({ length: 12 }, (_, index) => ({ id: `worker-${index}:1`, kind: 'implementation' as const, principal: `worker-${index}`, runtime: 'codex' as const, host: 'close-host', pane: `pane-${index}`, subject: 'Ended attempt', state: 'running' as const, startedAt: item.createdAt, updatedAt: item.createdAt }));
+    item.sessions = Array.from({ length: 12 }, (_, index) => ({ id: `worker-${index}:1`, epoch: 1, workspace: null, tab: null, agentName: null, role: null, head: null, attach: null, transcript: null, endedAt: null, outcome: null, kind: 'implementation' as const, principal: `worker-${index}`, runtime: 'codex' as const, host: 'close-host', pane: `pane-${index}`, subject: 'Ended attempt', state: 'running' as const, startedAt: item.createdAt, updatedAt: item.createdAt }));
     await store.transaction((db, now) => save(db, item, operator.id, 'fixture', now));
     const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/unused/token', cliPath: '/unused/cli', repository: 'owner/project', baseBranch: 'main', hostId: 'close-host', masterAgentName: 'master', workers: [] });
     const state = emptyDaemonState(config), calls: string[] = [], lines: string[] = [];
