@@ -6,7 +6,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
+import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, removeTree, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
 import { affectedPackages, buildArgv, installArgv, packageManager, pnpm, testArgv, type PackageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
@@ -311,7 +311,7 @@ export async function reclaimTrialCheckouts(root: string, prefixes: readonly str
     if (!prefixes.some(prefix => name.startsWith(prefix)) || name.endsWith('.owner')) continue;
     const directory = join(root, name), owner = await readTempOwner(directory).catch(() => null);
     if (!owner || !(abandonedTrialCheckouts.has(directory) || tempOwnerGone(owner))) continue;
-    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); abandonedTrialCheckouts.delete(directory); removed.push(directory); } catch { /* the next */ }
+    try { await removeTree(directory); await rm(tempOwnerMarker(directory), { force: true }); abandonedTrialCheckouts.delete(directory); removed.push(directory); } catch { /* the next */ }
   }
   return removed;
 }
@@ -320,7 +320,7 @@ export async function reclaimTrialCheckouts(root: string, prefixes: readonly str
  * has: a removal that fails keeps the marker and is remembered as abandoned, and the next trial
  * (or any trial once this process is gone) takes it back. The failure is rethrown.
  */
-export async function clearTrialCheckout(directory: string, remove: (path: string) => Promise<void> = path => rm(path, { recursive: true, force: true })): Promise<void> {
+export async function clearTrialCheckout(directory: string, remove: (path: string) => Promise<void> = removeTree): Promise<void> {
   try { await remove(directory); } catch (error) { abandonedTrialCheckouts.add(directory); throw error; }
   await rm(tempOwnerMarker(directory), { force: true }).catch(() => {});
 }
@@ -702,6 +702,8 @@ export interface RunTrialInput {
   selectFiles?: (files: string[], timeoutMs: number) => Promise<string[]>;
   environment?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** GY-3343: the detached trial run's directory, where a serve command's whole output is kept. */
+  runDirectory?: string;
   /** Removes the trial checkout afterwards; the managed-root removal unless a test injects one. */
   remove?: typeof removeSessionCheckout;
   /** The most files one runner process runs; `trialTestGroupSize` unless a test narrows it. A caller's own size cuts the selection in its order instead of sharding it by the timing baseline. */
@@ -1002,7 +1004,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>;
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
-    try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
+    try { await removeTree(directory); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   const prepare = async () => {
     // GY-2954: the short durable fallback may not exist yet on a host that has not run the suite;
@@ -1294,7 +1296,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const cpuBefore = cpu.sample();
       const ran = await containerTrialE2e({
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
-        networkWrapper: boundary,
+        networkWrapper: boundary, runDirectory: input.runDirectory,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
       const failures = ran.filter(entry => entry.failed);
