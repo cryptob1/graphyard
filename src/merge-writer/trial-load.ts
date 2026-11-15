@@ -1,3 +1,4 @@
+import { trialCpuMonitor } from './trial-cpu.js';
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs each size themselves alone; the launcher (trial-container.ts) is what they share.
@@ -11,10 +12,10 @@ export const diskFloorBytes = (config: { run: { diskFloorGb?: number } }) => (co
 
 /** How many shards of a trial's tests run at once on a host with `cores` CPUs (GY-1832): half of them, never fewer than one, the rest left to the shards' own test concurrency. */
 export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores / 2));
-/** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
+/** Normal headroom for the trials' serve/session containers, reduced with the host's usable CPU. */
 const minimumTrialContainers = 6;
-/** The containers a host runs at once: one per trial lane, whichever trials they serve. */
-export const trialContainerCap = (cores = availableParallelism()) => Math.max(minimumTrialContainers, trialShardLanes(cores));
+/** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
+export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, trialShardLanes(cores)) * usable / cores));
 /** A start waits while the hottest CPU sensor reads this or more. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
@@ -26,9 +27,10 @@ export const trialStartOrder = { merge: 0, gate: 1, verification: 2 } as const;
 export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
-export async function trialLoad(root: string, who: keyof typeof trialStartOrder): Promise<TrialLoad> {
+const hostCpu = trialCpuMonitor();
+export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: join(homedir(), '.gy', 'trial-slots'), cap: trialContainerCap(), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon' };
+  return { slots: join(homedir(), '.gy', 'trial-slots'), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon' };
 }
 
 const waitingLine = 'graphyard trial container: waiting', startingLine = 'graphyard trial container: starting';
