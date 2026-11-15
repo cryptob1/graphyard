@@ -1,0 +1,16 @@
+{
+  "id": "loop-survives-slow-host",
+  "title": "A slow host never makes the loop's own watchdog kill it, and a cycle stays cheap at thousands of items",
+  "description": "The loop runs under a unit watchdog whose window a whole cycle outlasts while each step still settles: keep-alives flow during the cycle and loop liveness reads running, never stalled, while a loop that makes no progress for the window sends no keep-alive at all and reads stalled. On a fixture ledger of 3,300 done and 34 open items, one cycle loads no done item — its snapshot holds the open items, the one done item they reference and the one that merged within the recent-changes window — and its CPU time and peak memory are recorded in the test output under fixed bounds (before the fix the cycle loaded all 3,300 done summaries and spent 423 ms CPU, +9.5 MB; after it loads none and spends ~40 ms, under 1 MB).",
+  "tags": ["loop", "performance"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the watchdog is fed on progress and a cycle on a 3,300-item ledger loads no done item",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-survives-slow-host.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
