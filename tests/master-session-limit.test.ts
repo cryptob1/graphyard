@@ -10,6 +10,7 @@ import { writeFile } from 'node:fs/promises';
 import { daemonStatePath } from '../src/daemon/state.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
+import { readSessionScreen } from '../src/master/prompt-delivery.js';
 import { masterProfile } from '../src/master/master-session.js';
 import { recordObservedExhaustion } from '../src/master/environments.js';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
@@ -224,4 +225,56 @@ test('unit:master-status-reads-live-pane — a moved master refreshes its persis
   assert.equal((await report()).masterSession.state, 'idle');
   visible = false;
   assert.equal((await report()).masterSession.state, 'unknown');
+});
+
+/**
+ * GY-3380: the master sat 4h23m on Claude's usage-limit menu while Herdr reported it agent_blocked:
+ * the agent read was refused, the screen read as unreadable, and the failover never ran. The loop now
+ * reads the pane's visible screen when the agent read is refused, through the production reader.
+ */
+const limitMenu = `● Checking GY-3375's trial.
+  ⎿  You've hit your weekly limit · resets Oct 26, 10pm (America/Los_Angeles)
+
+ What do you want to do?
+
+ ❯ 1. Stop and wait for limit to reset
+   2. Wait here, then continue automatically at Oct 26, 10pm
+   3. Switch to usage credits
+
+ Enter to confirm · Esc to cancel
+`;
+/** Herdr with the master blocked: the agent read is refused, the pane read shows `visible`. */
+const blockedHerdr = (visible: string, reads: string[][]) => async (command: string, args: string[]) => {
+  assert.ok(isHerdrCommand(command));
+  const call = herdrSubcommand(args);
+  reads.push(call.slice(0, 2));
+  if (call[0] === 'agent') throw Object.assign(new Error('Command failed: herdr agent read'), { stdout: '{"error":{"code":"agent_blocked","message":"agent is blocked"}}' });
+  return visible;
+};
+for (const [name, visible, failsOver] of [
+  ['a blocked master pane showing Claude\'s usage-limit menu marks its account exhausted and relaunches on the role\'s next account in one cycle', limitMenu, true],
+  ['a blocked master pane showing no limit notice is left as it is', '● Waiting on a permission prompt.\n ❯ 1. Yes\n   2. No\n Enter to confirm · Esc to cancel', false],
+] as const) test(`e2e:limit-menu-blocked-failover — ${name}`, async () => {
+  const master = await config(), registry = registryFixture(), observed = fixture(), reads: string[][] = [];
+  const agents = [{ name: MASTER, pane_id: 'pM', agent_status: 'blocked' }];
+  const effects = await effectsFor(master, agents, observed, registry);
+  effects.sessionScreen = ({ pane }) => readSessionScreen(pane!, blockedHerdr(visible, reads));
+  const state = emptyDaemonState(master);
+  state.master = { ...state.master, agentName: MASTER, pane: 'pM', runtime: 'claude', account: 'claude-c', session: 'session-claude-c', startedAt: iso(clock - 3_600_000) };
+  await runCycle(master, state, effects, () => clock);
+  assert.deepEqual(reads, [['agent', 'read'], ['pane', 'read']], 'the refused agent read falls back to the pane\'s visible screen');
+  if (failsOver) {
+    assert.deepEqual(observed.exhausted.map(entry => [entry.account, entry.reason]), [['claude-c', "You've hit your weekly limit · resets Oct 26, 10pm (America/Los_Angeles)"]], 'the account is marked exhausted with the menu\'s notice');
+    assert.ok(Date.parse(observed.exhausted[0]!.resetsAt!) > clock, 'the hold runs to the notice\'s reset');
+    assert.deepEqual(observed.closed, ['pM'], 'the blocked pane is closed');
+    assert.equal(observed.launched.length, 1, 'the master relaunches in the same cycle');
+    assert.equal(state.master.account, 'codex', 'on the role\'s other eligible account');
+    assert.deepEqual(registry.live(), ['codex']);
+  } else {
+    assert.deepEqual(observed.exhausted, []);
+    assert.deepEqual(observed.closed, []);
+    assert.deepEqual(observed.launched, []);
+    assert.equal(state.master.account, 'claude-c');
+    assert.equal(state.master.pane, 'pM');
+  }
 });

@@ -111,6 +111,7 @@ test('integration:expired-worker-partial-work-handoff — a worker attempt ended
 
   // The loop's own effects, with only the world beyond the control plane replaced: Herdr is empty,
   // the dispatch is the next worker's claim, and the coordination read is the server's own clock.
+  // The host's CPU reads nothing (GY-3373): a hot trial host must not hold this redispatch.
   const closed: string[] = [], launched: { key: string; epoch: number }[] = [];
   const snapshot = async () => {
     const response = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(coordinator)}`, 'X-Graphyard-View': 'coordination' } });
@@ -136,6 +137,7 @@ test('integration:expired-worker-partial-work-handoff — a worker attempt ended
       return { pane: null, epoch: next.epoch };
     },
     dispatchTick: async () => {}, sweepCheckouts: async () => {}, masterSession: undefined, mergeWriter: null,
+    cpuPressure: async () => null,
   };
   const state: DaemonState = emptyDaemonState(config);
 

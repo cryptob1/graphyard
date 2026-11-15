@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
-import type { ChildRun } from '../child-runner.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, writableDirectories, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig } from './profiles.js';
 import { assertOutsideWorktrees } from '../private-file.js';
@@ -250,6 +250,16 @@ export function cycleBaseTip(root: string, baseBranch: string, cycle: string | u
   cycleBaseFetches.set(key, { cycle, tip: shared });
   trimCycleFetches();
   return shared;
+}
+
+/**
+ * GY-3351: whether this host reaches origin the way cycleBaseTip's fetch does — one `git ls-remote`
+ * under the checkout's own credential, never prompting. Null when origin answered, else git's
+ * failure text, for doctor's git-remote line.
+ */
+export async function remoteFetchProbe(root: string): Promise<string | null> {
+  try { await defaultChildRun('git', ['ls-remote', '--heads', 'origin'], { cwd: root, timeoutMs: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); return null; }
+  catch (error: any) { return (String(error?.stderr ?? '').trim() || String(error?.message ?? error)).split('\n').filter(Boolean).join(' ').slice(0, 400); }
 }
 
 export { diskExhaustion, reclaimAdvice, exhaustedPath, diskExhaustionMessage, writeFailure } from '../disk-space.js';

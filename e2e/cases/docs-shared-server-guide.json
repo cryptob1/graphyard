@@ -1,0 +1,14 @@
+{
+  "id": "docs-shared-server-guide",
+  "title": "The shared-server guide covers the server, several installs, Tailscale sharing, the shared Herdr, per-install ports, sign-in and invites, and moving an install",
+  "description": "Reads docs/shared-server.md in the candidate checkout: the exact title and section list (the server with swap and the Landlock kernel, several installs, Tailscale machine sharing, one Herdr holding only Master sessions with headless workers and reviewers, one port per install, signing in and inviting people, the missing keyring, data outside Git, and moving an install by hand naming ~/.config/graphyard/masters/ and .git/worktrees), the links from README.md and docs/setup.md, no credential or address on the page and never Chief; and the README budget and docs-file contracts still pass.",
+  "tags": ["docs", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Shared-server guide, README budget and docs contracts",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/docs-shared-server-guide.test.ts tests/readme-landing-budget.test.ts tests/readme-and-walkthrough-only.test.ts",
+    "timeoutSeconds": 240
+  }]
+}

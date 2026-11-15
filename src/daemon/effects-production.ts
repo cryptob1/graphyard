@@ -35,6 +35,7 @@ import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
 import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
+import { ensureTrialImage } from '../install/trial-image.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
@@ -44,6 +45,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { hottestCpuCelsius } from './cpu-pressure.js';
 import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
@@ -217,11 +219,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
-    // GY-3348: the host's CPU before every launch; null where /proc/pressure/cpu is missing (not Linux).
+    // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
-      const pressure = await read('/proc/pressure/cpu');
-      return pressure === null ? null : { pressure, stat: await read('/proc/stat') };
+      return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await hottestCpuCelsius() };
     },
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
@@ -278,6 +279,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get mergeWriter() { const config = current();
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => { const snapshot = await deps.snapshot(); return mergeCandidateHold(snapshot.work.find(item => item.id === work.id), work, snapshot.work); }, holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
+        ensureTrialImage: () => ensureTrialImage(),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
         gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },

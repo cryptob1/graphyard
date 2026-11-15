@@ -120,10 +120,18 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
   throw new PromptNotAcceptedError(`${target} did not visibly accept its prompt after ${attempts} deliveries (${stalls.join(', ')}); the session is closed and relaunched rather than left idle${pane ? `; the pane last showed: "${pane}"` : ''}`);
 }
 
-/** The session's terminal, as text, or null with the error Herdr gave when it cannot read it. */
+/**
+ * The session's terminal, as text, or null with the error Herdr gave when it cannot read it. A
+ * session Herdr reports blocked — Claude's usage-limit menu waiting on a person — can refuse the
+ * agent read, so the pane's visible screen is read instead (GY-3380): that is where the limit
+ * notice the loop fails over on stands.
+ */
 export async function readSessionScreenOrError(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<{ screen: string | null; error: string | null }> {
   try { return { screen: String(await herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines)])), error: null }; }
-  catch (error) { return { screen: null, error: error instanceof Error ? error.message : String(error) }; }
+  catch (error) {
+    try { return { screen: String(await herdrCall(run, ['pane', 'read', target, '--source', 'visible', '--lines', String(lines)])), error: null }; }
+    catch { return { screen: null, error: error instanceof Error ? error.message : String(error) }; }
+  }
 }
 /** The session's terminal, as text; null when Herdr cannot read it. */
 export async function readSessionScreen(target: string, run: ChildRun = defaultChildRun, lines = 80): Promise<string | null> {
