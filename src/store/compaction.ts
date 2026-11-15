@@ -141,7 +141,6 @@ export async function compactLedger(pool: pg.Pool, options: { retentionMs?: numb
         const seqs = (await db.query(sql, [[...routineSaveKinds], cutoff, cursor, end])).rows.map(row => row.seq as string);
         if (seqs.length) rows.push(...(await db.query('DELETE FROM events WHERE seq = ANY($1::bigint[]) RETURNING seq, kind', [seqs])).rows);
       }
-      await db.query("SET LOCAL graphyard.ledger_compaction = 'off'");
       for (const row of rows) byKind[row.kind] = (byKind[row.kind] ?? 0) + 1;
       if (rows.length) {
         const seqs = rows.map(row => Number(row.seq));
@@ -154,8 +153,10 @@ export async function compactLedger(pool: pg.Pool, options: { retentionMs?: numb
       for (const [kind, n] of Object.entries(byKind)) removed[kind] = (removed[kind] ?? 0) + n;
       total += rows.length;
     } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; } finally { db.release(); }
-    if (end === null) { ran++; break; }
-    if (ran + 1 < batches) await new Promise(resolve => setTimeout(resolve, options.pauseMs ?? ledgerCompactionPauseMs));
+    if (end === null) break;
+    // The pause follows every batch that did work, the last of a run included, so a caller that
+    // loops runs never reaches the next batch back to back across the seam between runs.
+    await new Promise(resolve => setTimeout(resolve, options.pauseMs ?? ledgerCompactionPauseMs));
   }
   return { removed, total, batches: ran, cutoff: cutoff.toISOString(), cursor: Number(cursor) };
 }
