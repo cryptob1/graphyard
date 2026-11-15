@@ -12,6 +12,9 @@ import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
+import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
+import { installSecretsDirectory } from '../e2e/steps.js';
+import { join } from 'node:path';
 
 /** The gate's own item key in the trial (a proofless pseudo-item, like a revert's). */
 const gateKey = gateTrialKey;
@@ -45,11 +48,33 @@ export function fetchRefusalLine(repository: string, baseBranch: string, error: 
  * the failing step's for a case, the trial log's for the build or a test file); the trial is bounded
  * by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142).
  */
-async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
+async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, trusted: () => string | null = () => null, skipFaults = false): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
-  const run = await reads.trial(commit, tests, { key: gateKey, criteria: cases.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs: cases }] as Work['criteria'] : [] }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
-  const failed = [...(run.build === 'fail' ? ['build'] : []),
+  const environments = await gateEnvironments(reads, commit, cases, trusted());
+  const runCases = cases.filter(proof => !(proof in environments.unknown) && !environments.untrusted.includes(proof));
+  const trial = (origins: Record<string, string>, skipped: readonly string[]) => {
+    const proofs = runCases.filter(proof => !skipped.includes(proof));
+    return reads.trial(commit, tests, { key: gateKey, criteria: proofs.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs }] as Work['criteria'] : [], ...(Object.keys(origins).length ? { environments: origins } : {}) }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
+  };
+  // GY-3296: each named environment is provisioned around the one trial, its URL handed to its cases.
+  // An environment wait or fault throws for the gate, which retries; the diagnostics (`skipFaults`)
+  // leave that environment's cases out and run the rest, so an outage never reruns the whole suite.
+  const named = [...environments.named];
+  const nest = async (index: number, origins: Record<string, string>, skipped: readonly string[]): ReturnType<typeof trial> => {
+    if (index === named.length) return trial(origins, skipped);
+    const [name, proofs] = named[index]!;
+    try {
+      return await environments.lifecycle!.use(name, environments.definitions[name]!, commit, environments.cwd!,
+        url => nest(index + 1, { ...origins, ...Object.fromEntries(proofs.map(proof => [proof.slice(4), url])) }, skipped),
+        run => !(run.e2e ?? []).some(entry => proofs.includes(entry.proof) && (entry.failed > 0 || entry.executed === 0)));
+    } catch (error) {
+      if (!skipFaults || !(error instanceof EnvironmentFault) || error.environment !== name) throw error;
+      return nest(index + 1, origins, [...skipped, ...proofs]);
+    }
+  };
+  const run = await nest(0, {}, []);
+  const failed = [...Object.keys(environments.unknown), ...(run.build === 'fail' ? ['build'] : []),
     ...(run.e2e ?? []).filter(entry => entry.failed > 0 || entry.missing || entry.executed === 0).map(entry => entry.proof),
     ...run.tests.failed.map(file => `test:${file}`)];
   // GY-3305: a failing test check keeps its own identity in the record's detail — the browser
@@ -58,6 +83,7 @@ async function trialFailures(reads: MergeWriterReads, commit: string, checks: re
   // pass for a diagnosis that was never made.
   const testDetail = run.failingCase ?? (run.tests.failed.length ? 'the run named no failing test or error: nothing in its output establishes a cause' : null);
   const details = Object.fromEntries([
+    ...Object.entries(environments.unknown),
     ...(run.e2e ?? []).filter(entry => entry.failingStep).map(entry => [entry.proof, entry.failingStep!]),
     ...(testDetail ? run.tests.failed.slice(0, 1).map(file => [`test:${file}`, testDetail]) : []),
   ]);
@@ -67,6 +93,42 @@ async function trialFailures(reads: MergeWriterReads, commit: string, checks: re
   return { failed: failed.filter(check => checks.includes(check) || (check.startsWith('test:') && checks.includes('affected'))), details, outputs };
 }
 const trialChecks = async (...args: Parameters<typeof trialFailures>) => (await trialFailures(...args)).failed;
+
+/**
+ * GY-3296: the named environments the gate's `cases` need at `commit`, defined by graphyard.json at
+ * the trusted base — the last verified commit — and run from its checkout. A case naming an
+ * environment the commit declares but the base does not yet waits for that declaration to be
+ * verified; one naming an environment neither declares fails with the configuration to fix.
+ */
+async function gateEnvironments(reads: MergeWriterReads, commit: string, cases: readonly string[], base: string | null) {
+  const none = { named: new Map<string, string[]>(), unknown: {} as Record<string, string>, untrusted: [] as string[], definitions: {} as Record<string, AppEnvironment>, cwd: null as string | null, lifecycle: null as ReturnType<typeof loopLifecycle> | null };
+  const git = reads.git, gate = reads.gate;
+  if (!git || !gate || !cases.length) return none;
+  // One grep names the few case files that declare any environment; only those are read.
+  const declaring = lines(await git(['grep', '-l', '"environment"', commit, '--', 'e2e/cases/']).catch(() => ''))
+    .map(line => line.slice(line.indexOf(':') + 1)).filter(path => cases.includes(`e2e:${path.slice('e2e/cases/'.length, -'.json'.length)}`));
+  const wanted = new Map<string, string[]>();
+  for (const path of declaring) {
+    let name = localEnvironment;
+    try { name = JSON.parse(await git(['show', `${commit}:${path}`])).environment ?? localEnvironment; } catch { /* the trial names a case that does not parse */ }
+    if (name !== localEnvironment) wanted.set(name, [...wanted.get(name) ?? [], `e2e:${path.slice('e2e/cases/'.length, -'.json'.length)}`]);
+  }
+  if (!wanted.size) return none;
+  const show = (at: string) => git(['show', `${at}:graphyard.json`]).catch(() => null);
+  const definitions = base ? declaredEnvironments(await show(base)) : {};
+  const atCommit = declaredEnvironments(await show(commit));
+  const result = { ...none, named: new Map<string, string[]>(), definitions };
+  for (const [name, proofs] of wanted) {
+    if (definitions[name]) result.named.set(name, proofs);
+    else if (atCommit[name]) result.untrusted.push(...proofs);
+    else for (const proof of proofs) result.unknown[proof] = `case ${proof.slice(4)} names environment "${name}", which graphyard.json e2e.environments does not declare: declare it with up and down commands, or remove "environment" to run on local`;
+  }
+  if (result.named.size) {
+    result.cwd = await trustedCheckout(git, gate.root, base!);
+    result.lifecycle = gate.environments ?? loopLifecycle(environmentStatePath(gate.root), () => join(installSecretsDirectory(gate.root), environmentSecretsFile));
+  }
+  return result;
+}
 
 /** The pinning-test proof a gate filing binds, named from its check: `known-red:test:tests/a-b.test.ts` → `unit:a-b-pinned`. */
 export const pinningProof = (key: string) =>
@@ -86,7 +148,7 @@ export const gateFiledItem = (input: { title: string; description: string; key: 
   reason: `Filed by the batch gate on ${baseBranch}` });
 
 /** The gate's ports over the merge writer's reads. */
-export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[]): GatePorts & { diagnose: DiagnosePort } {
+export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
   const git = reads.git;
   const file = async (input: { title: string; description: string; key: string }) => {
     const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch), input.key);
@@ -110,7 +172,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     core: async commit => {
       try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
     },
-    run: (commit, checks, files, timeoutMs) => trialChecks(reads, commit, checks, files, timeoutMs),
+    run: (commit, checks, files, timeoutMs) => trialChecks(reads, commit, checks, files, timeoutMs, trusted),
     revert: async (landing, gated, check) => {
       // Merges may have landed while the gate ran: the revert goes onto main as it stands now.
       const tip = (await reads.fetch()).toLowerCase();
@@ -129,9 +191,9 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     file,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
-      const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs);
+      const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
       const held = await catalog(commit), cases = held.map(id => `e2e:${id}`), started = reads.now();
-      const { failed, details, outputs } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs) : { failed: [], details: {}, outputs: {} }, catalogMs = reads.now() - started;
+      const { failed, details, outputs } = cases.length ? await trialFailures(reads, commit, cases, [], gateLimitMs, trusted, true) : { failed: [], details: {}, outputs: {} }, catalogMs = reads.now() - started;
       const previews = reads.gate?.previews;
       const previewCases = !servedPreviewCases.some(id => held.includes(id)) ? []
         : previews ? await previews(commit) : notCovered(commit, new Date(reads.now()).toISOString(), 'this loop runs no served preview cases');
@@ -202,7 +264,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reading));
     await writeGateRecord(file, record);
   }
-  const ports = batchGatePorts({ ...reading, git }, cycle.snapshot.work);
+  const ports = batchGatePorts({ ...reading, git }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });

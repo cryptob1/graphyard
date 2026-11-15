@@ -157,8 +157,10 @@ export const statusRoutes = defineRoutes('status', [
       if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool, url.searchParams.get('since'))), view };
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never
-      // leave it whole, and what the SQL cut is added to what the view says it left out.
-      const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
+      // leave it whole, and what the SQL cut is added to what the view says it left out. The live
+      // loop's own poll (GY-3341, the read that names its presence) reads it open-only: a cycle
+      // holds open items and what they reference, never every settled summary the ledger keeps.
+      const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot({ openOnly: loopInterval !== null });
       const trimmedView = coordinationSnapshot(scope(snapshot));
       for (const work of trimmedView.work) {
         const cut = trimmed.get(work.id);

@@ -1,0 +1,11 @@
+{
+  "id": "free-usage-exhaustion",
+  "title": "A free-usage quota failure spends its account, and an account with no model id is flagged",
+  "description": "Real dispatch, CLI claim and watch with fixture runtimes: an account that prints 429 FreeUsageLimitError and exits is held before any other item can select it, and six queued items all start on the eligible successor without repeating it. A quota notice mid-run keeps the work and holds the account until its named reset; a notice naming none reads reset unknown. A reviewer stopped on the notice holds its account and runs on the next. An unrelated 429 holds nothing. An account whose model has no id is flagged in master status and on the Agents page as running the runtime's default model.",
+  "tags": ["capacity", "dispatch"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "free-usage exhaustion regression", "run": "node --import tsx tests/helpers/run-tests.ts tests/free-usage-exhaustion.test.ts", "timeoutSeconds": 600 }
+  ]
+}

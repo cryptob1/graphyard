@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, basename, delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -50,6 +50,12 @@ import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 import { LauncherUnavailableError } from './master/config.js';
+import { resolveRepositoryPolicy } from './model-boundary/repository-policy.js';
+import type { E2eServe } from './model/repository-policy.js';
+import { servingReport } from './deploy-watch.js';
+import { commandApplication, serveHead } from './merge-writer/serve-head.js';
+import { runEnvironment } from './runner/pi.js';
+import { statSync } from 'node:fs';
 export { controlPlaneFindingSection } from './review-prompt.js';
 export { reviewStandard, reviewStandards, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
 export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection, criteriaVerdictRule } from './review-prompt.js';
@@ -527,6 +533,47 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
   return null;
 }
 
+/** GY-3331: the browser tool a product review walks the app with, as the E2E runner drives it. */
+export const browserToolName = 'agent-browser';
+/** Resolves the browser tool on a PATH, or null when no directory of it holds an executable one. */
+export function browserToolOnPath(environment: { PATH?: string } = process.env): string | null {
+  for (const directory of (environment.PATH ?? '').split(delimiter)) {
+    if (!directory) continue;
+    try {
+      const tool = resolve(directory, browserToolName);
+      if (existsSync(tool) && statSync(tool).isFile() && statSync(tool).mode & 0o111) return tool;
+    } catch { /* an unreadable directory holds nothing to find */ }
+  }
+  return null;
+}
+/**
+ * GY-3331: why a product-review launch cannot give its session the three things its own
+ * environment owes it — the control plane's address, the CLI it posts through, and a browser tool
+ * on its PATH — or null. A launch that cannot starts no reviewer: the review is recorded as could
+ * not run with the missing thing named, retried on another eligible reviewer, and raised as one
+ * attention line; it never becomes a change request and never reaches the item's worker.
+ */
+export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null): string | null {
+  if (!config.url) return 'GRAPHYARD_URL is unset: this launch cannot tell its reviewer the control plane\'s address; set url with graphyard master setup';
+  const unreachable = cliUnreachableRefusal(config, mask);
+  if (unreachable) return unreachable;
+  if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} on this host`;
+  return null;
+}
+/** GY-3331: how the launcher records a could-not-run product review on the item, with the loop's own coordinator credential. */
+export async function recordCouldNotRunReview(config: Pick<MasterConfig, 'url' | 'credentialFile'>, work: Work, review: { reviewer: string; sha: string; baseSha: string; reason: string }) {
+  const token = await readCredentialFile(config.credentialFile);
+  const response = await fetch(`${config.url}/api/work/${encodeURIComponent(work.id)}/product-review`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `product-could-not-run:${review.sha}:${createHash('sha256').update(review.reason).digest('hex').slice(0, 16)}` }, body: JSON.stringify({ reviewer: review.reviewer, sha: review.sha, baseSha: review.baseSha, verdict: 'could-not-run', findings: review.reason.slice(0, 65_536), screenshots: [] }), signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) throw new Error(`The control plane refused the could-not-run record for ${work.key} (${response.status})`);
+}
+/** GY-3331: the head's own e2e.serve declaration, read from the graphyard.json its commit holds; null when the head declares none (or its policy does not parse). */
+export async function headServeDeclaration(root: string, sha: string, run: ChildRun = defaultChildRun): Promise<E2eServe | null> {
+  let text: string;
+  try { text = String(await run('git', ['-C', root, 'show', `${sha}:graphyard.json`])); }
+  catch { return null; }
+  try { return resolveRepositoryPolicy(JSON.parse(text)).e2e.serve; } catch { return null; }
+}
+
 /**
  * Control-plane mode (GY-1525): the prompt names the head and base SHAs and reads them from the
  * shared object store the session's checkout is anchored to; nothing names a pull request, and the
@@ -534,6 +581,10 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
  * its first parent, and says what becomes of its findings.
  */
 export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string;
+  /** GY-3331: the head itself, served for this review by the install's own e2e.serve command, on an install that serves nothing else. */
+  servedUrl?: string;
+  /** GY-3331: this install serves no app and declares no serve command, so no walkthrough is required or owed. */
+  noApp?: boolean;
   /** A headless session's answer (headlessReviewAnswer), in place of the `review post` instructions: the launcher posts it. */
   answer?: string }
 function reviewReadSection(cliPath: string, head: string) {
@@ -577,12 +628,21 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
  * session uses agent-browser on the head's preview (the loop serves the built head there while the
  * item's preview runs) and on the app as currently served, uses the feature and the flows around
  * it, and judges whether it is a good idea and improves the experience. The verdict names its
- * screenshots, which the item shows beside it.
+ * screenshots, which the item shows beside it. GY-3331: an install that serves nothing hands the
+ * reviewer the head itself, served by the install's own e2e.serve command; one that can serve
+ * nothing at all owes no walkthrough — the reviewer judges the diff, the criteria and the trial
+ * evidence and says so. A session whose own environment failed (no URL, no CLI, no browser, an
+ * app it cannot reach) reports COULD_NOT_RUN, never a change request.
  */
 function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, _checkout?: SessionCheckout) {
+  const unreachable = `If your own environment fails — GRAPHYARD_URL unset, no Graphyard CLI, no browser tool, or an app you cannot reach — report that as COULD_NOT_RUN with the reason, never as a change request: no worker can fix it. `;
   const walk = plane.previewUrl
-    ? `Walk it with agent-browser: open the head's built preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. `
-    : `The head itself is not separately previewed, so walk the app as currently served with agent-browser (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served), use the flows the feature belongs to, and read the head's diff (git diff ${plane.baseTip} ${plane.head}) beside what you see. `;
+    ? `Walk it with agent-browser: open the head's built preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. ${unreachable}`
+    : plane.servedUrl
+      ? `Walk it with agent-browser: this install serves no app of its own, so the head itself is served for this review at ${plane.servedUrl} — its own e2e.serve command running this exact head. Open it, use the feature and the flows around it, and read the head's diff (git diff ${plane.baseTip} ${plane.head}) beside what you see. ${unreachable}`
+      : plane.noApp
+        ? `This install serves no app and declares no serve command, so no walkthrough is required and none is owed: judge the change from the head's diff (git diff ${plane.baseTip} ${plane.head}), the criteria and the trial evidence, and say in your findings that no app was there to walk — the absence of an app is never a reason to request changes. `
+        : `The head itself is not separately previewed, so walk the app as currently served with agent-browser (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served), use the flows the feature belongs to, and read the head's diff (git diff ${plane.baseTip} ${plane.head}) beside what you see. ${unreachable}`;
   return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane. `
     + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct. `
     + walk
@@ -591,12 +651,12 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
     + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
-    + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES or REJECT, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:'));
+    + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES, REJECT or COULD_NOT_RUN, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:'));
 }
 const readOnlySession = 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. ';
 function productPostSection(cliPath: string) {
   return `Post exactly one verdict, only through Graphyard, with the body on standard input: node ${cliPath} review post --event EVENT <<'EOF' … EOF. `
-    + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one. `
+    + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one; --event COULD_NOT_RUN when your own environment failed (GRAPHYARD_URL unset, no Graphyard CLI, no browser tool, or an app you cannot reach), the reason in the body — Graphyard retries the review on another reviewer and the item never returns to its worker for it. `
     + `Open the body by naming the head you judged, and name each screenshot you captured (at most 5, .png or .jpg, each under 2 MiB) on its own "Screenshot: PATH" line, the path of the file you saved: review post uploads each with your verdict, and the item shows your verdict, findings and screenshots together. `;
 }
 /**
@@ -604,19 +664,20 @@ function productPostSection(cliPath: string) {
  * this launch's verdict through the same route and token, each finding as a BLOCKING: line.
  */
 export function headlessReviewAnswer(key: string, product = false) {
-  return `Answer in one JSON object, the last thing you print: {"verdict": "APPROVE" or "BLOCKING"${product ? ' or "REJECT"' : ''}, "body": "THE REVIEW BODY", "findings": ["${product ? 'SCREEN OR FLOW' : 'PATH:LINE'} — FINDING", …]}. `
-    + `APPROVE when no blocking finding stands, with findings empty; BLOCKING when one does, each in findings${product ? '; REJECT when the feature should not ship at all, the reason in the body: the master closes the item unmerged on it' : ''}. `
+  return `Answer in one JSON object, the last thing you print: {"verdict": "APPROVE" or "BLOCKING"${product ? ' or "REJECT" or "COULD_NOT_RUN"' : ''}, "body": "THE REVIEW BODY", "findings": ["${product ? 'SCREEN OR FLOW' : 'PATH:LINE'} — FINDING", …]}. `
+    + `APPROVE when no blocking finding stands, with findings empty; BLOCKING when one does, each in findings${product ? '; REJECT when the feature should not ship at all, the reason in the body: the master closes the item unmerged on it; COULD_NOT_RUN when your own environment failed — GRAPHYARD_URL unset, no Graphyard CLI, no browser tool, or an app you cannot reach — the reason in the body and no findings: Graphyard retries the review on another reviewer and the item never returns to its worker for it' : ''}. `
     + (product ? 'Open the body by naming the head you judged, and name each screenshot you saved (at most 5, .png or .jpg, each under 2 MiB) on its own "Screenshot: PATH" line: the item shows them beside your verdict. ' : '')
     + 'Graphyard posts that answer as your verdict under this launch, each finding on a BLOCKING: line, so run no review post. '
     + `Judge whether this change meets what ${key} requires; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. Decide on your own: never ask a human or wait on input.`;
 }
 /** The headless answer, checked before it is posted: a BLOCKING verdict names its findings, an approval none. */
-export const headlessVerdictSchema = z.object({ verdict: z.enum(['APPROVE', 'BLOCKING', 'REJECT']), body: z.string().trim().min(1).max(60_000), findings: z.array(z.string().trim().min(1).max(2_000)).max(100).default([]) })
+export const headlessVerdictSchema = z.object({ verdict: z.enum(['APPROVE', 'BLOCKING', 'REJECT', 'COULD_NOT_RUN']), body: z.string().trim().min(1).max(60_000), findings: z.array(z.string().trim().min(1).max(2_000)).max(100).default([]) })
   .refine(answer => answer.verdict !== 'APPROVE' || !answer.findings.length, 'an APPROVE verdict lists no findings')
+  .refine(answer => answer.verdict !== 'COULD_NOT_RUN' || !answer.findings.length, 'a COULD_NOT_RUN verdict lists no findings: the reason is the body')
   .refine(answer => answer.verdict !== 'BLOCKING' || answer.findings.length > 0, 'a BLOCKING verdict lists at least one finding');
 /** The review event and body a headless answer posts as. */
 export function headlessVerdictPost(answer: z.infer<typeof headlessVerdictSchema>) {
-  const event = answer.verdict === 'APPROVE' ? 'APPROVE' as const : answer.verdict === 'REJECT' ? 'REJECT' as const : 'REQUEST_CHANGES' as const;
+  const event = answer.verdict === 'APPROVE' ? 'APPROVE' as const : answer.verdict === 'REJECT' ? 'REJECT' as const : answer.verdict === 'COULD_NOT_RUN' ? 'COULD_NOT_RUN' as const : 'REQUEST_CHANGES' as const;
   return { event, body: [answer.body, ...answer.findings.map(finding => `BLOCKING: ${finding.replace(/^BLOCKING:\s*/i, '')}`)].join('\n') };
 }
 /** What posting and settling a headless review's answer needs (GY-3113): read back by a restarted loop, so paths and names only, never a credential. */
@@ -845,6 +906,10 @@ export async function launchReview(root: string, work: Work, profileName: string
   postMerge?: { mergeSha: string; baseTip?: string };
   /** GY-2989: a product review — the session walks the head's preview and the served app and judges the feature as a product. Control-plane mode only. */
   product?: boolean;
+  /** GY-3331: how the browser tool a product review walks with is resolved on a PATH; the host's own lookup by default. */
+  browserTool?: (environment: { PATH?: string }) => string | null;
+  /** GY-3331: how a launch that cannot give its reviewer the three things its environment owes records the review as could not run; the coordinator-credential route by default. */
+  recordCouldNotRun?: (config: Pick<MasterConfig, 'url' | 'credentialFile'>, work: Work, review: { reviewer: string; sha: string; baseSha: string; reason: string }) => Promise<unknown>;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
   /** The one-task model executor; the host's by default. */
@@ -987,6 +1052,8 @@ export async function launchReview(root: string, work: Work, profileName: string
       const credentialMask = credentialMaskFor(config, { credentialFile: null, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable, launch.kind) });
       const delivery: RequestDelivery = 'request';
       let answered: Promise<Awaited<ReturnType<typeof postReview>>> | null = null, headlessContext: HeadlessReviewContext | null = null;
+      /** GY-3331: the head itself, served for a product review on an install that serves nothing else, until its session ends. */
+      let serving: { url: string; close: () => Promise<void> } | null = null, noApp = false;
       /** The session the run is on: a headless run moves off a logged-out account (GY-3218). */
       const on = { current: selected };
       try {
@@ -995,12 +1062,47 @@ export async function launchReview(root: string, work: Work, profileName: string
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask, dependencies.coordinatorRoot);
         const own = withVerificationPath(harness.environment, launch.environment);
+        // GY-3331: a product review's session gets the connection a worker's gets — the control
+        // plane's address and the CLI it runs — and a browser tool on its PATH. The preflight
+        // checks the three before anything starts; a launch that cannot give them records the
+        // review as could not run with the missing thing named and starts no reviewer.
+        if (product) {
+          const tool = (dependencies.browserTool ?? browserToolOnPath)({ PATH: process.env.PATH });
+          const refusal = productLaunchRefusal(config, credentialMask, tool);
+          if (refusal) {
+            await (dependencies.recordCouldNotRun ?? recordCouldNotRunReview)(config, work, { reviewer: reviewerIdentity, sha: binding.sha, baseSha: binding.baseSha, reason: refusal }).catch(() => { /* the launch refusal itself is reported; the record is retried with it */ });
+            throw new Error(`The product review of ${binding.key} could not run: ${refusal}`);
+          }
+          // The tool resolved on the host the confinement mounts read-only; its directory goes
+          // first on the session's PATH, so a runtime that declares its own PATH keeps it too.
+          own.PATH = [dirname(tool!), own.PATH ?? process.env.PATH ?? ''].filter(Boolean).join(':');
+          own.GRAPHYARD_URL = config.url;
+          own.GRAPHYARD_CLI = config.cliPath ?? launcherPath;
+          // What the reviewer walks: the head's preview while it runs, the app the install serves,
+          // the head itself served by the install's own e2e.serve command, or — with neither — no
+          // walkthrough at all, the absence of an app never a reason to request changes.
+          if (work.preview?.state !== 'running') {
+            const report = await servingReport(root, config.repository, config.baseBranch, args => Promise.resolve((dependencies.run ?? defaultChildRun)('git', ['-C', root, ...args])).then(String)).catch(() => null);
+            if (!report?.serve?.url) {
+              const declared = await headServeDeclaration(root, binding.sha, dependencies.run);
+              if (declared) {
+                // The head's serve command runs from a worktree of the exact head, in the checkout
+                // this launch already allocated for the session.
+                const git = dependencies.run ?? defaultChildRun;
+                await git('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, binding.sha]);
+                const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
+                try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
+                catch (error) { await served.close().catch(() => {}); throw error; }
+              } else noApp = true;
+            }
+          }
+        }
         // What posting and settling a headless answer needs, which a restarted loop reads back from the run directory (GY-3113).
         headlessContext = { id, sha: binding.sha, reviewer: reviewerIdentity, kind: launch.kind!, cliPath: config.cliPath ?? launcherPath,
           GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
-        const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
+        const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}), ...(serving ? { servedUrl: serving.url } : {}), ...(noApp ? { noApp: true } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
         {
           // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
           const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {
@@ -1021,6 +1123,7 @@ export async function launchReview(root: string, work: Work, profileName: string
             answer: output => postHeadlessReview(root, headlessContext!, output, dependencies.run), root, route: 'review', context: headlessContext }));
         }
       } catch (error) {
+        await serving?.close();
         await on.current.release?.(`reviewer launch failed: ${String(error)}`.slice(0, 400));
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1050,6 +1153,8 @@ export async function launchReview(root: string, work: Work, profileName: string
       // accepted answer settles as a session that finished without one, and the request relaunches.
       if (answered) void answered.finally(() => on.current.release?.(`the headless review of ${work.key} finished`)).then(posted => settleHeadlessReview(root, headlessContext!, posted, { run: dependencies.run, now }), failure => settleHeadlessReview(root, headlessContext!, failure instanceof Error ? failure.message : String(failure), { run: dependencies.run, now }))
         .catch(() => { /* reconciliation settles a record this could not write */ });
+      // The head this review walks stays served until its session ends (GY-3331).
+      if (serving) void answered?.then(() => serving!.close(), () => serving!.close());
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,
         account: on.current.account ? { environment: on.current.account.name, kind: on.current.account.kind, quota: on.current.health?.quota ?? null, skipped: on.current.skipped } : null,

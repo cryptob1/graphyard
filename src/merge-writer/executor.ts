@@ -731,6 +731,8 @@ export type MergeOutcomeOfTrial = { mergeSha: string; files: string[]; addedOrMo
 /** Everything `mergeOne` and `reconcileIntents` touch outside the process: git in the coordinator checkout, the deploy-key push, and the coordinator's ledger. */
 export interface MergePorts {
   baseBranch: string;
+  /** An adopted run finishes on its original intent before the normal moved-tip landing. */
+  adoptedTrial?(key: string): boolean;
   now(): number;
   /** Fetches the base branch into the checkout (the head is already in its object store, GY-1523); answers the base tip. */
   fetch(): Promise<string>;
@@ -741,7 +743,7 @@ export interface MergePorts {
    * `share` is how many trials run at once (`mergeHeads`): each takes that share of the host's cores.
    * Aborting `signal` stops the trial's children (GY-3099). `timeoutMs` bounds the whole trial; absent, the merge-trial deadline (`trialTimeoutMinutes`).
    */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type']; /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it. */ environments?: Record<string, string> }, baseTip?: string, onStep?: (step: string) => void, onTiming?: (step: string, durationMs: number) => void, heads?: { key: string; head: string }[], share?: number, signal?: AbortSignal, timeoutMs?: number): Promise<MergeTrialRun>;
   /** The leased push of `mergeSha` onto `baseTip`; `rejected` when the remote reported a stale lease (`staleLeaseRejection`), any other failure thrown. */
   push(mergeSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
   /** Whether the base branch's first-parent history holds `sha`, as last fetched. */
@@ -819,7 +821,8 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     await ports.record(item, { kind: 'refused', head, reason });
     return { outcome: 'refused', reason, trial: null, conflict };
   };
-  let baseTip = await ports.fetch();
+  const adopted = ports.adoptedTrial?.(item.key) && state?.state === 'intent' && state.head === head ? state : null;
+  let baseTip = adopted?.baseTip ?? await ports.fetch();
   const opening = await openingHold();
   if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
   const merged = await ports.merge(head, baseTip, item);
@@ -827,7 +830,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   // The head itself when it fast-forwards the tip (trial.ts `trialMerge`): the ledger then names the head as the merge commit.
   let { mergeSha } = merged;
   // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
-  await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
+  if (!adopted) await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
   let run: MergeTrialRun | null = null;
   let baseHeld: string | null = null;
   let failure: string | null = null;
