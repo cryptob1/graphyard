@@ -22,6 +22,8 @@ export const reporterScope = defineRoutes('reporter-scope', [{
 }]);
 
 const text = z.object({ text: z.string().trim().min(1).max(4000) }).strict();
+/** GY-3345: a peer install's message carries the thread both sides file it under; this Master's record of one it sent names the peer it went `to`. */
+const message = text.extend({ thread: z.string().regex(/^[\w-]{1,100}$/).optional(), to: z.string().regex(/^[\w.-]{1,60}$/).optional() }).strict();
 const messageKind = 'master.message', replyKind = 'master.reply';
 
 /**
@@ -32,21 +34,23 @@ const messageKind = 'master.message', replyKind = 'master.reply';
 export const masterMessageRoutes = defineRoutes('master-messages', [
   { method: 'POST', path: '/api/master/messages', async handle(context) {
     const { actor, services } = context;
-    demand(actor.role === 'reporter' || actor.role === 'admin', 'Only a reporter or the operator messages the Master', 403);
-    const { text: body } = text.parse(await parseJson(context, 20_000));
-    return services.engine.store.transaction(db => once(db, actor, context.idempotencyKey(), { command: 'master.message', text: body }, async () => {
-      const row = (await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3) RETURNING seq', [actor.id, messageKind, JSON.stringify({ text: body })])).rows[0];
+    const input = message.parse(await parseJson(context, 20_000));
+    // A reporter or the operator messages the Master; the Master itself records only what it sent a peer.
+    demand(input.to ? actor.role === 'coordinator' || actor.role === 'admin' : actor.role === 'reporter' || actor.role === 'admin', input.to ? 'Only the Master records a message it sent a peer' : 'Only a reporter or the operator messages the Master', 403);
+    return services.engine.store.transaction(db => once(db, actor, context.idempotencyKey(), { command: 'master.message', ...input }, async () => {
+      const row = (await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3) RETURNING seq', [actor.id, messageKind, JSON.stringify(input)])).rows[0];
       return { id: Number(row.seq), sent: true, next: 'Read the Master\'s reply with graphyard messages' };
     }));
   } },
   { method: 'GET', path: '/api/master/messages', async handle({ actor, services }) {
-    demand(['reporter', 'admin', 'coordinator'].includes(actor.role), 'Only a reporter, the operator or the Master reads Master messages', 403);
+    demand(['reporter', 'admin', 'coordinator', 'reader'].includes(actor.role), 'Only a reporter, the operator, a viewer or the Master reads Master messages', 403);
     const own = actor.role === 'reporter' ? actor.id : null;
-    const { rows } = await services.engine.store.pool.query(`SELECT m.seq, m.actor, m.payload->>'text' AS text, m.created_at,
-        COALESCE((SELECT json_agg(json_build_object('by', r.actor, 'text', r.payload->>'text', 'at', r.created_at) ORDER BY r.seq)
+    const { rows } = await services.engine.store.pool.query(`SELECT m.seq, m.actor, m.payload->>'text' AS text, m.payload->>'thread' AS thread, m.payload->>'to' AS "to", m.created_at,
+        COALESCE((SELECT json_agg(json_build_object('id', r.seq, 'by', r.actor, 'text', r.payload->>'text', 'at', r.created_at) ORDER BY r.seq)
           FROM events r WHERE r.kind=$2 AND (r.payload->>'message')::bigint = m.seq), '[]') AS replies
       FROM events m WHERE m.kind=$1 AND ($3::text IS NULL OR m.actor=$3) ORDER BY m.seq DESC LIMIT 100`, [messageKind, replyKind, own]);
-    return { messages: rows.map(row => ({ id: Number(row.seq), from: row.actor, text: row.text, at: row.created_at, replies: row.replies })) };
+    // GY-3345: a message without a thread is its own; `to` marks one this Master sent a peer.
+    return { messages: rows.map(row => ({ id: Number(row.seq), from: row.actor, ...(row.to ? { to: row.to } : {}), thread: row.thread ?? String(row.seq), text: row.text, at: row.created_at, replies: row.replies })) };
   } },
   { method: 'POST', path: /^\/api\/master\/messages\/(\d+)\/reply$/, async handle(context, [id]) {
     const { actor, services } = context;

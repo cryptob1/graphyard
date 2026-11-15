@@ -17,7 +17,7 @@ import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
-import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
+import { masterCauses, masterCausePrompt, messageCauses } from './master-stalled-delivery.js';
 import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
@@ -782,8 +782,12 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
-  const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? [])];
+  // GY-3345: and each unanswered message another install's Master sent this one. An unreadable list
+  // keeps the messages already delivered, so none is delivered twice.
+  const messages = config.forPerson ? [] : await Promise.resolve(effects.masterMessages?.() ?? []).catch(() => null);
+  const causes = [...masterCauses(open, state.actions, state.failureRuns), ...(await sessions.pendingCauses?.(open) ?? []), ...messageCauses(messages ?? [], config.cliPath)];
   const current = new Set(causes.map(cause => cause.key));
+  if (!messages) for (const key of Object.keys(state.master.subjects)) if (key.startsWith('message:')) current.add(key);
   // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
   // while it runs, otherwise an unchanged failure would wake again after every retrial.
   for (const item of open) if (item.mergeLedger?.state === 'intent' && item.mergeLedger.head === item.candidate?.sha && item.mergeLedger.baseTip)

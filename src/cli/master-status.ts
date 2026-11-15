@@ -160,9 +160,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // and the error, raised by the loop itself (the same line the dashboard's Setup page carries as
   // its Needs you item), so it reaches the operator even with no master session to prompt.
   // GY-3344: each message a reporter (another install's Master) sent that the Master has not replied to, naming the sender.
-  const messages: { id: number; from: string; text: string; at: string; replies: unknown[] }[] = unreachable ? [] : await Promise.resolve().then(() => masterApi('master/messages')).then(body => Array.isArray(body?.messages) ? body.messages : [], () => []);
-  const messageAttention = messages.filter(message => !message.replies.length).reverse().map(message => ({ subject: `message ${message.id} from ${message.from}`,
-    text: `${message.from} wrote ${formatAge(message.at, now)} ago: ${message.text}`, next: `Act on it, then graphyard master reply ${message.id} TEXT` }));
+  // GY-3345: one this Master sent a peer is not; a peer's message is answered with master send, which carries the reply back.
+  const messages: { id: number; from: string; to?: string; text: string; at: string; replies: unknown[] }[] = unreachable ? [] : await Promise.resolve().then(() => masterApi('master/messages')).then(body => Array.isArray(body?.messages) ? body.messages : [], () => []);
+  const messageAttention = messages.filter(message => !message.to && !message.replies.length).reverse().map(message => ({ subject: `message ${message.id} from ${message.from}`,
+    text: `${message.from} wrote ${formatAge(message.at, now)} ago: ${message.text}`, next: master.peers?.some(peer => peer.name === message.from)
+      ? `Act on it, then graphyard master send ${message.from} --reply ${message.id} TEXT (or master reply ${message.id} TEXT to dismiss it without sending)` : `Act on it, then graphyard master reply ${message.id} TEXT` }));
   const stepFailureAttention = standingStepFailures(state ?? { actions: {} }).map(detail => ({ subject: 'the master loop', text: detail, next: 'Read the loop journal for the failing step and repair its cause; the alert clears on the first cycle the step succeeds' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
