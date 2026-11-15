@@ -98,6 +98,7 @@ export default function GuidePage() {
         <li><strong>State a goal.</strong> On Work, press <strong>New work item</strong> and give it a title. The Master writes the criteria.</li>
         <li><strong>Watch it move.</strong> Under Moving it goes from build to deploy. Open it to see its step and who acts next.</li>
         <li><strong>Find the result.</strong> Shipped lists what merged and went live.</li>
+        <li><strong>Taste the result.</strong> Work&rsquo;s Taste feed shows recent deliveries with their why and evidence. <strong>Looks good</strong> records your call; <strong>Send back</strong> files your note as follow-up work. Nothing waits on a taste.</li>
         <li><strong>Meet a blocker.</strong> Stuck items show under Blocked with the reason; your decisions wait under Needs you.</li>
       </ol>
     </section>
