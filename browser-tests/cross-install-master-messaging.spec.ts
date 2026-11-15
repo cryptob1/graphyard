@@ -5,6 +5,7 @@ import { symlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { withDatabase } from '../tests/helpers/postgres';
 import { temporaryDirectory } from '../tests/helpers/temp-dirs';
+import { serveXterm } from './xterm';
 
 const settled = { timeout: 15_000 };
 
@@ -34,6 +35,7 @@ test('e2e:cross-install-master-messaging — the receiving install\'s Master pag
     for (const width of [1280, 390] as const) {
       const { code } = await post('test-human-operator', 'sign-in-links', {});
       const context = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
+      await serveXterm(context);
       const page = await context.newPage();
       await page.goto(`${url}/#sign-in=${code}&master`);
       const thread = page.getByRole('article', { name: 'Thread with install-a' });
