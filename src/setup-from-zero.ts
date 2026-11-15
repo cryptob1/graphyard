@@ -63,7 +63,7 @@ export interface SetupFromZeroInput {
   /** GY-3351: the agent registry and this host's id; each account on this host gets its runtime lines when given. */
   registry?: { document: HostRegistry; host: string } | null;
   /** GY-3351: one read of origin (remoteFetchProbe): null when it answered, else git's failure; the git-remote line appears only when given. */
-  remote?: () => string | null;
+  remote?: () => Promise<string | null>;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -265,7 +265,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   const plugin = await herdrPluginCheck(env.PATH ?? '');
   if (plugin) lines.push(plugin);
   if (input.registry) lines.push(...accountRuntimeChecks(input.registry.document, input.registry.host, env.PATH ?? ''));
-  if (input.remote) lines.push(gitRemoteCheck(input.remote()));
+  if (input.remote) lines.push(gitRemoteCheck(await input.remote()));
   if (input.landlockAbi) {
     const read = input.landlockAbi; let abi = 0;
     const refusal = landlockRefusal(() => (abi = read()));
