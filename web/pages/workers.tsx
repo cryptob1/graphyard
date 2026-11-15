@@ -191,6 +191,8 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
  * The Workers page (GY-161, design/dashboard/Workers.dc.html): one table of the agent sessions
  * open now — the agent, its role in plain words, the item it works on, what it is doing, since
  * when, and its health — with the sessions that ended and the per-account summary folded below.
+ * The heading carries the host's CPU as the loop last read it (GY-3348): pressure and steal, the
+ * two figures that explain why nothing new is launching when the host is saturated.
  */
 export default function WorkersPage({ work, observedAt, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
@@ -199,8 +201,13 @@ export default function WorkersPage({ work, observedAt, setSelected, status }: P
   // A session the runtime no longer reports is not open: it is listed, marked, but never counted as working.
   const stale = view.running.filter(row => row.stale).length;
   const open = view.running.length - stale;
+  const cpu = status?.cpu as { avg60: number; steal: number | null } | null | undefined;
   return <>
-    <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
+    <div className="page-heading"><div>
+      <h1>Workers</h1>
+      <p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p>
+      {cpu ? <p className="summary host-cpu" data-host-cpu>Host CPU pressure {Math.round(cpu.avg60)}% · steal {cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}</p> : null}
+    </div></div>
     {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
     <ProjectMemorySection memory={status?.projectMemory}/>

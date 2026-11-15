@@ -4,7 +4,7 @@ import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { loopAlerts, loopAlertsHeader, loopCheckoutTrust, loopCheckoutTrustHeader, loopStepFailure, loopStepFailureHeader, loopSupervision, loopSupervisionHeader, loopWorkerGrowth, loopWorkerGrowthHeader, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, reportedLoopMerger } from '../../model/loop-presence.js';
+import { loopAlerts, loopAlertsHeader, loopCheckoutTrust, loopCheckoutTrustHeader, loopCpu, loopCpuHeader, loopStepFailure, loopStepFailureHeader, loopSupervision, loopSupervisionHeader, loopWorkerGrowth, loopWorkerGrowthHeader, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, reportedLoopMerger } from '../../model/loop-presence.js';
 import { loopWhere, loopWhereHeader, loopWhereRegistry } from '../../model/where-things-run.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
@@ -69,6 +69,9 @@ export const statusRoutes = defineRoutes('status', [
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
+        // GY-3348: the host's CPU as the live loop last named it on its coordination read — the
+        // Workers page's pressure and steal figures; null while no live loop names any.
+        cpu: loopRegistry(engine).live(observedAt)?.cpu ?? null,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
@@ -125,7 +128,7 @@ export const statusRoutes = defineRoutes('status', [
       const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
       // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
-      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]), alerts: loopAlerts(req.headers[loopAlertsHeader.toLowerCase()]), checkoutTrust: loopCheckoutTrust(req.headers[loopCheckoutTrustHeader.toLowerCase()]) ?? undefined, workerGrowth: loopWorkerGrowth(req.headers[loopWorkerGrowthHeader.toLowerCase()]), stepFailure: loopStepFailure(req.headers[loopStepFailureHeader.toLowerCase()]) }, new Date());
+      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]), alerts: loopAlerts(req.headers[loopAlertsHeader.toLowerCase()]), checkoutTrust: loopCheckoutTrust(req.headers[loopCheckoutTrustHeader.toLowerCase()]) ?? undefined, workerGrowth: loopWorkerGrowth(req.headers[loopWorkerGrowthHeader.toLowerCase()]), stepFailure: loopStepFailure(req.headers[loopStepFailureHeader.toLowerCase()]), cpu: loopCpu(req.headers[loopCpuHeader.toLowerCase()]) }, new Date());
       if (loopInterval !== null) loopPanesRegistry(services.engine).observe(loopPanes(req.headers[loopPanesHeader.toLowerCase()]));
       if (loopInterval !== null) loopWhereRegistry(services.engine).observe(loopWhere(req.headers[loopWhereHeader.toLowerCase()]));
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
