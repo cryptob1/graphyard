@@ -24,7 +24,7 @@ The Setup link connects worker and reviewer accounts, file goals under **New wor
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
-`graphyard guide infra` lists every part with its log command; the Setup page shows this install's own names.
+`graphyard guide infra` lists every part and its logs, and where the app under test runs versus the test runner.
 
 ## Learn more
 

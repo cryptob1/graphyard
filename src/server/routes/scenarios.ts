@@ -5,6 +5,7 @@ import type { Engine } from '../../engine.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { defineRoutes, parseJson } from '../routes.js';
 import { gateRecordPath, readGateRecord } from '../../batch-gate.js';
+import { environmentRows } from '../../app-environments.js';
 
 /** The case ids with a file under e2e/cases/ on the base branch the checkout serves, or null with no checkout to read (GY-3278). */
 async function mainCases(engine: Engine): Promise<Set<string> | null> {
@@ -33,6 +34,11 @@ export const scenarioRoutes = defineRoutes('scenarios', [
   { method: 'GET', path: '/api/scenarios', handle: ({ services }) => scenarios(services.engine.store, services.repository) },
   { method: 'POST', path: '/api/scenarios', handle: async context => defineScenario(context.services.engine.store, context.actor, await parseJson(context), context.idempotencyKey(), context.services.engine.operatorAuthorizer) },
   { method: 'POST', path: /^\/api\/scenarios\/([^/]+)\/runs$/, handle: async (context, [id]) => recordCaseRun(context.services.engine.store, context.actor, decodeURIComponent(id), await parseJson(context), context.services.engine.operatorAuthorizer, context.services.repository) },
-  { method: 'GET', path: '/api/tests', handle: async ({ services }) => trackedCases(services.engine.store.pool, services.repository, await mainCases(services.engine), servedGate(services.repository)) },
+  { method: 'GET', path: '/api/tests', handle: async ({ services }) => {
+    const gate = servedGate(services.repository);
+    // GY-3296: where the app under test runs, beside the cases: local and each declared environment.
+    return { ...await trackedCases(services.engine.store.pool, services.repository, await mainCases(services.engine), gate),
+      environments: environmentRows(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd(), gate?.lastOutcome ? { ...gate.lastOutcome, tip: gate.lastOutcome.tip ?? null, reason: gate.lastOutcome.reason ?? null } : null) };
+  } },
   { method: 'GET', path: /^\/api\/tests\/([^/]+)\/runs$/, handle: ({ services, url }, [id]) => runHistory(services.engine.store.pool, decodeURIComponent(id), url.searchParams) },
 ]);

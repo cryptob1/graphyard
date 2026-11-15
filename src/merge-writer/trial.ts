@@ -702,6 +702,8 @@ export interface RunTrialInput {
    * candidate is run against the base tip and keeps its before screenshot.
    */
   e2eFrom?: string;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it; such a case runs against that URL. */
+  e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -1243,7 +1245,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
       if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
       const ran = await containerTrialE2e({
-        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       });
