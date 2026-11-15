@@ -28,7 +28,8 @@ export function workerVerificationPump(root: string, host: () => string,
           await moveBranchToHead(root, job.branch, job.input.head);
           const result = job.input.mode === 'check'
             ? await check({ root, base: base(), baseBranch: job.baseBranch, key: job.work.key, head: job.input.head, check: job.input.check! })
-            : await runWorkerVerification(root, job.work, job.input, job.baseBranch);
+            : await runWorkerVerification(root, job.work, job.input, job.baseBranch, undefined,
+              line => { void mutate('worker-verifications/progress', { id: job.id, line }).catch(() => {}); });
           reply = { id: job.id, result };
         } catch (error) { reply = { id: job.id, error: error instanceof Error ? error.message : String(error) }; }
         await mutate('worker-verifications/finish', reply);

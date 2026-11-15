@@ -14,6 +14,8 @@ export interface WorkerVerificationJob {
 }
 interface Pending {
   job: WorkerVerificationJob; executor?: string;
+  /** The host's launcher lines so far (GY-3332): what the waiting worker's `complete` prints. */
+  lines: string[];
   resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
 }
 const queues = new WeakMap<Services, Map<string, Pending>>();
@@ -28,7 +30,7 @@ export async function dispatchWorkerVerification<Result extends WorkerVerificati
   try {
     return await new Promise<Result>((resolve, reject) => {
       timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
-      pending.set(id, { job: { ...job, id }, resolve: resolve as Pending['resolve'], reject });
+      pending.set(id, { job: { ...job, id }, lines: [], resolve: resolve as Pending['resolve'], reject });
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
 }
@@ -55,3 +57,15 @@ export function finishWorkerVerification(services: Services, actor: Principal, b
   else pending!.resolve(input.result!);
   return { accepted: true };
 }
+/** GY-3332: one launcher line from the host running a verification (waiting, starting, giving up). */
+export function progressWorkerVerification(services: Services, actor: Principal, body: unknown) {
+  demand(actor.role === 'coordinator', 'Only the host coordinator reports worker verification', 403);
+  const input = z.object({ id: z.string().uuid(), line: z.string().max(2000) }).strict().parse(body);
+  const pending = queue(services).get(input.id);
+  demand(pending && pending.executor === actor.id, 'No verification assigned to this coordinator', 409);
+  if (pending!.lines.length < 100) pending!.lines.push(input.line);
+  return { accepted: true };
+}
+/** The launcher lines of the verifications pending for work item `id`, oldest first. */
+export const workerVerificationLines = (services: Services, id: string) =>
+  [...queue(services).values()].filter(pending => pending.job.work.id === id || pending.job.work.key === id).flatMap(pending => pending.lines);
