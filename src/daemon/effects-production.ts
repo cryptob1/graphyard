@@ -44,6 +44,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
@@ -68,10 +69,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   fetcher?: typeof fetch;
   /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
   verify?: typeof runWorkerVerification;
+  /** GY-3345: the messages to this install's Master. */
+  messages?: DaemonEffects['masterMessages'];
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
-  let leftoversSweptAt = 0;
+  let leftoversSweptAt = 0, releasesSweptAt = 0;
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
@@ -198,6 +201,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The agent-registry session a review or proof session ran under, ended when the close step
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
+    endRegistrySession: (id, reason) => endRegistrySessionById(current(), id, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: (path, force) => removeAttemptWorktree(root, path, run, force),
     // GY-3341: the attempt worktrees still standing, read from the disk their leftovers live on.
@@ -223,6 +227,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
     reclaimJobLeftovers: async () => { if (Date.now() - leftoversSweptAt < 3_600_000) return []; leftoversSweptAt = Date.now(); return reclaimJobLeftovers(run); },
     usage: master => collectUsage(root, current(), master),
+    // GY-3334: hourly, like the job leftovers: the walk reads /proc and every release copy.
+    sweepCliReleases: async () => {
+      if (Date.now() - releasesSweptAt < 3_600_000) return { removed: [], bytes: 0, left: [] };
+      releasesSweptAt = Date.now();
+      return sweepCliReleases(installDirectory(installIdFor(current().repository)), run);
+    },
     leftoverDisk: () => leftoverDisk({ trialRuns: trialRunsDirectory(root), worktrees: worktreesDirectory(root), trialCheckouts: trialCheckoutRoots()[0]! }, run),
     // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
     composeServer: async () => {
@@ -249,6 +259,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
+    masterMessages: deps.messages,
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,

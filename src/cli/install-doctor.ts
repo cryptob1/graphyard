@@ -8,7 +8,8 @@ import { doctorRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { readLandlockAbi } from '../landlock.js';
-import { trialTestGateStatus } from '../merge-writer/trial.js';
+import { trialTemporaryRootReport, trialTestGateStatus } from '../merge-writer/trial.js';
+import { browserToolStatus } from '../browser-tool.js';
 import { remoteFetchProbe } from '../master/worktrees.js';
 import { loadStoredMasterConfig } from '../master/config.js';
 
@@ -59,6 +60,10 @@ export async function runDoctor(context: CliContext) {
     repositoryPolicy: doctorRepositoryPolicy(root),
     // GY-2958: whether the merge trial has a test check for this checkout (ci-tests, preMerge / npm test, or none).
     trialTests: trialTestGateStatus(root),
+    // GY-3370: the browser tool product reviews walk the app with, and the one command that installs it.
+    browserTool: browserToolStatus(),
+    // GY-3332: where trials make their temporary and HOME directories, and the fix when that volume can never keep the disk floor free.
+    trialTemporaryRoot: trialTemporaryRootReport(root),
     setupFromZero,
     readiness,
     next,

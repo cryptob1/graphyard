@@ -100,7 +100,9 @@ test('integration:placed-http', () => {
   };
   await assert.rejects(api('worker-verifications/take', { host: 'test' }, 'worker-test-token'), /Only the host coordinator/);
   await assert.rejects(api('worker-verifications/finish', { id: randomUUID(), error: 'forged' }, 'worker-test-token'), /Only the host coordinator/);
-  const effects = daemonEffects(coordinator, { hostId: 'test' } as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: api });
+  // The pump reads the host drain beside the managed worktree root's slots (GY-3304), so the
+  // config it is handed must resolve one — a stub without run.worktreeRoot makes every take throw.
+  const effects = daemonEffects(coordinator, { hostId: 'test', run: { worktreeRoot: coordinator } } as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: api });
   pump = setInterval(() => { void effects.snapshot().catch(() => {}); }, 50);
   const previous = process.env.GRAPHYARD_REPOSITORY_ROOT;
   process.env.GRAPHYARD_REPOSITORY_ROOT = '/server-private/repo-does-not-exist-on-host';

@@ -2,6 +2,7 @@
 // graphyard.json e2e.serve read as its migration source) built and served from a checkout, for the
 // merge trial's E2E cases and for item previews alike.
 import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import { createServer } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
@@ -24,6 +25,22 @@ export const nodeReadySeconds = 120;
 
 /** How long a stopped serve command has to end before its group is killed. */
 const closeGraceMs = 20_000;
+
+/** GY-3343: how many of a failed serve command's last output lines its trial result keeps. */
+export const serveTailLines = 40;
+/**
+ * GY-3343: how much of a serve command's output its file keeps: the first `serveOutputHeadBytes`
+ * as they arrive, then, once the command has ended, a cut line and the last of it — a command that
+ * prints without end never fills the trial run directory, and the head and the tail say why.
+ */
+export const serveOutputHeadBytes = 256 * 1024;
+/** GY-3343: a serve command that never served the head: why, its last output lines, and when it ran. */
+export class ServeCommandError extends Error {
+  constructor(reason: string, readonly output: string[], startedAt: number, endedAt: number) {
+    super(`${reason} (it ran from ${new Date(startedAt).toISOString()} to ${new Date(endedAt).toISOString()}, ${Math.round((endedAt - startedAt) / 100) / 10}s)`);
+    this.name = 'ServeCommandError';
+  }
+}
 
 /** What the loopback static site serves each extension as; anything else is application/octet-stream. */
 const staticTypes: Record<string, string> = {
@@ -77,6 +94,8 @@ export interface ServeHeadOptions {
   shell?: StaticBuildShell; wrapper?: readonly string[]; log?: (line: string) => void;
   /** Where a Compose application's generated configuration goes, outside the checkout. */
   scratch: string;
+  /** GY-3343: the file a serve command's whole output is written to. */
+  outputFile?: string;
   project?: string; bounds?: ComposeBounds; docker?: Docker; fetcher?: typeof fetch; variables?: Record<string, string>; hostEnvironment?: NodeJS.ProcessEnv;
 }
 
@@ -91,7 +110,7 @@ export function serveHead(checkout: string, application: ServedApplication, opti
   let close: () => Promise<void> = async () => {}, ended: () => string | null = () => null;
   const ready = (async () => {
     if (application.kind === 'command') {
-      const served = await serveByCommand(application, checkout, options.env, options.budgetMs, options.log ?? (() => {}), options.wrapper);
+      const served = await serveByCommand(application, checkout, options.env, options.budgetMs, options.log ?? (() => {}), options.wrapper, options.outputFile);
       close = served.close; ended = served.ended;
       return served.origin;
     }
@@ -106,7 +125,7 @@ export function serveHead(checkout: string, application: ServedApplication, opti
       }
       const port = await freePort();
       const served = await serveByCommand({ id: application.id, kind: 'command', command: application.start, url: `http://127.0.0.1:${port}`, readySeconds: nodeReadySeconds },
-        directory, { ...options.env, PORT: String(port) }, options.budgetMs, options.log ?? (() => {}), options.wrapper);
+        directory, { ...options.env, PORT: String(port) }, options.budgetMs, options.log ?? (() => {}), options.wrapper, options.outputFile);
       close = served.close; ended = served.ended;
       return served.origin;
     }
@@ -132,9 +151,11 @@ export function serveHead(checkout: string, application: ServedApplication, opti
 /**
  * A head served by its own `e2e.serve` declaration: `command` run in the trial checkout (the trial
  * environment, no credential) until `url` answers, waited for at most `readySeconds` and the
- * budget's remainder; never past it. The group is killed on close.
+ * budget's remainder; never past it. The group is killed on close. Its output goes to
+ * `outputFile` when given (GY-3343) — the head as it arrives, the last of it once the command
+ * ends — and a command that never serves fails with its last lines.
  */
-async function serveByCommand(serve: CommandApplication, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = []): Promise<{ origin: string; close(): Promise<void>; ended(): string | null }> {
+async function serveByCommand(serve: CommandApplication, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = [], outputFile?: string): Promise<{ origin: string; close(): Promise<void>; ended(): string | null }> {
   const startedAt = Date.now(), budgetEnd = startedAt + budgetMs, readyMs = serve.readySeconds * 1000;
   let deadline = Math.min(startedAt + readyMs, budgetEnd);
   // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
@@ -142,9 +163,28 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
   if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
   const [file, ...argv] = [...wrapper, 'sh', '-c', serve.command];
   const child = spawn(file!, argv, { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const chunks: Buffer[] = [];
-  child.stdout.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
-  child.stderr.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
+  const sink = outputFile ? createWriteStream(outputFile) : null;
+  sink?.on('error', error => log(`the serve command's output could not be written to ${outputFile}: ${error.message}`));
+  // The end of the output, enough for its last lines; the file keeps the head and, once ended, the tail.
+  let recent = Buffer.alloc(0), written = 0, dropped = 0;
+  const take = (chunk: Buffer) => {
+    recent = Buffer.concat([recent, chunk]).subarray(-64 * 1024);
+    if (!sink) return;
+    const head = chunk.subarray(0, Math.max(0, serveOutputHeadBytes - written));
+    written += head.length; sink.write(head);
+    dropped += chunk.length - head.length;
+  };
+  child.stdout.on('data', take);
+  child.stderr.on('data', take);
+  const tail = () => recent.toString('utf8').trimEnd().split('\n').slice(-serveTailLines);
+  const endSink = () => new Promise<void>(accept => sink
+    ? sink.end(dropped ? `\n… ${dropped} byte(s) of this output were cut here; the last of it follows …\n${recent.toString('utf8')}` : undefined, () => accept())
+    : accept());
+  const fail = async (reason: string): Promise<never> => {
+    await close();
+    await endSink();
+    throw new ServeCommandError(reason, tail(), startedAt, Date.now());
+  };
   let exited: string | null = null;
   child.on('error', error => { exited = error.message; });
   child.on('close', (code, signal) => { exited = `the serve command ended (${signal ? `signal ${signal}` : `status ${code}`})`; });
@@ -166,17 +206,15 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
     try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
   };
   for (;;) {
-    if (exited) { await close(); throw new Error(`${exited}: ${Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500)}`); }
+    if (exited) await fail(`${exited}: ${tail().slice(-5).join(' | ').slice(0, 500)}`);
     // Only a success answers: a server still starting up (503) is not yet the head served.
     const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
-    if (answered) return { origin: new URL(serve.url).origin, close, ended: () => exited };
+    if (answered) return { origin: new URL(serve.url).origin, close: () => close().finally(endSink), ended: () => exited };
     // GY-3189: the command's time to answer starts when its container does, however long the start waited.
-    if (trialContainerWaiting(Buffer.concat(chunks).toString('utf8'))) deadline = Math.min(Date.now() + readyMs, budgetEnd);
+    if (trialContainerWaiting(recent.toString('utf8'))) deadline = Math.min(Date.now() + readyMs, budgetEnd);
     if (Date.now() >= deadline) {
-      await close();
-      const tail = Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500);
-      log(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s${tail ? `: ${tail}` : ''}`);
-      throw new Error(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s`);
+      log(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s: ${tail().slice(-5).join(' | ').slice(0, 500)}`);
+      await fail(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s`);
     }
     await new Promise(accept => setTimeout(accept, 500));
   }

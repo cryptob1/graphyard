@@ -11,13 +11,14 @@ import { defaultChildRun } from '../child-runner.js';
 import { knownGoodCli, knownGoodState } from './known-good.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
+import { installLauncherPath } from '../install/cli-release.js';
 
 /** `systemctl --user ARGS`, returning stdout and throwing on a failed command; through the bounded asynchronous runner, since the loop reaches this module (GY-125). */
 export type UserSystemctl = (args: string[], timeoutMs?: number) => Promise<string> | string;
 const userSystemctl: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
 
 type LoopLock = { pid: number; host: string; heartbeatAt: string; startedAt?: string };
-/** This install's loop unit, as systemd reports it: its name, whether it is up (a restart wait counts) and its main process (0 between restarts). */
+/** This install's loop unit, as systemd reports it when it starts this install's loop: its name and its main process (0 while down or between restarts). */
 export interface SupervisingUnit { unit: string; mainPid: number }
 export interface RestartOptions { timeoutMs?: number; systemctl?: UserSystemctl; host?: LoopSupervisorHost; platform?: NodeJS.Platform }
 /** This install's loop command: its configured CLI launcher and repository, whose install directory (`installDir` overrides it) may hold the known-good pin master init writes into the unit instead (GY-1529). */
@@ -25,14 +26,17 @@ export type LoopInstall = Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterCon
 
 const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 /**
- * The CLIs this install's unit may run: config.cliPath, and the known-good pin master init writes
- * instead while one is promoted (loopUnitText, GY-1529). A pin that was never promoted is not
- * this install's CLI.
+ * The CLIs this install's unit may run: config.cliPath, the install's one stable launcher (GY-3337,
+ * which starts the release the install serves), and the known-good pin master init writes instead
+ * while one is promoted (loopUnitText, GY-1529). A pin that was never promoted is not this
+ * install's CLI.
  */
 function installClis(install: LoopInstall) {
   let directory = install.installDir ?? null;
   if (!directory && install.repository) { try { directory = installDirectory(installIdFor(install.repository)); } catch { /* no install directory: the launcher alone */ } }
-  return directory && knownGoodState(directory) ? [install.cliPath, knownGoodCli(directory)] : [install.cliPath];
+  return directory
+    ? [install.cliPath, ...(existsSync(installLauncherPath(directory)) ? [installLauncherPath(directory)] : []), ...(knownGoodState(directory) ? [knownGoodCli(directory)] : [])]
+    : [install.cliPath];
 }
 /**
  * Why the unit's effective ExecStart (drop-ins applied: `{ path=… ; argv[]=NODE CLI master run ; … }`)
@@ -58,28 +62,18 @@ async function unitProperties(systemctl: UserSystemctl, unit: string) {
   const text = await systemctl(['show', '--property=LoadState', '--property=ActiveState', '--property=MainPID', '--property=WorkingDirectory', '--property=ExecStart', unit]);
   return Object.fromEntries(text.split(/\r?\n/).filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1).trim()]));
 }
-/** systemd states in which the unit is up, starting, waiting out RestartSec, or stopping on its way to a queued restart. */
-const supervisedStates = ['active', 'activating', 'reloading', 'refreshing', 'deactivating'];
-/** Whether systemd holds a start or restart job for UNIT: `list-jobs` rows are `ID UNIT TYPE STATE`. */
-async function startQueued(systemctl: UserSystemctl, unit: string) {
-  return (await systemctl(['list-jobs', '--no-legend', '--plain', unit])).split(/\r?\n/).some(line => {
-    const [, name, type] = line.trim().split(/\s+/);
-    return name === unit && /^(start|restart|try-restart|reload-or-start)$/.test(type ?? '');
-  });
-}
 /**
- * The unit supervising this install's loop: this install's recorded unit (or the legacy alias),
- * loaded, up, waiting to restart, stopping or with a start queued, and running this install's `master run` (its effective ExecStart: Node and INSTALL's CLI) from exactly ROOT. A unit of the same
- * name rooted in another checkout is another install's loop and never this one's. Null when there is
- * none; throws when systemd cannot be asked but this checkout's unit file is installed, since spawning a second,
- * unsupervised loop beside a unit that may be running is what this module exists to prevent.
+ * The unit this install's checkout owns on this host, when one is installed for it: loaded and
+ * rooted in exactly ROOT. `mismatch` says why its effective ExecStart does not start this install's
+ * loop (GY-1616); null when it does, in which case the unit is the loop's supervisor whatever its
+ * active state, because `systemctl restart` starts it (GY-3337: a detached `master run` beside an
+ * installed unit is the crash-looping fault this module exists to prevent). A unit of the same name
+ * rooted in another checkout is another install's loop and never this one's. Null when there is
+ * none; throws when systemd cannot be asked but this checkout's unit file is installed, since
+ * spawning a second, unsupervised loop beside a unit that may be running must not happen.
  */
-export async function supervisingUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'> = {}): Promise<SupervisingUnit | null> {
-  const found = await inspectLoopUnit(root, install, options);
-  return found && 'mainPid' in found ? found : null;
-}
-/** This install's loop unit as supervisingUnit judges it, or, for this checkout's unit whose effective ExecStart is not this install's loop (GY-1616), why it is not used. */
-async function inspectLoopUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'>): Promise<SupervisingUnit | { unit: string; mismatch: string } | null> {
+interface LoopUnitInspection { unit: string; mainPid: number; mismatch: string | null }
+async function inspectLoopUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'>): Promise<LoopUnitInspection | null> {
   if ((options.platform ?? process.platform) !== 'linux') return null;
   const systemctl = options.systemctl ?? userSystemctl, host = options.host ?? {};
   const unit = loopUnitOf(root, loopUnitDirectory(host), host.home);
@@ -97,13 +91,13 @@ async function inspectLoopUnit(root: string, install: LoopInstall, options: Pick
   if (!directory || canonical(directory) !== canonical(root)) return null;
   // A unit whose effective command was overridden to anything but this install's `master run` is
   // not this loop's supervisor, and restarting it would report a restart while no loop runs.
-  const mismatch = execStartMismatch(properties.ExecStart ?? '', install);
-  if (mismatch) return { unit, mismatch };
-  // A unit stopping (deactivating) or down with a start or restart queued is still this loop's
-  // supervisor: a detached `master run` now would contend for the lock with the loop systemd is
-  // about to start.
-  if (!supervisedStates.includes(properties.ActiveState ?? '') && !await startQueued(systemctl, unit)) return null;
-  return { unit, mainPid: Number(properties.MainPID) || 0 };
+  return { unit, mainPid: Number(properties.MainPID) || 0, mismatch: execStartMismatch(properties.ExecStart ?? '', install) };
+}
+
+/** This install's loop unit as systemd reports it, when its unit is installed for this checkout and starts this install's loop: its name, whether it is up (MainPID 0 between restarts) and its main process. */
+export async function supervisingUnit(root: string, install: LoopInstall, options: Pick<RestartOptions, 'systemctl' | 'host' | 'platform'> = {}): Promise<SupervisingUnit | null> {
+  const found = await inspectLoopUnit(root, install, options);
+  return found && !found.mismatch ? { unit: found.unit, mainPid: found.mainPid } : null;
 }
 
 /** SIGTERM PID and wait for it to exit; past the bound it is killed, as the unit's own stop would (TimeoutStopSec, then SIGKILL). */
@@ -118,27 +112,32 @@ async function stopProcess(pid: number, timeoutMs: number) {
 }
 
 /**
- * Restart this host's master loop. Under an active unit for this install (GY-1603) the restart goes
- * through systemd — `systemctl --user restart UNIT` — and reports the unit's new MainPID; a loop
- * holding the lock outside the unit is stopped first, or the unit's new loop would be refused on the
- * lock and crash-loop. Without one, the running loop is stopped and a fresh one started detached,
- * logging beside the config; when this checkout's unit was passed over because its effective
- * ExecStart is not this install's loop (GY-1616), `mismatch` says why.
+ * Restart this host's master loop. Under this install's unit (GY-1603, GY-3337) the restart always
+ * goes through systemd — `systemctl --user restart UNIT`, which starts it when it is down — and
+ * reports the unit's new MainPID; a loop holding the lock outside the unit is stopped first, or the
+ * unit's new loop would be refused on the lock and crash-loop. Only where no unit of this install
+ * answers — no systemd user manager, or a unit rooted in another checkout — is the running loop
+ * stopped and a fresh one started detached, logging beside the config. This checkout's unit whose
+ * effective ExecStart is not this install's loop (GY-1616) is stopped before that detached loop
+ * starts, so its `Restart=always` cannot bring the old loop back every ten seconds to contend for
+ * the lock; `mismatch` says why, with the rewrite that fixes it.
  */
 export async function restartMasterLoop(root: string, config: MasterConfig, lock: LoopLock | null, options: RestartOptions = {}) {
   if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`The master loop runs on ${lock.host} (pid ${lock.pid}); restart it on that host`);
   const timeoutMs = options.timeoutMs ?? 30_000, systemctl = options.systemctl ?? userSystemctl;
   const holder = lock && lock.host === config.hostId && alive(lock.pid) ? lock.pid : null;
   const found = await inspectLoopUnit(root, config, options);
-  const supervisor = found && 'mainPid' in found ? found : null;
-  const mismatch = found && 'mismatch' in found ? `${found.unit} was not restarted: ${found.mismatch}; the loop was restarted detached instead` : null;
-  if (supervisor) {
-    const unsupervised = holder !== null && holder !== supervisor.mainPid ? { pid: holder, result: await stopProcess(holder, timeoutMs) } : null;
+  if (found && !found.mismatch) {
+    const unsupervised = holder !== null && holder !== found.mainPid ? { pid: holder, result: await stopProcess(holder, timeoutMs) } : null;
     // Blocking: systemd stops the loop (SIGTERM, SIGKILL past TimeoutStopSec) and starts the next before it returns.
-    await systemctl(['restart', supervisor.unit], (loopStopTimeoutSeconds + 60) * 1000);
-    const started = Number((await unitProperties(systemctl, supervisor.unit)).MainPID) || null;
-    return { supervisor: supervisor.unit, stopped: supervisor.mainPid || null, unsupervised, started, log: null, mismatch: null };
+    await systemctl(['restart', found.unit], (loopStopTimeoutSeconds + 60) * 1000);
+    const started = Number((await unitProperties(systemctl, found.unit)).MainPID) || null;
+    return { supervisor: found.unit, stopped: found.mainPid || null, unsupervised, started, log: null, mismatch: null };
   }
+  const mismatch = found
+    ? `${found.unit} was not restarted: ${found.mismatch}; the unit was stopped first, so systemd does not bring its loop back beside the detached one (fix: graphyard master init --token-stdin --replace-supervisor rewrites it onto this install's launcher); the loop was restarted detached instead`
+    : null;
+  if (found) await systemctl(['stop', found.unit], (loopStopTimeoutSeconds + 60) * 1000);
   let stopped: number | null = null;
   if (holder !== null) {
     process.kill(holder, 'SIGTERM'); stopped = holder;

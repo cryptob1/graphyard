@@ -284,7 +284,7 @@ test('integration:ledger-compaction-completes — on a generated ledger of hundr
       let saved = 0; removed = 0;
       for (;;) {
         const started = performance.now();
-        const run = await compactLedger(scale.pool, { batches: 1 });
+        const run = await compactLedger(scale.pool, { batches: 1, pauseMs: 0 });
         const ms = performance.now() - started;
         slowest = Math.max(slowest, ms); runs++; removed += run.total;
         assert.ok(ms < 5_000, `run ${runs} took ${Math.round(ms)} ms`);

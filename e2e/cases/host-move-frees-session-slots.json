@@ -1,0 +1,13 @@
+{
+  "id": "host-move-frees-session-slots",
+  "title": "After a host move, sessions recorded on another host give their role slots back",
+  "description": "The registry holds a live master session and three worker sessions recorded on host 'old' while the install runs on host 'new'. One loop cycle ends all four with a reason naming both hosts, launches the master role in the same cycle, frees the worker slots, and master status names no 'cannot launch' line for the master role. A session recorded on this host with a live process is untouched (GY-3346).",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Host move frees session slots",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/host-move-frees-session-slots.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

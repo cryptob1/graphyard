@@ -1,0 +1,13 @@
+{
+  "id": "readme-prerequisites",
+  "title": "The README names the Node version and how to install it, and doctor fails on an older Node",
+  "description": "The README prerequisites name the Node major package.json engines requires, with install commands for Ubuntu/Debian, Arch and macOS; doctor run under an older Node prints a FAIL line naming that major and its fix.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "readme prerequisites regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/readme-prerequisites.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

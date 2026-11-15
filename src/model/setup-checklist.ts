@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'fetch-refusal' | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -41,13 +41,13 @@ export function setupAddress(server: string, signIn?: string | null) {
 /**
  * The page an address opens and the fragment the sign-in page reads (GY-1419): `#setup` alone, or a
  * sign-in or claim fragment followed by `&setup`, opens the Setup page; the `&setup` marker is taken
- * off so the sign-in page sees the exact fragment it redeems. `#master` (or `&master`) opens the Master
- * page the same way (GY-3211). Any other fragment opens no page.
+ * off so the sign-in page sees the exact fragment it redeems. Every dashboard page opens the same
+ * way by its id (`#master`, `#costs`, GY-3322); a fragment that names no page opens none.
  */
-export function requestedView(hash: string): { view: 'setup' | 'master' | null; hash: string } {
-  if (hash === '#setup' || hash === '#master') return { view: hash.slice(1) as 'setup' | 'master', hash };
-  const signIn = /^(#(?:sign-in|claim)=[A-Za-z0-9_-]{16,200})&(setup|master)$/.exec(hash);
-  return signIn ? { view: signIn[2] as 'setup' | 'master', hash: signIn[1] } : { view: null, hash };
+export function requestedView(hash: string, pages: readonly string[]): { view: string | null; hash: string } {
+  const signIn = /^(#(?:sign-in|claim)=[A-Za-z0-9_-]{16,200})&([a-z-]+)$/.exec(hash);
+  if (signIn && pages.includes(signIn[2])) return { view: signIn[2], hash: signIn[1] };
+  return { view: pages.includes(hash.slice(1)) ? hash.slice(1) : null, hash };
 }
 
 const roleTitle: Record<RequiredSetupRole, string> = { worker: 'An agent account that writes code', reviewer: 'An agent account that reviews code' };
@@ -100,6 +100,12 @@ function accountItems(status: any | null): SetupItem[] {
   // while it stands — naming the step and the error — gone once the step succeeds again.
   const stepFailure = typeof status?.setup?.stepFailure === 'string' ? status.setup.stepFailure.trim() : '';
   if (stepFailure) items.push({ id: 'step-failure', title: 'A loop step keeps failing', done: false, human: true, line: stepFailure, action: { kind: 'wait', label: 'Check again' } });
+  // GY-3336: the standing fetch refusal the live loop raised (`setup.fetchRefusal`, its own
+  // attention line): the remote refuses the base branch's fetch — a SAML organization that has not
+  // authorised the merge writer's key — and the owner is the one who can. One item while it
+  // stands, quoting the remote's refusal and the fix, gone once a fetch succeeds again.
+  const fetchRefusal = typeof status?.setup?.fetchRefusal === 'string' ? status.setup.fetchRefusal.trim() : '';
+  if (fetchRefusal) items.push({ id: 'fetch-refusal', title: 'Authorise the repository for the merge writer', done: false, human: true, line: fetchRefusal, action: { kind: 'wait', label: 'Check again' } });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',
