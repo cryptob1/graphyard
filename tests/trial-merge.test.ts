@@ -151,11 +151,11 @@ const fixture = async () => {
   gitIn(repo.root, 'config', 'user.name', 'x');
   return repo;
 };
-const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove']) => {
+const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove'], cpu?: RunTrialInput['cpu']) => {
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
   const base = await temporaryDirectory('trial-merge-root', tmpdir());
-  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove });
+  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove, ...(cpu ? { cpu } : {}) });
   return { result, base };
 };
 
@@ -197,21 +197,26 @@ test('integration:trial-run-build-and-tests — a full selection runs exactly th
 });
 
 test('integration:trial-run-build-and-tests — a trial checkout that cannot be removed is reported: runTrial rejects with TrialCleanupError naming the directory and carrying the verdict it reached, or the failure it met', async () => {
+  // Pin a healthy host: the reporting is this test's concern, and on a saturated one the real
+  // monitor attributes the timed-out child below as the host's own overload (GY-3332), so the
+  // message the assertions read would name host noise instead of the trial's timeout.
+  let ticks = 0;
+  const cpu: RunTrialInput['cpu'] = () => ({ total: ++ticks * 100, idle: ticks * 90, steal: 0, load: 0, at: ticks * 1000 });
   const repo = await fixture();
   const head = repo.commitOnBase({ 'tests/a.test.ts': 'x\n' }, 'head');
   const stuck: RunTrialInput['remove'] = async () => { throw new Error('EBUSY: the checkout is in use'); };
-  await assert.rejects(trialOf(repo, head, ['tests/a.test.ts'], { PATH: process.env.PATH! }, stuck), (error: unknown) =>
+  await assert.rejects(trialOf(repo, head, ['tests/a.test.ts'], { PATH: process.env.PATH! }, stuck, cpu), (error: unknown) =>
     error instanceof TrialCleanupError && /graphyard-trial-gy-9-/.test(error.directory) && /EBUSY/.test(error.message) && /answered build pass, 0 failing/.test(error.message)
     && error.verdict?.build === 'pass' && error.verdict.tests.files === 1);
   const broken = repo.commitOnBase({ 'break-build': '' }, 'breaks the build');
-  await assert.rejects(trialOf(repo, broken, [], { PATH: process.env.PATH! }, stuck), (error: unknown) => error instanceof TrialCleanupError && error.verdict?.build === 'fail');
+  await assert.rejects(trialOf(repo, broken, [], { PATH: process.env.PATH! }, stuck, cpu), (error: unknown) => error instanceof TrialCleanupError && error.verdict?.build === 'fail');
   const run = ((command: string, args: string[], options: unknown) => {
     if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('killed'), { timedOut: true, stdout: '', stderr: '' });
     return defaultChildRun(command, args, options as never);
   }) as never;
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck, cpu }),
     (error: unknown) => error instanceof TrialCleanupError && error.verdict === null && /the trial itself failed: The trial timed out during its build/.test(error.message));
 });
 
