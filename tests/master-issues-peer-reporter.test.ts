@@ -172,7 +172,7 @@ test(`e2e:master-issues-peer-reporter — a confined Master session issues anoth
     assert.equal(statSync(tokenFile).mode & 0o777, 0o600, 'the token file has mode 0600');
     assert.match(readFileSync(tokenFile, 'utf8'), /^gyr_/, 'the file holds the minted reporter token');
     // The peer's own Master issues its side from its session the same way, and each list names the other.
-    assert.deepEqual(await b.command('peer', 'issue', '--root', a.root), { issued: 'install-a', url: a.url, reporter: 'install-a', tokenFile: await tokensOf(a.root, 'install-b'), next: `Its Master records this side from its own session: master peer issue --root ${a.root}` });
+    assert.deepEqual(await b.command('peer', 'issue', '--root', a.root), { issued: 'install-a', url: a.url, reporter: 'install-a', tokenFile: await tokensOf(a.root, 'install-b'), next: `Its Master records this side from its own session: master peer issue --root ${b.root}` });
     assert.deepEqual((await a.command('peer', 'list')).peers.map((peer: { name: string }) => peer.name), ['install-b']);
     assert.deepEqual((await b.command('peer', 'list')).peers.map((peer: { name: string }) => peer.name), ['install-a']);
 
