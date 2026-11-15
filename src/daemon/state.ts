@@ -207,6 +207,13 @@ export const daemonStateSchema = z.object({
   controlPlaneDay: z.string().max(10).nullable().default(null),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
   failureRuns: z.record(z.string(), failureRunSchema).default({}),
+  /**
+   * GY-3293: each cycle step's current run of the same failure — normalized reason and consecutive
+   * count, kept on the cursor so a restart does not forget it. The tenth consecutive raises the
+   * operator (cycle.ts `stepFailureThreshold`): a standing Needs you line on the dashboard and an
+   * attention line in master status, neither of which needs the master session.
+   */
+  stepFailures: z.record(z.string().max(40), z.object({ step: z.string().max(40), reason: z.string().max(1000), count: z.number().int().min(0), at: z.string() }).strict()).default({}),
   /** GY-3101: the stalled-yard alert's own bookkeeping, kept on the cursor so a restarted loop neither re-alerts at once nor loses the all-clear. */
   alerts: z.object({
     /** When the stop the loop is watching began — the last movement the yard showed, or the first stalled observation when none is recorded. Null while work starts or merges. */
@@ -342,6 +349,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     action.attempts = clampCount(action.attempts, 1000);
   }
   for (const entry of Object.values(state.launchBackoff)) entry.reason = cut(entry.reason, 500);
+  for (const entry of Object.values(state.stepFailures)) entry.reason = cut(entry.reason, 1000);
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
   if (state.master) {

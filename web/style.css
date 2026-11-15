@@ -276,12 +276,47 @@ html[data-fun='off'],html[data-fun='off']::before,html[data-fun='off']::after,ht
 .health.live{color:var(--shipped)}.health.live .health-dot{background:var(--shipped);border-color:var(--shipped)}
 .health.stale{color:var(--needs-you)}.health.stale .health-dot{border-color:var(--needs-you)}
 .workers-note{margin:var(--space-3) 0}
+/* GY-3314: the Workers table is one compact line per agent — the name, the item with its title
+   truncated in place, a state of at most three words, the age — never taller than 44 px, with
+   nothing clipped at the right edge. A row unfolds its session's live view in the row below. */
+.sessions-table.workers{table-layout:fixed}
+.sessions-table.workers tr[data-session] th[scope=row],.sessions-table.workers tr[data-session] td{height:44px;padding:0 var(--space-3);vertical-align:middle;white-space:nowrap;overflow-wrap:normal;word-break:keep-all}
+.sessions-table.workers tr[data-session] th[scope=row]{padding-left:var(--space-4)}
+.sessions-table.workers .col-age{width:128px}
+.sessions-table.workers .col-state{width:132px}
+.sessions-table.workers .col-agent{width:21%}
+.sessions-table.workers tr[data-session]{cursor:pointer}
+.sessions-table.workers .agent-line{display:inline-flex;align-items:center;gap:7px;min-width:0;max-width:100%;vertical-align:middle}
+.sessions-table.workers .agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.sessions-table.workers .agent-name .agent{overflow:hidden;text-overflow:ellipsis}
+.sessions-table.workers tr[data-session] td[data-label='Working on']{overflow:hidden;padding:0}
+.sessions-table.workers .row-open{display:flex;align-items:center;gap:6px;width:100%;min-width:0;padding:0 var(--space-3);text-align:left;color:var(--text)}
+.sessions-table.workers .row-open:hover .row-title{text-decoration:underline}
+.sessions-table.workers .row-open .row-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sessions-table.workers tr[data-session] td[data-label=State]{color:var(--text-2)}
+.sessions-table.workers tr[data-session] td[data-label=Age]{color:var(--text-2);font-variant-numeric:tabular-nums}
+.session-view>td{padding:var(--space-3) var(--space-4) var(--space-4);white-space:normal;background:var(--surface);overflow-wrap:anywhere}
+.session-view .session-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin:0 0 var(--space-2)}
+.session-view .session-item{color:var(--up-next);max-width:100%}
+.live-run-state{margin:0 0 var(--space-2);font-size:var(--type-small)}
 /* The fleet panel's probe mark (GY-945): a fresh quota reading reads as plain text, an old one
    as the needs-you amber, a failed probe as the blocked colour — shared tokens, no page colours. */
 .probe{color:var(--text-2)}
 .probe.stale{color:var(--needs-you)}
 .probe.failed{color:var(--blocked)}
 @media(max-width:650px){.sessions-table,.sessions-table tbody,.sessions-table tr,.sessions-table th[scope=row],.sessions-table td{display:block;width:100%}.sessions-table thead{display:none}.sessions-table tr{border-top:1px solid var(--border);padding:var(--space-2) 0}.sessions-table td,.sessions-table th[scope=row]{border:0;padding:6px var(--space-4)}.sessions-table td::before{content:attr(data-label);display:block;font-size:var(--type-tiny);color:var(--text-3)}}
+/* GY-3314: on a phone each agent is one compact card — name, item and title, state and age — and
+   the unfolded session view is part of the same card rather than a row of its own. */
+@media(max-width:650px){
+  .sessions-table.workers tr[data-session]{display:block;height:auto;border:1px solid var(--border);border-radius:var(--radius-lg);margin:var(--space-2) 0;padding:var(--space-2) var(--space-3);background:var(--surface)}
+  .sessions-table.workers tr[data-session] th[scope=row],.sessions-table.workers tr[data-session] td{display:block;height:auto;padding:2px 0;border:0}
+  .sessions-table.workers tr[data-session] td::before{content:none}
+  .sessions-table.workers .row-open{height:auto;padding:0}
+  .sessions-table.workers tr[data-session] td[data-label=State],.sessions-table.workers tr[data-session] td[data-label=Age]{display:inline-block}
+  .sessions-table.workers tr[data-session] td[data-label=State]::after{content:' ·';color:var(--text-3)}
+  .sessions-table.workers tr.session-view{display:block;border:1px solid var(--border);border-radius:var(--radius-lg);margin:calc(-1 * var(--space-2)) 0 var(--space-2);padding:var(--space-3)}
+  .sessions-table.workers tr.session-view>td{display:block;padding:0}
+}
 /* A commit shows eight characters; the whole SHA stays in the text so a selection copies it. */
 code.sha{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;vertical-align:bottom;font-family:var(--font-mono)}
 /* GY-198 sign-in: one column, one left edge. Every child of .login shares its max width and left edge (the brand drops the sidebar's inset), and the helper text is its own block below the action. */
@@ -440,6 +475,7 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .case-filters input[type=search]{width:auto;min-width:200px;padding:4px 12px;border-radius:999px}
 .test-matrix .matrix-cell{white-space:nowrap}.test-matrix .matrix-cell small{color:var(--text-2)}.test-matrix .matrix-totals td,.test-matrix .matrix-totals th{font-size:var(--type-small);color:var(--text-2)}.test-matrix .matrix-group th{background:var(--surface);text-align:left}
 .matrix-summary{margin:var(--space-2) 0;font-weight:500}.coverage-grid{width:auto}.coverage-grid td{text-align:center}.coverage-grid td.result-none{color:var(--text-2)}.matrix-help{margin:var(--space-2) 0}.matrix-help>summary{cursor:pointer;color:var(--text-2)}
+.where-tests-run{margin:var(--space-3) 0}.where-tests-run h2{margin:0 0 var(--space-1)}.where-tests-run ul{margin:var(--space-1) 0;padding-left:var(--space-3)}.where-tests-run li{overflow-wrap:anywhere}.where-tests-run>details>summary{cursor:pointer;color:var(--text-2)}
 
 .work-replay{margin-top:24px;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
 .replay-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.replay-tools h2{margin:0 auto 0 0}.replay-tools time{font-size:12px;color:var(--muted)}
@@ -447,3 +483,10 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .replay-panel{margin:24px 0;border:1px solid var(--border);border-radius:12px}.replay-panel>summary{padding:16px 20px;cursor:pointer;font-weight:550}.replay-panel .work-replay{margin:0;border:0}.replay-tools button[aria-pressed=false]{background:transparent;color:var(--text-2);border-color:var(--border)}
 /* GY-3310: the served build in the bottom-left corner; the sidebar keeps its strip clear, and the page's own bottom padding (never the shell's, which would make the document scroll) clears it in main. */
 .version-label{position:fixed;left:0;bottom:0;z-index:5;padding:2px 8px;font-size:10px;line-height:14px;color:var(--text-3);background:var(--bg);font-family:var(--font-mono,monospace);pointer-events:none}@media(min-width:651px){.sidebar-inner{padding-bottom:calc(var(--space-5) + 18px)}}
+/* The Costs page's tables (GY-3315): numbers right-aligned under their headers in tabular figures; on a phone the token split folds away. */
+.table-scroll{overflow-x:auto;max-width:100%}
+.cost-table{width:100%;border-collapse:collapse;font-size:var(--type-body);color:var(--text);font-variant-numeric:tabular-nums}
+.cost-table th{font-size:var(--type-small);font-weight:500;color:var(--text-3);text-align:left;padding:8px var(--space-3)}
+.cost-table td{padding:10px var(--space-3);border-top:1px solid var(--border);text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.cost-table .num{text-align:right;overflow-wrap:normal}.cost-table th:first-child,.cost-table td:first-child{padding-left:0}.cost-table th:last-child,.cost-table td:last-child{padding-right:0}
+@media(max-width:650px){.cost-table .detail{display:none}.cost-table th,.cost-table td{padding-left:var(--space-2);padding-right:var(--space-2)}}

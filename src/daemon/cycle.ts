@@ -18,13 +18,13 @@ import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../c
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
-import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld } from './repeated-failure.js';
+import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
 import { launchGraceMs } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
-import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
+import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { dueHumanProofs } from '../model/human-proof.js';
@@ -52,6 +52,19 @@ export const defaultLaunchConcurrency = 3;
 /** The cycle's steps, in order: the cycle record names exactly these. */
 export const cycleSteps = ['snapshot', 'close', 'dispatch', 'merge writer', 'persist'] as const;
 export type CycleStep = typeof cycleSteps[number];
+/**
+ * GY-3293: a step failing on the same error this many consecutive cycles raises the operator —
+ * a standing Needs you line on the dashboard and an attention line in master status — without the
+ * master session, which a step that keeps failing may never reach. Short of it, the step's failure
+ * stays what it already was: one journal line a cycle.
+ */
+export const stepFailureThreshold = 10;
+/** The cursor key of one step's standing repeated-failure line. */
+export const stepFailureKey = (step: string) => `step-failure:${step}`;
+/** The step-failure lines standing on the cursor, newest first (what the loop names to the control plane and master status shows). */
+export const standingStepFailures = (state: Pick<DaemonState, 'actions'>) =>
+  Object.entries(state.actions).filter(([key, action]) => key.startsWith('step-failure:') && action.state === 'failed')
+    .sort((a, b) => Date.parse(b[1].at) - Date.parse(a[1].at)).map(([, action]) => action.detail);
 /** The one timeout every step runs under. */
 export const stepTimeoutMs = (config: Pick<MasterConfig, 'run'>) => Math.max(60_000, config.run.intervalSeconds * 2_000);
 /** The key the master session's launch is handed to the launcher under. */
@@ -127,12 +140,38 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   if (!own) launches.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const steps: CycleStep[] = [];
   const timeoutMs = stepTimeoutMs(config), stalled: string[] = [];
+  /** GY-3293: one step's outcome folds into its run of equal failures; the threshold's standing line is raised and cleared here. */
+  const noteStep = (name: CycleStep, error?: unknown) => {
+    const key = stepFailureKey(name);
+    if (error === undefined) {
+      if (!state.stepFailures[name] && !state.actions[key]) return;
+      delete state.stepFailures[name];
+      delete state.actions[key];
+      void effects.persist(state).catch(() => {});
+      return;
+    }
+    const reason = normalizeFailureReason(message(error)).slice(0, 1000), at = new Date(now()).toISOString();
+    const prior = state.stepFailures[name];
+    const run = prior && prior.reason === reason ? { step: name, reason, count: prior.count + 1, at } : { step: name, reason, count: 1, at };
+    state.stepFailures[name] = run;
+    if (run.count < stepFailureThreshold) return;
+    const detail = `The loop's ${name} step failed the same way ${stepFailureThreshold} consecutive cycles: ${message(error)}`.slice(0, actionDetailMax);
+    if (state.actions[key]?.state === 'failed' && state.actions[key].detail === detail) touchStanding(state, key, at);
+    else {
+      const entry = storeAction(state, key, { kind: 'attention', work: null, principal: null, state: 'failed', detail, attempts: 1, epoch: null, cycle: state.cycle, at });
+      log(actionLine(state.cycle, entry));
+      void effects.persist(state).catch(() => {});
+    }
+  };
   const step = async <T>(name: CycleStep, body: () => Promise<T>): Promise<T | undefined> => {
     steps.push(name);
     let timer: NodeJS.Timeout | undefined;
     try {
-      return await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => { stalled.push(name); reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)); }, timeoutMs); timer.unref?.(); })]);
+      const value = await Promise.race([body(), new Promise<never>((_, reject) => { timer = setTimeout(() => { stalled.push(name); reject(new Error(`it ran past its ${Math.round(timeoutMs / 1000)}s timeout`)); }, timeoutMs); timer.unref?.(); })]);
+      noteStep(name);
+      return value;
     } catch (error) {
+      noteStep(name, error);
       if (name === 'snapshot') throw error;
       log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`);
       return undefined;

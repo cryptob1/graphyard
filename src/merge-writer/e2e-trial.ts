@@ -1,5 +1,7 @@
 // Concern: GY-2965 — the merge trial serves the head and runs its bound E2E cases (AC-2).
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { declaredEnvironments, localEnvironment, type AppEnvironment } from '../app-environments.js';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
@@ -55,19 +57,21 @@ export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
 /** The checkout's own declarations, read from its graphyard.json and never from the process's: its `e2e.serve` read as a command application (its migration source). */
-export function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string> } {
-  let serve: CommandApplication | null = null;
+export function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string>; environments: Record<string, AppEnvironment> } {
+  let serve: CommandApplication | null = null, text: string | null = null;
+  try { text = readFileSync(join(worktree, 'graphyard.json'), 'utf8'); } catch { /* no declaration */ }
+  const environments = declaredEnvironments(text);
   try { const declared = checkoutRepositoryPolicy(worktree).e2e.serve; serve = declared ? commandApplication(declared) : null; } catch { /* a policy the head broke: no serve, the case run names it */ }
   try {
     const delivery = loadProjectDelivery({}, worktree);
-    if (delivery.previews !== 'off') return { serve, applications: delivery.applications, bindings: delivery.cases };
+    if (delivery.previews !== 'off') return { serve, applications: delivery.applications, bindings: delivery.cases, environments };
   } catch { /* a delivery the head broke: the case run refuses naming why */ }
-  return { serve, applications: [], bindings: {} };
+  return { serve, applications: [], bindings: {}, environments };
 }
 
-/** The head's case `name`'s tags; none for a case that does not parse, which runs and names why. */
-async function caseTags(worktree: string, name: string): Promise<string[]> {
-  try { return parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8')).tags; } catch { return []; }
+/** The head's case `name`'s tags and environment; none and local for a case that does not parse, which runs and names why. */
+async function caseDeclaration(worktree: string, name: string): Promise<{ tags: string[]; environment: string }> {
+  try { return parseCase(`e2e/cases/${name}.json`, await readFile(join(worktree, 'e2e/cases', `${name}.json`), 'utf8')); } catch { return { tags: [], environment: localEnvironment }; }
 }
 
 /**
@@ -88,6 +92,8 @@ export async function runTrialE2eCases(input: {
   wrapper?: readonly string[];
   /** Trusted outer launcher dispatches groups into private-root containers. */
   runGroup?: typeof runTrialE2eGroup;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it. */
+  origins?: Record<string, string>;
 }): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   const pending: string[] = [];
@@ -98,15 +104,30 @@ export async function runTrialE2eCases(input: {
   }
   if (!pending.length) return cases;
   const declared = declaredServe(input.worktree);
-  if (!declared.serve && !declared.applications.length) {
-    for (const proof of pending) cases.push({ proof, case: proof.slice(4), executed: 0, failed: 1, failingStep: noServeRefusal });
-    return cases;
-  }
   // GY-3145: a case delivery.cases binds to an application runs against it; every other case runs
   // against `e2e.serve`, or, with no serve declared, against the only application.
-  const groups = new Map<string, { target: ServedApplication; proofs: string[] }>();
+  const groups = new Map<string, { target: ServedApplication; proofs: string[]; origin?: string }>();
   for (const proof of pending) {
     const name = proof.slice(4);
+    // GY-3296: a case whose named environment the batch gate provisioned runs against its URL; with
+    // none provisioned (a merge trial) it is left out, and an undeclared name fails naming the fix.
+    const origin = input.origins?.[name];
+    if (origin) {
+      const group = groups.get(`environment:${origin}`) ?? { target: { id: 'environment', kind: 'command', command: 'true', url: origin, readySeconds: 1 }, proofs: [], origin };
+      group.proofs.push(proof);
+      groups.set(`environment:${origin}`, group);
+      continue;
+    }
+    const declaration = await caseDeclaration(input.worktree, name);
+    if (declaration.environment !== localEnvironment) {
+      if (declared.environments[declaration.environment]) input.log(`left out ${proof}: it runs in environment ${declaration.environment}, which the batch gate provisions`);
+      else cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: `case ${name} names environment "${declaration.environment}", which graphyard.json e2e.environments does not declare: declare it with up and down commands, or remove "environment" to run on local` });
+      continue;
+    }
+    if (!declared.serve && !declared.applications.length) {
+      cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: noServeRefusal });
+      continue;
+    }
     const bound = declared.applications.find(application => application.id === declared.bindings[name]);
     const fallback = declared.serve ? null : declared.applications.length === 1 ? declared.applications[0]! : null;
     const application = bound ?? fallback;
@@ -115,7 +136,7 @@ export async function runTrialE2eCases(input: {
     // GY-3128: an unbound case needing a Compose item preview cannot pass on e2e.serve: the trial
     // withholds Docker from the head's code (GY-2997). It is left out, named in the log, and the
     // daily run proves it on the host (GY-3193, merge-writer/served-previews.ts).
-    const tags = id === 'serve' ? await caseTags(input.worktree, name) : [];
+    const tags = id === 'serve' ? declaration.tags : [];
     if (tags.includes('compose')) {
       input.log(`left out ${proof}: it needs a Compose item preview, which the daily served run proves`);
       continue;
@@ -138,12 +159,12 @@ export async function runTrialE2eCases(input: {
       cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: `case "${name}" is bound to no declared application: bind it in delivery.cases to one of ${declared.applications.map(application => application.id).join(', ')}` });
       continue;
     }
-    const group = groups.get(id!) ?? { target, proofs: [] };
+    const group: { target: ServedApplication; proofs: string[]; origin?: string } = groups.get(id!) ?? { target, proofs: [] };
     group.proofs.push(proof);
     groups.set(id!, group);
   }
   const deadline = Date.now() + input.budgetMs;
-  for (const group of groups.values()) cases.push(...await (input.runGroup ?? runTrialE2eGroup)(group.target, group.proofs, { ...input, budgetMs: Math.max(1_000, deadline - Date.now()) }));
+  for (const group of groups.values()) cases.push(...await (input.runGroup ?? runTrialE2eGroup)(group.target, group.proofs, { ...input, budgetMs: Math.max(1_000, deadline - Date.now()) }, group.origin));
   return cases;
 }
 

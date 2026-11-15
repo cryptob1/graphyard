@@ -25,6 +25,7 @@ import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies }
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
+import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -515,6 +516,19 @@ export class TrialHostFaultError extends Error {
     this.name = 'TrialHostFaultError';
   }
 }
+/**
+ * GY-3339: a trial step whose nested sandbox AppArmor denied — the trial host's AppArmor, not the
+ * head's. Like a fetch fault it reaches no verdict, is not retried, and the loop reports it upstream.
+ */
+export const trialSandboxFaultLead = `${trialHostFaultPrefix}: a nested sandbox could not start in the trial container`;
+export class TrialSandboxFaultError extends Error {
+  constructor(readonly phase: string, readonly line: string) {
+    super(`${trialSandboxFaultLead} during the ${phase} step (${line}); this is the trial host's AppArmor, not the head's: ${trialAppArmorFix}`);
+    this.name = 'TrialSandboxFaultError';
+  }
+}
+/** Whether an error, or the message it crossed a process boundary as, is a nested-sandbox trial-host fault. */
+export const trialSandboxFault = (error: unknown) => error instanceof Error && error.message.startsWith(trialSandboxFaultLead);
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
@@ -705,6 +719,8 @@ export interface RunTrialInput {
    * candidate is run against the base tip and keeps its before screenshot.
    */
   e2eFrom?: string;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it; such a case runs against that URL. */
+  e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -921,7 +937,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -1063,6 +1079,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const ended = endedOf(error, out);
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
+      if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;
     }
     entries.push(`$ ${command} ${args.join(' ')}\n${out}`);
@@ -1246,7 +1264,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
       if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
       const ran = await containerTrialE2e({
-        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
       }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });

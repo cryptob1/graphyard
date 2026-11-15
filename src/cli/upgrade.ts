@@ -4,11 +4,11 @@ import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
-import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, type Release } from '../release.js';
+import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, releaseIdentityPath, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -487,6 +487,7 @@ export const upgradeCommands = defineCommands([{
     '                                generated files, and check /healthz, to Graphyard\'s main tip',
     '                                (or the dated release VERSION);',
     '                                --plan prints the steps only; a failure names its step and rollback',
+    '  upgrade --repair-identity     Restore a moved CLI release’s local commit stamp.',
     '  upgrade --watch [--once] [--checkout DIR]',
     '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
     '                                each new base tip, build, restart, check /healthz, and roll back',
@@ -503,6 +504,17 @@ export const upgradeCommands = defineCommands([{
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
+    if (flags.includes('--repair-identity')) {
+      const root = resolve(installationRoot), commit = basename(root);
+      if (basename(dirname(root)) !== 'cli-releases' || !/^[0-9a-f]{40}$/i.test(commit)) {
+        throw new Error('Identity repair requires an installed cli-releases/<commit> directory; run graphyard upgrade from a readable Graphyard checkout');
+      }
+      const file = releaseIdentityPath(root);
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, commit.toLowerCase());
+      console.log(`Restored CLI release identity: ${file}`);
+      return;
+    }
     if (flags.includes('--watch')) {
       const repoRoot = context.repositoryRoot();
       await migrateHerdr(repoRoot);

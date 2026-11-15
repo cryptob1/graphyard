@@ -56,7 +56,19 @@ export function trialHostFaultItem(host: string, repository: string) {
     reason: 'Filed by the master loop from a trial-host fault (GY-3249)',
   };
 }
-export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem> | ReturnType<typeof trialHostFaultItem> | ReturnType<typeof trialImageFaultItem> | ReturnType<typeof trialNetworkFaultItem>;
+/** GY-3339: the bug item a merge trial whose nested sandbox AppArmor denies files upstream: one per repository. */
+export function trialSandboxFaultItem(repository: string) {
+  return {
+    title: `Merge trials cannot start nested sandboxes on ${repository}'s trial host`.slice(0, 200),
+    type: 'bug' as const,
+    priority: 1,
+    description: `A merge trial on the install for ${repository} failed because AppArmor denied a nested bubblewrap sandbox inside the trial container. The head was neither refused nor reworked and stays queued; the trial record carries the output. graphyard doctor names the fix: load the graphyard-trial AppArmor profile on the trial host (rerun graphyard up).`,
+    dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'A merge trial on this host starts nested sandboxes; a new test pins the cause and fails without the fix', proofs: ['unit:trial-sandbox-starts'] }],
+    reason: 'Filed by the master loop from a trial-host fault (GY-3339)',
+  };
+}
+export type FaultItem = ReturnType<typeof controlPlaneUpgradeItem> | ReturnType<typeof stepStallItem> | ReturnType<typeof trialHostFaultItem> | ReturnType<typeof trialImageFaultItem> | ReturnType<typeof trialSandboxFaultItem> | ReturnType<typeof trialNetworkFaultItem>;
 
 /** GY-3275: the bug item a merge trial that cannot build a repository's own trial image files upstream: one per repository. */
 export function trialImageFaultItem(repository: string) {
@@ -127,6 +139,10 @@ export const reportTrialNetworkFault = (cycle: Pick<Cycle, 'state' | 'effects' |
 /** GY-3275: a merge trial that could not build a repository's own trial image is reported once per repository, like any Graphyard fault. */
 export const reportTrialImageFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>) =>
   reportFault(cycle, `trial-image-fault:${cycle.config.repository}`, trialImageFaultItem(cycle.config.repository), `merge trials cannot build the repository's graphyard.trial.Dockerfile image on the install for ${cycle.config.repository}`);
+
+/** GY-3339: a merge trial whose nested sandbox AppArmor denied is reported once per repository, like any Graphyard fault. */
+export const reportTrialSandboxFault = (cycle: Pick<Cycle, 'state' | 'effects' | 'clock' | 'log' | 'config'>) =>
+  reportFault(cycle, `trial-sandbox-fault:${cycle.config.repository}`, trialSandboxFaultItem(cycle.config.repository), `merge trials cannot start nested sandboxes: AppArmor denies them in the trial container on the install for ${cycle.config.repository}`);
 
 /**
  * The control plane's own faults, read beside the cycle: a stuck upgrade from the record, the
