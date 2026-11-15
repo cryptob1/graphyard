@@ -5,12 +5,14 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 ## Host
 
 - Docker and Compose: on an AppArmor host up loads the `graphyard-trial` profile with sudo.
+- Docker and Compose are needed even for `--local`; merge trials run in them.
 
 ## Accounts and access
 
 - Workers and reviewers run headless, logged per item (`graphyard guide runtimes`).
 - Where a SAML organization or org policy blocks deploy keys, `--push-auth gh` pushes with your gh login instead of a deploy key.
 - Setup invites or revokes viewers and maintainers.
+- Sharing one machine across installs keeps two locks: the tailnet plus per-install sign-in.
 
 ## Publishing
 
