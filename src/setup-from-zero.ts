@@ -2,19 +2,23 @@ import { readInstallLoopCode } from './loop-code.js';
 import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import type { LoopCodeReading } from './repository-setup.js';
-import { installUnitsFile, parseInstallUnits } from './install/units.js';
+import { installUnitsFile, parseInstallUnits, systemdCommandLineWords, unitCheckout, userUnitDirectory } from './install/units.js';
+import { installDirectory } from './install/secrets.js';
+import { installIdFor } from './install/types.js';
+import { unitLauncherFault } from './install/cli-release.js';
+import { underTestRunner } from './runtime-environment.js';
+import { readLockRefusal, type LockRefusal, type UserSystemctl } from './master/loop-restart.js';
 import { defaultChildRun } from './child-runner.js';
-import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrInstaller, herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { deployCheckoutOf } from './install/loop-unit.js';
-import { installDirectory } from './install/secrets.js';
-import { installIdFor } from './install/types.js';
 import { repositoryFromRemote } from './onboarding.js';
 import { landlockRefusal } from './landlock.js';
 import { MINIMUM_NODE_MAJOR } from './install/local.js';
@@ -35,6 +39,8 @@ export const setupSteps = {
   trialAppArmor: trialAppArmorFix,
   loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
+  loopUnitRelease: 'run graphyard master init --token-stdin --replace-supervisor from this checkout so the unit starts the release this install serves',
+  loopLock: 'run graphyard master restart on that host: it restarts the loop through its unit, or stops the unit before a detached one, so a single loop remains',
   deploySource: 'restart this install\'s deploy unit (graphyard upgrade --watch), which replaces the worktree with a standalone clone at the same commit',
   node: `install Node ${MINIMUM_NODE_MAJOR} or newer (the README prerequisites give the command for your distribution), then rerun doctor with it`,
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
@@ -70,6 +76,8 @@ export interface SetupFromZeroInput {
   nodeVersion?: string;
   /** GY-3339: starts a nested sandbox in a trial container; null when it starts, else its output. Asked only on an AppArmor host. */
   trialSandbox?: () => string | null;
+  /** GY-3337: the loop-lock refusal doctor reads; the record beside the config when unset here. */
+  lockRefusal?: LockRefusal | null;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -231,6 +239,59 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
 }
 const userManager: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
 
+/** Under the test runner only a unit directory under the system temporary directory is read, as loop-code guards it: the operator's real units belong to no checkout a test made. */
+const readableUnitDirectory = (directory: string) => {
+  if (!underTestRunner()) return true;
+  try { const temporary = realpathSync(tmpdir()); return `${realpathSync(directory)}${sep}`.startsWith(`${temporary}${sep}`); } catch { return false; }
+};
+
+/** The launcher a loop unit's ExecStart names, worded by systemd's own quoting rules, null when it names none. */
+const unitLauncher = (text: string, home: string): string | null => {
+  const start = unitCheckout(text, home).execStart;
+  return start ? systemdCommandLineWords(start).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js)$/.test(part)) ?? null : null;
+};
+
+/**
+ * GY-3337: the loop unit's release line. The unit's ExecStart must resolve to the release this
+ * install serves — never a release that has gone stale, never another install's launcher. One FAIL
+ * names the unit and the init that rewrites it; a healthy unit records one PASS. A checkout
+ * recording no units, a host holding no unit file, or a unit naming no Graphyard launcher records
+ * no line: those are other lines' facts (loop-code, unit-overrides).
+ */
+async function loopUnitReleaseChecks(root: string, env: NodeJS.ProcessEnv): Promise<SetupCheck[]> {
+  const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'loop-unit-release', status, step: setupSteps.loopUnitRelease, detail });
+  let units, repository;
+  try { units = parseInstallUnits(await readFile(resolve(root, installUnitsFile), 'utf8'), installUnitsFile, () => { throw new Error('absent'); }); } catch { return []; }
+  try { repository = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8'))?.repository; } catch { /* no configuration: nothing to judge against */ }
+  if (typeof repository !== 'string' || !repository) return [];
+  let installDir: string;
+  try { installDir = installDirectory(installIdFor(repository), env.GRAPHYARD_CONFIG_HOME); } catch { return []; }
+  const unitDirectory = userUnitDirectory(env);
+  if (!readableUnitDirectory(unitDirectory)) return [];
+  const text = await readFile(join(unitDirectory, units.master), 'utf8').catch(() => null);
+  if (text === null) return [];
+  const home = env.HOME?.trim() || homedir();
+  const launcher = unitLauncher(text, home);
+  if (!launcher) return [];
+  const fault = unitLauncherFault({ unit: units.master, launcher, installDir });
+  return [fault ? check('fail', fault.detail) : check('pass', `${units.master}'s ExecStart starts the release this install serves (${launcher})`)];
+}
+
+/** GY-3337: how recent a lock refusal doctor still blames; a crash-looping war refreshes it every RestartSec. */
+export const loopCrashLoopWindowMs = 5 * 60_000;
+
+/**
+ * GY-3337: the loop-lock line. A `master run` that keeps exiting on another live loop's lock is a
+ * unit crash-looping beside it — the fault `master restart` now resolves — so doctor names it while
+ * it is happening. No refusals, one, or only old ones record no line.
+ */
+async function loopLockChecks(root: string, injected: LockRefusal | null | undefined): Promise<SetupCheck[]> {
+  const record = injected !== undefined ? injected : await readLockRefusal(root).catch(() => null);
+  if (!record || record.count < 2 || Date.now() - Date.parse(record.refusedAt) > loopCrashLoopWindowMs) return [];
+  return [{ id: 'loop-lock', status: 'fail', step: setupSteps.loopLock,
+    detail: `the master loop is crash-looping on the lock pid ${record.holder.pid} on ${record.holder.host} holds (${record.count} refusals, latest ${record.refusedAt}): a unit restarts a loop that exits at once on another live loop every RestartSec` }];
+}
+
 /**
  * GY-2976: the declared serve's line. A repository whose main declares a node application and
  * whose deploy pass has run carries a serve record; the URL it names must answer. A serve that is
@@ -300,6 +361,8 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
+  lines.push(...await loopUnitReleaseChecks(input.root, env));
+  lines.push(...await loopLockChecks(input.root, input.lockRefusal));
   const installDir = input.installDir ?? installDirOf(input.root);
   const deploySource = installDir ? await deploySourceCheck(installDir) : null;
   if (deploySource) lines.push(deploySource);

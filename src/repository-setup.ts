@@ -1,10 +1,12 @@
 import { installDirectory } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
 import { knownGoodDirectory, knownGoodState } from './master/known-good.js';
+import { installLauncherPath } from './install/cli-release.js';
 import { connectionRoots } from './git-checkout-roots.js';
 import { readInstallLoopCode } from './loop-code.js';
 import { shellQuote } from './shell-quote.js';
 import { chmod, cp, lstat, mkdir, readdir, rmdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -494,7 +496,10 @@ const onboardingFirstCase = () => ({
  * GY-1859 / GY-3000: the pins that hold this install's loop on code other than this CLI's, lifted so
  * a replacement starts this CLI. `loopUnitText` renders the known-good coordinator's launcher while
  * its pin stands (GY-1529): a rewrite under it comes back on the pinned commit. The pin's record is
- * kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA` restores).
+ * kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA` restores). GY-3337:
+ * the install's one stable launcher is lifted the same way while it resolves — a unit rewritten onto
+ * this CLI under it would come back on the release it serves; the next deploy pass rewrites the
+ * launcher, and `graphyard master init` re-adopts it.
  * Returns what was lifted, one phrase each; nothing standing lifts nothing.
  */
 export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null } = {}): Promise<string[]> {
@@ -508,6 +513,11 @@ export async function liftLoopPins(root: string, options: { installDir?: string 
     const directory = knownGoodDirectory(installDir);
     await rename(join(directory, 'state.json'), join(directory, 'lifted.json'));
     lifted.push(`the known-good pin at ${shortSha(pin.sha)} (${join(directory, 'state.json')}, kept as lifted.json)`);
+  }
+  const launcher = installDir ? installLauncherPath(installDir) : null;
+  if (launcher && existsSync(launcher)) {
+    await rm(launcher, { force: true });
+    lifted.push(`the serving launcher ${launcher} (the next deploy pass rewrites it, and graphyard master init re-adopts it)`);
   }
   return lifted;
 }
