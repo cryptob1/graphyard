@@ -12,6 +12,8 @@ export const simplicityParagraph = 'Keep it simple. Build the simplest thing tha
  * GY-3382: what every item filer writes before anything else — the master's prompt, the master
  * guide and `graphyard create` carry it — so items stay short and agents build what users need.
  */
+/** The master prompt's form, held to the brief's word budget; `master guide` opens with the full rule. */
+export const itemLeadBrief = 'Write why and simplest first in each item. ';
 export const itemLeadRule = 'Before anything else in an item you file, write why (one sentence: how it helps users) and simplest (one sentence: why it is the simplest thing that works); keep the description short, and cut scope until the second sentence can be written. ';
 /** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
 export const blockingStandardSection = 'A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. ';

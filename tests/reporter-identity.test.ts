@@ -127,7 +127,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
   await refused('master', 'registry');
   await refused('master', 'lesson', 'add', 'Reporters write lessons');
   // It reads back only its own items.
-  const other = await api('work', { title: 'The operator\'s own item', type: 'chore', criteria });
+  const other = await api('work', { why: 'w', simplest: 's', title: 'The operator\'s own item', type: 'chore', criteria });
   const unseen: any = await exec(process.execPath, [cli, 'status', other.key], { cwd: home, env }).then(() => null, error => error);
   assert.match(unseen?.stderr ?? '', new RegExp(`Unknown work item ${other.key}`));
   const after = await api(`work/${created.key}`);

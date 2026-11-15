@@ -25,7 +25,7 @@ test('e2e:pipeline-gate-known-red — a catalog-only case red before the batch i
 
     // The known-red filing's key was filed before with other wording, so the plane refuses it (409).
     const earlier = await fetch(`${world.url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'known-red:e2e:red-case' },
-      body: JSON.stringify({ title: 'Earlier wording of the red case', type: 'bug', criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:red-case-pinned', 'e2e:create-work-item'] }] }) });
+      body: JSON.stringify({ title: 'Earlier wording of the red case', why: 'w', simplest: 's', type: 'bug', criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:red-case-pinned', 'e2e:create-work-item'] }] }) });
     assert.ok(earlier.ok, await earlier.text());
 
     const benign = await world.submit('A benign change', { 'benign.txt': 'benign\n' });

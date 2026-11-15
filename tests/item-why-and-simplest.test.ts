@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { priorityServer } from './helpers/priority-server.js';
 import { workFixture } from './helpers/work-fixture.js';
 import { whyAndSimplestRefusal } from '../src/model-boundary/work.js';
-import { itemLeadRule } from '../src/review-prompt.js';
+import { itemLeadBrief, itemLeadRule } from '../src/review-prompt.js';
 import { masterPrompt } from '../src/master/harness.js';
 import { masterGuide } from '../src/master/guide.js';
 import { workerPrompt } from '../src/master/dispatch.js';
@@ -67,7 +67,8 @@ test('item-why-and-simplest: every built-in creator supplies both sentences, and
   assert.match(itemLeadRule, /^Before anything else .* why .* simplest .*keep the description short, and cut scope until the second sentence can be written/);
   const config = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:1', credentialFile: '/c', cliPath: '/cli.mjs', repository: 'owner/project', baseBranch: 'main', hostId: 'h', masterAgentName: 'm', workers: [] });
   const master = masterPrompt(config);
-  assert.ok(master.indexOf(itemLeadRule) > 0 && master.indexOf(itemLeadRule) < master.indexOf('Never implement'), 'the master prompt asks for both right after its role');
+  const asked = master.indexOf(itemLeadBrief.trim());
+  assert.ok(asked > 0 && asked < master.indexOf('Never implement'), 'the master prompt asks for both right after its role, before any other instruction');
   assert.ok(masterGuide.split('\n\n')[1].startsWith(itemLeadRule), 'the master guide opens with it');
   const createHelp = workCommands.find(command => command.name === 'create')!.help.join(' ');
   assert.match(createHelp, /"why" and "simplest" first/);

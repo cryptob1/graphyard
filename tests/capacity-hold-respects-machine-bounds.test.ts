@@ -108,7 +108,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   const selected = await selectAccount(config, 'worker', config.workers[0], { quota: false, now: () => now, cacheMs: 0, work: 'GY-1708' });
   assert.equal(selected.account?.name, 'env-b', 'selection fails over to the next account; the held one is never re-selected');
 
-  const filed = await ok(operator, 'POST', 'work', {
+  const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's',
     title: 'bounds', type: 'chore',
     criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds', 'e2e:fixture'] }],
   }) as Work;
