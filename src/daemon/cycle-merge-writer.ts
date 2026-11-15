@@ -57,7 +57,7 @@ export interface MergeWriterReads extends MergePorts {
    */
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
   /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
-  gate?: { root: string; repository: string; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
+  gate?: { root: string; repository: string; /** GY-3296: the app environment lifecycle; absent, the loop's own over the root's state file. */ environments?: ReturnType<typeof import('../app-environments.js').environmentLifecycle>; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
   /**
    * GY-3199: publishes `commit` at `refs/graphyard/verified` on this checkout's origin with the
    * merge writer's deploy key alone, like every other push — the ref every install's deploy watch
@@ -132,7 +132,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return heavyTrial(item.key, onStep, signal, () => (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+      return heavyTrial(item.key, onStep, signal, () => (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, ...(item.environments ? { e2eOrigins: item.environments } : {}), key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         ...trialShareAllowance(share, timeoutMs) }));
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
