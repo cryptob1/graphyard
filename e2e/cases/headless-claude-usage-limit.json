@@ -1,0 +1,11 @@
+{
+  "id": "headless-claude-usage-limit",
+  "title": "A headless claude worker out of usage credits hands off to the next account",
+  "description": "Real dispatch with a stub claude that exits at once with the headless result \"Switch to another model, or manage usage credits at https://claude.ai/settings/usage\": its account is held, the same dispatch starts the item on another account, and no launch failure is recorded.",
+  "tags": ["dispatch", "workers"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "headless claude usage-limit handoff", "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-claude-usage-limit.test.ts", "timeoutSeconds": 600 }
+  ]
+}

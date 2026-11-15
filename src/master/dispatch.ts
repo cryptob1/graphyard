@@ -27,6 +27,7 @@ import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, t
 import { liveRun } from '../runner/registry.js';
 import { runTranscript } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from './runtime-prompt.js';
+import { runtimeReport } from '../model/token-costs.js';
 import { detectLoggedOut } from './logged-out.js';
 import { cycleBaseTip, dependencyDirectories, failureText, preservedWorkNote, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
@@ -418,7 +419,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * and the account hold are recorded on the item, where the next attempt's brief reads them.
    */
   async function stoppedOnLimit(output: string) {
-    const notice = detectRuntimeExhaustion(output, launch.kind!, Date.now());
+    // A headless run's notice can be the reply inside its JSON report (GY-3389), or a line it printed.
+    const reply = runtimeReport(output).reply;
+    const notice = (reply ? detectRuntimeExhaustion(reply, launch.kind!, Date.now()) : null) ?? detectRuntimeExhaustion(output, launch.kind!, Date.now());
     if (!notice) return null;
     const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
     await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,

@@ -91,7 +91,8 @@ const builtInAdapters = {
     // Only Claude Code, which leaves AGENTS.md out under a role file, loads the launch authorization from a file.
     role: reference => `--append-system-prompt-file ${reference}`,
     screen: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-    limitNotices: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
+    // Headless `-p` runs end with the result `… Switch to another model, or manage usage credits at https://claude.ai/settings/usage` (GY-3389).
+    limitNotices: [...providerUsageErrors, /\bClaude AI usage limit reached\b/, /^.{0,160}\bmanage usage credits at https:\/\/claude\.ai\/settings\/usage\b/i],
     home: { variable: 'CLAUDE_CONFIG_DIR', default: home => resolve(home, '.claude') },
     usage: (environment, probe, { now }) => claudeAccount(environment, probe, now),
     identity: { file: '.claude.json', ids: login => [login?.oauthAccount?.accountUuid, login?.oauthAccount?.organizationUuid] },
