@@ -51,7 +51,9 @@ async function fillsThePage(page: Page) {
   await expect.poll(async () => fills(await fill(page)), settled).toBe(true).catch(async error => {
     throw new Error(`The terminal does not fill its container (gaps in cells): ${JSON.stringify(await fill(page))}\n${error}`);
   });
-  expect((await fill(page))!.documentScrolls).toBe(false);
+  // Polled too: a repaint can leave the ruler's rows unreadable for a moment, and `fill` returning
+  // null then is a redraw in flight, not a verdict on the document.
+  await expect.poll(async () => (await fill(page))?.documentScrolls, settled).toBe(false);
 }
 
 async function fixture() {
