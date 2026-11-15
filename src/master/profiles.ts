@@ -395,10 +395,17 @@ export const masterConfigSchema = forwardTolerant(z.object({
     maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
   }).strict().optional(),
   // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
+  // GY-3344: its credential is a reporter principal there, which files items and messages that Master and nothing else.
   upstream: z.object({
     url: z.string().min(1).max(500),
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
   }).strict().optional(),
+  // GY-3345: the other installs this Master messages (`master peer add`), each with a reporter token that install issued.
+  peers: z.array(z.object({
+    name: z.string().regex(/^[\w.-]{1,60}$/),
+    url: z.string().url().max(500),
+    tokenFile: z.string().min(1).max(1000).refine(isAbsolute, 'peers[].tokenFile must be absolute'),
+  }).strict()).max(50).optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
 }).passthrough()).transform(({ autoMerge, reviewRoundCap, reviewer, approver, invariants, browser, mergeQueue, ...kept }) => kept);

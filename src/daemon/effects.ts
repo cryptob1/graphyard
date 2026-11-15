@@ -12,6 +12,7 @@ import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
+import type { MasterMessage } from './master-stalled-delivery.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
@@ -155,6 +156,8 @@ export interface DaemonEffects {
   dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
+  /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */
+  masterMessages?: () => Promise<MasterMessage[]>;
   personalMasterSession?: (config: MasterConfig) => MasterSessionEffects;
   /** The control-plane merge executor's reads (cycle-merge-writer.ts); absent, the merge writer does nothing. */
   mergeWriter?: MergeWriterReads | null;

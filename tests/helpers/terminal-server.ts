@@ -12,7 +12,7 @@ import type { Principal } from '../../src/model.js';
  * optionally the port to listen on — a successor plane can take the same port a predecessor left,
  * as one URL does across a deploy. The loop has named its master pane `w1:master`, and one item
  * records a running worker session in pane `w1:worker`. Credentials: the human operator
- * (test-human-operator) and a reader (test-reader).
+ * (test-human-operator), a reader (test-reader) and another install's reporter (test-install-a).
  */
 const [database, site, port] = process.argv.slice(2) as [string, string, string?];
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -27,6 +27,8 @@ const http = server(engine, [
   { id: 'watcher', role: 'reader', token: 'test-reader' },
   { ...worker, token: 'test-worker' } as any,
   { ...coordinator, token: 'test-coordinator' } as any,
+  // GY-3345: another install's Master, messaging this one.
+  { id: 'install-a', role: 'reporter', token: 'test-install-a' },
 ]);
 loopPanesRegistry(engine).observe({ configHome: null, session: null, host: 'host-1', running: true, master: 'w1:master' });
 let item = await engine.execute(operator, 'create', null, { type: 'chore', title: 'Watch a worker', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['e2e:fixture'] }] }, randomUUID());

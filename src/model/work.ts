@@ -45,7 +45,8 @@ export const operatorCapabilities = ['policy:requirements', 'policy:review-provi
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
-  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader';
+  /** GY-3344: a reporter is another install's Master: it files items, messages this install's Master and reads back its own items and replies, and nothing else (server/routes/reporter.ts). */
+  id: string; role: 'admin' | 'operator-agent' | 'coordinator' | 'slice-lead' | 'worker' | 'producer' | 'reader' | 'reporter';
   proofs?: string[]; displayName?: string; runtime?: string;
   // Deployment observation is a separate lane from acceptance-proof collection. A
   // producer's `proofs` allowlist grants no authority here and is never widened to
@@ -120,6 +121,8 @@ export function criteriaChanges(previous: readonly Criterion[], revised: readonl
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 export interface Work extends Create {
+  /** GY-3344: the reporter principal that filed the item; that reporter reads it back and no other item. */
+  reportedBy?: string;
   /**
    * The current validation selection per proof. `reanchor` is set when the selected request's
    * target moved and automatic re-anchoring could not create a fresh request yet; the
@@ -226,7 +229,8 @@ export interface Work extends Create {
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.
-export function operatorScopeIncludes(actor: Principal, work: { id: string; key: string }) {
+export function operatorScopeIncludes(actor: Principal, work: { id: string; key: string; reportedBy?: string }) {
+  if (actor.role === 'reporter') return work.reportedBy === actor.id;
   if (actor.role !== 'operator-agent') return true;
   return !!actor.scope?.workItems.some(entry => entry === '*' || entry === work.id || entry === work.key);
 }

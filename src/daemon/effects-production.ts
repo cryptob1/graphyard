@@ -69,6 +69,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   fetcher?: typeof fetch;
   /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
   verify?: typeof runWorkerVerification;
+  /** GY-3345: the messages to this install's Master. */
+  messages?: DaemonEffects['masterMessages'];
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
@@ -257,6 +259,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
+    masterMessages: deps.messages,
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
