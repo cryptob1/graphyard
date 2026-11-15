@@ -71,7 +71,7 @@ export const statusRoutes = defineRoutes('status', [
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
-        thisWeek: servingRoot ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
+        thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
         // GY-3348: the host's CPU as the live loop last named it on its coordination read — the
         // Workers page's pressure and steal figures; null while no live loop names any.
         cpu: loopRegistry(engine).live(observedAt)?.cpu ?? null,
