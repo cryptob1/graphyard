@@ -1,0 +1,11 @@
+{
+  "id": "one-mode-specs-stable",
+  "title": "The one-mode dashboard specs pass ten times in a row on two cores",
+  "description": "The browser specs one-mode-no-fun-toggle and dashboard-fun run ten times each, pinned to two CPU cores with two Playwright workers, and every run passes: the Settings tabs are read only once they have rendered and each one opens without the page crashing, and the merge confetti lasts as long as the toast that announces it, so a check that finds the toast late still finds the confetti.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "both specs, ten runs each, on two cores", "run": "taskset -c 0,1 npm run test:browser -- browser-tests/one-mode-no-fun-toggle.spec.ts browser-tests/dashboard-fun.spec.ts --repeat-each 10 --workers 2", "timeoutSeconds": 900 }
+  ]
+}

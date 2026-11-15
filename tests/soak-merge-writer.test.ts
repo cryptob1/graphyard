@@ -20,7 +20,7 @@ import type { Work } from '../src/model.js';
  * (refused, reworked, resubmitted on a new head); the coordinator's merge-record route is down for
  * stretches (a step fails before or after the push, and the next cycle reconciles or retries);
  * the executor is killed between a push and its record (reconciled, no second push); some trials
- * time out (the head yields its queue turn, and a second timeout where another head passed refuses
+ * time out (the head keeps its queue place, and a second timeout while another head passed or waited refuses
  * it to rework, GY-2079); and the rework decision route refuses a few requests before taking them.
  * The writer must deliver every
  * item exactly once, push every merge commit exactly once, run one merge at a time, request each
@@ -109,7 +109,7 @@ class World {
         // A foreign commit lands on main during the trial: the leased push below is rejected.
         if (heads.some(n => (tipMovesOnce(n) && world.trials % 2 === 1 && first(n)) || (tipMovesAlways(n) && world.movedAlways < 4 && first(n)))) { world.main.unshift(sha(`foreign:${world.trials}`)); if (heads.some(tipMovesAlways)) world.movedAlways += 1; }
         const failed = heads.some(n => failsTrial(n) && first(n));
-        // GY-2079: a head whose trial keeps outrunning the time budget yields its turn and, on a
+        // GY-2079: a head whose trial keeps outrunning the time budget stays queued in its place and, on a
         // second timeout where other heads passed, is refused to rework; its resubmitted head passes.
         // A batch holding it times out too, and its heads are trialled one at a time (GY-2088).
         if (heads.some(n => timesOut(n) && first(n))) throw new TrialTimeoutError('tests', 1_200_000, '$ node --import tsx tests/helpers/run-tests.ts --files-from tests-1.txt\nok 1 - tests/fast.test.ts\nnot ok 2 - tests/slow.test.ts');
@@ -195,7 +195,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   for (const n of failing) { assert.ok(reasons(n).some(reason => reason.startsWith(trialFailurePrefix)), `GY-${n} was refused for its trial`); assert.equal(world.refusedRequests.get(n) ?? 0, refusedDecisions(n), `GY-${n}'s request was refused ${refusedDecisions(n)} times first`); assert.equal(world.submissions.get(n)!.head, sha(`head${n}-2`), `GY-${n} came back on a new head`); }
   for (const n of timingOut) {
     const grounds = [...new Set(reasons(n).filter(reason => reason.startsWith(`${trialFailurePrefix}: the trial timed out`)))];
-    assert.deepEqual(grounds, [`${trialFailurePrefix}: the trial timed out 2 times while other heads' trials passed: tests/fast.test.ts, tests/slow.test.ts`], `GY-${n} was refused once at the bound, naming the slow files, not retried without bound: ${reasons(n).join(' | ')}`);
+    assert.deepEqual(grounds, [`${trialFailurePrefix}: the trial timed out 2 times while other heads passed or waited: tests/fast.test.ts, tests/slow.test.ts`], `GY-${n} was refused once at the bound, naming the slow files, not retried without bound: ${reasons(n).join(' | ')}`);
     assert.equal(world.submissions.get(n)!.head, sha(`head${n}-2`), `GY-${n} came back on a new head`);
   }
   assert.ok(failing.some(n => refusedDecisions(n) > 0), 'some requests were refused before they were taken');

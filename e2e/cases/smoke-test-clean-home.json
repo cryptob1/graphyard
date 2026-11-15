@@ -1,0 +1,13 @@
+{
+  "id": "smoke-test-clean-home",
+  "title": "An account smoke test starts from a clean home every time",
+  "description": "With a stub agy runtime that creates its config directory on start, and a leftover smoke home from an interrupted earlier test of the same account present: two smoke tests of that account in a row both pass, and no smoke home remains afterwards.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Two agy smoke tests in a row pass over a leftover smoke home and leave none",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/smoke-test-clean-home.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
