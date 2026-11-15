@@ -22,7 +22,7 @@ import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normal
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
-import { launchGraceMs } from '../model/registry-sessions.js';
+import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
 import { basename } from 'node:path';
@@ -294,6 +294,23 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
  * an attempt ended by a lapsed lease had not committed, ask the control plane to reconcile each
  * lease that lapsed with nothing submitted, and remove the worktrees of ended attempts.
  */
+/**
+ * GY-3346: a live registry session recorded on another host cannot run here — the install moved,
+ * and nothing on the old host will ever end it — so it gives its role slot back in this close step,
+ * before the same cycle's dispatch and master launch ask the registry for slots.
+ */
+async function endForeignHostSessions(cycle: Cycle) {
+  const { config, effects } = cycle;
+  if (!effects.registry || !effects.endRegistrySession) return;
+  const registry = await effects.registry().catch(() => null);
+  for (const session of liveSessions({ sessions: registry?.sessions ?? [] })) {
+    if (session.host === config.hostId) continue;
+    const key = `close:registry:${session.id}`;
+    try { await effects.endRegistrySession(session.id, `recorded on ${session.host}, this install runs on ${config.hostId}`); await note(cycle, key, 'close', session.work, 'done', `Ended the ${session.role} registry session ${session.id}: recorded on ${session.host}, this install runs on ${config.hostId}`); }
+    catch (error) { await note(cycle, key, 'close', session.work, 'failed', `Could not end the ${session.role} registry session ${session.id} recorded on ${session.host}: ${message(error)}`); }
+  }
+}
+
 async function closeStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock } = cycle;
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
@@ -316,6 +333,7 @@ async function closeStep(cycle: Cycle) {
     }
     await attemptBoundStep(cycle, item, session);
   }
+  await endForeignHostSessions(cycle);
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
     const lease = item.lease;
@@ -434,6 +452,13 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
   tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
+  const releases = await effects.sweepCliReleases?.().catch(error => { cycle.log(`[graphyard-master] the CLI release sweep failed: ${message(error)}`); return null; });
+  if (releases?.removed.length) {
+    tallyLeftovers(state, 'cliReleases', releases.removed.length);
+    tallyLeftovers(state, 'cliReleaseBytes', releases.bytes);
+    await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
+  }
+  if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new

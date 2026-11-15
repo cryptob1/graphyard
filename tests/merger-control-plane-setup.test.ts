@@ -37,7 +37,7 @@ test('unit:setup-checklist-control-plane — the Setup checklist names no GitHub
 test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks name no GitHub App, reviewer App or branch-protection line for an unsupervised install', async () => {
   const root = await temporaryDirectory('merger-control-plane-setup');
   const checks = await setupFromZeroChecks({ root, env: {}, status: bare(), environments: join(root, 'none'), sandbox: () => null });
-  assert.deepEqual(checks.map(check => check.id), ['control-plane', 'credentials-file', 'agent-environments', 'worker-sandbox', 'herdr']);
+  assert.deepEqual(checks.map(check => check.id), ['control-plane', 'node', 'credentials-file', 'agent-environments', 'worker-sandbox', 'herdr']);
   assert.ok(!checks.some(check => check.id === 'github-app' || check.id === 'reviewer-app'), 'no App line');
   assert.ok(!checks.some(check => check.id === 'branch-protection' || check.id === 'merger'), 'no branch protection or merger line');
 });
