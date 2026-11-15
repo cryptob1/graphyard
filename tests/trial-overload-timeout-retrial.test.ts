@@ -65,7 +65,7 @@ const testTimeout = '  1) browser-tests/one.spec.ts:3:1 › one test\n\n    Test
 const webTimeout = 'Error: Timed out waiting 60000ms from config.webServer.';
 const serveTimeout = 'the serve command did not answer http://127.0.0.1:8080/healthz within 180s';
 
-for (const mode of ['serve', 'test', 'file', 'web-server'] as const) for (const steal of [0.7, 0]) {
+for (const mode of ['serve', 'test', 'file', 'web-server', 'deadline'] as const) for (const steal of mode === 'deadline' ? [0.7] : [0.7, 0]) {
   test(`${proof} — ${mode} timeout with ${steal * 100}% steal`, { timeout: 120_000 }, async () => {
     const root = await temporaryDirectory('trial-overload-repo');
     const { base, head } = await repository(root);
@@ -74,7 +74,7 @@ for (const mode of ['serve', 'test', 'file', 'web-server'] as const) for (const 
     const run: ChildRun = async (command, args, { wrapper: _wrapper, ...options } = {}) => {
       if (command === 'npm' && args.includes('test')) {
         cpu.step();
-        throw Object.assign(new Error('test failed'), { status: 1, stdout: mode === 'test' ? testTimeout : mode === 'file' ? 'not ok - tests/one.test.ts\n  test at tests/one.test.ts:1:1\n  test file timed out after 300000ms' : webTimeout, stderr: '' });
+        throw Object.assign(new Error('test failed'), { status: 1, ...(mode === 'deadline' ? { timedOut: true } : {}), stdout: mode === 'test' ? testTimeout : mode === 'file' ? 'not ok - tests/one.test.ts\n  test at tests/one.test.ts:1:1\n  test file timed out after 300000ms' : webTimeout, stderr: '' });
       }
       if (command === 'npm') { cpu.step(); return ''; }
       // The E2E container returns the serve-ready timeout in its normal result file.
