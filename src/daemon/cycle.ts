@@ -303,16 +303,34 @@ async function endForeignHostSessions(cycle: Cycle) {
   }
 }
 
+/** Bound the runtime call itself, not just its subsequent pane-disappearance polling. */
+async function closeWithin(body: () => void | Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([Promise.resolve().then(body), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('session close timed out after 5s; retrying next cycle')), 5_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 async function closeStep(cycle: Cycle) {
+  // Each pane gets one attempt per cycle, including the later leftover-pane sweep. A slow
+  // runtime must not hold every other session behind it or outlive the step's 60s deadline.
+  const attemptedPanes = new Set<string>();
+  const original = cycle.effects;
+  cycle = { ...cycle, effects: { ...original, closeSession: pane => {
+    attemptedPanes.add(pane);
+    return closeWithin(() => original.closeSession(pane));
+  } } };
   const { config, state, effects, snapshot, clock } = cycle;
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
-  for (const item of snapshot.work) for (const session of item.sessions ?? []) {
-    if (session.host !== config.hostId) continue;
+  await Promise.all(snapshot.work.flatMap(item => (item.sessions ?? []).map(async session => {
+    if (session.host !== config.hostId) return;
     const key = `close:${item.id}:${session.id}`;
-    if (session.state !== 'running' && (item.stage === 'done' || state.actions[key]?.state === 'done')) continue;
+    if (state.actions[key]?.state === 'done' || (session.state !== 'running' && item.stage === 'done')) return;
     const failure = item.stage === 'done' ? null : await workerLaunchHealth(cycle, item, session);
     // A reporter-finished handle can still own a pane. Diagnose it before the same idempotent close.
-    if (session.state !== 'running' && !failure) continue;
+    if (session.state !== 'running' && !failure) return;
     const reason = sessionEnded(item, session, clock) ?? (session.state !== 'running' ? failure : null);
     if (reason) {
       try {
@@ -321,10 +339,10 @@ async function closeStep(cycle: Cycle) {
         await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure ?? `closed by the loop: ${reason}`.slice(0, 500) });
         await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${failure ?? reason}`, session.principal);
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
-      continue;
+      return;
     }
     await attemptBoundStep(cycle, item, session);
-  }
+  })));
   await endForeignHostSessions(cycle);
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
@@ -413,7 +431,7 @@ async function closeStep(cycle: Cycle) {
   if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
     const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
     const pane = agent.pane_id;
-    if (!pane || masters.has(pane) || live.has(pane) || agent.agent_status === 'working') continue;
+    if (!pane || attemptedPanes.has(pane) || masters.has(pane) || live.has(pane) || agent.agent_status === 'working') continue;
     if (!cwd.includes('/.graphyard/worktrees/') && !managedRoots.some(root => cwd.startsWith(root + sep))) continue;
     const gone = !existsSync(cwd), exited = !agent.agent || endedRuntimeStates.includes(agent.agent_status ?? '');
     const due = () => ended.has(pane) || (gone && exited && launched.has(pane));
