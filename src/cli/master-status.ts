@@ -33,7 +33,6 @@ import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
 import { backedOffProfiles, readDispatchCursor } from '../dispatch/cursor.js';
 
@@ -147,8 +146,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
   // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
+  // GY-3387: judged from graphyard.json at main's tip, not the checkout's working tree, which can lag main.
   let placeholder = false;
-  try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
+  try { placeholder = !!report.main && isPlaceholderServe(JSON.parse(String(await run('git', ['-C', root, 'show', `${report.main}:graphyard.json`]))).e2e?.serve); } catch { /* main holds no parseable graphyard.json: no serve declared */ }
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
   const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
