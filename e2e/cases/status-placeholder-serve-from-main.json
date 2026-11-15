@@ -1,0 +1,14 @@
+{
+  "id": "status-placeholder-serve-from-main",
+  "title": "master status judges the placeholder serve from main, not the checkout's working tree",
+  "description": "In a fixture repository onboarded with the placeholder e2e.serve, master status shows the Placeholder serve line while main declares the placeholder; once main declares a real serve and the checkout's working tree stays at the onboarding commit, the line is gone.",
+  "tags": ["onboarding", "serve", "status"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the Placeholder serve line follows main's graphyard.json",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/status-placeholder-serve-from-main.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

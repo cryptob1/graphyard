@@ -19,7 +19,7 @@ const waiting = 'Waiting on the master: writing the criteria';
 const criteria = [{ id: 'AC-1', text: 'The requested change works through the dashboard', proofs: ['e2e:create-work-one-box'] }];
 
 test('e2e:create-work-one-box — title-only filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
-  // Embedded Postgres setup alone takes ~40 s on a loaded host before the first page step (GY-3293 trial timed out at 120 s).
+  // The body takes ~10 s on two loaded cores (GY-3362 trace); the headroom is for a busy trial host.
   test.setTimeout(180_000);
   setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
   const store = await withDatabase('create-work-one-box'); await store.init();
@@ -158,7 +158,9 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     expect(rulesDraft.policy).toEqual({ review: true, checks: ['test'] });
     await expect(page.locator('article.item-page')).toContainText(waiting);
   } finally {
-    await page.unrouteAll({ behavior: 'wait' });
+    // GY-3362: 'wait' hung to the test timeout when a dashboard poll was in flight at teardown: Playwright
+    // answers that route itself, the handler's fulfill throws "already handled", and the wait never ends.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
     http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); await store.close();
   }
 });

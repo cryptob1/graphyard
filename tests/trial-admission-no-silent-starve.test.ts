@@ -46,7 +46,7 @@ async function machine(label: string) {
   await chmod(join(bin, 'docker'), 0o755); await chmod(join(bin, 'df'), 0o755);
   const env = { PATH: `${bin}:/usr/bin:/bin` };
   const load = (order: number, bounds: Partial<TrialLoad> = {}): TrialLoad => ({ slots, cap: 6, order, hotCelsius: 95, floorBytes: 30e9, hwmon: join(base, 'hwmon'),
-    pressureBoundSeconds: 600, waitBoundSeconds: null, ...bounds });
+    pressureBoundSeconds: 600, ...bounds });
   const volume = async (name: string, free?: number) => {
     const path = join(base, name);
     await mkdir(path, { recursive: true });
@@ -118,7 +118,7 @@ test(`${proof} — a start whose load wait passes its bound fails as a trial-hos
   } finally { await host.close(); }
 });
 
-test(`${proof} — a verification start that must wait prints the reason through complete's output within seconds and, past its bound, fails naming it`, { timeout: 120_000 }, async t => {
+test(`${proof} — a verification start that must wait prints the reason through complete's output within seconds and keeps waiting its turn (GY-3390)`, { timeout: 120_000 }, async t => {
   const host = await machine('starve-complete');
   const store = await withDatabase('starve-complete');
   await store.init(); t.after(() => store.close());
@@ -146,7 +146,7 @@ test(`${proof} — a verification start that must wait prints the reason through
   let taken = false;
   const pump = workerVerificationPump(root, () => 'test', mutate, () => 'main', undefined, async (_root, _work, _input, _base, _parent, progress) => {
     taken = true;
-    await verificationStep('true', [], { env: host.env, timeoutMs: 60_000, wrapper: host.words([allocation], host.load(trialStartOrder.verification, { cap: 1, waitBoundSeconds: 8 })) }, progress!);
+    await verificationStep('true', [], { env: host.env, timeoutMs: 8_000, wrapper: host.words([allocation], host.load(trialStartOrder.verification, { cap: 1, pressureBoundSeconds: 2 })) }, progress!);
     throw new Error('the start never ran');
   });
   const shown: { at: number; line: string }[] = [];
@@ -163,8 +163,9 @@ test(`${proof} — a verification start that must wait prints the reason through
     const waiting = shown.find(entry => entry.line.includes('waiting: '))!;
     assert.ok(waiting.at - at < 6_000, `within seconds, not at the bound: ${waiting.at - at} ms`);
     const failed = await answer;
-    assert.ok(failed instanceof Error, 'complete fails once the bound passes');
-    assert.match(failed.message, /could not start: Trial-host fault: the trial container waited \d+s to start and gave up: the machine-wide cap of 1 trial containers is reached/);
+    // Only the run's own deadline (8 s here) ends the wait: a full cap is no trial-host fault, however long the pressure bound.
+    assert.ok(failed instanceof Error, 'the run ends at its own deadline');
+    assert.doesNotMatch(failed.message, /gave up|Trial-host fault/);
     assert.equal(await host.started(), 1, 'the waiting verification never reached Docker');
     assert.equal(occupant.child.exitCode, null, 'the running trial is untouched');
   } finally {

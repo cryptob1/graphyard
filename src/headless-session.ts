@@ -16,7 +16,7 @@ import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
 import { realRuntimeBinary } from './runtime-binary.js';
-import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
+import { detectHeadlessExhaustion } from './master/runtime-prompt.js';
 import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
@@ -251,7 +251,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
         const raw = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), printed = runtimeReport(raw).reply ?? raw;
-        const notice = detectRuntimeExhaustion(printed, launch.kind, Date.now());
+        const notice = detectHeadlessExhaustion(raw, launch.kind, Date.now());
         if (notice) {
           await input.holdAccount?.(notice);
           if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${notice.reason}`, 'limit')); attempt = 0; continue; }
