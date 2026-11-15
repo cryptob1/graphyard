@@ -242,7 +242,8 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     const home = local.find(account => account.name === observation.account)?.credential.home;
     if (!home) continue;
     const mark = hostAccountExhaustion(home, now);
-    if (mark) observation.quota = { ...observation.quota, state: 'exhausted', session: mark.session, resetsAt: mark.until, since: mark.at,
+    // This install's own mark is already its registry's hold; only another install's is news here.
+    if (mark && mark.by !== install) observation.quota = { ...observation.quota, state: 'exhausted', session: mark.session, resetsAt: mark.until, since: mark.at,
       reason: `${observation.account} is held exhausted until ${mark.until} by the Graphyard install ${mark.by}: ${mark.reason}`.slice(0, 500) };
     try {
       for (const session of await hostAccountSessions(home)) if (session.install !== install) hostSessions.push({ account: observation.account, install: session.install, at: session.at });
