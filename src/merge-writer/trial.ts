@@ -25,6 +25,7 @@ import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies }
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
+import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -534,6 +535,19 @@ export class TrialHostFaultError extends Error {
     this.name = 'TrialHostFaultError';
   }
 }
+/**
+ * GY-3339: a trial step whose nested sandbox AppArmor denied — the trial host's AppArmor, not the
+ * head's. Like a fetch fault it reaches no verdict, is not retried, and the loop reports it upstream.
+ */
+export const trialSandboxFaultLead = `${trialHostFaultPrefix}: a nested sandbox could not start in the trial container`;
+export class TrialSandboxFaultError extends Error {
+  constructor(readonly phase: string, readonly line: string) {
+    super(`${trialSandboxFaultLead} during the ${phase} step (${line}); this is the trial host's AppArmor, not the head's: ${trialAppArmorFix}`);
+    this.name = 'TrialSandboxFaultError';
+  }
+}
+/** Whether an error, or the message it crossed a process boundary as, is a nested-sandbox trial-host fault. */
+export const trialSandboxFault = (error: unknown) => error instanceof Error && error.message.startsWith(trialSandboxFaultLead);
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
@@ -923,7 +937,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -1068,6 +1082,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-3332: a container start that gave up waiting on host pressure is no verdict on the head.
       const fault = trialContainerFault(out);
       if (fault) throw new TrialHostFaultError(phase, null, fault.slice(fault.indexOf(': ') + 2));
+      const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
+      if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;
     }
     entries.push(`$ ${command} ${args.join(' ')}\n${out}`);

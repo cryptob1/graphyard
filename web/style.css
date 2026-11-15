@@ -447,3 +447,10 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .replay-panel{margin:24px 0;border:1px solid var(--border);border-radius:12px}.replay-panel>summary{padding:16px 20px;cursor:pointer;font-weight:550}.replay-panel .work-replay{margin:0;border:0}.replay-tools button[aria-pressed=false]{background:transparent;color:var(--text-2);border-color:var(--border)}
 /* GY-3310: the served build in the bottom-left corner; the sidebar keeps its strip clear, and the page's own bottom padding (never the shell's, which would make the document scroll) clears it in main. */
 .version-label{position:fixed;left:0;bottom:0;z-index:5;padding:2px 8px;font-size:10px;line-height:14px;color:var(--text-3);background:var(--bg);font-family:var(--font-mono,monospace);pointer-events:none}@media(min-width:651px){.sidebar-inner{padding-bottom:calc(var(--space-5) + 18px)}}
+/* The Costs page's tables (GY-3315): numbers right-aligned under their headers in tabular figures; on a phone the token split folds away. */
+.table-scroll{overflow-x:auto;max-width:100%}
+.cost-table{width:100%;border-collapse:collapse;font-size:var(--type-body);color:var(--text);font-variant-numeric:tabular-nums}
+.cost-table th{font-size:var(--type-small);font-weight:500;color:var(--text-3);text-align:left;padding:8px var(--space-3)}
+.cost-table td{padding:10px var(--space-3);border-top:1px solid var(--border);text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.cost-table .num{text-align:right;overflow-wrap:normal}.cost-table th:first-child,.cost-table td:first-child{padding-left:0}.cost-table th:last-child,.cost-table td:last-child{padding-right:0}
+@media(max-width:650px){.cost-table .detail{display:none}.cost-table th,.cost-table td{padding-left:var(--space-2);padding-right:var(--space-2)}}
