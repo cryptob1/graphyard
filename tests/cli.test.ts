@@ -435,3 +435,44 @@ test('sync merges origin/BASE without rebasing and judges only the merge: in-sco
     await assert.rejects(sync(), /not one/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
+
+test(`unit:cli-pinned — sync runs from a directory inside the registered workspace (a subdirectory of the checkout) and heartbeats that checkout's own epoch, never a sibling attempt sharing the branch (GY-3355)`, async () => {
+  const cwd = await temporaryDirectory('cli-sync-pin');
+  const heartbeats: { url: string; body: any }[] = [];
+  // Rework keeps the branch across attempts: epoch 1's stale checkout and epoch 2's live one share it.
+  const task: any = { id: 'task', key: 'GY-4', policyRevision: 1,
+    workspaces: [{ epoch: 1, host: 'machine-a', path: join(cwd, 'stale'), branch: 'graphyard/gy-4-1' },
+      { epoch: 2, host: 'machine-a', path: join(cwd, 'live'), branch: 'graphyard/gy-4-1' }],
+    unsyncedRevision: { policyRevision: 1, at: '2026-11-15T00:00:00Z', by: 'operator', changed: [] } };
+  const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
+    if (req.method === 'POST') { let raw = ''; req.on('data', (chunk: any) => raw += chunk); req.on('end', () => { heartbeats.push({ url: req.url!, body: JSON.parse(raw) }); res.end('{}'); }); return; }
+    res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
+      : req.url === '/api/work-snapshot' ? { now: new Date().toISOString(), work: [task] } : req.url === '/api/work/GY-4' ? task : [task])); });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
+  const env = { ...process.env, GRAPHYARD_TOKEN: 'fixture', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
+  const origin = join(cwd, 'origin'), live = join(cwd, 'live');
+  const git = async (repo: string, ...args: string[]) => (await exec('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
+  const commit = async (repo: string, message: string) => { await git(repo, 'add', '-A'); await git(repo, 'commit', '-q', '-m', message); return git(repo, 'rev-parse', 'HEAD'); };
+  try {
+    await mkdir(origin); await git(origin, 'init', '-q', '--initial-branch', 'main');
+    await mkdir(join(origin, 'src'), { recursive: true });
+    await writeFile(join(origin, 'src/base.ts'), 'export const base = 1;\n');
+    await commit(origin, 'Base');
+    await exec('git', ['clone', '-q', origin, live]);
+    // sync runs the worker's own git merge, so the clone carries the identity a worker's checkout has.
+    await git(live, 'config', 'user.name', 'Test'); await git(live, 'config', 'user.email', 'test@localhost');
+    await git(live, 'checkout', '-q', '-b', 'graphyard/gy-4-1');
+    await writeFile(join(live, 'src/feature.ts'), 'feature v1\n'); await commit(live, 'Feature');
+    await writeFile(join(origin, 'src/base.ts'), 'export const base = 2;\n'); const mainTip = await commit(origin, 'Ship GY-33');
+    await git(live, 'fetch', '-q', 'origin');
+    // From inside the epoch-2 workspace — a subdirectory of its checkout — the merge runs and the
+    // acknowledging heartbeat names epoch 2: the checkout identifies the epoch, not the first
+    // branch match (epoch 1's stale attempt shares the branch).
+    const synced = JSON.parse((await exec(process.execPath, [launcher, 'sync', 'GY-4'], { cwd: join(live, 'src'), env })).stdout);
+    assert.equal(synced.ok, true); assert.equal(synced.merged, true); assert.equal(synced.baseTip, mainTip);
+    assert.deepEqual(heartbeats, [{ url: '/api/work/task/heartbeat', body: { epoch: 2, syncedPolicyRevision: 1 } }]);
+    // Outside every registered workspace — even on the shared branch — sync refuses rather than merge.
+    await exec('git', ['clone', '-q', '--branch', 'graphyard/gy-4-1', live, join(cwd, 'elsewhere')]);
+    await assert.rejects(exec(process.execPath, [launcher, 'sync', 'GY-4'], { cwd: join(cwd, 'elsewhere'), env }), /is not one/);
+  } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});

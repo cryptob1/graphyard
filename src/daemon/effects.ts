@@ -83,6 +83,13 @@ export interface DaemonEffects {
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree, forced only when asked (a done item's, a day after its last attempt ended); whether one was removed. */
   removeWorktree?: (path: string, force?: boolean) => Promise<boolean>;
+  /**
+   * GY-3341: the attempt worktrees still standing on this host, from the disk (`GY-N-EPOCH`
+   * directories under `.graphyard/worktrees`) with when each last changed. The close step reclaims
+   * the leftovers of items the loop's snapshot no longer holds; absent, only the snapshot's own
+   * items are reclaimed.
+   */
+  attemptWorktrees?: () => Promise<{ path: string; changedAt: number }[]>;
   /** The free space of each volume Graphyard writes (GY-3122). Absent, no headroom is kept. */
   diskVolumes?: () => Promise<{ path: string; freeBytes: number | null }[]>;
   /** Reclaims Graphyard's own leftovers when free space is below the floor (GY-3122): what it removed, by name. */

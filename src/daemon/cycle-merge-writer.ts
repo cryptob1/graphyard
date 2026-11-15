@@ -1,3 +1,4 @@
+import { trialOverloadFault } from '../merge-writer/trial-cpu.js';
 import { timedMergePorts, trialStepMedians } from './trial-timings.js';
 import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, pendingReworkSchema, unconfirmedRecordSchema, mergeWriterStateSchema, emptyMergeWriterState, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
@@ -857,6 +858,12 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads' trials passed (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head yields its turn and is tried after every other queued head`);
+          } else if (trialOverloadFault(error)) {
+            action('failed', `Merge of ${itemKey} head ${head} stopped on ${message(error)}; no rework; the same head retries until three overloaded trials raise a blocker to the master`);
+            const attentionKey = `trial-overload:${itemKey}:${head}`;
+            if (!state.actions[attentionKey]) performed.push(storeAction(state, attentionKey, { kind: 'attention', work: itemKey, principal: null,
+              state: 'failed', detail: `${itemKey}: ${message(error)}; the same head is queued again. After three overloaded trials the master must resolve the host.`,
+              attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
           } else if (trialRepositoryImageFault(error)) {
             // GY-3275: the repository's own trial image could not be built: no verdict on the head, reported upstream like a fetch fault (GY-3249).
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
