@@ -12,6 +12,7 @@ import { defaultChildRun } from './child-runner.js';
 import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrInstaller, herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
+import { deployCheckoutOf } from './install/loop-unit.js';
 import { landlockRefusal } from './landlock.js';
 import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
 import { trialContainerLaunch, trialImage } from './merge-writer/trial-container.js';
@@ -30,6 +31,7 @@ export const setupSteps = {
   trialAppArmor: trialAppArmorFix,
   loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
+  deploySource: 'restart this install\'s deploy unit (graphyard upgrade --watch), which replaces the worktree with a standalone clone at the same commit',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
 } as const;
 
@@ -38,6 +40,8 @@ export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: strin
 export interface SetupFromZeroInput {
   /** The managed repository's checkout doctor runs in. */
   root: string;
+  /** This install's directory, whose deploy checkout doctor judges (GY-3350). */
+  installDir?: string;
   env?: NodeJS.ProcessEnv;
   /** The server's GET /api/status answer, or null with the failure when it did not answer. */
   status: any | null;
@@ -235,6 +239,15 @@ async function serveCheck(root: string): Promise<SetupCheck | null> {
     : check('fail', `the declared serve does not answer ${record.url}${record.failed ? `; the build of ${record.failed.slice(0, 12)} failed last: ${(record.reason ?? '').slice(0, 200)}` : ''}`);
 }
 
+/** GY-3350: an install's deploy checkout must be its own clone; a linked worktree (its .git a file) breaks when the checkout it belongs to moves or is deleted. Null when the install has none. */
+export async function deploySourceCheck(installDir: string): Promise<SetupCheck | null> {
+  const checkout = deployCheckoutOf(installDir);
+  const dotGit = await stat(join(checkout, '.git')).catch(() => null);
+  if (!dotGit) return null;
+  return dotGit.isDirectory() ? { id: 'deploy-source', status: 'pass', step: setupSteps.deploySource, detail: `${checkout} is a standalone clone` }
+    : { id: 'deploy-source', status: 'fail', step: setupSteps.deploySource, detail: `the deploy source ${checkout} is a worktree of another checkout, so moving or deleting that checkout breaks this install's deploy` };
+}
+
 /** Whether herdr, which the master window runs in, is on PATH (GY-3324). */
 async function herdrCheck(path: string): Promise<SetupCheck> {
   for (const directory of path.split(delimiter).filter(Boolean)) {
@@ -270,6 +283,8 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
+  const deploySource = input.installDir ? await deploySourceCheck(input.installDir) : null;
+  if (deploySource) lines.push(deploySource);
   const serve = await serveCheck(input.root);
   if (serve) lines.push(serve);
   return lines;
