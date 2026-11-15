@@ -184,3 +184,24 @@ test(`${proof} — a trial's compose-network container counts under the same loa
   assert.equal(network.network, 'container:abc');
   assert.deepEqual(network.load, load);
 });
+
+
+test('e2e:trial-overload-timeout-retrial — a reduced cap counts running containers in higher-numbered slots', async () => {
+  const host = await machine('load-cap-reduced');
+  try {
+    const first = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 1, 'first started');
+    const second = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 2, 'second started');
+    const third = host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 3, 'third started');
+    host.launch({ cap: 4 });
+    await host.until(async () => await host.started() === 4, 'fourth started');
+    await host.end(first.child); await host.end(second.child);
+    const waiting = host.launch({ cap: 2 });
+    await host.until(() => waiting.said().includes('cap of 2 trial containers'), 'the lower cap counts the two still running');
+    assert.equal(await host.started(), 4, 'free low slots do not grant extra capacity');
+    await host.end(third.child);
+    await host.until(async () => await host.started() === 5, 'a start fits once the running count falls below two');
+  } finally { await host.close(); }
+});
