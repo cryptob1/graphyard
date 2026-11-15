@@ -91,11 +91,14 @@ export function removeMasterLesson(memory: ProjectMemory, id: string): MemoryNot
 /**
  * Adopt the file's master lessons and product brief into the loop's copy (GY-3274): the master
  * session records them straight to `.graphyard/project-memory.json`, so the file — never the loop's
- * older copy — is their truth, additions and removals alike. `null` (no readable file) changes nothing.
+ * older copy — is their truth, additions and removals alike — except a lesson the loop already removed
+ * once its item turned it into code (GY-3399), which a stale write of the file never brings back.
+ * `null` (no readable file) changes nothing.
  */
 export function reconcileMasterMemory(memory: ProjectMemory, recorded: { lessons: MemoryNote[]; brief: ProductBrief | null } | null): ProjectMemory {
   if (!recorded) return memory;
-  memory.notes = boundMemoryNotes([...recorded.lessons, ...memory.notes.filter(note => note.kind !== masterLessonKind)]);
+  const removed = new Set((memory.removedGates ?? []).map(entry => entry.id));
+  memory.notes = boundMemoryNotes([...recorded.lessons.filter(lesson => !removed.has(lesson.id)), ...memory.notes.filter(note => note.kind !== masterLessonKind)]);
   memory.brief = recorded.brief;
   return memory;
 }
