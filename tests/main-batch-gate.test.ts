@@ -779,3 +779,21 @@ test('e2e:diagnostic-failure-details — a scheduled diagnostic through batchGat
   await writeGateRecord(file, older);
   assert.deepEqual(gateSummary(readGateRecord(file))!.diagnosticFailures, []);
 });
+
+// A project that was never onboarded needs a repair, not a revert of an unrelated merge.
+test('integration:real-app-onboarding — a pre-existing feature-map fault holds; a new regression reverts', async () => {
+  const verified = sha(1), check = 'e2e:graphyard-feature-map';
+  for (const alreadyBroken of [true, false]) {
+    const { ports, reverted } = gatePorts([landing(2)], (commit, name) => name === check && (alreadyBroken || commit !== verified));
+    ports.core = async () => ['graphyard-feature-map'];
+    const record = bootstrapGate(repository, verified);
+    const result = await runGate(ports, record);
+    assert.equal(result.outcome, alreadyBroken ? 'held' : 'reverted');
+    assert.equal(record.verified, verified);
+    assert.deepEqual(reverted, alreadyBroken ? [] : ['GY-2']);
+    if (alreadyBroken) {
+      assert.match(record.held!.reason, /Master fault: owner\/project/);
+      assert.equal((await runGate(ports, record)).outcome, 'idle', 'one standing fault until main changes');
+    }
+  }
+});

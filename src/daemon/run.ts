@@ -192,7 +192,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // reads it — and told to the supervisor as a keep-alive.
     let progress: () => void = () => {};
     let heartbeat: LoopHeartbeat | undefined;
-    let cycling = false;
+    let cycling = true;
     const effects = boundedPersist(namedEffects(markedEffects(raw, () => progress())));
     acquireDaemonLock(state, options.identity, now(), interval());
     state.release = carryUndeclared(state.release, raw.loadedRelease ?? null);
