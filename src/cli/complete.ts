@@ -7,6 +7,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
+import { checkoutRoot } from './context.js';
 import { changeBase, selfVerification } from './verify.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { leadingProof } from '../model/flake-ledger.js';
@@ -330,6 +331,7 @@ export const completeCommand: CliCommand = {
   ],
   run: async (context, work) => {
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    await checkoutRoot(context, `graphyard complete ${work.key}`);
     // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
     // before anything is submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape

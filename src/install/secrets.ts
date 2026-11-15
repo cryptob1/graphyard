@@ -37,9 +37,9 @@ export class Vault {
  * later apply keeps; the installer's own entries carry none.
  */
 export interface RosterPrincipal extends PlannedPrincipal { grants?: PrincipalGrant[]; source?: 'principal' }
-const roles: Role[] = ['admin', 'coordinator', 'worker', 'reader', 'producer'];
+const roles: Role[] = ['admin', 'coordinator', 'worker', 'reader', 'producer', 'reporter'];
 /** One install.json roster entry: the principal, with its credential's fingerprint and never the credential. */
-const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer']), proofs: z.array(z.string().min(1)).optional(), grants: z.array(z.enum(principalGrants)).optional(), sessionKind: z.enum(['human', 'ai']).optional(), source: z.literal('principal').optional(), fingerprint: z.string().length(12) }).strict();
+const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer', 'reporter']), proofs: z.array(z.string().min(1)).optional(), grants: z.array(z.enum(principalGrants)).optional(), sessionKind: z.enum(['human', 'ai']).optional(), source: z.literal('principal').optional(), fingerprint: z.string().length(12) }).strict();
 export const installRecordSchema = z.object({
   version: z.literal(1),
   installId: z.string().min(1),

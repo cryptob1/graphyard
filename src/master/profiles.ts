@@ -395,6 +395,7 @@ export const masterConfigSchema = forwardTolerant(z.object({
     maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
   }).strict().optional(),
   // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
+  // GY-3344: its credential is a reporter principal there, which files items and messages that Master and nothing else.
   upstream: z.object({
     url: z.string().min(1).max(500),
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),

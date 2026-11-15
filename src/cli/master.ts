@@ -1,5 +1,6 @@
 import { masterGuide } from '../master/guide.js';
 import { defineCommands } from './registry.js';
+import { checkoutRoot } from './context.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
@@ -67,6 +68,7 @@ export const masterCommands = defineCommands([
       '                                Apply intent at once with the master\'s identity',
       '  master hold GY-N REASON       Hold a released item out of dispatch; its worker keeps its lease',
       '  master message GY-N TEXT      Message the item\'s worker; shown and acknowledged at its next sync',
+      '  master reply MESSAGE-ID TEXT  Reply to a message a reporter sent this Master (master status lists them)',
       '  master priority GY-N 0|1|2|3 REASON  Change priority with an audit reason',
       '  master attest GY-N PROOF REASON  Attest a manual: proof on the exact current head',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
@@ -79,7 +81,7 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
-      const root = context.repositoryRoot();
+      const root = await checkoutRoot(context, `graphyard master ${id ?? ''}`.trimEnd());
       // The master's role instructions lead the guide.
       if (id === 'guide') return console.log(`${masterInstructions}\n${masterGuide}`);
       if (id === 'init') return masterInit(context, root);
