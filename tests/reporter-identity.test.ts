@@ -68,7 +68,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
 
   // It files an item with the CLI and gets its key; the item is unreleased, in backlog and attributed to it.
   const itemFile = join(home, 'item.json');
-  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', description: 'Filed by the Huck install master.', type: 'chore', criteria }));
+  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', why: 'Huck ships Go changes again.', simplest: 'Add Go 1.23 to the trial image.', description: 'Filed by the Huck install master.', type: 'chore', criteria }));
   const created = await graphyard('create', itemFile);
   assert.match(created.key, /^GY-\d+$/);
   const filed = await api(`work/${created.key}`);
