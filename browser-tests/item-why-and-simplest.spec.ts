@@ -42,10 +42,11 @@ test('e2e:item-why-and-simplest — the create box files both sentences, the ite
 
     const itemPage = page.locator('article.item-page');
     const heading = itemPage.locator('.page-heading');
-    await expect(heading.locator('[data-why]')).toHaveText(`Why: ${why}`, settled);
+    // GY-3392: the why sentence is the plate's heading, the first thing on the page.
+    await expect(heading.locator('h1[data-why="true"]')).toHaveText(why, settled);
     await expect(heading.locator('[data-simplest]')).toHaveText(`Simplest: ${simplest}`);
     // Above the description and criteria, which fold under Details further down.
-    const leadTop = (await heading.locator('[data-lead]').boundingBox())!.y, detailsTop = (await itemPage.locator('.item-details-fold').boundingBox())!.y;
+    const leadTop = (await heading.locator('h1[data-why="true"]').boundingBox())!.y, detailsTop = (await itemPage.locator('.item-details-fold').boundingBox())!.y;
     expect(leadTop).toBeLessThan(detailsTop);
 
     await page.getByRole('button', { name: '← Back' }).click();
@@ -64,7 +65,7 @@ test('e2e:item-why-and-simplest — the create box files both sentences, the ite
     await revise.getByLabel('Why it helps users').fill('Agents build what users need.');
     await revise.getByLabel('Reason for revision').fill('Sharper why');
     await revise.getByRole('button', { name: 'Save requirement revision' }).click();
-    await expect(heading.locator('[data-why]')).toHaveText('Why: Agents build what users need.', settled);
+    await expect(heading.locator('h1[data-why="true"]')).toHaveText('Agents build what users need.', settled);
     await expect(heading.locator('[data-simplest]')).toHaveText(`Simplest: ${simplest}`);
     await page.getByRole('button', { name: '← Back' }).click();
     await expect(page.locator(`[data-row="${created.key}"] [data-lead]`)).toBeVisible(settled);
@@ -72,7 +73,7 @@ test('e2e:item-why-and-simplest — the create box files both sentences, the ite
 
     await page.locator(`[data-row="${older.key}"]`).getByRole('button', { name: /open/ }).click();
     await expect(itemPage.locator('h1')).toHaveText('Older item', settled);
-    await expect(itemPage.locator('[data-lead]')).toHaveCount(0);
+    await expect(itemPage.locator('h1[data-why="true"], [data-simplest]')).toHaveCount(0);
   } finally {
     await page.unrouteAll({ behavior: 'wait' });
     await f.close();
