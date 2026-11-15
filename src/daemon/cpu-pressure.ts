@@ -8,18 +8,38 @@
 // from the fleet's own load. Both figures ride the loop's presence to the Workers page and master
 // status. Where /proc/pressure/cpu is missing (not Linux) the whole check is skipped: launches
 // run as they always did, and nothing running is ever stopped.
+// GY-3373: the hottest CPU sensor rides the same reading. Pressure alone missed a host at 98C with
+// avg60 near 20, where every trial start waited on heat while the loop kept launching agents; so
+// launches wait from the trial guard's own limit minus 5C. Where no sensor is readable, no heat holds.
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
+import { cpuSensorNames, trialHotCelsius } from '../merge-writer/trial-load.js';
 
 /** The one constant, no setting: while 'some avg60' reads above this, no new worker, reviewer or trial starts. */
 export const cpuPressureCeiling = 85;
+/** GY-3373: launches wait while the hottest CPU sensor reads this or more, before the trial guard itself refuses a start. */
+export const launchHotCelsius = trialHotCelsius - 5;
 
-/** The one status line master status carries while launches wait (GY-3348), with the figure rounded. */
-export const cpuWaitingLine = (avg60: number) => `launches waiting: CPU pressure ${Math.round(avg60)} percent`;
+/** The one status line master status carries while launches wait — heat first, then pressure — or null when nothing holds them. */
+export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
+  const cpu = state.cpuPressure;
+  if (cpu?.celsius != null && cpu.celsius >= launchHotCelsius) return `launches waiting: CPU ${cpu.celsius}C`;
+  if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return `launches waiting: CPU pressure ${Math.round(cpu.avg60)} percent`;
+  return null;
+}
+export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuWaiting(state) !== null;
 
-/** Whether the last reading holds new launches: avg60 above the ceiling. A missing reading (or file) holds nothing. */
-export function cpuPressureHeld(state: Pick<DaemonState, 'cpuPressure'>): boolean {
-  return !!state.cpuPressure && state.cpuPressure.avg60 > cpuPressureCeiling;
+/** The hottest CPU sensor under `hwmon` in whole degrees, as the trial guard reads it; null where none is readable. */
+export async function hottestCpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
+  const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');
+  const readings = (await Promise.all((await readdir(hwmon).catch(() => [] as string[])).map(async sensor => {
+    if (!cpuSensorNames.includes(await read(join(hwmon, sensor, 'name')))) return [];
+    const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => name.startsWith('temp') && name.endsWith('_input'));
+    return (await Promise.all(inputs.map(name => read(join(hwmon, sensor, name))))).filter(text => /^\d+$/.test(text)).map(text => Math.floor(Number(text) / 1000));
+  }))).flat();
+  return readings.length ? Math.max(...readings) : null;
 }
 
 /** 'some avg60' of /proc/pressure/cpu: the kernel's own average of the time some task waited for a CPU. */
@@ -46,23 +66,17 @@ export function stealPercent(previous: { total: number; steal: number } | null, 
 /**
  * One cycle's reading (GY-3348): the pressure and steal figures the Workers page and master status
  * show, with the counters the next cycle's steal is measured from, kept on the cursor so a restart
- * loses only one reading. A missing pressure file (not Linux) clears the record — launches run and
+ * loses only one reading, and the hottest sensor (GY-3373). With neither readable (not Linux) the record clears — launches run and
  * the pages show nothing, exactly as before — and a hold that begins or ends is one journal line.
  */
 export async function cpuPressureStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   const reading = await Promise.resolve(effects.cpuPressure?.()).catch(() => null) ?? null;
-  const avg60 = reading ? pressureAvg60(reading.pressure) : null;
-  if (avg60 === null) {
-    if (cpuPressureHeld(state)) log(`[graphyard-master] cycle ${state.cycle}: launches resume: no CPU pressure reading (the file is missing, so the check is skipped)`);
-    state.cpuPressure = null;
-    return;
-  }
-  const previous = state.cpuPressure;
-  const stat = reading && reading.stat !== null ? cpuStatTotals(reading.stat) : null;
-  state.cpuPressure = { at: new Date(now()).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat };
-  const waiting = avg60 > cpuPressureCeiling;
-  if (waiting !== cpuPressureHeld({ cpuPressure: previous })) log(waiting
-    ? `[graphyard-master] cycle ${state.cycle}: ${cpuWaitingLine(avg60)} (above ${cpuPressureCeiling}); no new worker, reviewer or trial starts until it falls`
-    : `[graphyard-master] cycle ${state.cycle}: launches resume: CPU pressure ${Math.round(avg60)} percent`);
+  const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, celsius = reading?.celsius ?? null;
+  const previous = state.cpuPressure, was = cpuWaiting(state);
+  const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null;
+  state.cpuPressure = avg60 === null && celsius === null ? null
+    : { at: new Date(now()).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius };
+  const waiting = cpuWaiting(state);
+  if (!!waiting !== !!was) log(`[graphyard-master] cycle ${state.cycle}: ${waiting ? `${waiting}; no new worker, reviewer or trial starts until it falls` : 'launches resume'}`);
 }

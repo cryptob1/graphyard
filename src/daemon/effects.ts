@@ -100,7 +100,7 @@ export interface DaemonEffects {
    * the pressure file is missing (not Linux), in which case nothing is held. Absent, no reading is
    * kept and no launch waits on the CPU.
    */
-  cpuPressure?: () => Promise<{ pressure: string; stat: string | null } | null>;
+  cpuPressure?: () => Promise<{ pressure: string | null; stat: string | null; celsius?: number | null } | null>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */

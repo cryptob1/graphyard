@@ -20,6 +20,8 @@ export const trialSlotCount = (cores: number, requested: number, affordableFiles
 const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
+/** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */
+export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
 /** GY-3376: a start waits while a CPU sensor reads 3C under its own critical (else max) temperature; this is the limit for a sensor that reports neither. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
@@ -29,21 +31,20 @@ export const trialStartOrder = { merge: 0, gate: 1, verification: 2 } as const;
 
 /**
  * GY-3332: how long a start waits on host pressure (heat, the disk floor) before it fails as a trial-host
- * fault, with no verdict on its head; and how long a worker's verification waits for anything, so
- * `complete` never hangs on a start it cannot see. A merge or gate start's wait for a slot is bounded by its trial's own deadline.
+ * fault, with no verdict on its head. A wait for a slot under the cap is capacity, not a fault (GY-3390):
+ * every start waits its turn, bounded only by its own run's deadline (a worker verification's 55 minutes).
  */
 export const trialPressureBoundSeconds = 10 * 60;
-export const trialVerificationBoundSeconds = 10 * 60;
 
 /** What the launcher reads to admit a container. `slots` is per machine, not per install: any install's containers load the same CPUs. */
-export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number; waitBoundSeconds: number | null }
+export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
 const hostCpu = trialCpuMonitor();
 export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
   return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
-    pressureBoundSeconds: trialPressureBoundSeconds, waitBoundSeconds: who === 'verification' ? trialVerificationBoundSeconds : null };
+    pressureBoundSeconds: trialPressureBoundSeconds };
 }
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
 
@@ -53,7 +54,7 @@ const faultLine = `${launcherLine}Trial-host fault: `;
 /** The launcher's Python: `admit()` returns once a container may start, holding its slot in the fd it returns. */
 export const trialAdmission = String.raw`
 load = spec.get('load')
-cpu_sensors = ('coretemp', 'k10temp', 'zenpower', 'cpu_thermal')
+cpu_sensors = ${JSON.stringify(cpuSensorNames)}
 def read(path):
     try:
         with open(path) as file:
@@ -155,12 +156,14 @@ def admit():
                 if queued is not None:
                     os.close(queued)
                     queued = None
-                bound = load.get('pressureBoundSeconds')
+                bound = load['pressureBoundSeconds']
             else:
                 why = 'the machine-wide cap of ' + str(load['cap']) + ' trial containers is reached'
                 if queued is None:
                     queued = locked('waiting-' + str(load['order']), fcntl.LOCK_SH)
-                bound = load.get('waitBoundSeconds')
+                # A slot wait is capacity, never a fault: it has no bound, and only pressure that follows it is timed.
+                bound = None
+                began = time.time()
             if why != said:
                 print('${waitingLine}: ' + why, file=sys.stderr, flush=True)
                 said = why
