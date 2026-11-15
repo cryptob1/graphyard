@@ -7,6 +7,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
+import { cpuPressureHeld, cpuWaitingLine } from '../daemon/cpu-pressure.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
@@ -24,6 +25,7 @@ import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-spe
 import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
+import { trialFloorAttention } from '../merge-writer/trial-load.js';
 import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
@@ -137,7 +139,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .sort((a, b) => Date.parse(b.delivery?.mergedAt ?? b.observation!.mergedAt!) - Date.parse(a.delivery?.mergedAt ?? a.observation!.mergedAt!)).slice(0, 50)
     .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
       events: await itemLedger(masterApi, item.id) })));
-  const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000);
+  const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
   // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
   let placeholder = false;
   try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
@@ -162,7 +164,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -177,6 +179,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       : { on: false },
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
+    // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
+    // same two figures the Workers page shows — with the one waiting line while avg60 is over the
+    // ceiling and launches are held.
+    cpuPressure: state?.cpuPressure
+      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal,
+        waiting: cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure.avg60) : null }
+      : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },

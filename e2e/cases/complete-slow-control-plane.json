@@ -1,0 +1,13 @@
+{
+  "id": "complete-slow-control-plane",
+  "title": "complete survives a slow control plane instead of failing at 120 s",
+  "description": "Runs the real CLI against a control-plane stub whose idempotency receipts work like the plane's own. When the stub answers the first submit only after the CLI's 120 s request bound and the retry promptly, complete succeeds with the head submitted exactly once under one idempotency key and names the retry; when the stub applied the first request before the bound, the retry is answered from the receipt and reports the submission as already recorded, still exactly once, exiting 0.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Complete retries a submission a slow control plane did not answer, under one idempotency key",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/complete-slow-control-plane.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

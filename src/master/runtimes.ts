@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { asksNothing, trustAgyFolder, trustClaudeFolder, trustCodexFolder, verifyClaudeTrust, verifyCodexTrust, type LaunchRecipe } from '../harness.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
+import { claudeAccount, codexAccount, zaiAccount, type PlanReading } from './environment-quota.js';
 import type { AccountUsage, EnvironmentProbe } from './environments.js';
 
 /** An account home as a usage reader probes it: its kind and home, the plan derived for it and the one declared, and its named key file. */
@@ -59,10 +59,23 @@ const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly
 /** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
 const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
 
-/** Cursor keeps its login in cli-config.json and exposes no quota. */
+/** GY-3329: where cursor-agent keeps its sign-in on a host with no desktop keyring: `$XDG_CONFIG_HOME/cursor/auth.json`, falling back to `$HOME/.config/cursor/auth.json`. It never reads its sign-in from `CURSOR_CONFIG_DIR`, which holds the profile in cli-config.json. */
+export const cursorSignInFile = 'cursor/auth.json';
+/** Cursor keeps its profile in cli-config.json and its sign-in in `cursor/auth.json` under the account's XDG config home (GY-3329) — the file a confined session, with a private HOME and no keyring, actually authenticates with. It exposes no quota. */
 async function cursorAccount(environment: ProbedHome): Promise<AccountReading> {
-  const info = (await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo;
-  return { loggedIn: !!info && !!(info.userId || info.email), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+  const signIn = await readFile(resolve(environment.home, cursorSignInFile), 'utf8').then(text => text.trim(), () => '');
+  return { loggedIn: !!signIn, usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+}
+/**
+ * GY-3329: the login-home variables an account's home is applied to beyond its home variable.
+ * cursor-agent ignores `CURSOR_CONFIG_DIR` for its sign-in and reads it from
+ * `$XDG_CONFIG_HOME/cursor/auth.json`, and a confined session has a private HOME and no
+ * XDG_CONFIG_HOME, so a cursor account's home is its XDG config home too — applied per account,
+ * over anything a runtime contract pinned to one account's home, so one cursor account never
+ * reads another's sign-in.
+ */
+export function accountHomeEnvironment(kind: string | null | undefined, home: string | null | undefined): Record<string, string> {
+  return kind === 'cursor' && home ? { XDG_CONFIG_HOME: home } : {};
 }
 
 // Per-runtime startup contracts that remove the approval and workspace-trust prompts a freshly
@@ -104,6 +117,8 @@ const builtInAdapters = {
     request: reference => reference,
     screen: /\bCursor\b/,
     limitNotices: [...providerUsageErrors],
+    // GY-3329: the sign-in cursor-agent reads is `$XDG_CONFIG_HOME/cursor/auth.json`, so the
+    // account's home is applied to XDG_CONFIG_HOME too (accountHomeEnvironment).
     home: { variable: 'CURSOR_CONFIG_DIR', default: home => resolve(home, '.cursor') },
     usage: environment => cursorAccount(environment),
     identity: { file: 'cli-config.json', ids: login => [login?.authInfo?.userId] },

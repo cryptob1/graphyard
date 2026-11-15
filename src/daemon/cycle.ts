@@ -22,7 +22,7 @@ import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normal
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
-import { launchGraceMs } from '../model/registry-sessions.js';
+import { launchGraceMs, liveSessions } from '../model/registry-sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { actionDetailMax, actionLine, cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, storeAction, touchStanding } from './state.js';
 import { basename } from 'node:path';
@@ -44,6 +44,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
+import { cpuPressureHeld, cpuPressureStep, cpuWaitingLine } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -285,6 +286,23 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
  * an attempt ended by a lapsed lease had not committed, ask the control plane to reconcile each
  * lease that lapsed with nothing submitted, and remove the worktrees of ended attempts.
  */
+/**
+ * GY-3346: a live registry session recorded on another host cannot run here — the install moved,
+ * and nothing on the old host will ever end it — so it gives its role slot back in this close step,
+ * before the same cycle's dispatch and master launch ask the registry for slots.
+ */
+async function endForeignHostSessions(cycle: Cycle) {
+  const { config, effects } = cycle;
+  if (!effects.registry || !effects.endRegistrySession) return;
+  const registry = await effects.registry().catch(() => null);
+  for (const session of liveSessions({ sessions: registry?.sessions ?? [] })) {
+    if (session.host === config.hostId) continue;
+    const key = `close:registry:${session.id}`;
+    try { await effects.endRegistrySession(session.id, `recorded on ${session.host}, this install runs on ${config.hostId}`); await note(cycle, key, 'close', session.work, 'done', `Ended the ${session.role} registry session ${session.id}: recorded on ${session.host}, this install runs on ${config.hostId}`); }
+    catch (error) { await note(cycle, key, 'close', session.work, 'failed', `Could not end the ${session.role} registry session ${session.id} recorded on ${session.host}: ${message(error)}`); }
+  }
+}
+
 async function closeStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock } = cycle;
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
@@ -307,6 +325,7 @@ async function closeStep(cycle: Cycle) {
     }
     await attemptBoundStep(cycle, item, session);
   }
+  await endForeignHostSessions(cycle);
   if (effects.reclaimLease) for (const item of snapshot.work) {
     if (item.stage === 'done' || item.submission) continue;
     const lease = item.lease;
@@ -425,8 +444,18 @@ async function closeStep(cycle: Cycle) {
   tallyLeftovers(state, 'reclaimed', leftovers.length - networks);
   tallyLeftovers(state, 'networks', networks);
   if (leftovers.length) await note(cycle, `job-leftovers:${state.cycle}`, 'reclaim', null, 'done', `Removed ${leftovers.join(', ')}: left behind by jobs that have ended`);
+  const releases = await effects.sweepCliReleases?.().catch(error => { cycle.log(`[graphyard-master] the CLI release sweep failed: ${message(error)}`); return null; });
+  if (releases?.removed.length) {
+    tallyLeftovers(state, 'cliReleases', releases.removed.length);
+    tallyLeftovers(state, 'cliReleaseBytes', releases.bytes);
+    await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
+  }
+  if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
+  // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
+  // launches while it is saturated — before anything of this cycle starts one.
+  await cpuPressureStep(cycle);
 }
 
 /**
@@ -559,8 +588,12 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
+  // reviewer or trial starts: one status line names the figure, and running sessions are never
+  // stopped. The first cycle below it launches again on its own.
+  const cpuWaiting = cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure!.avg60) : undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !cpuWaiting && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -606,7 +639,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot);
+  await effects.dispatchTick?.(snapshot, cpuWaiting);
   await masterSession(cycle, open);
 }
 

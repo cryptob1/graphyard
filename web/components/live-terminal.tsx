@@ -88,8 +88,11 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
         section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + below}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
-        const cols = Math.max(10, Math.min(500, Math.floor((host.current.clientWidth - 16) / (screen.width / terminal.cols))));
-        const rows = Math.max(10, Math.min(500, Math.floor(host.current.clientHeight / (screen.height / terminal.rows))));
+        // xterm 6's scrollbar overlays the text: the columns take the container's whole width (GY-3313),
+        // measured unrounded, since clientWidth rounds a fractional width up past the edge.
+        const box = host.current.getBoundingClientRect();
+        const cols = Math.max(10, Math.min(500, Math.floor(box.width / (screen.width / terminal.cols))));
+        const rows = Math.max(10, Math.min(500, Math.floor(box.height / (screen.height / terminal.rows))));
         if (cols !== terminal.cols || rows !== terminal.rows) terminal.resize(cols, rows);
         send({ type: 'resize', cols, rows });
       };
@@ -190,10 +193,12 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       element.addEventListener('touchstart', touchStart, { passive: true }); element.addEventListener('touchmove', touchMove, { passive: false });
       const typing = terminal.onData(input);
       const observer = new ResizeObserver(fit); observer.observe(host.current!);
-      window.addEventListener('resize', fit);
+      // Back on the page after another tab or app sized the pane, the pane is fitted to this page again (GY-3313).
+      const visible = () => { if (document.visibilityState === 'visible') fit(); };
+      window.addEventListener('resize', fit); document.addEventListener('visibilitychange', visible);
       fit(); connect();
       stop = () => {
-        clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit);
+        clearTimeout(reconnect); observer.disconnect(); window.removeEventListener('resize', fit); document.removeEventListener('visibilitychange', visible);
         element.removeEventListener('paste', paste, true); element.removeEventListener('drop', drop); element.removeEventListener('dragover', over); element.removeEventListener('contextmenu', context);
         element.removeEventListener('touchstart', touchStart); element.removeEventListener('touchmove', touchMove);
         typing.dispose(); socket.close(); terminal.dispose(); sendKey.current = () => {};

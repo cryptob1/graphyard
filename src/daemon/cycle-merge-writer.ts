@@ -16,7 +16,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialHostFaultPrefix, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
@@ -28,6 +28,7 @@ import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-fai
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
+import { cpuPressureHeld } from './cpu-pressure.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -589,8 +590,9 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   if (revertState.held?.serve === serve) return false;
   if (flying(state)) { revertWaiting.add(state); return false; }
   // GY-3122: below the disk floor no new trial starts — the revert flight's trial is the loop's
-  // most disk-heavy one — and an owed retrial keeps its place until room returns.
-  if (state.diskHeadroom) return false;
+  // most disk-heavy one — and an owed retrial keeps its place until room returns. GY-3348: a
+  // saturated CPU holds it just the same.
+  if (state.diskHeadroom || cpuPressureHeld(state)) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
   // An owed retrial waits the base-failure hold like a base-held head (executor.ts GY-1834)
@@ -884,10 +886,12 @@ export async function mergeWriterStep(cycle: Cycle) {
             // GY-3339: AppArmor denied the trial's nested sandbox: no verdict on the head, reported upstream once per repository.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             await reportTrialSandboxFault(cycle);
-          } else if (trialHostFaultHost(error)) {
-            // GY-3249: the trial host could not reach a host the build needs: no verdict on the head, reported upstream once per host.
+          } else if (message(error).startsWith(trialHostFaultPrefix)) {
+            // GY-3249: the trial host could not reach a host the build needs, or (GY-3332) its container gave up waiting on the
+            // host's load: no verdict on the head; a fetch fault is reported upstream once per host.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
-            await reportTrialHostFault(cycle, trialHostFaultHost(error)!);
+            const host = trialHostFaultHost(error);
+            if (host) await reportTrialHostFault(cycle, host);
           } else if (error instanceof TrialCancelledError) action('failed', `Merge of ${itemKey} head ${head} stopped: its trial was cancelled because ${error.reason}; the head is not refused to rework and, while it is still queued, is trialled again on the current base`);
           else action('failed', keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
             : `Merge of ${itemKey} head ${head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);
@@ -1039,8 +1043,9 @@ export async function mergeWriterStep(cycle: Cycle) {
       // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
       const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === runnable[0]?.id) ?? null;
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
-      // GY-3122: below the disk floor no new trial starts; one in flight settles.
-      const due = next?.candidate && !state.diskHeadroom && (reads.admit?.() ?? true) ? next : null;
+      // GY-3122: below the disk floor no new trial starts; one in flight settles. GY-3348: so does
+      // a saturated CPU — the trial would time out into rework, the episode this reading answers.
+      const due = next?.candidate && !state.diskHeadroom && !cpuPressureHeld(state) && (reads.admit?.() ?? true) ? next : null;
       // GY-3120: the first `parallel` heads in queue order are trialled at once, each alone on the current tip; the flight is named by the first.
       // A yielding head (GY-2079) merges alone, so its timeouts are its own.
       const yields = (work: Work) => yielding.has(`${work.key}:${work.candidate?.sha.toLowerCase()}`);

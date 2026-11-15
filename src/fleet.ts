@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { launchRecipe } from './harness.js';
 import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
-import { runtimeAdapter } from './master/runtimes.js';
+import { runtimeAdapter, cursorSignInFile, accountHomeEnvironment } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -525,7 +525,10 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
     // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
-    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
+    // GY-3329: the login also runs with XDG_CONFIG_HOME on the account home, so on a host with no
+    // desktop keyring the sign-in lands at ACCOUNT_HOME/cursor/auth.json, where a confined session
+    // reads it — never in the operator's own ~/.config.
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: cursorSignInFile,
     smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
@@ -579,7 +582,9 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
   return await new Promise(done => {
     let child: ReturnType<typeof spawn>;
     const pasteCode = !!provider.login!.pasteCode;
-    try { child = spawn(login.command, login.args, { env: { ...process.env, ...provider.login!.env, [provider.login!.envVariable]: home }, stdio: [pasteCode ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); }
+    // GY-3329: a cursor login also runs with XDG_CONFIG_HOME on the account home, so the sign-in
+    // it writes is the one a confined session reads; other runtimes name no such variable.
+    try { child = spawn(login.command, login.args, { env: { ...process.env, ...provider.login!.env, [provider.login!.envVariable]: home, ...accountHomeEnvironment(provider.runtime, home) }, stdio: [pasteCode ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); }
     catch (error) { done({ url: null, code: null, loggedIn: false, error: `${login.command} could not be started: ${error instanceof Error ? error.message : 'unknown reason'}` }); return; }
     let text = '', found: { url: string | null; code: string | null } | null = null, settled = false;
     const finish = (result: { url: string | null; code: string | null; loggedIn: boolean; error: string | null }) => {
