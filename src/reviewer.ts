@@ -553,9 +553,9 @@ export function browserToolOnPath(environment: { PATH?: string } = process.env):
  * not run with the missing thing named, retried on another eligible reviewer, and raised as one
  * attention line; it never becomes a change request and never reaches the item's worker.
  */
-export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null, cli: (config: Partial<Pick<MasterConfig, 'cliPath'>>, mask?: CredentialMask) => string | null = cliUnreachableRefusal): string | null {
+export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null): string | null {
   if (!config.url) return 'GRAPHYARD_URL is unset: this launch cannot tell its reviewer the control plane\'s address; set url with graphyard master setup';
-  const unreachable = cli(config, mask);
+  const unreachable = cliUnreachableRefusal(config, mask);
   if (unreachable) return unreachable;
   if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} on this host`;
   return null;
