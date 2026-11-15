@@ -67,5 +67,7 @@ export function progressWorkerVerification(services: Services, actor: Principal,
   return { accepted: true };
 }
 /** The launcher lines of the verifications pending for work item `id`, oldest first. */
-export const workerVerificationLines = (services: Services, id: string) =>
-  [...queue(services).values()].filter(pending => pending.job.work.id === id || pending.job.work.key === id).flatMap(pending => pending.lines);
+export function workerVerificationLines(services: Services, actor: Principal, id: string) {
+  demand(actor.role === 'worker', 'Only an implementation worker reads its verification progress', 403);
+  return [...queue(services).values()].filter(pending => pending.job.work.id === id || pending.job.work.key === id).flatMap(pending => pending.lines);
+}

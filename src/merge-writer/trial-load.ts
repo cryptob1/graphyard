@@ -1,7 +1,7 @@
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs each size themselves alone; the launcher (trial-container.ts) is what they share.
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { availableParallelism, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -160,7 +160,8 @@ export function trialFloorWaits(slots = trialSlots()): string[] {
   return names.flatMap(name => {
     const pid = /^floor-(\d+)$/.exec(name)?.[1];
     if (!pid) return [];
-    try { process.kill(Number(pid), 0); return [readFileSync(join(slots, name), 'utf8')]; } catch { return []; }
+    try { process.kill(Number(pid), 0); return [readFileSync(join(slots, name), 'utf8')]; }
+    catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return []; } // a killed launcher's note
   });
 }
 
