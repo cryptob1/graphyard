@@ -30,12 +30,17 @@ const numbered = (value: string, n: number, limit: number) => `${value.slice(0, 
  * first profile's credential. Profiles are only ever added, so a lowered limit leaves the spare
  * ones idle and a raised one reuses them. Growth stops at MAX_WORKER_PROFILES profiles of any mode
  * (GY-3292): past it master.json would be unreadable and every cycle would mint another identity.
+ * GY-3285's outage: a role allowing accounts × concurrency past that maximum (128 over 8 accounts)
+ * grew the file until it would not parse and every cycle failed — so every profile the loop mints
+ * is marked `minted` (a file that will not load is repaired by removing the loop's own entries,
+ * never the operator's) and `saveWorkerProfile` revalidates the whole file before it is written,
+ * refusing a write that would not load back instead of bricking the install.
  */
 export async function growWorkerPool(root: string, config: Pick<MasterConfig, 'workers'>, allowed: number, mint: (id: string) => Promise<{ token: string }>) {
   const first = config.workers.find(profile => profile.mode === 'launch' && profile.credentialFile);
   const added: WorkerProfile[] = [];
   for (let n = 2; first && config.workers.length < MAX_WORKER_PROFILES && config.workers.filter(profile => profile.mode === 'launch').length < allowed; n++) {
-    const profile: WorkerProfile = { ...first, name: numbered(first.name, n, 80), principal: numbered(first.principal, n, 200), agentName: numbered(first.agentName, n, sessionNameLimit) };
+    const profile: WorkerProfile = { ...first, name: numbered(first.name, n, 80), principal: numbered(first.principal, n, 200), agentName: numbered(first.agentName, n, sessionNameLimit), minted: true };
     if (config.workers.some(other => other.name === profile.name || other.principal === profile.principal || other.agentName === profile.agentName)) continue;
     profile.credentialFile = join(dirname(first.credentialFile!), `${profile.principal}.token`);
     await atomicPrivateText(profile.credentialFile, (await mint(profile.principal)).token);

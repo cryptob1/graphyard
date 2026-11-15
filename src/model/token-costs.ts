@@ -1,6 +1,7 @@
 // Concern: what the project's agents spent (GY-3289) — the tokens each session's runtime reported,
 // priced from the registry's price sheet. Pure: the dashboard shares this module.
 import type { AgentRegistry, FleetModel } from './registry.js';
+import { seedPrices } from './price-sheet.js';
 
 export interface Tokens { input: number; output: number; cacheRead: number; cacheWrite: number }
 /** One session's reported tokens on one model. `reported: false` is a runtime that printed no usage: stored, never counted as zero spend. */
@@ -100,6 +101,17 @@ export function pricedModel(models: readonly FleetModel[], name: string | null):
   return models.find(model => model.id === bare || model.name === bare)
     ?? models.filter(model => model.id && bare.startsWith(model.id)).sort((a, b) => b.id!.length - a.id!.length)[0] ?? null;
 }
+/**
+ * The models costs are priced with: the registry's, a model it never priced taking the bundled
+ * sheet's price for its id or name, then the bundled sheet's own models, so a session on a model
+ * the sheet knows is priced without first running `master registry model seed`.
+ */
+export function priceModels(models: readonly FleetModel[]): FleetModel[] {
+  const sheet = seedPrices.map(price => ({ name: price.id, id: price.id, provider: price.provider, cost: price.cost }) as FleetModel);
+  const filled = models.map(model => model.cost.inputPerMTok != null && model.cost.outputPerMTok != null ? model
+    : { ...model, cost: pricedModel(sheet, model.id ?? model.name)?.cost ?? model.cost });
+  return [...filled, ...sheet];
+}
 /** US dollars for these tokens at a model's prices; null — price unknown — when a rate the tokens need was never recorded. */
 export function tokenCost(model: FleetModel | null, tokens: Tokens): number | null {
   if (!model) return null;
@@ -146,12 +158,12 @@ const roleNames: Record<string, string> = { worker: 'Workers', reviewer: 'Review
 
 /** The project's Costs view: totals per window, the breakdowns over `days`, and the price sheet they were priced from. `shipped` are the keys of delivered items. */
 export function costSummary(rows: readonly UsageRow[], registry: Pick<AgentRegistry, 'models' | 'accounts'>, shipped: ReadonlySet<string>, now: number, days: number | null = null): CostSummary {
-  const day = 24 * 60 * 60_000;
+  const day = 24 * 60 * 60_000, models = priceModels(registry.models);
   const since: Record<CostWindow, number> = { today: new Date(now).setUTCHours(0, 0, 0, 0), week: now - 7 * day, month: now - 30 * day, all: -Infinity };
   const tally = (into: CostLine, row: UsageRow) => {
     if (!row.reported) { into.notReported++; return null; }
     add(into, row);
-    const cost = tokenCost(pricedModel(registry.models, row.model), row);
+    const cost = tokenCost(pricedModel(models, row.model), row);
     if (cost === null) into.unpriced += total(row);
     else { into.cost += cost; if (flatPlan(registry.accounts.find(account => account.name === row.account))) into.apiEquivalent += cost; }
     return cost;
@@ -163,7 +175,8 @@ export function costSummary(rows: readonly UsageRow[], registry: Pick<AgentRegis
       const cost = tally(all, row);
       if (row.work && shipped.has(row.work) && row.reported) { items.add(row.work); onShipped += cost ?? 0; }
     }
-    return [window, { ...all, shipped: items.size, perShipped: items.size ? onShipped / items.size : null }];
+    // Per shipped item only when every token in the window is priced: a part-priced figure would understate it.
+    return [window, { ...all, shipped: items.size, perShipped: items.size && !all.unpriced ? onShipped / items.size : null }];
   })) as CostSummary['windows'];
   const from = days === null ? -Infinity : now - days * day, within = rows.filter(row => Date.parse(row.at) >= from);
   const group = (name: (row: UsageRow) => string) => {
@@ -174,12 +187,12 @@ export function costSummary(rows: readonly UsageRow[], registry: Pick<AgentRegis
   return {
     windows, days,
     roles: group(row => roleNames[row.role] ?? row.role),
-    models: group(row => pricedModel(registry.models, row.model)?.name ?? row.model ?? 'model not reported'),
+    models: group(row => pricedModel(models, row.model)?.name ?? row.model ?? 'model not reported'),
     accounts: group(row => row.account ?? 'account not recorded').map(entry => {
       const account = registry.accounts.find(candidate => candidate.name === entry.name);
       return { ...entry, flat: flatPlan(account), monthlyFee: account?.monthlyFee ?? null };
     }),
-    prices: registry.models.map(model => ({ name: model.name, id: model.id, input: model.cost.inputPerMTok, output: model.cost.outputPerMTok, cacheRead: model.cost.cacheReadPerMTok ?? null, cacheWrite: model.cost.cacheWritePerMTok ?? null, asOf: model.cost.asOf ?? null })),
+    prices: models.slice(0, registry.models.length).map(model => ({ name: model.name, id: model.id, input: model.cost.inputPerMTok, output: model.cost.outputPerMTok, cacheRead: model.cost.cacheReadPerMTok ?? null, cacheWrite: model.cost.cacheWritePerMTok ?? null, asOf: model.cost.asOf ?? null })),
     monthlyFees: registry.accounts.reduce((sum, account) => sum + (account.monthlyFee ?? 0), 0),
   };
 }
@@ -189,16 +202,23 @@ export function costSummary(rows: readonly UsageRow[], registry: Pick<AgentRegis
 export const tokenCount = (value: number) => value >= 1_000_000 ? `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 1 : 2)}M` : value >= 10_000 ? `${Math.round(value / 1000)}k` : value.toLocaleString('en-US');
 export const dollars = (value: number) => `$${value >= 100 ? Math.round(value).toLocaleString('en-US') : value.toFixed(2)}`;
 export const lineTokens = (entry: Tokens) => total(entry);
-/** A line's cost in words: the list-price figure, 'API-equivalent' where a flat plan carried it, and 'price unknown' for tokens no price covers. */
+/** A line's cost as one figure: dollars, 'at least' dollars when some of its tokens have no price, 'price unknown' when none do. */
+export function costFigure(entry: CostLine): string {
+  const tokens = total(entry);
+  if (tokens && entry.unpriced >= tokens) return 'price unknown';
+  const amount = `${entry.unpriced ? 'at least ' : ''}${dollars(entry.cost)}`;
+  return entry.apiEquivalent > 0 ? entry.apiEquivalent >= entry.cost ? `${amount} API-equivalent` : `${amount} (${dollars(entry.apiEquivalent)} API-equivalent)` : amount;
+}
+/** A line's cost in words: its figure, the tokens no price covers, its plan's fee and the sessions that reported nothing. */
 export function costText(entry: CostLine): string {
-  const priced = total(entry) > entry.unpriced;
+  const tokens = total(entry);
   const parts = [
-    ...(priced ? [`${dollars(entry.cost)}${entry.apiEquivalent > 0 ? entry.apiEquivalent >= entry.cost ? ' API-equivalent' : ` (${dollars(entry.apiEquivalent)} API-equivalent)` : ''}`] : []),
-    ...(entry.unpriced ? [priced ? `price unknown for ${tokenCount(entry.unpriced)} tokens` : 'price unknown'] : []),
+    ...(tokens ? [costFigure(entry)] : []),
+    ...(entry.unpriced && entry.unpriced < tokens ? [`price unknown for ${tokenCount(entry.unpriced)} tokens`] : []),
     ...(entry.monthlyFee != null ? [`plan ${dollars(entry.monthlyFee)}/month`] : []),
     ...(entry.notReported ? [`${entry.notReported} session${entry.notReported === 1 ? '' : 's'} not reported`] : []),
   ];
-  return parts.join(' · ') || (total(entry) ? 'price unknown' : 'no usage reported');
+  return parts.join(' · ') || 'no usage reported';
 }
 /** A line's tokens in words. */
 export const tokensText = (entry: Tokens) => `${tokenCount(total(entry))} tokens (${tokenCount(entry.input)} in, ${tokenCount(entry.output)} out, ${tokenCount(entry.cacheRead)} cache read, ${tokenCount(entry.cacheWrite)} cache write)`;

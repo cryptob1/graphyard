@@ -26,12 +26,47 @@ export const registryEventPrefix = 'agent-registry.';
 const configurators = ['admin', 'coordinator'] as const;
 const readers = ['admin', 'coordinator', 'reader', 'slice-lead'] as const;
 
+/** GY-3285's command, the only writer that set the worker role's concurrency per account before this marker existed. */
+const perAccountWorkerReason = 'master workers ';
+
+/**
+ * GY-3293: GY-3285 made the worker role's concurrency per-account, but a registry written before
+ * it holds a total — this install's 16 over 8 accounts read as 8 × 16 = 128 and the worker pool
+ * overgrew its schema. A document without `workerConcurrencyPerAccount` is converted on read: the
+ * total becomes per-account, ceil(total / accounts), so the fleet keeps the worker count its
+ * operator set. A worker role whose last write was `master workers N` already meant per-account,
+ * and a value conversion cannot change (one account, or a count of one or none) reads back
+ * exactly as stored; the first registry event any code appends persists the marker.
+ */
+export function upgradeWorkerConcurrency(registry: RegistryDocument, lastWorkerSetReason: string | null = null): RegistryDocument {
+  if (registry.workerConcurrencyPerAccount === true) return registry;
+  const worker = registry.roles.find(role => role.name === 'worker');
+  const perAccount = worker && worker.accounts.length > 0 && worker.concurrency > 1 && !lastWorkerSetReason?.startsWith(perAccountWorkerReason)
+    ? Math.ceil(worker.concurrency / worker.accounts.length) : worker?.concurrency;
+  if (!worker || perAccount === worker.concurrency) return registry;
+  return { ...registry, roles: registry.roles.map(role => role.name === 'worker' ? { ...role, concurrency: perAccount! } : role), workerConcurrencyPerAccount: true };
+}
+
+/** The reason of the newest event that wrote the worker role, or null when the ledger names none. */
+async function lastWorkerRoleSetReason(db: Pick<pg.PoolClient, 'query'>): Promise<string | null> {
+  const row = (await db.query(`SELECT payload->'change'->>'reason' AS reason FROM events WHERE work_id IS NULL AND (
+    (kind = '${registryEventPrefix}role.set' AND payload->'change'->'role'->>'name' = 'worker') OR
+    (kind = '${registryEventPrefix}apply' AND payload->'change'->'roles' @> '[{"name":"worker"}]'))
+    ORDER BY seq DESC LIMIT 1`)).rows[0];
+  return typeof row?.reason === 'string' ? row.reason : null;
+}
+
 export async function readRegistry(db: Pick<pg.PoolClient, 'query'>): Promise<RegistryDocument> {
   const row = (await db.query(`SELECT payload->'registry' AS registry FROM events WHERE work_id IS NULL AND kind LIKE '${registryEventPrefix}%' ORDER BY seq DESC LIMIT 1`)).rows[0];
-  return row?.registry ?? emptyRegistry();
+  if (!row?.registry) return emptyRegistry();
+  const registry = row.registry as RegistryDocument;
+  return registry.workerConcurrencyPerAccount === true ? registry : upgradeWorkerConcurrency(registry, await lastWorkerRoleSetReason(db));
 }
 
 const appendRegistry = async (db: Pick<pg.PoolClient, 'query'>, actor: Principal, kind: string, registry: RegistryDocument, change: unknown) => {
+  // GY-3293: every registry this code appends means the worker role's concurrency per account
+  // (upgradeWorkerConcurrency converts a document an older release wrote on read).
+  registry.workerConcurrencyPerAccount = true;
   const removedRoles = registry.roles.filter(role => !registryRoles.includes(role.name)).map(role => role.name);
   if (removedRoles.length) {
     registry.roles = registry.roles.filter(role => registryRoles.includes(role.name));
