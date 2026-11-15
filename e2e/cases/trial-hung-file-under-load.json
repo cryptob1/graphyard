@@ -1,7 +1,7 @@
 {
   "id": "trial-hung-file-under-load",
   "title": "A hung test file is ended by its file timeout even on a busy host",
-  "description": "The merge trial's hung-file case runs pinned to one core shared with a busy loop, so it gets half a core: the hung file still fails by name with its file timeout's own message while the slow file passes, and no wall-clock limit decides the case. With the file timeout disabled the hung file runs on to the trial's overall deadline and the case fails.",
+  "description": "The merge trial's hung-file case runs pinned to one core shared with a busy loop, so it gets half a core: the hung file still fails by name with its file timeout's own message while the slow file passes, and no wall-clock limit decides the case, so the case fails on the base tip, whose verdict still asserts an absolute wall-clock limit on the tests phase. With the file timeout handling disabled in a fixture runner the hung file runs on to the trial's overall deadline and the case fails.",
   "tags": ["deployment", "regression"],
   "target": "any",
   "required": false,
@@ -10,5 +10,9 @@
     "name": "the hung-file trial case on half a core",
     "run": "taskset -c 0 sh -c 'node -e \"for(;;);\" & busy=$!; node --import tsx tests/helpers/run-tests.ts --test-name-pattern=trial-hung-test-fails-fast tests/trial-merge.test.ts; status=$?; kill $busy; exit $status'",
     "timeoutSeconds": 600
+  }, {
+    "kind": "command",
+    "name": "no absolute wall-clock limit left in the hung-file case's verdict",
+    "run": "! grep -qF 'phases!.tests <' tests/trial-merge.test.ts"
   }]
 }
