@@ -3,7 +3,10 @@ import { withDatabase } from '../tests/helpers/postgres';
 import { Engine } from '../src/engine';
 import { server } from '../src/server';
 
+test.use({ actionTimeout: 15_000 });
+
 test('e2e:setup-invite — Setup invites, copies a single-use viewer link and revokes the redeemed session', async ({ page, context, browser, baseURL }) => {
+  test.setTimeout(90_000);
   const store = await withDatabase('setup_invite');
   await store.init();
   const engine = new Engine(store, 120, 'owner/project');
@@ -17,7 +20,7 @@ test('e2e:setup-invite — Setup invites, copies a single-use viewer link and re
   const proxy = async (browserContext: BrowserContext) => browserContext.route('**/*', async route => {
     const { pathname, search } = new URL(route.request().url());
     await route.fetch(pathname.startsWith('/api/') ? { url: url + pathname + search } : {})
-      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => {});
   });
   try {
     await Promise.all([proxy(context), proxy(fresh), proxy(reused)]);

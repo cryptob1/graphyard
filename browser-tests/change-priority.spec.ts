@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { priorityServer, nextPriorityDispatch } from '../tests/helpers/priority-server';
 
 test('e2e:change-priority — row and item controls persist and show attributed audit history', async ({ page }) => {
+  test.setTimeout(120_000);
   const f = await priorityServer();
   // Every assertion waits on the real server; a loaded merge trial needs longer than the default.
   const settled = { timeout: 15_000 };

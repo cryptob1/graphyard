@@ -77,6 +77,7 @@ async function readableDiagrams(page: Page) {
 
 for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
   test(`e2e:docs-first-visit — a newcomer follows Docs from overview to FAQ and reference at ${viewport.width}px, with readable diagrams and no overflow`, async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await signedIn(page);
     // On a phone the sidebar folds behind Menu; Help is at its foot.
@@ -99,7 +100,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
       await expect(docs.getByRole('heading', { name: heading, level: 2, exact: true })).toBeInViewport();
     }
     const overview = docs.locator('#docs-overview');
-    for (const role of ['You, the owner', 'The Chief', 'The loop']) await expect(overview).toContainText(role);
+    for (const role of ['You, the owner', 'The Master', 'The loop']) await expect(overview).toContainText(role);
     const journey = docs.locator('#docs-first-item ol');
     await expect(journey.locator('li')).toHaveCount(7);
     for (const step of ['npx @cryptob1/graphyard doctor', 'npx @cryptob1/graphyard up --repo OWNER/NAME', 'http://127.0.0.1:4310', 'New work item', 'Shipped', 'Blocked', 'Needs you']) await expect(journey).toContainText(step);

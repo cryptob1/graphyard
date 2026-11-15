@@ -41,7 +41,8 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   };
   const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const branch = git('symbolic-ref', '--short', 'HEAD');
-  if (!work.workspaces.some((w: any) => w.branch === branch)) throw new Error(`Run sync from a workspace branch registered for ${work.key}; ${branch} is not one`);
+  const workspace = work.workspaces.find((w: any) => w.branch === branch && resolve(w.path) === cwd);
+  if (!workspace) throw new Error(`Run sync from a workspace registered for ${work.key}; ${cwd} on ${branch} is not one`);
   // GY-3266: the requirements revision an operator recorded under this lease reaches the worker
   // here — every sync prints the revised criteria with what changed, and a completed merge also
   // acknowledges them (a heartbeat naming the policy revision), which complete waits for.
@@ -49,7 +50,8 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   // GY-3298: the master's unread messages, with author and time; the completed sync acknowledges them.
   const unread = (work.messages ?? []).filter((message: any) => !message.acknowledged);
   const messages = unread.length ? { messages: unread.map(({ id, at, by, text }: any) => ({ id, at, by, text })) } : {};
-  const epoch = work.workspaces.find((w: any) => w.branch === branch)?.epoch;
+  // Rework keeps the branch across attempts; only this checkout identifies its epoch.
+  const epoch = workspace.epoch;
   const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
   const generated = await localGeneratedManifest(cwd);
   // A merge the previous sync left for the worker to resolve is continued, not restarted.

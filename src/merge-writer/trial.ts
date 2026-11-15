@@ -23,8 +23,9 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies } from './trial-container.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
-import { checkServiceVariables, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
+import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { gateTrialKey, trialLoad, trialShardLanes } from './trial-load.js';
+import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -515,9 +516,39 @@ export class TrialHostFaultError extends Error {
     this.name = 'TrialHostFaultError';
   }
 }
+/**
+ * GY-3339: a trial step whose nested sandbox AppArmor denied — the trial host's AppArmor, not the
+ * head's. Like a fetch fault it reaches no verdict, is not retried, and the loop reports it upstream.
+ */
+export const trialSandboxFaultLead = `${trialHostFaultPrefix}: a nested sandbox could not start in the trial container`;
+export class TrialSandboxFaultError extends Error {
+  constructor(readonly phase: string, readonly line: string) {
+    super(`${trialSandboxFaultLead} during the ${phase} step (${line}); this is the trial host's AppArmor, not the head's: ${trialAppArmorFix}`);
+    this.name = 'TrialSandboxFaultError';
+  }
+}
+/** Whether an error, or the message it crossed a process boundary as, is a nested-sandbox trial-host fault. */
+export const trialSandboxFault = (error: unknown) => error instanceof Error && error.message.startsWith(trialSandboxFaultLead);
 /** The host a trial-host fault names, from the error or the message it crossed a process boundary as; null for any other error. */
 export const trialHostFaultHost = (error: unknown): string | null =>
   new RegExp(`^${trialHostFaultPrefix}: .* could not fetch from (\\S+), rerun included`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/**
+ * GY-3316: Docker refused the trial's network because leaked networks spent its address pools — the
+ * trial host, not the head. Like a fetch fault it reaches no verdict and is not retried: the head
+ * stays queued and the loop reports the fault, naming how many preview networks the host holds.
+ */
+export class TrialNetworkPoolError extends Error {
+  constructor(readonly networks: number | null) {
+    super(`${trialHostFaultPrefix}: Docker could not create the trial's network (${addressPoolsSpent}); ${networks ?? 'an unknown number of'} Graphyard preview networks are on the trial host`);
+    this.name = 'TrialNetworkPoolError';
+  }
+}
+/** The preview-network count a network-pool fault names, from the error or the message it crossed a process boundary as; null for any other error. */
+export const trialNetworkPoolFault = (error: unknown): string | null =>
+  new RegExp(`^${trialHostFaultPrefix}: Docker could not create the trial's network .*; (.+) Graphyard preview networks`).exec(error instanceof Error ? error.message : '')?.[1] ?? null;
+/** `error` as a network-pool fault when Docker refused a network for spent address pools, else null. */
+const networkPoolFault = async (error: unknown, env: Record<string, string>) => (error instanceof Error ? error.message : String(error)).includes(addressPoolsSpent)
+  ? new TrialNetworkPoolError((error as { previewNetworks?: number | null }).previewNetworks ?? await previewNetworkCount(dockerEnvironment(env, { DOCKER_HOST: 'unix:///var/run/docker.sock' }))) : null;
 const localHost = /^(?:localhost|127\.[\d.]+|0\.0\.0\.0|::1|\[::1\])$/i;
 /**
  * The external host a failed step's output shows a network fetch failure to, or null: a resolver or
@@ -688,6 +719,8 @@ export interface RunTrialInput {
    * candidate is run against the base tip and keeps its before screenshot.
    */
   e2eFrom?: string;
+  /** GY-3296: case id → URL of the named app environment the batch gate provisioned for it; such a case runs against that URL. */
+  e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
@@ -732,6 +765,25 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
         return useful.slice(0, Math.max(0, perEntry)).trimEnd();
       }).join('\n')}${end}`;
     }
+    // GY-3305: a Playwright run keeps each failing test's heading, its error's first line and the
+    // run's counts — never the end of its output, which the web server's teardown noise owns. Whole
+    // entries in failure order, the earliest cut only when it alone outgrows the share.
+    const browser = playwrightFailures(output);
+    if (browser.length) {
+      const counts = output.split('\n').map(line => line.replace(ansiEscape, '')).findLast(line => playwrightCounts.test(line))?.trim() ?? '';
+      const entries = browser.map(failure => `${failure.file}:${failure.line} › ${failure.title}${failure.error ? `\n  ${failure.error}` : ''}`);
+      const roomForEntries = share - command.length - cut.length - end.length - (counts ? counts.length + 1 : 0);
+      const kept: string[] = [];
+      let used = 0;
+      for (const entry of entries) {
+        const left = roomForEntries - used - kept.length;
+        if (left <= 0) break;
+        kept.push(entry.length <= left ? entry : entry.slice(0, left - 1).trimEnd());
+        used += Math.min(entry.length, left);
+        if (entry.length > left) break;
+      }
+      return `${command}${cut}${kept.join('\n')}${counts ? `\n${counts}` : ''}${end}`;
+    }
     const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
     if (errorAt >= 0) {
       const first = output.slice(errorAt, errorAt + Math.floor(room / 2));
@@ -743,6 +795,40 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
   }).join('\n').slice(-length);
 }
 const testFile = /[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?/g;
+/** A Playwright failure summary heading: `  2) [chromium] › browser-tests/x.spec.ts:10:1 › title`. */
+const playwrightHeading = /^\s*\d+\)\s+(?:\[[^\]]+\]\s+›\s+)?([\w./-]+\.(?:spec|test)\.[cm]?[jt]sx?):(\d+):\d+\s+›\s+(.+?)\s*$/;
+/** Playwright's end-of-run count line: `  89 passed, 2 failed (2.1m)`. */
+const playwrightCounts = /^\s*\d+ (?:passed|failed|flaky|skipped|interrupted|did not run)\b/;
+/**
+ * One failure a Playwright run's output names (GY-3305): the spec file and line its summary heading
+ * carries, the test title, and the first line of the error block that follows the heading — the
+ * identity a browser run must keep in its verdict and records when its teardown noise (web-server
+ * shutdown warnings, pool-end errors) crowds the log's tail. Only the numbered summary headings
+ * name the file; the run's `✘` progress lines carry the title alone.
+ */
+export interface PlaywrightFailure { file: string; line: number; title: string; error: string | null }
+/** Every failure a Playwright run's output names, in log order, deduplicated by file, line and title. */
+export function playwrightFailures(log: string): PlaywrightFailure[] {
+  const lines = log.split('\n').map(line => line.replace(ansiEscape, ''));
+  const failures: PlaywrightFailure[] = [];
+  for (let at = 0; at < lines.length; at++) {
+    const heading = playwrightHeading.exec(lines[at]!);
+    if (!heading) continue;
+    let error: string | null = null;
+    // The error block sits between the heading and the next heading or the counts line; its first
+    // non-empty line is the failure's own words (an Error:, a Test timeout … exceeded).
+    for (let next = at + 1; next < lines.length; next++) {
+      const line = lines[next]!;
+      if (playwrightHeading.test(line) || playwrightCounts.test(line)) break;
+      if (!line.trim()) continue;
+      error = line.trim().slice(0, 300);
+      break;
+    }
+    const failure = { file: heading[1]!, line: Number(heading[2]), title: heading[3]!, error };
+    if (!failures.some(seen => seen.file === failure.file && seen.line === failure.line && seen.title === failure.title)) failures.push(failure);
+  }
+  return failures;
+}
 /**
  * The failing files a runner log names, for a runner whose records are missing. A file-level
  * failure is a `not ok`/`✖` line carrying the path; a failing case inside a file is reported as
@@ -768,8 +854,13 @@ const timeoutFailure = /timed?\s*out|Timeout of \d+m?s exceeded/i;
  * order, and whether every named case's nearby output is only a time-out (load, not a regression).
  */
 export function repositoryCheckFailure(log: string): { files: string[]; cases: string[]; firstCase: string | null; timedOut: boolean } {
-  const files = failingFilesInLog(log).slice(0, 10);
-  const cases = parseFailedTests(log).filter(name => !fileLevelFailure.test(name));
+  // GY-3305: a browser run's failures arrive as Playwright's summary headings, each with its error
+  // block — read as test identities, so the failing spec and its error ride in the verdict's own
+  // fields and survive whatever the log's tail ends up holding.
+  const browser = playwrightFailures(log);
+  const files = [...new Set([...failingFilesInLog(log), ...browser.map(failure => failure.file)])].slice(0, 10);
+  const node = parseFailedTests(log).filter(name => !fileLevelFailure.test(name));
+  const cases = [...new Set([...node, ...browser.map(failure => `${failure.file}:${failure.line} › ${failure.title}`)])];
   let firstCase: string | null = null;
   for (const raw of log.split('\n')) {
     const line = raw.replace(ansiEscape, '').trimEnd();
@@ -778,10 +869,18 @@ export function repositoryCheckFailure(log: string): { files: string[]; cases: s
     const name = (spec?.[1] ?? (tap && !tap[2] ? tap[1] : null))?.trim() ?? null;
     if (name && name.length <= 500 && !fileLevelFailure.test(name)) { firstCase = name; break; }
   }
-  const timedOut = cases.length > 0 && cases.every(name => {
-    const at = log.indexOf(name);
-    return timeoutFailure.test(at < 0 ? name : log.slice(Math.max(0, at - 80), at + 400));
-  });
+  if (firstCase === null && browser.length) {
+    const first = browser[0]!;
+    firstCase = `${first.file}:${first.line} › ${first.title}${first.error ? `: ${first.error}` : ''}`.slice(0, 500);
+  }
+  // A browser failure is a time-out only when its own error block says so: an assertion whose call
+  // log merely mentions a wait timeout is a failure, not load.
+  const timedOut = (node.length > 0 || browser.length > 0)
+    && node.every(name => {
+      const at = log.indexOf(name);
+      return timeoutFailure.test(at < 0 ? name : log.slice(Math.max(0, at - 80), at + 400));
+    })
+    && browser.every(failure => failure.error !== null && timeoutFailure.test(failure.error));
   return { files, cases, firstCase, timedOut };
 }
 /** The runner's per-file records (`--durations FILE`, the runner records): one JSON line per file that ran, with whether it passed. */
@@ -838,7 +937,7 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
     } catch (error) {
       if (error instanceof TrialCleanupError && error.verdict) { if (attempts.length) error.verdict.retried = attempts; throw error; }
       attempts.push(trialNoVerdict(error));
-      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialRepositoryImageError) {
+      if (attempt >= retries || input.signal?.aborted || error instanceof TrialReadOnlyError || error instanceof TrialHostFaultError || error instanceof TrialNetworkPoolError || error instanceof TrialSandboxFaultError || error instanceof TrialRepositoryImageError) {
         if (typeof error === 'object' && error) attemptContext.set(error, { ...(attemptContext.get(error) ?? { phase: attempts.at(-1)!.phase, phases: attempts.at(-1)!.phases }), attempts });
         throw error;
       }
@@ -980,6 +1079,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const ended = endedOf(error, out);
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
+      const denied = nestedSandboxDenied.exec(out.replace(ansiEscape, ''));
+      if (denied) throw new TrialSandboxFaultError(phase, denied[0]);
       return ended;
     }
     entries.push(`$ ${command} ${args.join(' ')}\n${out}`);
@@ -1135,6 +1236,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let started: CheckServices;
     try { started = await (input.services ?? startCheckServices)({ checkout: worktree, services: check.services, scratch: temporary!, env, key: input.key ?? 'trial', timeoutMs: remaining() }); }
     catch (error) {
+      const fault = await networkPoolFault(error, env);
+      if (fault) throw fault;
       const why = `the services of check ${check.check} did not start: ${error instanceof Error ? error.message : String(error)}`;
       log.push(why);
       return { services: why };
@@ -1161,10 +1264,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
       if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
       const ran = await containerTrialE2e({
-        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-      });
+      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
       // The laid-over files served the cases only: the checks that follow test the base tip as it is.
       if (added.length) await run('git', ['-C', worktree, 'rm', '-q', '-f', '--', ...added], { timeoutMs: remaining() });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.

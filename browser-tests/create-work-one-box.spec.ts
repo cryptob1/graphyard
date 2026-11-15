@@ -19,6 +19,8 @@ const waiting = 'Waiting on the master: writing the criteria';
 const criteria = [{ id: 'AC-1', text: 'The requested change works through the dashboard', proofs: ['e2e:create-work-one-box'] }];
 
 test('e2e:create-work-one-box — title-only filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
+  // Embedded Postgres setup alone takes ~40 s on a loaded host before the first page step (GY-3293 trial timed out at 120 s).
+  test.setTimeout(180_000);
   setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
   const store = await withDatabase('create-work-one-box'); await store.init();
   const engine = new Engine(store, 300, 'owner/project'); engine.gitRunner = null;

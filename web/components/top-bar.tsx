@@ -1,9 +1,8 @@
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
-import { sections, viewFor, visibleViews, type View } from '../pages';
+import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { cityCounts } from '../city';
-import { Playful, useFun } from '../fun';
 import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
@@ -13,15 +12,14 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
  * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
  * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read. 'Runners on shift' and 'tonight'
- * are Fun's words; with Fun off the strip says agents working and today, as the rest of the app does.
+ * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped today.
  */
 export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
-  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt), fun = useFun();
-  return <p className="city-strip" aria-label={fun ? 'The yard tonight' : 'Activity'} data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
-    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> {fun ? `runner${onShift === 1 ? '' : 's'} on shift` : `agent${onShift === 1 ? '' : 's'} working`}
+  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
+  return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
+    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} working
     <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
-    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped {fun ? 'tonight' : 'today'}
+    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped today
   </p>;
 }
 
@@ -115,9 +113,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
   const section = viewFor(view).section;
   const pages = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   const tabs = pages.filter(page => !page.advanced), advanced = pages.filter(page => page.advanced);
-  // A section's own page reads as its sidebar entry does, so Fun's "The Chief" names the Master tab too.
-  const named = sections.find(entry => entry.id === section && 'fun' in entry);
-  const tab = (page: View) => { const term = meaning(page.label); return <button key={page.id} type="button" className={page.id === view ? 'tab active' : 'tab'} aria-current={page.id === view ? 'page' : undefined} onClick={() => setView(page.id)}>{named && 'fun' in named && page.id === named.id ? <Playful plain={page.label} fun={named.fun}/> : term ? <Term term={term} focusable={false}>{page.label}</Term> : page.label}</button>; };
+  const tab = (page: View) => { const term = meaning(page.label); return <button key={page.id} type="button" className={page.id === view ? 'tab active' : 'tab'} aria-current={page.id === view ? 'page' : undefined} onClick={() => setView(page.id)}>{term ? <Term term={term} focusable={false}>{page.label}</Term> : page.label}</button>; };
   return <div className="top-bar">
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}

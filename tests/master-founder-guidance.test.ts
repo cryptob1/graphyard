@@ -5,11 +5,12 @@ import { masterGuide } from '../src/master/guide.js';
 import { guideText } from '../src/guide.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 
-// GY-3274 AC-3: the master prompt and guide master say the master is the project's chief,
-// responsible for the product succeeding — it learns the problem and the users first, writes and
+// GY-3274 AC-3: the master prompt and guide master say the master is responsible for the product
+// succeeding — it learns the problem and the users first, writes and
 // revises the product brief, ranks work by its success signals and re-checks them after each
 // deploy, records lessons, and defers to the owner's stated mission and priorities, with money,
 // accounts and credentials the owner's alone.
+// GY-3307: the guidance names the master Master, never chief.
 
 const config = {
   repository: 'owner/project', cliPath: '/bin/graphyard.mjs', url: 'https://graphyard.example', credentialFile: '/credentials/master.token',
@@ -20,10 +21,12 @@ const config = {
 /** Every text the founder guidance lives in: the launch role brief, the `guide master` topic and `master guide`. */
 const texts = () => ({ prompt: masterPrompt(config), guideTopic: guideText('master'), masterGuide });
 
-test('unit:tests/master-founder-guidance.test.ts — the master prompt and guide master name the master the project\'s chief, responsible for the product succeeding', () => {
+test('unit:tests/master-founder-guidance.test.ts — the master prompt and guide master name the master responsible for the product succeeding', () => {
   const { prompt, guideTopic } = texts();
-  assert.match(prompt, /this project's chief, responsible for the product succeeding/);
-  assert.match(guideTopic, /the project's chief, responsible for the product succeeding/);
+  assert.match(prompt, /master agent for owner\/project, responsible for the product succeeding/);
+  assert.match(guideTopic, /The master is responsible for the product succeeding/);
+  // GY-3307: the guidance names the master Master, never chief.
+  for (const text of Object.values(texts())) assert.doesNotMatch(text, /chief/i);
 });
 
 test('unit:tests/master-founder-guidance.test.ts — it first learns the problem and the users from the repository, docs, the running app, owner messages and item history', () => {
@@ -61,7 +64,7 @@ test('unit:tests/master-founder-guidance.test.ts — the owner\'s stated mission
 
 test('unit:tests/master-founder-guidance.test.ts — the master guide, which `master guide` prints at launch, carries the same founder guidance', () => {
   const { masterGuide: guide } = texts();
-  assert.match(guide, /the project's chief, responsible for the product succeeding/);
+  assert.match(guide, /The master is responsible for the product succeeding/);
   assert.match(guide, /learn the problem and the users first \(repository, docs, the running app, owner messages, item history\)/);
   assert.match(guide, /keep the product brief current/);
   assert.match(guide, /rank work by its impact on the brief's success signals and re-check those signals after each deploy/);

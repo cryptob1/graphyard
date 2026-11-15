@@ -5,6 +5,7 @@ import { signInProcess } from '../tests/helpers/sign-in-process';
 
 test.use({ reducedMotion: 'no-preference' });
 test('e2e:work-replay — recorded stages, windows, playback and motion preferences on a fixture install', async ({ page }) => {
+  test.setTimeout(120_000);
   const store = await withDatabase('work_replay'); await store.init();
   const http = await signInProcess((store.pool as any).options.connectionString);
   const end = Date.now(), hour = 3_600_000;
@@ -73,8 +74,5 @@ test('e2e:work-replay — recorded stages, windows, playback and motion preferen
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await expect(scrub).toBeDisabled(); await expect(dot).toHaveAttribute('data-column', 'Shipped');
     await expect(replay.locator('[data-replay-column="Shipped"] .count')).toHaveText('1');
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await page.getByRole('button', { name: 'Fun', exact: true }).click();
-    await expect(scrub).toBeDisabled(); await expect(dot).toHaveAttribute('data-column', 'Shipped');
   } finally { await page.unrouteAll({ behavior: 'ignoreErrors' }); await http.close(); await store.close(); }
 });

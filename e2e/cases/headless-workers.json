@@ -6,7 +6,7 @@
   "target": "any",
   "required": true,
   "steps": [
-    { "kind": "command", "name": "headless worker runtime matrix and handoff", "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-workers.test.ts", "timeoutSeconds": 600 },
+    { "kind": "command", "name": "headless worker runtime matrix and handoff", "run": "node --import tsx tests/helpers/run-tests.ts tests/headless-workers.test.ts tests/headless-workers-registry-kinds.test.ts", "timeoutSeconds": 900 },
     { "kind": "command", "name": "worker run logs on the item page", "run": "npm run test:browser -- browser-tests/headless-workers.spec.ts", "timeoutSeconds": 240 }
   ]
 }

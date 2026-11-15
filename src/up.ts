@@ -13,7 +13,7 @@ import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { masterCredential, planeRequest } from './setup-from-zero.js';
+import { masterCredential, planeRequest, setupSteps } from './setup-from-zero.js';
 import { sshOrigin } from './merger-mode.js';
 import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
@@ -706,7 +706,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('preflight', async () => {
       const landlock = deps.landlockAbi ? landlockRefusal(deps.landlockAbi) : null;
-      if (landlock) throw new UpStop(`preflight: ${landlock}. Boot a newer kernel, then rerun ${rerun()}; nothing was installed.`, upExitCodes.prerequisite);
+      if (landlock) throw new UpStop(`preflight: ${landlock}. Fix: ${setupSteps.kernel}, then rerun ${rerun()}; nothing was installed.`, upExitCodes.prerequisite);
       // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
       await ensureRepository();
       const planned = await run('preflight', installArgs('--plan'), installInput);

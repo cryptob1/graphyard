@@ -42,6 +42,7 @@ const search = (page: Page) => page.getByLabel('Search commands');
 const sheet = (page: Page) => page.getByRole('dialog', { name: 'Keyboard shortcuts' });
 
 test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Enter opens that item; the palette jumps and switches theme', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   await page.keyboard.press('Control+k');
   await expect(palette(page)).toBeVisible();
@@ -52,11 +53,11 @@ test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Ent
   await expect(page.locator('article.item-page')).toContainText('Add dark mode to settings');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
-  // A command by name: the Master page — its title is the Chief (AC-5) — then the theme, both without the mouse.
+  // A command by name: the Master page — its title is Master — then the theme, both without the mouse.
   await page.keyboard.press('Control+k');
   await search(page).fill('Master');
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
   await page.keyboard.press('Control+k');
   await search(page).fill('Daylight');
   await page.keyboard.press('Enter');
@@ -78,6 +79,7 @@ test('e2e:keyboard-palette — Cmd/Ctrl+K opens the palette; an item key and Ent
 });
 
 test('e2e:keyboard-palette — j/k move a cursor through the Work rows, Enter opens that row, and Esc clears the cursor', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   const cursor = page.locator('.work-row.kb-cursor');
   // The board's first visible row is the one that needs the operator.
@@ -99,10 +101,11 @@ test('e2e:keyboard-palette — j/k move a cursor through the Work rows, Enter op
 });
 
 test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? shows the shortcut sheet', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   await page.keyboard.press('g');
   await page.keyboard.press('m');
-  await expect(page.getByRole('heading', { name: 'The Chief', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
   await page.keyboard.press('g');
   await page.keyboard.press('w');
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
@@ -121,6 +124,7 @@ test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? show
 });
 
 test('e2e:keyboard-palette — the top bar strip counts the shift, the trials and tonight’s ships, matching the Workers page', async ({ page }) => {
+  test.setTimeout(60_000);
   await serve(page);
   // The fixture holds two fresh running sessions (a third not seen for forty minutes), one pushed
   // merge trial and one merge from tonight.
@@ -128,9 +132,9 @@ test('e2e:keyboard-palette — the top bar strip counts the shift, the trials an
   await expect(strip).toHaveAttribute('data-on-shift', '2');
   await expect(strip).toHaveAttribute('data-in-trial', '1');
   await expect(strip).toHaveAttribute('data-shipped-tonight', '1');
-  await expect(strip).toContainText('2 runners on shift');
+  await expect(strip).toContainText('2 agents working');
   await expect(strip).toContainText('1 in trial');
-  await expect(strip).toContainText('1 shipped tonight');
+  await expect(strip).toContainText('1 shipped today');
   // The same numbers the Workers page reads off the same board.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible();

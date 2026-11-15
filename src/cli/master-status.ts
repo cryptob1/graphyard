@@ -6,9 +6,9 @@ import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
+import { standingStepFailures, workerGrowthKey } from '../daemon/cycle.js';
 import { profileHealth } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
-import { workerGrowthKey } from '../daemon/cycle.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -17,10 +17,11 @@ import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
+import { failureHeld, repeatedFailureCause } from '../daemon/repeated-failure.js';
 import { alertMinutesOf } from '../daemon/yard-alerts.js';
 import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
-import type { FleetView } from '../model/registry.js';
+import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
@@ -124,6 +125,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     return { subject: item.key, text: `${item.key}'s blocker${since !== null ? ` has waited ${formatAge(since, now)}` : ''}: ${item.blocker}`,
       next: `Clear the cause, then graphyard master unblock ${item.key} REASON; ${blockerEscalationMinutes} minutes unanswered raises it on the dashboard's Needs you` };
   });
+  const leaseLosses = open.flatMap(item => {
+    const run = state?.failureRuns[item.id];
+    return run?.kind === 'lease' && failureHeld(run)
+      ? [{ subject: item.key, text: repeatedFailureCause(run)!.detail, next: `Diagnose the lease loss, then graphyard master rework ${item.key} REASON` }] : [];
+  });
   const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   // GY-3105: delivery speed from the event ledger for the last merged items, computed now.
@@ -141,10 +147,14 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const reworked = reworkAttention(open);
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
+  // GY-3293: a cycle step failing the same way ten consecutive cycles — attention naming the step
+  // and the error, raised by the loop itself (the same line the dashboard's Setup page carries as
+  // its Needs you item), so it reaches the operator even with no master session to prompt.
+  const stepFailureAttention = standingStepFailures(state ?? { actions: {} }).map(detail => ({ subject: 'the master loop', text: detail, next: 'Read the loop journal for the failing step and repair its cause; the alert clears on the first cycle the step succeeds' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...applicationAttention(observed), ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...growth, ...stopped, ...reworked, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -183,3 +193,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
 }
+/** GY-3302: each enabled account serving a role whose model names no concrete id runs its runtime's default, perhaps a free model. */
+export const unspecifiedModelAttention = (fleet: Pick<FleetView, 'accounts'> | null) => (fleet?.accounts ?? []).filter(account => account.enabled && account.roles.length).flatMap(account => {
+  const text = unspecifiedModel(account);
+  return text ? [{ subject: `account ${account.name}`, text, next: `graphyard master registry model set ${account.model} --id ID --reason REASON names the model it runs` }] : [];
+});

@@ -161,13 +161,13 @@ export function masterSummary(master: MasterSessionState, now: number, agent?: {
 
 /** GY-3104: one item's current run of equal-signature failures (daemon/repeated-failure.ts) and the failure occurrences already counted. */
 const failureRunSchema = z.object({
-  key: z.string().max(100), kind: z.enum(['launch', 'trial', 'review']), signature: z.string().max(100),
+  key: z.string().max(100), kind: z.enum(['launch', 'trial', 'review', 'lease']), signature: z.string().max(100),
   reasons: z.array(z.string().max(1000)).max(2), count: z.number().int().min(0), rework: z.string().nullable(), handedIn: z.string().nullable(), seen: z.array(z.string().max(300)).max(20),
 }).strict();
 export type FailureRun = z.infer<typeof failureRunSchema>;
 
 /** GY-3190: what the close step's sweeps stopped or removed, by kind, and the disk Graphyard's leftovers hold. */
-const leftoverCountsSchema = z.object({ processes: z.number().int().min(0), trialContainers: z.number().int().min(0), reclaimed: z.number().int().min(0), panes: z.number().int().min(0), worktrees: z.number().int().min(0) }).strict();
+const leftoverCountsSchema = z.object({ processes: z.number().int().min(0), trialContainers: z.number().int().min(0), reclaimed: z.number().int().min(0), panes: z.number().int().min(0), worktrees: z.number().int().min(0), networks: z.number().int().min(0).default(0) }).strict();
 export type LeftoverCounts = z.infer<typeof leftoverCountsSchema>;
 const bytes = z.number().min(0).nullable();
 const leftoverDiskSchema = z.object({ trialRuns: bytes, worktrees: bytes, trialCheckouts: bytes, trialImages: bytes, buildCache: bytes }).strict();
@@ -202,11 +202,18 @@ export const daemonStateSchema = z.object({
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()
-    .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0 }, report: null })),
+    .default(() => ({ day: null, counts: { processes: 0, trialContainers: 0, reclaimed: 0, panes: 0, worktrees: 0, networks: 0 }, report: null })),
   /** GY-3199: the UTC day the control-plane diagnostics last ran, so the staleness lines log once a day. */
   controlPlaneDay: z.string().max(10).nullable().default(null),
   /** GY-3104: each open item's current run of equal-signature failures, kept here so a restart does not forget it. */
   failureRuns: z.record(z.string(), failureRunSchema).default({}),
+  /**
+   * GY-3293: each cycle step's current run of the same failure — normalized reason and consecutive
+   * count, kept on the cursor so a restart does not forget it. The tenth consecutive raises the
+   * operator (cycle.ts `stepFailureThreshold`): a standing Needs you line on the dashboard and an
+   * attention line in master status, neither of which needs the master session.
+   */
+  stepFailures: z.record(z.string().max(40), z.object({ step: z.string().max(40), reason: z.string().max(1000), count: z.number().int().min(0), at: z.string() }).strict()).default({}),
   /** GY-3101: the stalled-yard alert's own bookkeeping, kept on the cursor so a restarted loop neither re-alerts at once nor loses the all-clear. */
   alerts: z.object({
     /** When the stop the loop is watching began — the last movement the yard showed, or the first stalled observation when none is recorded. Null while work starts or merges. */
@@ -342,6 +349,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     action.attempts = clampCount(action.attempts, 1000);
   }
   for (const entry of Object.values(state.launchBackoff)) entry.reason = cut(entry.reason, 500);
+  for (const entry of Object.values(state.stepFailures)) entry.reason = cut(entry.reason, 1000);
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
   if (state.master) {

@@ -163,7 +163,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>(<abbr[^>]*>)?Operator automation</);
   assert.deepEqual(tabs(dashboard(), 'tests'), ['Tests', 'Test cases']);
   assert.deepEqual(tabs(dashboard(), 'workers'), ['Workers', 'Costs']);
-  assert.deepEqual(tabs(dashboard(), 'master'), ['The Chief', 'Product'], "the Chief's own tab reads as its sidebar entry does");
+  assert.deepEqual(tabs(dashboard(), 'master'), ['Master', 'Product'], "the Master's own tab reads as its sidebar entry does");
   assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
   agent.actor = { ...agent.actor, sessionKind: 'ai' };
@@ -223,8 +223,9 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   const count = words(view).length;
   assert.ok(count <= 250, `item view renders ${count} words: ${visible}`);
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
-  const order = [at('Moving'), at('PR #43'), at('Testing 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, pull request, why, who acts next, then what is left');
+  // GY-3321: the why is the page heading's fact, under the title; the pull request is its action, top right.
+  const order = [at('Moving'), at('Testing 2 of 3 proofs passed'), at('PR #43'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, why, pull request, who acts next, then what is left');
   // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under Technical details.
   const review = itemView('GY-15');
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
@@ -348,7 +349,7 @@ test('unit:work-page-no-derived-totals — a total that is a sum or subset of th
   assert.ok(!page.includes('aria-label="Open items"'), 'no Open tile');
   assert.ok(!/<span>Open<\/span>/.test(page), 'Open is not a tile label');
   assert.match(page, /<h1>Work<\/h1>/, 'the heading carries no derived count');
-  const sentence = /<p class="summary">([^<]*)<\/p>/.exec(page)![1];
+  const sentence = /<p class="page-fact">([^<]*)<\/p>/.exec(page)![1];
   const { byGroup } = classify(work, NOW);
   assert.equal(sentence, summarySentence(Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as any));
 });

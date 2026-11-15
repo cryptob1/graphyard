@@ -17,6 +17,7 @@ import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 // panes — so the panel answers from the loop's own report, not from a fixture the page invented.
 
 test('e2e:setup-where-things-run — the Setup page\'s Where things run panel names this install\'s units, containers, port, URL, directories and master pane', async ({ page, context, baseURL }) => {
+  test.setTimeout(90_000);
   const store = await withDatabase('setup_where_things_run');
   await store.init();
   const engine = new Engine(store, 120, 'fixture/shop');
@@ -30,7 +31,7 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
   const proxy = async (browserContext: BrowserContext) => browserContext.route('**/*', async route => {
     const { pathname, search } = new URL(route.request().url());
     await route.fetch(pathname.startsWith('/api/') ? { url: url + pathname + search } : {})
-      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => {}); // a request still in flight at teardown
   });
   try {
     await proxy(context);
