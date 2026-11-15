@@ -401,10 +401,13 @@ export const masterConfigSchema = forwardTolerant(z.object({
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
   }).strict().optional(),
   // GY-3345: the other installs this Master messages (`master peer add`), each with a reporter token that install issued.
+  // GY-3385: `configDirectory` names a peer install's directory on this host — where `master peer
+  // issue` places the reporter token this Master mints for it, granted writable at launch.
   peers: z.array(z.object({
     name: z.string().regex(/^[\w.-]{1,60}$/),
     url: z.string().url().max(500),
     tokenFile: z.string().min(1).max(1000).refine(isAbsolute, 'peers[].tokenFile must be absolute'),
+    configDirectory: z.string().min(1).max(1000).refine(isAbsolute, 'peers[].configDirectory must be absolute').optional(),
   }).strict()).max(50).optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.

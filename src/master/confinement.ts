@@ -210,6 +210,20 @@ export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly 
     hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
 }
 
+/** GY-3385: the `peers` directory of an install's config directory — where the reporter tokens exchanged between two installs on a host live, each placed by the issuing side. */
+export const peerTokenDirectory = (installDirectory: string) => join(installDirectory, 'peers');
+/**
+ * GY-3385: the peer exchange a master session's launch prepares — this install's own `peers`
+ * directory created (so a peer's session can place a token in it), and each recorded peer's
+ * returned for the launch to grant writable, where this Master places the tokens it issues.
+ */
+export function preparePeerExchange(config: { credentialFile: string; peers?: readonly { configDirectory?: string }[] | null }): string[] {
+  const foreign = [...new Set((config.peers ?? []).flatMap(peer => peer.configDirectory ? [peer.configDirectory] : []))];
+  for (const directory of [peerTokenDirectory(dirname(dirname(resolve(config.credentialFile)))), ...foreign.map(peerTokenDirectory)])
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return foreign.map(peerTokenDirectory);
+}
+
 /**
  * The bubblewrap words that hide the install's credential locations from the session (GY-1856):
  * each masked directory becomes an empty tmpfs, so every credential under it is unreadable —
