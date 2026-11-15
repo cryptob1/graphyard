@@ -1,8 +1,8 @@
 import { defaultChildRun, runChild, type ChildRun } from '../child-runner.js';
-import { lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { stopProcessesUnder } from '../session-processes.js';
 
 /**
@@ -122,12 +122,27 @@ const git = (repository: string): Run => (command, args) => defaultChildRun(comm
  * registration goes with the files; a worktree the session never created, or already removed, is
  * not an error, and the prune afterwards drops whatever registration is left pointing at nothing.
  */
+/**
+ * GY-3343: removes `path` whole. A read-only tree (0555 directories, as Go's module cache leaves)
+ * cannot be emptied by `rm` alone, so a refused removal makes every directory writable and retries.
+ */
+export async function removeTree(path: string): Promise<void> {
+  try { return await rm(path, { recursive: true, force: true }); }
+  catch (error) { if (!['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  const writable = async (directory: string): Promise<void> => {
+    await chmod(directory, 0o700).catch(() => {});
+    for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) if (entry.isDirectory()) await writable(join(directory, entry.name));
+  };
+  await writable(path);
+  await rm(path, { recursive: true, force: true });
+}
+
 export async function removeSessionCheckout(repository: string, base: string, directory: string, run?: Run) {
   assertManaged(base, directory);
   await stopProcessesUnder(directory);
   const execute = run ?? git(repository);
   try { await execute('git', ['-C', repository, 'worktree', 'remove', '--force', resolve(directory, 'checkout')]); } catch { /* never created, or already gone */ }
-  await rm(directory, { recursive: true, force: true });
+  await removeTree(directory);
   try { await execute('git', ['-C', repository, 'worktree', 'prune']); } catch { /* a stale registration is harmless and pruned next time */ }
   // An installation with no session leaves nothing behind, not even its empty root.
   await rmdir(base).catch(() => {});

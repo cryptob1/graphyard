@@ -1,0 +1,15 @@
+{
+  "id": "trial-serve-output-kept",
+  "title": "A trial keeps the serve command output and can remove read-only scratch",
+  "description": "Runs real merge trials of a fixture repository whose declared serve command prints 100 lines and either never answers or exits early. Each trial leaves all of the command's output in a file under the trial run directory, and the last 40 lines in the trial result with the time the command ran. The fixture's build leaves a read-only tree (directories 0555, files 0444) in the trial's scratch, which the trial removes whole and reports no leftover.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a serve command that never answers or exits early keeps its output, and read-only scratch is removed",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:trial-serve-output-kept tests/trial-serve-output-kept.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
