@@ -14,7 +14,7 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { idempotencyKey } from './idempotency-key';
-import { ShippedToast, confetti } from './fun';
+import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
 import KeyboardNav from './keyboard';
@@ -127,7 +127,7 @@ function App() {
     const fresh = merged.current ? work.filter(w => isMerged(w) && merged.current!.get(w.id) === false) : [];
     merged.current = new Map(work.map(w => [w.id, isMerged(w)]));
     if (!fresh.length) return;
-    setShipped(fresh.at(-1)!); confetti();
+    setShipped(fresh.at(-1)!);
   }, [work]);
   useEffect(() => { if (!shipped) return; const timer = setTimeout(() => setShipped(null), 8000); return () => clearTimeout(timer); }, [shipped]);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
@@ -140,7 +140,7 @@ function App() {
     <main className="main">{error && <div role="alert" className="notice danger">{error}{error === SIGN_IN_NEEDED && <> <button type="button" onClick={signOut}>Sign in</button></>}</div>}
       <TopBar {...dashboard} onPalette={() => setPalette(true)}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
-    {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
+    {shipped && <ShippedToast key={shipped.id} item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
     <VersionLabel status={status}/>
   </div>;
