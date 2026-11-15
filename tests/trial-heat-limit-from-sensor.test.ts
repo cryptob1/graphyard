@@ -22,7 +22,7 @@ async function host(label: string, sensor: { name: string; celsius: number; crit
   if (sensor.crit) await writeFile(join(dir, 'temp1_crit'), `${sensor.crit * 1000}\n`);
   if (sensor.max) await writeFile(join(dir, 'temp1_max'), `${sensor.max * 1000}\n`);
   const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-    load: { slots: join(base, 'slots'), cap: 2, order: trialStartOrder.merge, hotCelsius: trialHotCelsius, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
+    load: { slots: join(base, 'slots'), cap: 2, order: trialStartOrder.merge, hotCelsius: trialHotCelsius, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600 } });
   const child: ChildProcess = spawn(program!, [...words, 'true'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
   let said = '';
   child.stderr!.on('data', chunk => { said += chunk; });
