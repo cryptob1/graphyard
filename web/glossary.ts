@@ -18,7 +18,7 @@ export const glossary = {
   reviewer: 'The agent or person who approves a change. It is never the one who built it.',
   producer: 'An agent that supplies independent proof of a change.',
   master: 'The agent coordinating work and resolving blockers. Independent reviewers approve changes.',
-  blocker: 'A worker’s reason it cannot continue. The master is notified to resolve it.',
+  blocker: 'A worker’s reason it cannot continue. The Master clears it; the Master page lists the ones waiting.',
   'bootstrap obligation': 'A proof that was put off when Graphyard was first set up. The next change to the same files must provide it.',
   'post-deploy check': 'A test run against the live site after a change is deployed (e2e:deploy-smoke).',
   'end-to-end test': 'A test that uses the finished product the way a person would, from start to finish, usually through a browser. Its proof names start with e2e:.',
