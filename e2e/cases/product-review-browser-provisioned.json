@@ -1,0 +1,16 @@
+{
+  "id": "product-review-browser-provisioned",
+  "title": "A host without the browser tool is set up for product reviews instead of stalling them",
+  "description": "GY-3370: on a host where agent-browser is absent, a feature item that reaches product review makes the loop install the pinned tool once into the install's tool directory; the reviewer launch finds it on its PATH and the review runs in the same cycle, and two items reaching review together share one install. With the installer failing the item stays in review, no rework is requested, and master status shows one attention line with the installer's error. Doctor reports the tool missing before and present after.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "browser tool provisioned for product review",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-review-browser-provisioned.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}
