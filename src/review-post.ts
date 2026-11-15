@@ -13,7 +13,8 @@ import { blockingFindings, findingLocation } from './review-cap.js';
 /** The file, in the session's GH_CONFIG_DIR, that binds a reviewer session to its launch. */
 export const reviewBindingFile = 'review-binding.json';
 // REJECT is a product review's verdict (GY-2989): the route accepts it only from a product launch.
-export const reviewEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'REJECT'] as const;
+// COULD_NOT_RUN is a product review's too (GY-3331): its own environment failed, so nobody judged.
+export const reviewEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'REJECT', 'COULD_NOT_RUN'] as const;
 export type ReviewEvent = typeof reviewEvents[number];
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 /** The verdict token a control-plane launch binds: 32 random bytes, hex; only its sha256 is kept anywhere but the binding. */
@@ -125,7 +126,7 @@ export interface ReviewPostDependencies {
 }
 
 /** The review state a verdict event records as (the form `exactApproval` and the review gate read). */
-export const verdictStateOf = (event: ReviewEvent) => event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : event === 'REJECT' ? 'REJECTED' : 'COMMENTED';
+export const verdictStateOf = (event: ReviewEvent) => event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : event === 'REJECT' ? 'REJECTED' : event === 'COULD_NOT_RUN' ? 'COULD_NOT_RUN' : 'COMMENTED';
 
 /**
  * Check, then post exactly one review. `environment` is the session's own: GH_CONFIG_DIR names the

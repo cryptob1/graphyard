@@ -194,9 +194,9 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     // or rejected, recorded on `work.productReview` — never as a code review on the observation.
     const product = !!launch!.product;
     demand(product || !data.screenshots?.length, 'Only a product review uploads screenshots', 409);
-    if (product) demand(data.event !== 'COMMENT', 'A product review is approved, changes requested or rejected; it posts no COMMENT', 409);
-    else demand(data.event !== 'REJECT', 'REJECT is a product review verdict; a code review posts APPROVE, REQUEST_CHANGES or COMMENT', 409);
-    const productVerdict: ProductReview['verdict'] | null = product ? data.event === 'APPROVE' ? 'approved' : data.event === 'REQUEST_CHANGES' ? 'changes-requested' : 'rejected' : null;
+    if (product) demand(data.event !== 'COMMENT', 'A product review is approved, changes requested, rejected or could not run; it posts no COMMENT', 409);
+    else if (data.event === 'REJECT' || data.event === 'COULD_NOT_RUN') demand(false, `${data.event} is a product review verdict; a code review posts APPROVE, REQUEST_CHANGES or COMMENT`, 409);
+    const productVerdict: ProductReview['verdict'] | null = product ? data.event === 'APPROVE' ? 'approved' : data.event === 'REQUEST_CHANGES' ? 'changes-requested' : data.event === 'COULD_NOT_RUN' ? 'could-not-run' : 'rejected' : null;
     // Every verdict carries the base its session judged (GY-2948 AC-2): the launch's baseTip, the
     // head's merge base with the base branch, so the verdict itself — in the ledger event, the
     // observation.reviews entry and the launch's verdict record — says which commits were in scope,

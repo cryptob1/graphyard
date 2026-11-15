@@ -8,7 +8,7 @@ test.use({ reducedMotion: 'no-preference' });
 // GY-3272 AC-4: the yard moves. A one-second boot sequence plays once per browser session and any
 // key or click skips it; a stage change glides the row to its new group instead of jumping; an
 // item in trial carries a light streak along its row; the rain falls in two parallax sheets, the
-// headings flicker in and the top line types itself out. Reduced motion — or Fun off — stills all
+// headings flicker in and the top line types itself out. Reduced motion stills all
 // of it, and the boot never runs.
 const ledger = (item: any, state: string) => ({ key: item.key, state, head: item.candidate.sha, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: null, events: 1 });
 /** The board fixture with one merge trial out (GY-21 pushed, the streak) and one refused on its own head (GY-15, the glitch). */
@@ -104,8 +104,8 @@ test('e2e:night-yard-animation — a stage change glides the row to its new grou
   state.work = state.work.map(item => item.key === 'GY-20' ? { ...item, humanRequest: null, blocker: null } : item);
   await expect(row).not.toHaveAttribute('data-group', 'needs-you', live);
   await expect.poll(() => page.evaluate(() => (window as any).glided ?? null), live).toMatch(/^transform /);
-  await expect.poll(() => row.evaluate(el => el.classList.contains('glide')), { timeout: 3_000 }).toBe(false);
-  expect(await row.evaluate(el => el.style.transform)).toBe('');
+  // It lands where it belongs: no glide class and no transform left on it, read together in one look.
+  await expect.poll(() => row.evaluate(el => ({ glide: el.classList.contains('glide'), transform: el.style.transform })), live).toEqual({ glide: false, transform: '' });
 });
 
 test('e2e:night-yard-animation — a row in trial carries the streak, the rain falls in two sheets, headings flicker in and the line types itself out', async ({ page }) => {
@@ -154,20 +154,3 @@ test('e2e:night-yard-animation — with reduced motion every animation stills an
   expect(await row.evaluate(el => el.classList.contains('glide'))).toBe(false);
 });
 
-test('e2e:night-yard-animation — Fun off turns every animation off, on this page and the next', async ({ page }) => {
-  test.setTimeout(60_000);
-  await serve(page);
-  await page.getByRole('button', { name: 'Fun', exact: true }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-fun', 'off');
-  // Rain (both sheets), streak, beacons and the flicker-in: all still. The line is gone with its
-  // Fun, and so is the glitch's own class — no row claims it any more.
-  for (const [selector, pseudo] of [['body', '::after'], ['html', '::after'], ['.work-row.trial', '::after'], ['.city-strip .beacon', ''], ['h1', '']] as const)
-    expect(await animationOf(page, selector, pseudo), `${selector}${pseudo}`).toBe('none');
-  await expect(page.locator('.build-line')).toHaveCount(0);
-  await expect(page.locator('.work-row.glitch')).toHaveCount(0);
-  // A fresh load with Fun remembered off brings the page straight up, boot and all.
-  await page.reload();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
-  await expect(page.locator('[data-boot]')).toHaveCount(0);
-  expect(await animationOf(page, 'body', '::after')).toBe('none');
-});

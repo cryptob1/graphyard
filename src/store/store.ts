@@ -14,6 +14,7 @@ import { runStartupMigration } from './migration-locks.js';
 // the lock budget stays exported here with the store that applies it.
 export { migrationAttemptLockTimeoutMs, migrationLockTimeoutMs } from './migration-locks.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
+import { recentChangesWindowMs } from '../model/project-memory.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
@@ -180,8 +181,14 @@ export class Store {
    * snapshot, so only the live items' documents are read at all (GY-203).
    * The master loop, the dispatcher and every executor poll this; the full snapshot stays for the
    * readers that derive reports from whole documents.
+   *
+   * `openOnly` (GY-3341) is the live loop's own read: a cycle holds only open items and what they
+   * reference — every unsettled document, plus the settled summaries an open item names as a
+   * dependency and those that merged inside the project memory's recent-changes window — so a
+   * cycle's cost never grows with every item ever created. Every other reader (the worker's sync,
+   * an export) still gets every settled summary.
    */
-  async coordinationSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; trimmed: Map<string, CoordinationTrim> }> {
+  async coordinationSnapshot(options: { openOnly?: boolean } = {}): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[]; trimmed: Map<string, CoordinationTrim> }> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -189,10 +196,14 @@ export class Store {
       // Every other item's document is trimmed in SQL, and only those documents are read. The trimmed
       // document is built once per row (`OFFSET 0`): inlined, every `x.document` the trim counts read
       // built it again, five times a row (GY-1583).
-      const settled = (await client.query('SELECT number, summary AS document, trimmed FROM work_index WHERE settled')).rows;
       const live = (await client.query(`SELECT d.number, x.document, ${coordinationTrimSql('x.document', coordinationTail)} AS trimmed
         FROM (SELECT w.number, ${detoasted('w.document')} AS document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) OFFSET 0) d
         CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document OFFSET 0) x`)).rows;
+      const settled = options.openOnly
+        ? (await client.query(`SELECT number, summary AS document, trimmed FROM work_index WHERE settled
+            AND (id = ANY($1::uuid[]) OR merged_at >= statement_timestamp() - interval '${recentChangesWindowMs} milliseconds')`,
+          [[...new Set(live.flatMap((row: { document: Work }) => row.document.dependencies ?? []))]])).rows
+        : (await client.query('SELECT number, summary AS document, trimmed FROM work_index WHERE settled')).rows;
       const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
       const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
       await client.query('COMMIT');

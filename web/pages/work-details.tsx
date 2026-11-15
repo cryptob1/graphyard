@@ -42,7 +42,7 @@ const withoutPr = (sentence: string) => sentence.replace(/\s*(?:of|on|in)?\s*PR 
 const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0]; return first.length > 90 ? `${first.slice(0, 88).replace(/\s+\S*$/, '')}…` : first; };
 
 const previewWords: Record<ItemPreviewState, string> = { starting: 'Starting', running: 'Running', failed: 'Failed', cleaned: 'Cleaned up' };
-const productWords: Record<string, string> = { approved: 'Approved', 'changes-requested': 'Changes requested', rejected: 'Rejected' };
+const productWords: Record<string, string> = { approved: 'Approved', 'changes-requested': 'Changes requested', rejected: 'Rejected', 'could-not-run': 'Could not run' };
 /**
  * The product review (GY-2989): a user-facing feature is judged in the whole app's context before
  * it merges. The panel shows the standing verdict, the reviewer's findings and every screenshot the
@@ -266,23 +266,25 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const plainLead = plainSentence || item.title;
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
-    <div className="item-head">
-      <div className="item-title">
+    <div className="page-heading">
+      <div>
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())}</span><Priority item={item} disabled={busy} onChange={mayChangePriority(status?.actor) ? priority => { void action(item.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
+        <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={why}/></p>
       </div>
-      {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key} observation={item.observation}/> on GitHub ↗</span>}
+      {(item.candidate || (!item.ready && admin)) && <div className="page-actions">
+        {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key} observation={item.observation}/> on GitHub ↗</span>}
+        {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
+      </div>}
     </div>
-    <section className={`where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
-      <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
+    <section className={`panel where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
       {item.reworkRequested && item.lastRework?.reason && <p className="notice" data-rework-reason>Sent back because: {item.lastRework.reason}</p>}
       <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label && !waitingOnYou.length ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
       {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
-      {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
     </section>
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
