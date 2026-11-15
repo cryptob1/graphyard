@@ -13,9 +13,10 @@ const parked = { dependencies: [], scenarioRequirements: [], id: 'parked-work', 
   criteria: [{ id: 'AC-1', text: 'Proven live', proofs: ['unit:live'] }], evidence: [], gates: [], lease: null, blocker: `Waiting on a human-only decision (spending money or opening third-party accounts): ${request.needed}`, humanRequest: request, humanRequests: [] };
 const now = '2026-01-01T02:00:00Z';
 
-async function fixture(page: Page, options: { refuseAnswers?: boolean } = {}) {
+async function fixture(page: Page, options: { refuseAnswers?: boolean; holdPoll?: () => Promise<void> } = {}) {
   const posted: { path: string; body: any }[] = [];
   let work: any = parked;
+  let statusReads = 0;
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname, method = route.request().method();
     // The link is the credential: the one route reached without a token, and it opens a human session.
@@ -28,7 +29,11 @@ async function fixture(page: Page, options: { refuseAnswers?: boolean } = {}) {
       work = { ...parked, blocker: null, humanRequest: null, humanRequests: [{ ...request, answer: { by: 'operator', at: now, outcome: choice.outcome, text: choice.label, waitedMs: 7_200_000, choice: { id: choice.id, label: choice.label }, note: null } }] };
       return route.fulfill({ json: work });
     }
-    if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, humanOnly: openHumanOnly([{ work }], Date.parse(now)), github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
+    if (path.endsWith('/status')) {
+      const json = { actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, humanOnly: openHumanOnly([{ work }], Date.parse(now)), github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] };
+      if (++statusReads === 2) await options.holdPoll?.();
+      return route.fulfill({ json });
+    }
     if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: [work], now } });
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus([work], Date.parse(now), null) });
     return route.fulfill({ json: path.endsWith('/work') ? [work] : [] });
@@ -136,4 +141,27 @@ test('a real-world check keeps the photo the person chose: a 1 MiB image posts w
   await pass.click();
   await expect.poll(() => posted.length).toBe(1);
   expect(posted[0]).toEqual({ request: check.id, outcome: 'pass', note: 'Printed clean', photo: { name: 'receipt.jpg', mediaType: 'image/jpeg', bytes: bytes.toString('base64') } });
+});
+
+// Hold the first background poll until the answer's refresh has landed. Without ordering
+// these reads, its old request list resurrects the card and erases Recently answered.
+test('an older poll cannot undo a successful answer', async ({ page }) => {
+  await page.clock.install({ time: new Date(now) });
+  await page.clock.pauseAt(new Date(now));
+  let markHeld!: () => void, release!: () => void;
+  const held = new Promise<void>(resolve => { markHeld = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  await fixture(page, { holdPoll: () => { markHeld(); return released; } });
+  await page.goto('/#sign-in=one-time-code-from-graphyard-login');
+  await held;
+  await page.getByRole('button', { name: 'Every request and answer →' }).click();
+  await page.locator('.human-request').getByRole('button', { name: 'Approve up to €50/month' }).click();
+  await expect(page.getByRole('region', { name: 'Recently answered' })).toContainText('Approve up to €50/month');
+  const response = page.waitForResponse('**/api/status');
+  release();
+  await (await response).finished();
+  // Drain the browser's response callbacks and React paint before inspecting the old poll's effect.
+  await page.clock.runFor(100);
+  await expect(page.locator('.human-request')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Recently answered' })).toContainText('Approve up to €50/month');
 });
