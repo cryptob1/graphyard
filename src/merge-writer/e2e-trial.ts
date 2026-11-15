@@ -24,7 +24,7 @@ export interface TrialE2eCase {
   missing?: boolean;
   /** The step that failed, as the runner names it, or why the case could not run. */
   failingStep?: string | null;
-  /** GY-3265: the failing step's last lines of output, secrets redacted; the diagnostics' filing carries them, the trial record does not. */
+  /** GY-3265, GY-3343: the failing step's last lines of output, secrets redacted; a serve command that never served carries them so the refusal names why (the diagnostics' filing carries them the same way; the Graphyard record a trial posts still strips them). */
   output?: string[];
   /** GY-3180: the case's browser or runner could not start, so the head was never judged: the trial ends with no verdict. */
   hostFailure?: boolean;

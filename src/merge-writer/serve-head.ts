@@ -166,9 +166,9 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
   const sink = outputFile ? createWriteStream(outputFile) : null;
   sink?.on('error', error => log(`the serve command's output could not be written to ${outputFile}: ${error.message}`));
   // The end of the output, enough for its last lines; the file keeps the head and, once ended, the tail.
-  let recent = '', written = 0, dropped = 0;
+  let recent = Buffer.alloc(0), written = 0, dropped = 0;
   const take = (chunk: Buffer) => {
-    recent = (recent + chunk.toString('utf8')).slice(-64 * 1024);
+    recent = Buffer.concat([recent, chunk]).subarray(-64 * 1024);
     if (!sink) return;
     const head = chunk.subarray(0, Math.max(0, serveOutputHeadBytes - written));
     written += head.length; sink.write(head);
@@ -176,9 +176,9 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
   };
   child.stdout.on('data', take);
   child.stderr.on('data', take);
-  const tail = () => recent.trimEnd().split('\n').slice(-serveTailLines);
+  const tail = () => recent.toString('utf8').trimEnd().split('\n').slice(-serveTailLines);
   const endSink = () => new Promise<void>(accept => sink
-    ? sink.end(dropped ? `\n… ${dropped} byte(s) of this output were cut here; the last of it follows …\n${recent}` : undefined, () => accept())
+    ? sink.end(dropped ? `\n… ${dropped} byte(s) of this output were cut here; the last of it follows …\n${recent.toString('utf8')}` : undefined, () => accept())
     : accept());
   const fail = async (reason: string): Promise<never> => {
     await close();
@@ -211,7 +211,7 @@ async function serveByCommand(serve: CommandApplication, worktree: string, env: 
     const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
     if (answered) return { origin: new URL(serve.url).origin, close: () => close().finally(endSink), ended: () => exited };
     // GY-3189: the command's time to answer starts when its container does, however long the start waited.
-    if (trialContainerWaiting(recent)) deadline = Math.min(Date.now() + readyMs, budgetEnd);
+    if (trialContainerWaiting(recent.toString('utf8'))) deadline = Math.min(Date.now() + readyMs, budgetEnd);
     if (Date.now() >= deadline) {
       log(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s: ${tail().slice(-5).join(' | ').slice(0, 500)}`);
       await fail(`the serve command did not answer ${serve.url} within ${serve.readySeconds}s`);

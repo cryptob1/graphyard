@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { removeTree, writableDirectories } from '../src/install/worktree-root.js';
 import { runMergeTrial } from '../src/merge-writer/executor.js';
 import { trialMerge } from '../src/merge-writer/trial.js';
 import { defaultChildRun } from '../src/child-runner.js';
@@ -72,4 +73,45 @@ test('e2e:trial-serve-output-kept — a serve command that exits early keeps its
   const { run, runDirectory, temporaryRoot } = await trialOf(true);
   assertKept(run, runDirectory, /the serve command ended \(status 3\)/);
   assertNoLeftover(run, temporaryRoot);
+});
+
+// The merge trial of this change's first candidate failed here: while removeTree chmod-walked the
+// read-only scratch, the trial image's own tooling removed a compile-cache directory beside it, and
+// the walk read that vanished entry as a failed removal. A path another remover takes mid-removal
+// counts as removed, exactly as Node's own rm reads ENOENT.
+test('e2e:trial-serve-output-kept — a directory another remover takes mid-removal is gone, not a failed removal', async () => {
+  const gone = join(tmpdir(), 'trial-serve-output-never-made');
+  await removeTree(gone);
+  await writableDirectories(gone);
+  assert.equal(existsSync(gone), false, 'a path that was never there removes as if removed');
+
+  const root = await temporaryDirectory('trial-serve-output-race');
+  // The read-only tree that forces the chmod-walk, as Go's module cache does, made wide enough that the walk is still running when the other remover strikes.
+  for (let index = 0; index < 400; index++) {
+    const directory = join(root, `ro-${index}`);
+    mkdirSync(join(directory, 'mod'), { recursive: true });
+    writeFileSync(join(directory, 'mod', 'file'), 'x');
+    chmodSync(join(directory, 'mod', 'file'), 0o444);
+    chmodSync(join(directory, 'mod'), 0o555);
+    chmodSync(directory, 0o555);
+  }
+  // The entries another process removes the moment the walk makes the root writable (it chmods the root first), as a compile cache goes from under a trial's temporary directory.
+  for (let index = 0; index < 40; index++) {
+    mkdirSync(join(root, `churn-${index}`), { recursive: true });
+    writeFileSync(join(root, `churn-${index}`, 'blob'), 'x');
+  }
+  chmodSync(root, 0o555);
+  const remover = spawn(process.execPath, ['-e', `
+    const { readdirSync, rmSync, statSync } = require('node:fs');
+    for (;;) {
+      try {
+        if ((statSync(process.argv[1]).mode & 0o200) === 0) continue;
+        for (const name of readdirSync(process.argv[1])) if (name.startsWith('churn-')) rmSync(\`\${process.argv[1]}/\${name}\`, { recursive: true, force: true });
+        process.exit(0);
+      } catch { process.exit(0); }
+    }`, '--', root], { stdio: 'ignore' });
+  try {
+    await removeTree(root);
+    assert.equal(existsSync(root), false, 'the whole tree, read-only parts and raced parts alike, is removed');
+  } finally { remover.kill('SIGKILL'); }
 });

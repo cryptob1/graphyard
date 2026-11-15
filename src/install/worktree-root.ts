@@ -1,5 +1,5 @@
 import { defaultChildRun, runChild, type ChildRun } from '../child-runner.js';
-import { statfsSync } from 'node:fs';
+import { statfsSync, type Dirent } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, rm, rmdir, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -121,14 +121,22 @@ export async function allocateSessionCheckout(base: string, kind: CheckoutKind, 
 
 type Run = ChildRun;
 const git = (repository: string): Run => (command, args) => defaultChildRun(command, args, { cwd: repository });
-/** Give the owner write access to `directory` and every directory below it; a symlink is never followed. */
+/** GY-3343: a path that vanished while a removal worked — another remover is taking the same tree, as the trial image's own tooling takes a compile cache under the trial's temporary directory. */
+const vanished = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
+
+/**
+ * Give the owner write access to `directory` and every directory below it; a symlink is never
+ * followed. A path that vanished while the walk ran is skipped, never an error: the removal the
+ * walk serves finishes the tree whatever the other remover took.
+ */
 export async function writableDirectories(directory: string): Promise<void> {
-  const { mode } = await lstat(directory);
-  if ((mode & 0o700) !== 0o700) await chmod(directory, mode | 0o700);
-  for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await writableDirectories(join(directory, entry.name));
+  const info = await lstat(directory).catch(error => { if (!vanished(error)) throw error; return null; });
+  if (info && (info.mode & 0o700) !== 0o700) await chmod(directory, info.mode | 0o700).catch(error => { if (!vanished(error)) throw error; });
+  const entries = await readdir(directory, { withFileTypes: true }).catch(error => { if (!vanished(error)) throw error; return [] as Dirent[]; });
+  for (const entry of entries) if (entry.isDirectory()) await writableDirectories(join(directory, entry.name));
 }
 
-/** GY-3343: removes `path` whole; a refused removal (a read-only tree, as Go's module cache leaves) makes its directories writable and retries. */
+/** GY-3343: removes `path` whole; a refused removal (a read-only tree, as Go's module cache leaves) makes its directories writable and retries, and a path another remover already took counts as removed. */
 export async function removeTree(path: string): Promise<void> {
   try { return await rm(path, { recursive: true, force: true }); }
   catch (error) { if (!['EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
