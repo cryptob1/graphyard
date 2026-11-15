@@ -47,7 +47,7 @@ echo '{"url":"http://127.0.0.1:9"}'
 `;
 const httpCase = (id: string, environment?: string) => JSON.stringify({ id, title: `The ${id} app answers`, target: 'any', ...(environment ? { environment } : {}),
   steps: [{ kind: 'http', name: 'the app answers', method: 'GET', path: '/app', status: 200, expect: [{ path: 'ok', equals: true }] }] });
-const policy = (environment: Record<string, unknown>, extra: Record<string, unknown> = {}) => JSON.stringify({ e2e: { serve: { command: 'true', url: 'http://127.0.0.1:1', readySeconds: 1 }, environments: { staging: environment, ...extra } } });
+const policy = (environment: Record<string, unknown>, extra: Record<string, unknown> = {}) => JSON.stringify({ featureMap: [{ name: 'App', url: '/app', traps: [] }], e2e: { serve: { command: 'true', url: 'http://127.0.0.1:1', readySeconds: 1 }, environments: { staging: environment, ...extra } } });
 
 /** A repository with the verified base B declaring `staging`, the candidate C on it, an app the case hits, and the install's provider and secrets. */
 async function fixture(options: { maxConcurrent?: number; secretsMode?: number } = {}) {

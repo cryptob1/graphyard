@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'fetch-refusal' | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'fetch-refusal' | 'master-loop' | 'real-app';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -106,6 +106,9 @@ function accountItems(status: any | null): SetupItem[] {
   // stands, quoting the remote's refusal and the fix, gone once a fetch succeeds again.
   const fetchRefusal = typeof status?.setup?.fetchRefusal === 'string' ? status.setup.fetchRefusal.trim() : '';
   if (fetchRefusal) items.push({ id: 'fetch-refusal', title: 'Authorise the repository for the merge writer', done: false, human: true, line: fetchRefusal, action: { kind: 'wait', label: 'Check again' } });
+  const app = status?.serving?.onboarding;
+  items.push({ id: 'real-app', title: app?.onboarded ? 'Project onboarded' : 'Project not onboarded', done: app?.onboarded === true, human: false,
+    line: app?.onboarded ? 'The real application and its feature map are declared.' : `Master fault: ${status?.repository ?? 'This project'} — ${app?.fault ?? 'Waiting for the real application and feature map on main.'}`, action: null });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',

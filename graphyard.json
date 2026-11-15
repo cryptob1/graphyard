@@ -80,7 +80,10 @@
     }
   },
   "gate": {
-    "core": ["create-work-item", "smoke"]
+    "core": [
+      "create-work-item",
+      "smoke"
+    ]
   },
   "product": {
     "ui": [
@@ -147,5 +150,21 @@
       "fixture-static-home": "fixture-site",
       "fixture-compose-app": "fixture-app"
     }
-  }
+  },
+  "featureMap": [
+    {
+      "name": "Work dashboard",
+      "url": "/",
+      "traps": [
+        "Sign in to see project work."
+      ]
+    },
+    {
+      "name": "Ready control plane",
+      "url": "/healthz?ready",
+      "traps": [
+        "Startup migrations must finish before readiness succeeds."
+      ]
+    }
+  ]
 }

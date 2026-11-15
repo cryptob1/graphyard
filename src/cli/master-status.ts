@@ -33,7 +33,6 @@ import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
 import { backedOffProfiles, readDispatchCursor } from '../dispatch/cursor.js';
 
 /** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
@@ -99,6 +98,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // remote-tracking ref; the deploy unit fetches it).
   const report = await servingReport(root, master.repository, master.baseBranch, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
   const serving = {
+    onboarding: report.onboarding,
     unconfigured: report.unconfigured, commit: short(report.commit), main: short(report.main), atMain: report.atMain,
     failedDeploy: report.failedDeploy ? { tip: short(report.failedDeploy.tip), reason: report.failedDeploy.reason, restoring: short(report.failedDeploy.restoring) } : null,
     // A repository that declares no node application reports exactly what it reported before it (GY-2976), with the serve fields null.
@@ -145,10 +145,6 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
       events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
-  // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
-  // GY-3387: judged from graphyard.json at main's tip, not the checkout's working tree, which can lag main.
-  let placeholder = false;
-  try { placeholder = !!report.main && isPlaceholderServe(JSON.parse(String(await run('git', ['-C', root, 'show', `${report.main}:graphyard.json`]))).e2e?.serve); } catch { /* main holds no parseable graphyard.json: no serve declared */ }
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
   const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
@@ -189,7 +185,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...(report.onboarding.fault ? [{ subject: 'e2e.serve', text: `${report.onboarding.fault} Master fault: ${master.repository} is not onboarded.`, next: 'The Master must declare the real application serve and feature map on main.' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

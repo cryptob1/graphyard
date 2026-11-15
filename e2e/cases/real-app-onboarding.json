@@ -1,0 +1,12 @@
+{
+  "id": "real-app-onboarding",
+  "title": "Only a real app with a feature map is onboarded",
+  "description": "Setup reports a placeholder project as not onboarded with a Master fault; committing its real application serve and feature map on main makes it onboarded. Integration checks exercise the mapped feature against both the batch app and deployed app.",
+  "tags": ["onboarding", "serve"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {"kind": "command", "name": "Batch and deploy check the real app", "run": "node --import tsx tests/helpers/run-tests.ts tests/real-app-onboarding.test.ts", "timeoutSeconds": 600},
+    {"kind": "command", "name": "Setup shows real app onboarding", "run": "node --import tsx tests/helpers/run-tests.ts --browser browser-tests/real-app-onboarding.spec.ts", "timeoutSeconds": 600}
+  ]
+}

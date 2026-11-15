@@ -115,7 +115,7 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   assert.ok(loop.trials.filter(entry => entry.commit !== tip).every(entry => entry.commit === verified));
   const [trial] = gated;
   assert.equal(trial!.commit, tip, 'the gate runs on the main tip');
-  assert.deepEqual(trial!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:smoke'], 'the bound cases of every merged item and the gate.core cases (create-work-item and the smoke)');
+  assert.deepEqual(trial!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:smoke'], 'the bound cases of every merged item and the gate.core cases (create-work-item and the smoke)');
   assert.deepEqual([...trial!.files].sort(), ['src/f1.ts', 'src/f2.ts', 'src/f3.ts'], 'the affected selection runs over the files the batch changed');
   const record = readGateRecord(gateRecordPath(coordinator))!;
   assert.equal(record.verified, tip, 'a passing gate records the tip verified');
@@ -129,7 +129,7 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   const whole = reads(coordinator);
   const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
   assert.equal((await runGate(batchGatePorts({ ...whole.value, git: whole.value.git! }, work), fits)).outcome, 'verified');
-  assert.deepEqual(whole.trials[0]!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:other', 'e2e:smoke'], 'the whole E2E catalog');
+  assert.deepEqual(whole.trials[0]!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:other', 'e2e:smoke'], 'the whole E2E catalog');
 
   // The deploy watch serves the verified commit, never the fetched main tip.
   const deployed: string[] = [];

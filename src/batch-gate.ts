@@ -233,7 +233,7 @@ function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly Ser
 
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  const cases = whole ? await ports.catalog(tip) : [...new Set([...boundCaseIds(record, landings), ...await ports.core(tip)])];
+  const cases = [...new Set([...(whole ? await ports.catalog(tip) : boundCaseIds(record, landings)), ...await ports.core(tip)])];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
