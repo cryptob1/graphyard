@@ -1,3 +1,4 @@
+import { trialCpuMonitor } from './trial-cpu.js';
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs share the launcher (trial-container.ts); trials also divide their CPU lanes.
@@ -9,15 +10,15 @@ import { join } from 'node:path';
 export const defaultDiskFloorGb = 30;
 export const diskFloorBytes = (config: { run: { diskFloorGb?: number } }) => (config.run.diskFloorGb ?? defaultDiskFloorGb) * 1e9;
 
-/** One lane per allocated core; sharing keeps at least two lanes unless files or memory cap it. */
+/** One lane per allocated core (GY-3352); sharing keeps at least two lanes unless files or memory cap it. */
 export const trialShardLanes = (cores: number) => Math.max(2, Math.floor(cores));
-/** Two lanes per busy trial, bounded by the host and any configured upper bound. */
+/** Two lanes per busy trial (GY-3352), bounded by the host and any configured upper bound. */
 export const trialSlotCount = (cores: number, requested: number, affordableFiles: number | null = null) =>
   Math.max(1, Math.min(requested, Math.floor(cores / 2), affordableFiles === null ? Infinity : Math.floor(affordableFiles / 2)));
 /** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
 const minimumTrialContainers = 6;
-/** The containers a host runs at once: one per trial lane, whichever trials they serve. */
-export const trialContainerCap = (cores = availableParallelism()) => Math.max(minimumTrialContainers, Math.floor(cores / 2));
+/** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
+export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
 /** A start waits while the hottest CPU sensor reads this or more. */
 export const trialHotCelsius = 95;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
@@ -29,9 +30,10 @@ export const trialStartOrder = { merge: 0, gate: 1, verification: 2 } as const;
 export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
-export async function trialLoad(root: string, who: keyof typeof trialStartOrder): Promise<TrialLoad> {
+const hostCpu = trialCpuMonitor();
+export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: join(homedir(), '.gy', 'trial-slots'), cap: trialContainerCap(), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon' };
+  return { slots: join(homedir(), '.gy', 'trial-slots'), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon' };
 }
 
 const waitingLine = 'graphyard trial container: waiting', startingLine = 'graphyard trial container: starting';
@@ -75,11 +77,30 @@ def take_slot():
         if probe is None:
             return None
         os.close(probe)
-    for slot in range(load['cap']):
-        fd = locked('slot-' + str(slot), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if fd is not None:
-            return fd
-    return None
+    # A lower cap must count containers already holding higher-numbered slots. Serialize
+    # counting and claiming, so simultaneous starts cannot both spend the same free capacity.
+    admission = locked('admission', fcntl.LOCK_EX)
+    spare = None
+    try:
+        names = set(os.path.basename(path) for path in glob.glob(os.path.join(load['slots'], 'slot-*')))
+        names.update('slot-' + str(slot) for slot in range(load['cap']))
+        occupied = 0
+        for name in sorted(names):
+            fd = locked(name, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fd is None:
+                occupied += 1
+            elif spare is None:
+                spare = fd
+            else:
+                os.close(fd)
+        if occupied < load['cap']:
+            return spare
+        if spare is not None:
+            os.close(spare)
+        return None
+    finally:
+        os.close(admission)
+
 def admit():
     # The kernel drops a flock with its last holder, so a killed launcher leaves no slot and no place in the queue.
     os.makedirs(load['slots'], exist_ok=True)
