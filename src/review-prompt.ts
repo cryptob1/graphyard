@@ -9,10 +9,10 @@ export type ReviewCriterion = { id: string; text: string; proofs?: readonly stri
  */
 export const simplicityParagraph = 'Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases. ';
 /**
- * GY-3382: what every item filer writes before anything else — the master's prompt, the master
- * guide and `graphyard create` carry it — so items stay short and agents build what users need.
+ * GY-3382: what every item filer writes before anything else, so items stay short and agents build
+ * what users need. The master prompt carries the short form, held to its brief's word budget;
+ * `master guide` opens with the full rule.
  */
-/** The master prompt's form, held to the brief's word budget; `master guide` opens with the full rule. */
 export const itemLeadBrief = 'Write why and simplest first in each item. ';
 export const itemLeadRule = 'Before anything else in an item you file, write why (one sentence: how it helps users) and simplest (one sentence: why it is the simplest thing that works); keep the description short, and cut scope until the second sentence can be written. ';
 /** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
