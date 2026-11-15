@@ -1,7 +1,7 @@
 import { demand } from '../../model.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
-import { humanSignIn, mintWorkerIdentity } from '../auth.js';
+import { humanSignIn, mintReporterIdentity, mintWorkerIdentity } from '../auth.js';
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle. */
 export const operatorAgentRoutes = defineRoutes('operator-agents', [
@@ -19,6 +19,8 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   },
   // GY-3285: the loop mints a worker identity for each worker session its registry allows.
   { method: 'POST', path: '/api/worker-identities', handle: async context => mintWorkerIdentity(context.services, context.actor, (await parseJson(context) as { id?: unknown }).id) },
+  // GY-3385: the Master issues a peer install its reporter identity from its own session.
+  { method: 'POST', path: '/api/reporter-identities', handle: async context => mintReporterIdentity(context.services, context.actor, (await parseJson(context) as { id?: unknown }).id) },
   { method: 'GET', path: '/api/operator-agents', handle: ({ actor, services }) => services.operatorAgents.list(actor) },
   { method: 'POST', path: '/api/operator-agents', handle: async context => context.services.operatorAgents.setup(context.actor, await parseJson(context), context.idempotencyKey()) },
   {
