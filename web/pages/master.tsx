@@ -53,7 +53,7 @@ export default function MasterPage({ work, observedAt, token, api, setSelected }
   const owes = masterOwes(work, now);
   return <>
     <PageHeader title="Master" fact={owes.length ? `${owes.length} ${owes.length === 1 ? 'blocker waits' : 'blockers wait'} on the Master.` : 'Files, routes and unsticks the work.'}/>
-    {owes.length > 0 && <section className="panel" aria-label="Blockers the Master owes"><h2>Blockers <small>· the Master clears these, never you</small></h2>
+    {owes.length > 0 && <section className="panel" aria-label="Blockers the Master owes"><h2>Blockers <small>· the Master clears these</small></h2>
       <ul className="master-owes">{owes.map(entry => <li key={entry.id}>
         <button className="text-button" onClick={() => setSelected(entry.id)}>{entry.key} <span data-title>{entry.title}</span></button>
         <span className="muted">{entry.since !== null ? `blocked ${formatAge(entry.since, now)} ago` : 'blocked'}</span>
