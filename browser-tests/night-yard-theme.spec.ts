@@ -155,7 +155,7 @@ test('e2e:night-yard-theme — with reduced motion the rain, the glitch flicker 
   expect(await rain(page)).toBe('none');
   // The grain holds still — it is a texture, not a movement — and the beacons do not breathe.
   expect(await grain(page)).toContain('svg');
-  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.city-strip .beacon')!).animationName)).toBe('none');
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.trust-strip .beacon')!).animationName)).toBe('none');
   // A merge still brings the toast, but no pulse runs on it.
   state.work = state.work.map(item => item.key === 'GY-15' ? merged(item) : item);
   const toast = page.locator('[data-toast="GY-15"]');
