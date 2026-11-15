@@ -81,8 +81,9 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await expect.poll(async () => (await calls()).some(entry => entry.pane === 'w1:master' && entry.command?.type === 'terminal.release'), settled).toBe(true);
     expect((await calls()).some(entry => entry.args?.[0] === 'pane' && entry.args?.[1] === 'close')).toBe(false);
 
-    // GY-3259: terminal attachment is the master's alone; a worker's output is its item's run log.
-    await expect(operator.getByRole('row', { name: /Builds code/ })).toBeVisible(settled);
+    // GY-3259: terminal attachment is the master's alone; a worker's output is its item's run log,
+    // and its Workers row (GY-3314) opens that log read-only — no terminal, nothing to type.
+    await expect(operator.getByRole('row', { name: /Building/ })).toBeVisible(settled);
     await expect(operator.getByRole('button', { name: 'Watch', exact: true })).toHaveCount(0);
     await operator.close();
   } finally {

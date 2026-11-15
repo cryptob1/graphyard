@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -94,6 +94,12 @@ function accountItems(status: any | null): SetupItem[] {
   // role's arguments change, which the loop re-checks each cycle and this page re-reads.
   const trust = typeof status?.setup?.checkoutTrust === 'string' ? status.setup.checkoutTrust.trim() : '';
   if (trust) items.push({ id: 'checkout-trust', title: 'Trust the repository folder for its agent accounts', done: false, human: true, line: trust, action: { kind: 'wait', label: 'Check again' } });
+  // GY-3293: a cycle step failing the same way ten consecutive cycles (`setup.stepFailure`, the
+  // loop's own standing line): the loop keeps running and its journal holds each failure, but
+  // nothing is repairing itself, so the operator is the one to read the error and act. One item
+  // while it stands — naming the step and the error — gone once the step succeeds again.
+  const stepFailure = typeof status?.setup?.stepFailure === 'string' ? status.setup.stepFailure.trim() : '';
+  if (stepFailure) items.push({ id: 'step-failure', title: 'A loop step keeps failing', done: false, human: true, line: stepFailure, action: { kind: 'wait', label: 'Check again' } });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',

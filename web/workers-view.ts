@@ -2,6 +2,8 @@ import type { Work } from '../src/model';
 import type { SessionHandle } from '../src/model/sessions';
 import { sessionObservationFreshMs, sessionView, type SessionView } from '../src/model/session-state';
 import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release';
+import { changesRequested } from '../src/model/pr-steps';
+import { phaseOf, statusSince, type Phase } from '../src/model/plain-status';
 
 /**
  * The Workers tab (GY-116): every handle across the graph in one table, read for triage.
@@ -129,6 +131,37 @@ export interface PrincipalSummary {
   sessionsLast24h: number;
 }
 export interface WorkersView { running: WorkerRow[]; finished: WorkerRow[]; principals: PrincipalSummary[] }
+
+/** One session's state as its row shows it (GY-3314): at most three words, and when it entered them. */
+export interface SessionState { words: string; since: string }
+
+/** The item's phase in the words a worker's row reads: every one at most three words. */
+const phaseWords: Record<Phase, string> = {
+  'not-started': 'Not started', 'needs-worker': 'Waiting', building: 'Building', review: 'In review',
+  checks: 'Testing', proof: 'Proving', merging: 'Merging', shipped: 'Ended',
+};
+
+/**
+ * The state one session's row names, and how long it has held it. The state comes first from the
+ * session itself — a session nobody has seen, one that ended, the loop's own coordination seats —
+ * and then from what its item waits on (`phaseOf`): a builder names the round it is on when it was
+ * sent back, anything else the item's phase in the words above. `since` is the instant the words
+ * became true of it, so the age beside them is the time in that state, not the session's whole run.
+ */
+export function sessionState(row: WorkerRow, item: Work | undefined, now: number): SessionState {
+  if (row.leftOn) return { words: 'Left over', since: row.updatedAt };
+  if (row.stale) return { words: 'Not seen', since: row.stale.since };
+  if (row.state !== 'running') return { words: 'Ended', since: row.endedAt ?? row.updatedAt };
+  // Reviewers and producers hold their own step wherever the item stands; the loop's coordination seats run the cycle.
+  if (row.roleKind === 'master') return { words: 'Runs the loop', since: row.startedAt };
+  if (row.roleKind === 'reviewer') return { words: 'In review', since: row.startedAt };
+  if (row.roleKind === 'producer') return { words: 'Proving', since: row.startedAt };
+  if (!item) return { words: 'Building', since: row.startedAt };
+  const phase = phaseOf(item, now), rounds = item.pipeline?.reworkRounds ?? 0;
+  if (phase === 'building' && rounds > 0 && (item.reworkRequested || changesRequested(item)))
+    return { words: `Rework ${rounds}`, since: statusSince(item, now) };
+  return { words: phaseWords[phase], since: statusSince(item, now) };
+}
 
 const parsed = (iso: string | null) => { const at = Date.parse(iso ?? ''); return Number.isFinite(at) ? at : null; };
 /** One handle as a tab row: how long it has spent, its two attach forms, and whether it is stale or was reconciled. */

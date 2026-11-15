@@ -12,6 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { trialAdmission, type TrialLoad } from './trial-load.js';
+import { appArmorEnabled, trialAppArmorProfile } from './trial-apparmor.js';
 
 export const trialContainerImage = 'graphyard-trial:local';
 /** GY-3214: where an install names the published trial image it pulled for the release tree at `root`. */
@@ -41,6 +42,7 @@ docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
+        *(['--security-opt=apparmor=' + spec['apparmor']] if spec.get('apparmor') else []),
         '--ulimit', 'core=0', '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
@@ -97,9 +99,9 @@ finally:
         pass
 `;
 
-/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189). */
+/** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189), under the trial AppArmor profile on an AppArmor host (GY-3339). */
 export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad }) =>
-  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify(spec)];
+  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ ...spec, apparmor: appArmorEnabled() ? trialAppArmorProfile : null })];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = trialImage(), network = 'bridge', deadline?: number, load?: TrialLoad): string[] {
