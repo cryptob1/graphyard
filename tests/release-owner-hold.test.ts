@@ -25,7 +25,7 @@ const call = async (credential: string, path: string, body: unknown) => {
   return { status: response.status, body: await response.json() as any };
 };
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isolation when the owner says so',
+const heldInput = { type: 'chore', why: 'w', simplest: 's', title: 'Owner hold: schedule credential isolation when the owner says so',
   description: 'Deferred by the owner. This item stays in the backlog until the owner releases it.',
   criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation', 'e2e:fixture'] }], reason: 'Owner deferral' };
 const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Next by priority' };
