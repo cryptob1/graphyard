@@ -13,7 +13,7 @@ import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnit
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, runtimeLoginHomes, workerConfinementRefusal } from './profiles.js';
-import { masterCredentialMask } from './confinement.js';
+import { masterCredentialMask, preparePeerExchange } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -273,7 +273,9 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // GY-3237: the install state the master session's own recovery commands write — reviewer
     // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
     // the managed worktree root its launches allocate checkouts under — granted writable.
-    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
+    // GY-3385: and each recorded peer's peers directory, where the session places the reporter
+    // tokens it issues them (master peer issue), created where missing before the confinement binds.
+    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config), ...preparePeerExchange(config)];
 
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the
