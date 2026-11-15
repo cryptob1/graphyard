@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise } from '../session-watch.js';
@@ -41,7 +41,10 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   };
   const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const branch = git('symbolic-ref', '--short', 'HEAD');
-  const workspace = work.workspaces.find((w: any) => w.branch === branch && resolve(w.path) === cwd);
+  // Rework keeps the branch across attempts, so the checkout identifies its epoch: any directory
+  // inside the registered workspace is that checkout — a worker may sync from a subdirectory —
+  // while a sibling attempt's worktree lies outside it and never answers for this one.
+  const workspace = work.workspaces.find((w: any) => w.branch === branch && (resolve(w.path) === cwd || cwd.startsWith(`${resolve(w.path)}${sep}`)));
   if (!workspace) throw new Error(`Run sync from a workspace registered for ${work.key}; ${cwd} on ${branch} is not one`);
   // GY-3266: the requirements revision an operator recorded under this lease reaches the worker
   // here — every sync prints the revised criteria with what changed, and a completed merge also
@@ -50,7 +53,6 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   // GY-3298: the master's unread messages, with author and time; the completed sync acknowledges them.
   const unread = (work.messages ?? []).filter((message: any) => !message.acknowledged);
   const messages = unread.length ? { messages: unread.map(({ id, at, by, text }: any) => ({ id, at, by, text })) } : {};
-  // Rework keeps the branch across attempts; only this checkout identifies its epoch.
   const epoch = workspace.epoch;
   const unmerged = () => quietly('diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
   const generated = await localGeneratedManifest(cwd);
