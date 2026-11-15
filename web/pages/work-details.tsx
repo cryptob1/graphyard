@@ -42,7 +42,7 @@ const withoutPr = (sentence: string) => sentence.replace(/\s*(?:of|on|in)?\s*PR 
 const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0]; return first.length > 90 ? `${first.slice(0, 88).replace(/\s+\S*$/, '')}…` : first; };
 
 const previewWords: Record<ItemPreviewState, string> = { starting: 'Starting', running: 'Running', failed: 'Failed', cleaned: 'Cleaned up' };
-const productWords: Record<string, string> = { approved: 'Approved', 'changes-requested': 'Changes requested', rejected: 'Rejected' };
+const productWords: Record<string, string> = { approved: 'Approved', 'changes-requested': 'Changes requested', rejected: 'Rejected', 'could-not-run': 'Could not run' };
 /**
  * The product review (GY-2989): a user-facing feature is judged in the whole app's context before
  * it merges. The panel shows the standing verdict, the reviewer's findings and every screenshot the

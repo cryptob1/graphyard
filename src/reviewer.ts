@@ -50,7 +50,7 @@ import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 import { LauncherUnavailableError } from './master/config.js';
-import { checkoutRepositoryPolicy } from './model-boundary/repository-policy.js';
+import { resolveRepositoryPolicy } from './model-boundary/repository-policy.js';
 import type { E2eServe } from './model/repository-policy.js';
 import { servingReport } from './deploy-watch.js';
 import { commandApplication, serveHead } from './merge-writer/serve-head.js';
@@ -566,9 +566,12 @@ export async function recordCouldNotRunReview(config: Pick<MasterConfig, 'url' |
   const response = await fetch(`${config.url}/api/work/${encodeURIComponent(work.id)}/product-review`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `product-could-not-run:${review.sha}:${createHash('sha256').update(review.reason).digest('hex').slice(0, 16)}` }, body: JSON.stringify({ reviewer: review.reviewer, sha: review.sha, baseSha: review.baseSha, verdict: 'could-not-run', findings: review.reason.slice(0, 65_536), screenshots: [] }), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`The control plane refused the could-not-run record for ${work.key} (${response.status})`);
 }
-/** GY-3331: the head's own e2e.serve declaration, read from its checkout's graphyard.json; null when the head declares none or its policy does not parse. */
-function declaredServe(worktree: string): E2eServe | null {
-  try { return checkoutRepositoryPolicy(worktree).e2e.serve; } catch { return null; }
+/** GY-3331: the head's own e2e.serve declaration, read from the graphyard.json its commit holds; null when the head declares none (or its policy does not parse). */
+export async function headServeDeclaration(root: string, sha: string, run: ChildRun = defaultChildRun): Promise<E2eServe | null> {
+  let text: string;
+  try { text = String(await run('git', ['-C', root, 'show', `${sha}:graphyard.json`])); }
+  catch { return null; }
+  try { return resolveRepositoryPolicy(JSON.parse(text)).e2e.serve; } catch { return null; }
 }
 
 /**
@@ -1079,9 +1082,13 @@ export async function launchReview(root: string, work: Work, profileName: string
           if (work.preview?.state !== 'running') {
             const report = await servingReport(root, config.repository, config.baseBranch, args => Promise.resolve((dependencies.run ?? defaultChildRun)('git', ['-C', root, ...args])).then(String)).catch(() => null);
             if (!report?.serve?.url) {
-              const declared = declaredServe(checkout.worktree);
+              const declared = await headServeDeclaration(root, binding.sha, dependencies.run);
               if (declared) {
-                const served = serveHead(checkout.directory, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
+                // The head's serve command runs from a worktree of the exact head, in the checkout
+                // this launch already allocated for the session.
+                const git = dependencies.run ?? defaultChildRun;
+                await git('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, binding.sha]);
+                const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
                 try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
                 catch (error) { await served.close().catch(() => {}); throw error; }
               } else noApp = true;
