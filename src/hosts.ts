@@ -15,7 +15,8 @@ import { shellQuote } from './shell-quote.js';
 export interface HostRecord { target: string; addedAt: string }
 export interface HostReading { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null; stat?: { total: number; steal: number } | null }
 
-export const hostsFile = (home = configHome()) => join(home, 'hosts.json');
+/** Machine-wide, beside the machine-share link (team-access.ts): every install's loop on this machine reads the same hosts. */
+export const hostsFile = (home = configHome()) => join(home, 'machine', 'hosts.json');
 export const hostTargetPattern = /^[a-z_][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/;
 
 export async function readHosts(file = hostsFile()): Promise<HostRecord[]> {

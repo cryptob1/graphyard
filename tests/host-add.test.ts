@@ -44,7 +44,7 @@ cd "${homes}/$host" && HOME="${homes}/$host" PATH="$path" sh -c "$last"
 });
 after(() => { process.env.PATH = savedPath; if (savedConfig === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = savedConfig; });
 
-const recorded = async () => JSON.parse(await readFile(join(config, 'hosts.json'), 'utf8').catch(() => '[]')).map((host: { target: string }) => host.target);
+const recorded = async () => JSON.parse(await readFile(join(config, 'machine', 'hosts.json'), 'utf8').catch(() => '[]')).map((host: { target: string }) => host.target);
 const output = async (argv: string[]) => {
   const lines: string[] = [], log = console.log;
   console.log = (...parts: unknown[]) => { lines.push(parts.join(' ')); };
@@ -69,7 +69,8 @@ test(`${proof} — host add records a Docker-over-SSH host and writes nothing on
 });
 
 test(`${proof} e2e:workers-host-list — each cycle reads this machine and every added host, an unreachable one away, and the control plane serves them on /api/status`, async () => {
-  await writeFile(join(config, 'hosts.json'), JSON.stringify([{ target: 'vish@box', addedAt: 'x' }, { target: 'vish@gone', addedAt: 'x' }]));
+  await mkdir(join(config, 'machine'), { recursive: true });
+  await writeFile(join(config, 'machine', 'hosts.json'), JSON.stringify([{ target: 'vish@box', addedAt: 'x' }, { target: 'vish@gone', addedAt: 'x' }]));
   const first = await readHostReadings([], { local: 'vishrog' });
   assert.deepEqual(first.map(reading => [reading.host, reading.away]), [['vishrog', false], ['vish@box', false], ['vish@gone', true]]);
   const box = first[1]!;
