@@ -1,5 +1,6 @@
 import { masterGuide } from '../master/guide.js';
 import { defineCommands } from './registry.js';
+import type { CliContext } from './context.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
@@ -67,6 +68,7 @@ export const masterCommands = defineCommands([
       '                                Apply intent at once with the master\'s identity',
       '  master hold GY-N REASON       Hold a released item out of dispatch; its worker keeps its lease',
       '  master message GY-N TEXT      Message the item\'s worker; shown and acknowledged at its next sync',
+      '  master reply MESSAGE-ID TEXT  Reply to a message a reporter sent this Master (master status lists them)',
       '  master priority GY-N 0|1|2|3 REASON  Change priority with an audit reason',
       '  master attest GY-N PROOF REASON  Attest a manual: proof on the exact current head',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
@@ -79,7 +81,7 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
-      const root = context.repositoryRoot();
+      const root = await masterRoot(context);
       // The master's role instructions lead the guide.
       if (id === 'guide') return console.log(`${masterInstructions}\n${masterGuide}`);
       if (id === 'init') return masterInit(context, root);
@@ -97,3 +99,15 @@ export const masterCommands = defineCommands([
 ]);
 
 export { derivedIntent } from './master/intent.js';
+
+/**
+ * The coordinator checkout every master subcommand runs in. GY-3344: outside one, a reporter's
+ * credential (another install's Master) is told plainly that master subcommands are not its own.
+ */
+async function masterRoot(context: CliContext) {
+  try { return context.repositoryRoot(); } catch (error) {
+    const actor = await context.api('status').then(status => status?.actor, () => null);
+    if (actor?.role === 'reporter') throw new Error(`Reporter ${actor.id} may only file items, message this install's Master and read back its own items and the Master's replies; graphyard master ${context.id ?? ''} is the Master's own`.trimEnd());
+    throw error;
+  }
+}
