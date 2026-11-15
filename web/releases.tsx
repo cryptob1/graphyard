@@ -29,7 +29,7 @@ export default function ReleasesView({ api, work }: { api: (path: string) => Pro
   const release = (id: string, revision: number) => releases.find(r => r.id === id && r.revision === revision);
   const keyOf = (workId: string) => work.find(w => w.id === workId)?.key ?? workId;
   const verified = environments.filter(env => env.verification.status === 'verified').length;
-  return <><PageHeader title="Releases" fact={!loaded ? (error ? 'Releases could not be read.' : 'Reading releases…') : environments.length ? `${verified} of ${environments.length} ${environments.length === 1 ? 'environment' : 'environments'} verified in production.` : 'No environment expects a release yet.'}>
+  return <><PageHeader title="Releases" fact={!loaded ? (error ? 'Releases could not be read.' : 'Reading releases…') : environments.length ? `${verified} of ${environments.length} ${environments.length === 1 ? 'environment' : 'environments'} running a verified release.` : 'No environment expects a release yet.'}>
       Which release each environment expects, and whether independently observed runtime identity has verified it.</PageHeader>
     <div className="notice">Desired state changes only through an operator or a registered promoter. Runtime state comes only from service-scoped observers with measured instance identity; a provider webhook, a green deploy job or an application's own version report never verifies a release.</div>
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button onClick={() => setRetry(n => n + 1)}>Retry loading releases</button></div>}
