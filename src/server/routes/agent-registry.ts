@@ -66,7 +66,7 @@ const connectEventPrefix = 'connect-account.';
 const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const hostKeySchema = z.object({ host: z.string().trim().min(1).max(200).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'A host id cannot contain control characters'),
   publicKey: z.string().trim().regex(base64, 'A public key is base64').length(124, 'A host public key is the 91-byte SPKI of a P-256 key, base64') }).strict();
-const sealedSchema = z.object({
+export const sealedSchema = z.object({
   ephemeral: z.string().regex(base64, 'The ephemeral key is base64').length(124, 'The ephemeral key is the 91-byte SPKI of a P-256 key, base64'),
   iv: z.string().regex(base64, 'The nonce is base64').length(16, 'The nonce is 12 bytes, base64'),
   ciphertext: z.string().regex(base64, 'The ciphertext is base64').min(16).max(4096),
