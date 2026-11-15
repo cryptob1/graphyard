@@ -13,6 +13,7 @@ import LoginPage, { HUMAN_SESSION_KEY, REJECTED_NOTICE, SIGN_IN_NEEDED, storedTo
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
+import { requestedView } from '../src/model/setup-checklist';
 import { idempotencyKey } from './idempotency-key';
 import { ShippedToast, confetti } from './fun';
 import { applyTheme } from './theme';
@@ -49,7 +50,7 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [view, setView] = useState(initialView);
+  const [view, setView] = useState(() => initialView(views.map(page => page.id)));
   const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
@@ -130,6 +131,11 @@ function App() {
     setShipped(fresh.at(-1)!); confetti();
   }, [work]);
   useEffect(() => { if (!shipped) return; const timer = setTimeout(() => setShipped(null), 8000); return () => clearTimeout(timer); }, [shipped]);
+  // Every page has an address (GY-3322): following a link to #costs opens Costs without a reload.
+  useEffect(() => {
+    const follow = () => { const page = requestedView(location.hash, views.map(entry => entry.id)).view; if (page) { setSelected(null); setView(page); } };
+    addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow);
+  }, []);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));

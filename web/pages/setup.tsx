@@ -23,9 +23,9 @@ let opened: string | undefined;
  * prints a sign-in link ending `&setup`, which opens this page once the person is signed in. The
  * marker leaves the address bar so the sign-in page redeems the exact link fragment it knows.
  */
-export function initialView(): string {
+export function initialView(pages: readonly string[]): string {
   if (opened !== undefined) return opened;
-  const requested = requestedView(location.hash);
+  const requested = requestedView(location.hash, pages);
   if (requested.hash !== location.hash) history.replaceState(null, '', `${location.pathname}${location.search}${requested.hash}`);
   return opened = requested.view ?? 'work';
 }
