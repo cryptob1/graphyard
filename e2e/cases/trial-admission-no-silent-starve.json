@@ -1,7 +1,7 @@
 {
   "id": "trial-admission-no-silent-starve",
   "title": "A trial start that waits says why, and a stuck gate cannot starve every complete on the host",
-  "description": "Drive the real trial admission launcher with stand-in docker and df: a gate start waiting on the disk floor holds no place in the queue, so a verification start runs beside it; a pressure wait past its bound fails as a trial-host fault naming the reading, with no verdict on the head; a waiting verification start shows its reason through complete's output within seconds and fails naming it past its bound; with /tmp a tmpfs under the floor, merge and gate trials put their temporary and HOME directories on the durable root and start, doctor names the root and its fix, and a floor wait is one master status attention line.",
+  "description": "Drive the real trial admission launcher with stand-in docker and df: a gate start waiting on the disk floor holds no place in the queue, so a verification start runs beside it; a pressure wait past its bound fails as a trial-host fault naming the reading, with no verdict on the head; a waiting verification start shows its reason through complete's output within seconds and keeps waiting its turn; with /tmp a tmpfs under the floor, merge and gate trials put their temporary and HOME directories on the durable root and start, doctor names the root and its fix, and a floor wait is one master status attention line.",
   "tags": ["trial"],
   "target": "any",
   "required": false,

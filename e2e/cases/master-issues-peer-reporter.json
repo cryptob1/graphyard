@@ -1,0 +1,16 @@
+{
+  "id": "master-issues-peer-reporter",
+  "title": "The Master issues a reporter identity for another install on its host from its own session",
+  "description": "Two installs on one host, each with its own temporary Postgres control plane. From install A's master session, launched under its real confinement the way the loop launches it, `master peer issue --root B` mints a reporter identity through A's control plane and places the token file under B's config directory with mode 0600; a session launched before the peer was recorded records the peer and names the rerun, and the rerun from a relaunched session places the token. B's master issues its side the same way, each master peer list names the other, and B's master send reaches A through Graphyard authenticated as the identity A's confined session issued.",
+  "tags": ["api", "master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "A confined Master session issues B its reporter identity; both sides peer and B's send reaches A",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-issues-peer-reporter.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}
