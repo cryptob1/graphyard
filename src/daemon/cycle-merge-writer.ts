@@ -12,7 +12,7 @@ import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-grou
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { mergeStallMs } from '../model/merge-ledger.js';
-import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost } from '../merge-writer/trial.js';
+import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialSandboxFault } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
@@ -25,7 +25,7 @@ import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-fai
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
-import { reportTrialHostFault, reportTrialImageFault } from './control-plane.js';
+import { reportTrialHostFault, reportTrialImageFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
 
@@ -868,6 +868,10 @@ export async function mergeWriterStep(cycle: Cycle) {
             // GY-3275: the repository's own trial image could not be built: no verdict on the head, reported upstream like a fetch fault (GY-3249).
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             await reportTrialImageFault(cycle);
+          } else if (trialSandboxFault(error)) {
+            // GY-3339: AppArmor denied the trial's nested sandbox: no verdict on the head, reported upstream once per repository.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            await reportTrialSandboxFault(cycle);
           } else if (trialHostFaultHost(error)) {
             // GY-3249: the trial host could not reach a host the build needs: no verdict on the head, reported upstream once per host.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
