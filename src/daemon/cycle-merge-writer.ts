@@ -316,10 +316,10 @@ export function trialShareAllowance(share: number | undefined, timeoutMs = trial
 /**
  * GY-2053: the writer's worst case for one flight — one trial timeout (scaled by the most trials that share the host, GY-3183), then a landing that re-merges onto each
  * tip move another head's landing makes (GY-3120), one cycle's allowance per head that can trial at once
- * (`run.mergeWriter.parallel`) — the bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`).
+ * (`run.mergeWriter.parallel`, plus the diagnostic flight) — the bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`).
  */
 export const mergeWriterFlightBoundMs = (run: { intervalSeconds?: number; mergeWriter?: { parallel?: number } }) =>
-  (run.mergeWriter?.parallel ?? defaultMergeWriterParallel) * (trialTimeoutMinutes * 60_000 + (run.intervalSeconds ?? 20) * 1000);
+  ((run.mergeWriter?.parallel ?? defaultMergeWriterParallel) + 1) * (trialTimeoutMinutes * 60_000 + (run.intervalSeconds ?? 20) * 1000);
 
 /**
  * GY-2053: what one recorded write says, as the reader reads it — the attempt step the writer's summary reports as its newest movement.
