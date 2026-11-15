@@ -102,6 +102,30 @@ export async function hostSuiteBreadth(environment: NodeJS.ProcessEnv = process.
   return suiteBreadth({ budgetBytes, otherFiles, cpus: availableParallelism() });
 }
 
+/** The port one run's shared Postgres cluster sits on: the Node run's own base, or one window above the browser run's port. */
+export const sharedClusterPort = (base: number, browser?: boolean) => browser ? base + testPortSpan : base;
+
+/**
+ * The variables one suite run hands its children (GY-3356): both suites name the run's one shared
+ * Postgres cluster through GRAPHYARD_TEST_DATABASE_URL. The Node suite always did; the browser
+ * suite booted one cluster per worker process instead, so every database-backed browser spec — 24
+ * of them, headless-workers among it — spent its own test budget copying the template and starting
+ * Postgres, the part of its boot that scales worst on a loaded host. On 15 November 2026 that blew
+ * browser-tests/headless-workers.spec.ts's 120 s cap once on main, beside two other specs' own caps
+ * in the same loaded run, and all three passed their re-run. With the cluster named,
+ * signInDatabase and withDatabase create a database on it (tests/helpers/postgres.ts `clusterUrl`)
+ * and no browser spec boots a cluster of its own.
+ */
+export function suiteRunEnvironment(input: { browser?: boolean; browserPort: number; clusterPort: number; clusterUrl: string; dataHome: string; tmpRoot?: string | null }): Record<string, string> {
+  return {
+    ...(input.browser
+      ? { GRAPHYARD_BROWSER_PORT: String(input.browserPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl }
+      : { ...testPortEnvironment(input.clusterPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl, [hostMemoryVariable]: 'unreadable' }),
+    GRAPHYARD_DATA_HOME: input.dataHome,
+    ...(input.tmpRoot ? { TMPDIR: input.tmpRoot, TMP: input.tmpRoot, TEMP: input.tmpRoot } : {}),
+  };
+}
+
 export interface RunOptions {
   cwd?: string;
   /** Test files or extra `node --test` arguments; the default is every tests/*.test.ts under `cwd`. */
@@ -186,21 +210,23 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     if (options.stdio !== 'pipe') console.log('No test files selected for this run.');
     return { code: 0, base: 0, environment: {}, stdout: '', stderr: '' };
   }
-  // The browser window is the dev server's port and the sentinel above it that holds the window.
-  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
+  // The browser window is the dev server's port with a spare beside it, then one window above both
+  // the run's shared Postgres cluster and the sentinel that holds the window (GY-3356); a Node
+  // run's window is its shared cluster's own.
+  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2 + testPortSpan, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
   let postgres: Awaited<ReturnType<typeof import('./postgres.js').startPostgres>> | undefined;
   try {
-    if (!options.browser) {
-      const { startPostgres } = await import('./postgres.js');
-      postgres = await startPostgres(reservation.base);
-    }
+    // One shared warm cluster for the whole run, whichever suite runs (GY-3356).
+    const { startPostgres } = await import('./postgres.js');
+    const clusterPort = sharedClusterPort(reservation.base, options.browser);
+    postgres = await startPostgres(clusterPort);
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
     // A run of the suite reads no host memory (GY-612): a host the suite itself loaded low must not
     // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+    const set = suiteRunEnvironment({ browser: options.browser, browserPort: reservation.base, clusterPort, clusterUrl: postgres.url, dataHome, tmpRoot });
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
