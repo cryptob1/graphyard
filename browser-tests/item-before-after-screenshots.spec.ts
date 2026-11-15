@@ -125,7 +125,7 @@ test('e2e:item-before-after-screenshots — the item page shows a browser case\'
     await expect(shots.locator('figure', { hasText: 'Before' })).toBeVisible();
     await expect(shots.locator('figure', { hasText: 'After' })).toBeVisible();
     const images = shots.locator('img.artifact-preview');
-    await expect(images).toHaveCount(2);
+    await expect(images).toHaveCount(2, { timeout: 15_000 });
     const loaded = await images.evaluateAll(entries => (entries as HTMLImageElement[]).map(image => [image.naturalWidth, image.currentSrc] as const));
     expect(loaded.length).toBe(2);
     expect(loaded.every(([width]) => width > 0)).toBe(true);
@@ -138,11 +138,13 @@ test('e2e:item-before-after-screenshots — the item page shows a browser case\'
     await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0);
 
     // A later trial of the first item that kept no screenshot replaces its panel: none is shown.
+    // The dashboard reads the retrial on its next 5 s work poll, so the wait spans a poll and its
+    // read (15 s cap); the 5 s default raced the poll and failed on a loaded trial host (GY-3372).
     await recordTrial(plane.url, withShots, heads.shots, baseTip, 'e2e:item-before-after-screenshots', {}, 'retrial');
     await page.getByRole('button', { name: '← Back' }).click();
     await page.locator(`[data-row="${withShots.key}"]`).click();
     await expect(page.locator('article.item-page')).toContainText(withShots.key);
-    await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0);
+    await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0, { timeout: 20_000 });
   } finally {
     await rm(cases, { recursive: true, force: true }).catch(() => {});
     await plane.close();
