@@ -101,6 +101,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await expect(sectionA.locator('[data-share-state="ok"]')).toContainText(link, settled);
     await expect(async () => { await sync(); await reload(pageB); await expect(sectionB.locator('[data-share-state="ok"]')).toContainText(link, { timeout: 1_000 }); }).toPass({ timeout: 15_000 });
     await expect(sectionB.getByRole('link', { name: b.tailnet })).toBeVisible(settled);
+
     // Invite someone on each install: one message with the machine link and that install's own sign-in link.
     for (const [page, install, name, role] of [[pageA, a, 'sam', 'viewer'], [pageB, b, 'kim', 'maintainer']] as const) {
       const message = await invite(page, name, role);

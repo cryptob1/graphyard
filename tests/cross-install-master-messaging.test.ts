@@ -71,6 +71,8 @@ async function install(name: string, peer: string) {
   const stored = async () => Number((await store.pool.query(`SELECT count(*) FROM events WHERE kind LIKE 'master.%'`)).rows[0].count);
 
   // The loop's real cycle with its master session live in a pane: every prompt it delivers is kept.
+  // The config is re-read per cycle, as the loop's liveMasterConfig does, so a peer added after the
+  // loop started (master peer add) is known to the cycles that follow it.
   const config = await loadMasterConfig(root), state = emptyDaemonState(config), inputs: string[] = [];
   const effects: DaemonEffects = {
     snapshot: () => api('work-snapshot'), agents: () => [{ name: config.masterAgentName, pane_id: `${name}:master`, agent: 'claude', agent_status: 'idle' }],
@@ -78,7 +80,7 @@ async function install(name: string, peer: string) {
     masterMessages: async () => (await api('master/messages')).messages,
     masterSession: { wake: async (_pane, text) => { inputs.push(text); }, launch: async () => { throw new Error('the master session is live'); } },
   };
-  const cycles = async (count: number) => { for (let cycle = 0; cycle < count; cycle++) await runCycle(config, state, effects); };
+  const cycles = async (count: number) => { for (let cycle = 0; cycle < count; cycle++) await runCycle(await loadMasterConfig(root), state, effects); };
   return { name, url, issued, master, attention, messages, stored, inputs, cycles, stop };
 }
 
