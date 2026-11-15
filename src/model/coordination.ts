@@ -73,8 +73,8 @@ export function concurrentOverlap(work: Work, all: Work[], now: number): Overlap
   });
 }
 
-/** Ready to be offered a worker: released, unblocked, unclaimed, not submitted unless rework was requested, past any observation window (GY-1698), not a loop-owned observation the loop reads itself (GY-1762), and not loop-owned (GY-1760: an item only the master side can satisfy is never offered, so the board's dispatchable count matches what dispatch launches). */
-export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested)
+/** Ready to be offered a worker: released, unblocked, unclaimed, not submitted unless rework was requested, past any observation window (GY-1698), not a loop-owned observation the loop reads itself (GY-1762), not loop-owned (GY-1760: an item only the master side can satisfy is never offered, so the board's dispatchable count matches what dispatch launches), and not carrying a finished head the loop resubmits itself (GY-3335). */
+export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !work.finishedBlockerHead && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested)
   && !observationWindowHold(work, new Date(now)) && !loopObservationProofs(work) && !loopOwned(work);
 
 /** True when the item's observed candidate changes a hot file: one two or more live attempts are already changing (`hotspots`, GY-882). */
