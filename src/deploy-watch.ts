@@ -128,7 +128,78 @@ export interface DeployWatchPorts {
   schema(commit: string): Promise<number | null>;
   /** The database's schema generation, or null when it cannot be read. */
   database(): Promise<number | null>;
+  /**
+   * GY-3347: brings a stopped control plane back without a new commit. Present when this
+   * install's server runs as a compose stack; absent when there is no stack to bring up.
+   */
+  stoppedPlane?: StoppedPlanePorts;
 }
+
+/**
+ * What the watch brings a stopped control plane back with (GY-3347): one quick /healthz probe,
+ * `up` at the commit the record already serves — the stack's own image — and the recreate for the
+ * compose failure that means the old Docker network id is gone.
+ */
+export interface StoppedPlanePorts {
+  /** One quick /healthz probe: resolves healthy, throws when the plane is down. */
+  health(): Promise<void>;
+  /** Brings the stack up in the install's compose directory. */
+  up(): Promise<string>;
+  /** Recreates the containers — `down` then `up` — after `up` failed on a network that is gone. */
+  recreate(): Promise<string>;
+}
+
+/** A compose `up` failure that means the old Docker network is gone, so the containers must be recreated rather than started. */
+export function networkMissing(text: string) {
+  return /\bnetwork\b[^\n]*?\b(?:not found|needs to be (?:recreated|removed)|was found but has incorrect label)\b/i.test(text);
+}
+
+/** GY-3347: how many times one pass tries to bring a stopped plane back before recording one failure reason, the pause before the first retry, and how long health may take to answer after `up`. */
+export const stoppedPlaneAttempts = 3, stoppedPlaneRetryMs = 5_000, stoppedPlaneHealthMs = 30_000;
+
+/**
+ * GY-3347: a stopped control plane comes back without a new commit. A pass that deploys nothing
+ * probes the serving commit's /healthz; a plane that fails is brought back with `up` at the
+ * commit the record already serves, recreating the containers when `up` fails because the old
+ * Docker network id is gone, with a backoff between attempts. Three failures record one plain
+ * reason beside the serving tip — where master status and the alert path already read deploy
+ * failures — and a plane that answers again clears it. Returns whether the plane was down.
+ */
+export async function recoverStoppedPlane(record: DeployRecord, ports: StoppedPlanePorts, write: (entry: Omit<DeployRecord, 'at' | 'repository'>) => Promise<void>, log: (line: string) => void): Promise<boolean> {
+  try { await ports.health(); return false; } catch { /* the plane is down: bring it back */ }
+  const tip = record.tip!;
+  const waitHealthy = async () => {
+    const deadline = Date.now() + stoppedPlaneHealthMs;
+    for (;;) {
+      try { return await ports.health(); } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await delay(1_000);
+      }
+    }
+  };
+  let reason = 'unknown failure';
+  for (let attempt = 1; attempt <= stoppedPlaneAttempts; attempt++) {
+    try {
+      log(`[graphyard-deploy] /healthz fails for the serving ${tip.slice(0, 12)}; bringing the stack up (attempt ${attempt} of ${stoppedPlaneAttempts})`);
+      try { await ports.up(); } catch (error) {
+        const text = message(error);
+        if (!networkMissing(text)) throw error;
+        log(`[graphyard-deploy] the stack's Docker network is gone; recreating the containers: ${text}`);
+        await ports.recreate();
+      }
+      await waitHealthy();
+      await write({ tip, failed: null, reason: null, verified: record.verified });
+      log(`[graphyard-deploy] the stack is up again at ${tip.slice(0, 12)}`);
+      return true;
+    } catch (error) { reason = message(error); }
+    if (attempt < stoppedPlaneAttempts) await delay(stoppedPlaneRetryMs * 2 ** (attempt - 1));
+  }
+  const plain = `the stopped control plane was not brought back up at ${tip.slice(0, 12)} in ${stoppedPlaneAttempts} attempts: ${reason}`;
+  await write({ tip, failed: tip, reason: plain, verified: record.verified });
+  log(`[graphyard-deploy] ${plain}`);
+  return true;
+}
+
 // Publication follows strict server health; production ports atomically select a retained artifact.
 const steps = ['build', 'restart', 'health', 'checkout', 'pin'] as const;
 /** Rollback attempts before the watch stops retrying one and waits for the base to move. */
@@ -208,6 +279,10 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     // watcher left without the repository it serves gains the name on this first pass, so master
     // status reads the serving commit before the next merge rewrites the record (GY-2957).
     if (stored && stored.tip === tip && (stored.repository ?? null) !== owner) await write({ tip, failed: stored.failed, reason: stored.reason, restore: stored.restore, attempts: stored.attempts });
+    // GY-3347: a stopped control plane comes back without a new commit. This pass deploys
+    // nothing and no rollback is mid-flight (that is a deploy at work), so the watch brings the
+    // stack up at the commit it already recorded as serving.
+    if (ports.stoppedPlane && record.tip && !record.restore) await recoverStoppedPlane(record, ports.stoppedPlane, write, log);
     return 'unchanged';
   }
   const before = await ports.database().catch(() => null);

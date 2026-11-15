@@ -1,23 +1,12 @@
-import { useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { mergedAt } from './groups';
 import type { Work } from '../src/model';
 
 /**
- * The dashboard's fun (GY-3268): friendly agent names, a line about building at the top of the
+ * The dashboard's character (GY-3268): friendly agent names, a line about building at the top of the
  * Work page, playful empty states and a small celebration when work ships. Dashboard only — the CLI
- * and agent prompts stay plain. The Fun toggle in the page menu turns it all off (remembered per
- * browser); with it off, names and lines fall back to the plain text, and reduced motion stops the confetti.
+ * and agent prompts stay plain. There is one mode (GY-3320); reduced motion stops the confetti.
  */
-const KEY = 'graphyard.fun';
-const listeners = new Set<() => void>();
-const readFun = () => { try { return localStorage.getItem(KEY) !== 'off'; } catch { return true; } };
-export { readFun };
-const applyFun = (on: boolean) => { document.documentElement.dataset.fun = on ? 'on' : 'off'; };
-export function setFun(on: boolean) { try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch { /* private mode: this page only */ } applyFun(on); listeners.forEach(listener => listener()); }
-/** Once, before the dashboard renders: Fun's state is on `<html>` for the first paint, where the stylesheet can read it. */
-export const bootFun = () => applyFun(readFun());
-export const useFun = () => useSyncExternalStore(listener => { listeners.add(listener); return () => { listeners.delete(listener); }; }, readFun, () => true);
-
 const NAMES = ['Ada', 'Juno', 'Pixel', 'Milo', 'Nova', 'Otto', 'Iris', 'Felix', 'Luna', 'Hugo', 'Wren', 'Theo', 'Mabel', 'Ziggy', 'Pip', 'Rosa', 'Arlo', 'Cleo', 'Basil', 'Echo',
   'Fern', 'Gus', 'Hazel', 'Indy', 'Jasper', 'Kit', 'Lark', 'Moss', 'Nico', 'Olive', 'Percy', 'Quinn', 'Ruby', 'Sage', 'Tilly', 'Umi', 'Vera', 'Wally', 'Xena', 'Yuki',
   'Zara', 'Bea', 'Cosmo', 'Dot', 'Elio', 'Flo', 'Gem', 'Hank', 'Ivy', 'Jett', 'Kai', 'Lola', 'Max', 'Nell', 'Oz', 'Poppy', 'Remy', 'Sunny', 'Toby', 'Uma',
@@ -35,14 +24,11 @@ export function friendlyName(id: string): string | null {
   for (const char of id) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
   return NAMES[(hash >>> 0) % NAMES.length];
 }
-/** An account as the dashboard names it: its friendly name with the account id on hover, or the id itself with Fun off. */
+/** An account as the dashboard names it: its friendly name with the account id on hover. */
 export function Agent({ id, master, detail }: { id: string; master?: boolean; detail?: string }) {
-  const fun = useFun(), name = fun ? (master ? 'the Master' : friendlyName(id)) : null;
+  const name = master ? 'the Master' : friendlyName(id);
   return <span className="agent" data-agent={id} title={detail ? `${id} · ${detail}` : id}>{name ?? id}</span>;
 }
-
-/** A quiet state's line: playful with Fun on, plain with it off. */
-export const Playful = ({ plain, fun }: { plain: string; fun: string }) => <>{useFun() ? fun : plain}</>;
 
 export const LINES = [
   'You had an idea at breakfast. It shipped before lunch.', 'Twelve agents, zero standups.', 'The backlog is just a to-do list for the crew.',
@@ -65,15 +51,13 @@ export const LINES = [
   '“Make it work, make it right, make it fast.” — Kent Beck', '“Real artists ship.” — Steve Jobs', '“Done is better than perfect.” — Sheryl Sandberg',
   '“What I cannot create, I do not understand.” — Richard Feynman', '“The details are not the details. They make the design.” — Charles Eames',
 ];
-/** The Work page header's line: a new one per page load, the next one on a tap. Nothing with Fun off.
+/** The Work page header's line: a new one per page load, the next one on a tap.
  *  In Night Yard the line types itself out (GY-3272 AC-4d) — the whole text stays in the page, and
- *  a clip-path wipes it open one character step at a time; reduced motion and Fun off show it whole. */
+ *  a clip-path wipes it open one character step at a time; reduced motion shows it whole. */
 export function BuildLine() {
-  const fun = useFun();
   const [index, setIndex] = useState(() => Math.floor(Math.random() * LINES.length));
-  if (!fun) return null;
   const line = LINES[index];
-  return <button type="button" className="build-line" title="Another one" data-fun data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
+  return <button type="button" className="build-line" title="Another one" data-decor data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
     <span key={index} className="typed" style={{ '--chars': line.length } as CSSProperties}>{line}</span>
   </button>;
 }
@@ -90,16 +74,15 @@ export function shippedToday(work: Work[], now = Date.now()) {
   return { count, streak };
 }
 export function ShippedToday({ work }: { work: Work[] }) {
-  const fun = useFun(), { count, streak } = shippedToday(work);
-  if (!fun) return null;
-  return <span className="shipped-today" aria-label="Shipped today" data-fun data-shipped-today={count}>🚢 {count} shipped today{streak > 1 ? ` · 🔥 ${streak}-day streak` : ''}</span>;
+  const { count, streak } = shippedToday(work);
+  return <span className="shipped-today" aria-label="Shipped today" data-decor data-shipped-today={count}>🚢 {count} shipped today{streak > 1 ? ` · 🔥 ${streak}-day streak` : ''}</span>;
 }
 
 /** The agent that built an item: the last implementer, or the lease holder. */
 export const builderOf = (w: Work) => w.implementers?.at(-1) ?? w.lease?.owner ?? null;
-/** A brief confetti burst, a few dozen CSS pieces that remove themselves. None with Fun off or reduced motion set. */
+/** A brief confetti burst, a few dozen CSS pieces that remove themselves. None with reduced motion set. */
 export function confetti() {
-  if (!readFun() || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const burst = document.createElement('div');
   burst.className = 'confetti'; burst.setAttribute('aria-hidden', 'true');
   for (let n = 0; n < 40; n++) {
@@ -110,11 +93,11 @@ export function confetti() {
   document.body.append(burst);
   setTimeout(() => burst.remove(), 2200);
 }
-/** The toast when an item merges while the page is open: who built it and what. The neon pulse (GY-3272) runs only with Fun on; reduced motion stops it. */
+/** The toast when an item merges while the page is open: who built it and what. The neon pulse (GY-3272) stops under reduced motion. */
 export function ShippedToast({ item, onClose }: { item: Work; onClose(): void }) {
-  const fun = useFun(), builder = builderOf(item), name = builder && fun ? friendlyName(builder) ?? builder : builder;
-  return <div className={fun ? 'toast pulse' : 'toast'} aria-live="polite" data-toast={item.key} onClick={onClose}>
-    {builder ? <span title={builder}>{name}</span> : 'Graphyard'} shipped “{item.title}”{fun ? ' 🎉' : ''}
+  const builder = builderOf(item), name = builder ? friendlyName(builder) ?? builder : builder;
+  return <div className="toast pulse" aria-live="polite" data-toast={item.key} onClick={onClose}>
+    {builder ? <span title={builder}>{name}</span> : 'Graphyard'} shipped “{item.title}” 🎉
   </div>;
 }
 

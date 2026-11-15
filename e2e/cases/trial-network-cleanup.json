@@ -1,0 +1,14 @@
+{
+  "id": "trial-network-cleanup",
+  "title": "Each trial removes its Docker networks when it ends, and spent address pools are a trial-host fault",
+  "description": "With the Docker CLI stubbed, a trial whose check services create a preview network removes it when the trial passes, fails or is cancelled; the loop's leftovers sweep removes a preview-trial network no container uses, keeps one a running container uses, and the daily leftovers report counts the removed networks. A trial whose network Docker refuses with \"all predefined address pools have been fully subnetted\" records a trial-host fault naming the preview networks on the host: the head is neither refused nor reworked and stays queued for another trial, and the loop raises one attention line.",
+  "tags": ["regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Trial networks are removed when trials end and swept when left, and spent address pools are a trial-host fault",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-network-cleanup.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

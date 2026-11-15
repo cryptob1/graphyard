@@ -31,7 +31,7 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
   const proxy = async (browserContext: BrowserContext) => browserContext.route('**/*', async route => {
     const { pathname, search } = new URL(route.request().url());
     await route.fetch(pathname.startsWith('/api/') ? { url: url + pathname + search } : {})
-      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused'));
+      .then(response => route.fulfill({ response }), () => route.abort('connectionrefused')).catch(() => {}); // a request still in flight at teardown
   });
   try {
     await proxy(context);
