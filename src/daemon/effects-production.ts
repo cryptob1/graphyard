@@ -1,6 +1,8 @@
 import { sessionInventory } from '../session-inventory.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { readdir, stat } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
 import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
@@ -197,6 +199,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: (path, force) => removeAttemptWorktree(root, path, run, force),
+    // GY-3341: the attempt worktrees still standing, read from the disk their leftovers live on.
+    attemptWorktrees: async () => {
+      const directory = worktreesDirectory(root);
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => [] as Dirent[]);
+      return (await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry => {
+        const changedAt = await stat(join(directory, entry.name)).then(info => info.mtimeMs, () => 0);
+        return { path: join(directory, entry.name), changedAt };
+      }))).filter(entry => entry.changedAt > 0);
+    },
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),

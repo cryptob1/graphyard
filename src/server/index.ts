@@ -10,6 +10,7 @@ import { productBriefRoutes } from './routes/product-brief.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
+import { teamAccessRoutes } from './routes/team-access.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
 import { delegationRoutes } from './routes/delegation.js';
 import { validationRoutes } from './routes/validation.js';
@@ -33,7 +34,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes]
  * modules ahead of the operator-agent guard authorize their callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = [
-  operatorAgentRoutes,
+  operatorAgentRoutes, teamAccessRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   loopStateRoutes, agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, emblemRoutes, usageRoutes, scenarioRoutes, actionRoutes, statusRoutes, workRoutes, productBriefRoutes,
 ];
