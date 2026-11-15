@@ -327,11 +327,14 @@ test('unit:cursor-launch-uses-agent — a cursor profile launches, logs in and s
   assert.equal(launchProgram('cursor'), 'agent');
   assert.equal(launchProgram('claude'), 'claude', 'every other runtime still starts under its own name');
 
-  // A local profile on a Cursor account home: the home on CURSOR_CONFIG_DIR, the operator's model
-  // flag kept, the no-approval recipe added, and the typed command starting `agent`.
+  // A local profile on a Cursor account home: the home on CURSOR_CONFIG_DIR and, because
+  // cursor-agent reads its sign-in from `$XDG_CONFIG_HOME/cursor/auth.json`, on XDG_CONFIG_HOME
+  // too (GY-3329); the operator's model flag kept, the no-approval recipe added, and the typed
+  // command starting `agent`.
   const launch = accountLaunch({ kind: 'cursor', approvals: 'auto', agentArgs: ['--model', 'gpt-5.4'], environment: {} }, { name: 'cursor-a', kind: 'cursor', home: '/home/operator/.graphyard/environments/cursor-a' });
   assert.equal(launch.kind, 'cursor');
   assert.equal(launch.environment.CURSOR_CONFIG_DIR, '/home/operator/.graphyard/environments/cursor-a');
+  assert.equal(launch.environment.XDG_CONFIG_HOME, '/home/operator/.graphyard/environments/cursor-a', 'the account home is the XDG config home the sign-in is read from');
   assert.deepEqual(launch.args, ['--force', '--trust', '--model', 'gpt-5.4']);
   const directory = await temporaryDirectory('cursor-launch');
   try {
@@ -342,7 +345,7 @@ test('unit:cursor-launch-uses-agent — a cursor profile launches, logs in and s
     const contract = proposedRuntimes.find(runtime => runtime.name === 'cursor')!.launch;
     assert.equal(contract.homeVariable, 'CURSOR_CONFIG_DIR');
     assert.equal(contract.modelFlag, '--model');
-    assert.equal(contract.login, 'CURSOR_CONFIG_DIR={home} agent login');
+    assert.equal(contract.login, 'CURSOR_CONFIG_DIR={home} XDG_CONFIG_HOME={home} agent login');
     const args = registryLaunchArgs({ fleet: { contract, policy: null, modelId: 'claude-sonnet-5' } } as unknown as FleetLaunchAccount);
     assert.equal(launchCommand('cursor', args, files), `GY=${files.stem}; agent --model claude-sonnet-5 "$(cat "$GY.request")"`);
   } finally { await rm(directory, { recursive: true, force: true }); }

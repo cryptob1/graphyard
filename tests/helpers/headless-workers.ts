@@ -115,6 +115,9 @@ export async function headlessWorkers(label: string, leaseSeconds = 120): Promis
       await writeFile(join(home, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: 'fixture-key' } }));
       await writeFile(join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'fixture-key', anthropic: { type: 'api', key: 'fixture-key' } }));
       await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: entry.name } }));
+      // GY-3329: a cursor account's usable sign-in is cursor/auth.json under its home.
+      await mkdir(join(home, 'cursor'), { recursive: true });
+      await writeFile(join(home, 'cursor', 'auth.json'), JSON.stringify({ accessToken: 'fixture-sign-in' }));
       await mkdir(join(home, 'opencode'), { recursive: true });
       await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'fixture-key' } }));
       const executable = entry.kind === 'cursor' ? 'cursor-agent' : entry.kind;
