@@ -4,12 +4,13 @@
 // install files, the credential directory (the operator tokens and the loop's state files beside
 // the coordinator token) and every credential file master.json names, copies the main Git repository
 // (with its worktree registrations) the checkout and its CLI release copies point at, provisions the merge-trial image
-// on the target, rewrites hostId there and prints what to start. The copy is plain rsync, outside
+// on the target, rewrites hostId there and prints what to start. A move over SSH copies with rsync;
+// a stand-in directory (--into) copies in process, with no external tool to need. Both stay outside
 // any coordination transaction.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -180,21 +181,34 @@ export async function moveInstall(root: string, options: { to: string; into?: st
   await (dependencies.stop ?? (async commands => { for (const [program, ...args] of commands) await (dependencies.run ?? run)(program!, args).catch(() => {}); }))(stop);
 
   const exec = dependencies.run ?? run;
-  const copy = (path: string, extra: string[] = []) => exec('rsync', ['-a', '--mkpath', ...extra, path, destination(path)]);
+  /** Copies one path to the target: rsync over SSH for a real move, in process for a stand-in directory — no rsync to spawn, so the move runs anywhere (the trial image ships none). */
+  const copy = (path: string, extra: { exclude?: string; mode?: number; contents?: boolean } = {}) => {
+    if (!options.into) return exec('rsync', ['-a', '--mkpath', ...(extra.exclude ? ['--exclude', `/${extra.exclude}/`] : []), ...(extra.mode !== undefined ? [`--chmod=F${extra.mode.toString(8)}`] : []), extra.contents ? `${path}/` : path, `${to}:${path}`]);
+    const targetPath = join(resolve(options.into), path);
+    return (async () => {
+      await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+      await cp(path, targetPath, { recursive: true, verbatimSymlinks: true, ...(extra.exclude !== undefined ? { filter: (candidate: string) => candidate !== join(path, extra.exclude!) } : {}) });
+      if (extra.mode !== undefined) await chmod(targetPath, extra.mode);
+    })();
+  };
   if (!local) await exec('docker', ['run', '--rm', '-v', `${volume}:/data`, '-v', `${directory}:/out`, 'postgres:17-alpine', 'tar', '-C', '/data', '-cf', '/out/graphyard-data.tar', '.']);
-  for (const path of directories) await (path === root ? copy(`${path}/`, ['--exclude', '/.graphyard/worktrees/']) : copy(`${path}/`));
+  for (const path of directories) await (path === root ? copy(path, { contents: true, exclude: join('.graphyard', 'worktrees') }) : copy(path, { contents: true }));
   for (const file of unitFiles) await copy(file);
-  for (const file of credentials) await copy(file, ['--chmod=F600']);
+  for (const file of credentials) await copy(file, { mode: 0o600 });
   // hostId names the target in both files the target's CLI and loop read.
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-move-'));
-  try {
-    for (const file of [masterFile, connectionFile].filter(existsSync)) {
-      const rewritten = join(scratch, file === masterFile ? 'master.json' : 'connection.json');
-      await atomicPrivateWrite(rewritten, { ...JSON.parse(await readFile(file, 'utf8')), hostId: to });
-      await exec('rsync', ['-a', '--mkpath', '--chmod=F600', rewritten, destination(file)]);
+  for (const file of [masterFile, connectionFile].filter(existsSync)) {
+    const rewritten = { ...JSON.parse(await readFile(file, 'utf8')), hostId: to };
+    if (options.into) await atomicPrivateWrite(destination(file), rewritten);
+    else {
+      const scratch = await mkdtemp(join(tmpdir(), 'graphyard-move-'));
+      try {
+        const staged = join(scratch, basename(file));
+        await atomicPrivateWrite(staged, rewritten);
+        await exec('rsync', ['-a', '--mkpath', '--chmod=F600', staged, `${to}:${file}`]);
+      } finally { await rm(scratch, { recursive: true, force: true }); }
     }
-  } finally { await rm(scratch, { recursive: true, force: true }); }
-  // The target's completes and merge trials run in the trial image, so the move leaves it provisioned there (GY-3318).
+  }
+  // The target's complete submissions and merge trials run in the trial image, so the move leaves it provisioned there (GY-3318).
   await provisionTrialImage({ transport: dependencies.transport ?? targetTransport(to, options.into, exec), sourceRoot: options.into ? destination(root) : root }, published);
   return { ...plan, applied: true, next: `On ${to}, run: ${start.join(' && ')}` };
 }
