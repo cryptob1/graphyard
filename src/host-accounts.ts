@@ -24,7 +24,7 @@ const accountDirectory = (home: string) => join(hostAccountsRoot(), hostAccountK
 
 /** What one live session's record names: the install holding it, and what it holds it for. */
 export interface HostAccountSession { install: string; pid: number; at: string; role: string; work: string | null; account: string }
-interface HeldRecord { fd: number; path: string }
+interface HeldRecord { fd: number; path: string; install: string }
 const held = new Map<string, HeldRecord>(); // by registry session id, this process's own records
 
 // flock locks the inherited open file description, as the verification slots do: the launcher
@@ -68,7 +68,7 @@ export async function registerHostAccountSession(id: string, home: string | null
     try { rmSync(pending, { force: true }); } catch { /* nothing to clean */ }
     return null;
   }
-  held.set(id, { fd, path });
+  held.set(id, { fd, path, install: session.install });
   return { clear: () => clearHostAccountSession(id) };
 }
 
@@ -82,6 +82,11 @@ export function clearHostAccountSession(id: string) {
   try { renameSync(record.path, tomb); } catch { /* already gone */ }
   try { closeSync(record.fd); } catch { /* already closed */ }
   try { rmSync(tomb, { force: true }); } catch { /* the next read reaps it */ }
+}
+
+/** Clear this process's records for `install` whose registry session is no longer live, however its control plane ended it. */
+export function clearEndedHostAccountSessions(install: string, live: ReadonlySet<string>) {
+  for (const [id, record] of [...held]) if (record.install === install && !live.has(id)) clearHostAccountSession(id);
 }
 
 /** Every session record still locked on the account at `home` — this host's live sessions on it, whichever install holds them. A record whose holder died is reaped on the way past. */

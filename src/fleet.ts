@@ -14,7 +14,7 @@ import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
 import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
-import { clearHostAccountSession, hostAccountExhaustion, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
+import { clearEndedHostAccountSessions, clearHostAccountSession, hostAccountExhaustion, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -235,6 +235,8 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   // and a quota hold one install marked holds the account everywhere until it resets. A record
   // directory that cannot be read holds nothing, and the install counts as it did before.
   const install = config.repository ?? config.url ?? host;
+  // A session the control plane ended on its own side (a sweep, a removed account) frees its record here too.
+  clearEndedHostAccountSessions(install, new Set(liveSessions(registry).map(session => session.id)));
   const hostSessions: { account: string; install: string; at: string }[] = [];
   for (const observation of observations) {
     const home = local.find(account => account.name === observation.account)?.credential.home;
