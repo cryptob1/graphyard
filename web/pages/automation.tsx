@@ -4,7 +4,7 @@ import { EmptyState, MoreDetails, PageHeader, PageSection } from '../components/
 /** Scoped operator automation identities, read through the admin credential. Ids, fingerprints and revisions wait behind each identity's details (GY-978). */
 export default function AutomationPage({ operatorAgents, operatorAgentsError, setView }: Pick<Dashboard, 'operatorAgents' | 'operatorAgentsError'> & Partial<Pick<Dashboard, 'setView'>>) {
   const active = operatorAgents.filter(agent => !agent.revokedAt).length;
-  return <><PageHeader title="Operator automation" fact={operatorAgentsError ? 'What is configured is unknown: the read failed.' : operatorAgents.length ? `${active} of ${operatorAgents.length} scoped ${operatorAgents.length === 1 ? 'identity' : 'identities'} active.` : 'No scoped operator automation is configured.'}>
+  return <><PageHeader title="Operator automation" fact={operatorAgentsError ? 'What is configured is unknown: the read failed.' : operatorAgents.length ? `${active} of ${operatorAgents.length} scoped ${operatorAgents.length === 1 ? 'identity' : 'identities'} active.` : 'No scoped identity is configured.'}>
       Scoped coordination after bootstrap. Credentials are created, rotated, and revoked through the secret-safe CLI.
     </PageHeader>
     {setView && <p>The runtimes, accounts, models and roles these identities' sessions launch on are configured in the <button className="text-button" onClick={() => setView('agents')}>Agents ↗</button>.</p>}

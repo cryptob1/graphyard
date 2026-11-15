@@ -25,7 +25,7 @@ export function ProductView({ brief, error, loading, retry }: { brief: ProductBr
     <PageHeader title="Product" fact={brief ? `What the product is for, set ${when(brief.updatedAt)} by ${brief.by}.` : loading ? 'Reading the product brief…' : error ? 'The product brief could not be read.' : 'No product brief yet.'}
       actions={error && <button type="button" onClick={retry}>Retry</button>}>{brief && <>{brief.why}. Kept by the master in project memory; this page is read-only.</>}</PageHeader>
     {error && <p role="alert" className="amber">{error}</p>}
-    {!loading && !error && !brief && <EmptyState title="No product brief yet.">The master records one with <code>master brief set FILE REASON</code>.</EmptyState>}
+    {!loading && !error && !brief && <EmptyState title="The master has not written the brief.">It records one with <code>master brief set FILE REASON</code>.</EmptyState>}
     {brief && <article className="product-brief">{
       // The brief's own Markdown headings are trusted structure from the master: render each section as text.
       brief.markdown.split(/\n(?=##\s)/).map((section, index) => {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { EnvironmentDelivery, Release, RollbackRequest } from '../src/delivery';
 import type { Work } from '../src/model';
+import { EmptyState, PageHeader } from './components/page-layout';
 
 /** Precise labels: a verified release is a common interval over the whole manifest, never a green deploy job. */
 export const verificationLabel: Record<EnvironmentDelivery['verification']['status'], string> = {
@@ -27,16 +28,17 @@ export default function ReleasesView({ api, work }: { api: (path: string) => Pro
   }, [retry]);
   const release = (id: string, revision: number) => releases.find(r => r.id === id && r.revision === revision);
   const keyOf = (workId: string) => work.find(w => w.id === workId)?.key ?? workId;
-  return <><header><div className="breadcrumb">Verification <span>/</span> Releases</div></header>
-    <div className="page-heading"><div><div className="eyebrow">OBSERVED, NOT ASSUMED</div><h1>Releases</h1><p>Which release each environment expects, and whether independently observed runtime identity has verified it.</p></div></div>
+  const verified = environments.filter(env => env.verification.status === 'verified').length;
+  return <><PageHeader title="Releases" fact={!loaded ? (error ? 'Releases could not be read.' : 'Reading releases…') : environments.length ? `${verified} of ${environments.length} ${environments.length === 1 ? 'environment' : 'environments'} verified in production.` : 'No environment expects a release yet.'}>
+      Which release each environment expects, and whether independently observed runtime identity has verified it.</PageHeader>
     <div className="notice">Desired state changes only through an operator or a registered promoter. Runtime state comes only from service-scoped observers with measured instance identity; a provider webhook, a green deploy job or an application's own version report never verifies a release.</div>
     {error && <div role="alert" className="notice danger">{error} {loaded && 'Previously loaded data may be stale.'} <button onClick={() => setRetry(n => n + 1)}>Retry loading releases</button></div>}
     {!loaded && !error && <p role="status">Loading releases…</p>}
-    {loaded && !error && !environments.length && <div className="empty"><h2>No release selected yet.</h2><p>Attest a build, define a release with its explicit membership, approve it and select it as an environment's expected release.</p></div>}
+    {loaded && !error && !environments.length && <EmptyState title="No release selected yet.">Attest a build, define a release with its explicit membership, approve it and select it as an environment's expected release.</EmptyState>}
     <div className="scenario-list">{environments.map(env => {
       const expected = env.expected && release(env.expected.releaseId, env.expected.releaseRevision);
       const v = env.verification;
-      return <article className="scenario-card" key={env.environmentId}><div className="card-top"><span>{env.environmentId} · generation {env.generation}</span><strong>{v.status}</strong></div>
+      return <article className="panel scenario-card" key={env.environmentId}><div className="card-top"><span>{env.environmentId} · generation {env.generation}</span><strong>{v.status}</strong></div>
         <h2>{env.expected ? `${env.expected.releaseId} r${env.expected.releaseRevision}` : 'No expected release'}</h2>
         <p className={v.status === 'verified' ? '' : 'amber'}>{verificationLabel[v.status]}</p>
         {v.interval && <p className="muted">Common verified interval {new Date(v.interval.from).toLocaleString()} → {new Date(v.interval.to).toLocaleString()}{v.verifiedAt ? ` · verified ${new Date(v.verifiedAt).toLocaleString()}` : ''}</p>}
