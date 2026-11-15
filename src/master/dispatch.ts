@@ -24,6 +24,7 @@ import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
+import { exhaustionHold, markHostAccountExhausted } from '../host-accounts.js';
 import { liveRun } from '../runner/registry.js';
 import { runTranscript } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from './runtime-prompt.js';
@@ -423,6 +424,12 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
     await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,
       reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
+    // GY-3333: the hold is recorded beside the login home too, so every install on this host reads
+    // the account as exhausted until the same reset rather than rediscovering it with a session.
+    if (launch.home) {
+      try { markHostAccountExhausted(launch.home, { by: config.repository ?? config.url, reason: notice.reason, at: new Date().toISOString(), ...exhaustionHold(notice.resetsAt, Date.now()) }); }
+      catch { /* the control-plane hold stands; only the shared record could not be written */ }
+    }
     return notice;
   }
   /**

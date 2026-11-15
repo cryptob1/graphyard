@@ -5,6 +5,7 @@ import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
+import { hostAccountsVariable } from '../../src/host-accounts.js';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
 import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
@@ -200,7 +201,9 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome,
+      // GY-3333: the suite's host-level account records live under the test data home, never the real ~/.gy.
+      [hostAccountsVariable]: join(dataHome, 'host-accounts'), ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
