@@ -9,6 +9,8 @@ import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { readLandlockAbi } from '../landlock.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
+import { remoteFetchProbe } from '../master/worktrees.js';
+import { loadStoredMasterConfig } from '../master/config.js';
 
 /** `graphyard doctor [--profile PROFILE]`: local discovery, live integration readiness and the readiness checklist for a completion profile. */
 export async function runDoctor(context: CliContext) {
@@ -34,7 +36,11 @@ export async function runDoctor(context: CliContext) {
     proposal: stored?.proposal ?? null,
   });
   // The machine-local prerequisites the README's setup steps depend on (GY-1352), each naming its step.
-  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi });
+  // GY-3351: every registry account on this host, as the loop launches it, and one read of origin.
+  const document = live ? await api('agent-registry/document').catch(() => null) : null;
+  const host = (await loadStoredMasterConfig(root).catch(() => null))?.hostId ?? context.individualHostId();
+  const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi,
+    registry: document ? { document, host } : null, remote: () => remoteFetchProbe(root) });
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and
   // an undeployed merge are the next actions; until then the checklist's own gap comes first.

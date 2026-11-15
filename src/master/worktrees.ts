@@ -2,6 +2,7 @@ import { writeFailure } from '../disk-space.js';
 // Concern: removing ended attempts' worktrees, managed checkouts and shared installs, and preparing assignment worktrees: the dispatch cycle's one shared base fetch.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { statfs, readdir, lstat, chmod, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -257,6 +258,16 @@ export function cycleBaseTip(root: string, baseBranch: string, cycle: string | u
   cycleBaseFetches.set(key, { cycle, tip: shared });
   trimCycleFetches();
   return shared;
+}
+
+/**
+ * GY-3351: whether this host reaches origin the way cycleBaseTip's fetch does — one `git ls-remote`
+ * under the checkout's own credential, never prompting. Null when origin answered, else git's
+ * failure text, for doctor's git-remote line.
+ */
+export function remoteFetchProbe(root: string): string | null {
+  try { execFileSync('git', ['ls-remote', '--heads', 'origin'], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'], timeout: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); return null; }
+  catch (error: any) { return (String(error?.stderr ?? '').trim() || String(error?.message ?? error)).split('\n').filter(Boolean).join(' ').slice(0, 400); }
 }
 
 export { diskExhaustion, reclaimAdvice, exhaustedPath, diskExhaustionMessage, writeFailure } from '../disk-space.js';
