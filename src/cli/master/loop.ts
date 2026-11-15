@@ -34,9 +34,13 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
     if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
     // A coordinator credential is the daemon's entire authority; its roster --proof patterns cover only the loop's readings,
-    // since evidence submission refuses every coordinator (GY-2934).
-    if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
-    assertProtocol(coordinator);
+    // since evidence submission refuses every coordinator (GY-2934). GY-3347: a plane that is down
+    // at startup is waited out rather than refused — the loop keeps running for the plane to
+    // answer, and the plane itself enforces the credential on every call the loop then makes.
+    if (coordinator) {
+      if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
+      assertProtocol(coordinator);
+    }
     // GY-3290: everything heavy this loop runs or launches shares the host's budget with every other Graphyard project here.
     joinHostHeavyBudget(master.repository);
     const state = await readDaemonState(root, master);
@@ -65,7 +69,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const stopping = new AbortController();
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
     const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root,
-      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator.actor.id } }))
+      // GY-3347: a loop started while the plane is down knows no actor of its own yet; no event reads as its own, so any event may wake it — one more cycle, never a lost one.
+      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator?.actor.id ?? '' } }))
       .finally(() => stopping.abort());
     // GY-409: the loop turns a connect made in Settings › Agents into a registered account on this host, one pass at a time.
     let connecting = false;
@@ -82,7 +87,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const result = await daemonRun;
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
     if (result.stopped) exit.stopped();
-    return print({ repository: master.repository, coordinator: coordinator.actor.id, intervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null });
+    return print({ repository: master.repository, coordinator: coordinator?.actor.id ?? null, intervalSeconds, cycles: result.cycles.length, failedCycles: result.failed.length, stopped: result.stopped ? 'signal' : 'completed', last: result.cycles.at(-1) ?? null, lastFailure: result.failed.at(-1) ?? null });
   }
   return unhandled;
 }

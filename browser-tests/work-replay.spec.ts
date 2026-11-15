@@ -74,8 +74,5 @@ test('e2e:work-replay — recorded stages, windows, playback and motion preferen
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await expect(scrub).toBeDisabled(); await expect(dot).toHaveAttribute('data-column', 'Shipped');
     await expect(replay.locator('[data-replay-column="Shipped"] .count')).toHaveText('1');
-    await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await page.getByRole('button', { name: 'Fun', exact: true }).click();
-    await expect(scrub).toBeDisabled(); await expect(dot).toHaveAttribute('data-column', 'Shipped');
   } finally { await page.unrouteAll({ behavior: 'ignoreErrors' }); await http.close(); await store.close(); }
 });

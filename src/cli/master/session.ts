@@ -39,7 +39,11 @@ export async function openMasterSession(context: CliContext, root: string) {
   };
   // The host is named so the control plane judges fleet placement for this executor.
   // `master status` still reports an unreachable control plane (GY-2966): what the loop recorded about it is on its cursor.
-  const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }).catch(error => { if (id === 'status' && typeof error?.status !== 'number') return null; throw error; });
+  // GY-3347: `master run` starts against a plane that is down too — the loop waits it out, its
+  // cycles failing and retrying while the GY-2966 recovery brings the stack back — instead of
+  // exiting on 'fetch failed' for the supervisor to restart every few seconds. The plane itself
+  // enforces the credential on every call the loop then makes.
+  const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }).catch(error => { if ((id === 'status' || id === 'run') && typeof error?.status !== 'number') return null; throw error; });
   if (coordinator) assertMasterBinding(master, coordinator);
   // The CLI's own commit, for the version-skew guard.
   const cli = { commit: cliCommit(fileURLToPath(new URL('../../..', import.meta.url))) };

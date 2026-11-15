@@ -15,7 +15,7 @@ import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
-import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
+import { deployRecordPath, releaseHandover, watchMain, type DeployWatchPorts, type StoppedPlanePorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
 import { installCommand, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, servedApplication, serveEnvironment, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
@@ -425,6 +425,24 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
   }
 }
 
+/** GY-3347: the compose stack's stopped-plane recovery, as the watch drives it: one real /healthz
+ * probe of the server, `docker compose up -d` in the install's compose directory — the stack's own
+ * image is the commit the record serves — and the down-then-up recreate after a failure meaning
+ * the old Docker network id is gone. The database volume is never touched.
+ */
+export function stoppedPlanePorts(url: string, composeDirectory: string, run: ChildRun): StoppedPlanePorts {
+  const compose = async (args: string[], timeoutMs = 300_000) => String(await run('docker', ['compose', ...args], { cwd: composeDirectory, timeoutMs }));
+  return {
+    health: async () => {
+      const response = await fetch(`${url.replace(/\/+$/, '')}/healthz`, { signal: AbortSignal.timeout(10_000) });
+      const body = await response.json().catch(() => null) as { ok?: unknown } | null;
+      if (!response.ok || body?.ok !== true) throw new Error(`/healthz ${response.ok ? 'reports the server unhealthy' : `answered HTTP ${response.status}`}`);
+    },
+    up: async () => (await compose(['up', '-d'])).trim(),
+    recreate: async () => `${await compose(['down'])}${await compose(['up', '-d'])}`.trim(),
+  };
+}
+
 /** The deploy watch builds isolated per-commit CLI artifacts, redeploys through the existing install
  * plan/apply flow, and publishes the launcher pointer only after strict health passes. Published
  * artifacts (including the legacy build checkout) are retained for in-flight CLI/server processes.
@@ -474,6 +492,9 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
     schema: async commit => revisionSchema(cliRoot, commit),
     database: () => databaseSchemaOf(url),
+    // GY-3347: the compose stack this install's control plane runs as, brought back up when its
+    // health fails and the pass has nothing to deploy.
+    ...(install.provider === 'compose' ? { stoppedPlane: stoppedPlanePorts(url, join(directory, 'compose'), input.run) } : {}),
   };
 }
 
