@@ -294,7 +294,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       finally { live.gate = null; }
     })();
   }
-  if (!live.diagnostics && busyTrialSlots(cycle.state) < slots) {
+  // Diagnostics get at most one extra trial so a one-slot host cannot starve its daily check.
+  if (!live.diagnostics) {
     live.diagnostics = (async () => {
       try {
         const fresh = readGateRecord(file) ?? record;
