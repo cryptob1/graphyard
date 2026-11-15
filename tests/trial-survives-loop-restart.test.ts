@@ -150,7 +150,7 @@ test('unit:trial-survives-loop-restart — a trial in progress when the loop res
   await stepTwo();
 
   const one = world.recorded.get(1)!.map(event => event.kind).filter(kind => kind !== 'trial-step');
-  assert.deepEqual(one, ['intent', 'intent', 'trial', 'pushed', 'reconciled'], 'the passing head lands on its adopted trial: the next loop re-intends the merge, runs no second trial, and delivers');
+  assert.deepEqual(one, ['intent', 'trial', 'pushed', 'reconciled'], 'the passing head lands on its adopted trial: the next loop retains the intent, runs no second trial, and delivers');
   assert.equal(one.filter(kind => kind === 'trial').length, 1, 'exactly one trial ran for the head across the restart');
   assert.equal(world.snapshot()[0]!.stage, 'done', 'GY-1 is delivered');
 
