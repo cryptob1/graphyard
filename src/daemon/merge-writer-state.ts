@@ -40,13 +40,13 @@ export const mergeWriterStateSchema = z.object({
     steps: z.array(z.object({ step: z.string(), durationMs: z.number().min(0) }).strict()) }).strict()).max(20).optional(),
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
-  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */
+  /** The merge in flight; `attempt` identifies the flight across loop restarts, persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(),
     step: z.string().max(100).optional(), stepStartedAt: instant.optional(), revert: revertFlightSchema.optional(),
     /** GY-3159: the head's detached trial run, whose directory the next loop adopts the run from after a restart. */
     run: z.object({ directory: z.string().max(1000), mergeSha: shaField }).strict().optional() }).strict().nullable().default(null),
   /** Every queue position the merge in flight trials at once (GY-3120 `mergeHeads`), in queue order, each with its own trial step; `inFlight` is the first. Absent while nothing merges. */
-  inFlights: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, step: z.string().max(100), stepStartedAt: instant,
+  inFlights: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(), step: z.string().max(100), stepStartedAt: instant,
     /** GY-3159: the head's detached trial run, whose directory the next loop adopts the run from after a restart. */
     run: z.object({ directory: z.string().max(1000), mergeSha: shaField }).strict().optional() }).strict()).max(maxMergeWriterParallel).optional(),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
