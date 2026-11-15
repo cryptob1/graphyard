@@ -34,12 +34,12 @@ img.mark{display:block;width:32px;height:36px;border:0;border-radius:0;object-fi
 .pulse-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.bars{height:170px;display:grid;grid-template-columns:repeat(12,1fr);align-items:end;gap:8px;border-bottom:1px solid var(--border)}.bar-slot{height:100%;display:flex;align-items:flex-end}.bar{width:100%;min-height:2px;background:var(--shipped);border-radius:3px 3px 0 0}.bar-labels{display:flex;justify-content:space-between;color:var(--text-2);font-size:10px;margin-top:9px}.delivery-list article{display:flex;justify-content:space-between;gap:20px;padding:18px 0;border-bottom:1px solid var(--border)}.delivery-list p{font-size:11px;margin:6px 0}.delivery-list details{color:var(--text-2);font-size:11px}.delivery-list li{margin:6px 0}.delivery-links{display:flex;gap:13px;white-space:nowrap;font-size:11px}.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 @media(max-width:650px){.bars{height:130px;gap:4px}.delivery-list article{display:block}.delivery-links{margin-top:12px;white-space:normal;flex-wrap:wrap}.pulse .page-heading{display:flex}.pulse-actions{margin-top:8px}}
 /* Flow analytics: every chart is paired with the data table that carries its numbers. */
-table.flow-data{border-collapse:collapse;width:100%;font-size:12px;color:var(--text)}
-table.flow-data{margin:12px 0;display:block;max-width:100%;overflow:auto}
-table.flow-data caption{text-align:left;font-size:11px;color:var(--text-2);padding:10px 12px}
-table.flow-data th,table.flow-data td{border:1px solid var(--border);padding:9px 11px;text-align:left;white-space:nowrap}
-table.flow-data thead th{background:var(--border);color:var(--text);position:sticky;top:0}
-table.flow-data tbody th{font-weight:500;color:var(--text)}
+
+
+
+
+
+
 /* Attribution section: metric cards carry an explicit state badge so unknown and blocked never read as zero or success. */
 /* GY-67 simplified shell. The sidebar is an ordinary flex column, so its background runs the
    full height of the page however long it is; its contents stay pinned while the page scrolls. */
@@ -343,7 +343,7 @@ table.agents-table td.why{white-space:normal;min-width:160px;overflow-wrap:anywh
 .plan-header-content{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .plan-name{font-size:var(--type-body);font-weight:600;color:var(--text)}
 .plan-usage{display:inline-flex;align-items:center;gap:10px;flex-wrap:nowrap;vertical-align:middle}
-table.compact-table th,table.compact-table td{padding:5px 10px}
+
 .usage-bar-container{display:inline-flex;align-items:center;gap:4px;font-size:var(--type-small);cursor:help}
 .usage-window-label{font-weight:600;color:var(--text-2);text-transform:uppercase;font-size:11px}
 .usage-bar-track{display:inline-block;width:48px;height:6px;background:var(--raised);border:1px solid var(--border);border-radius:4px;overflow:hidden;position:relative}
@@ -354,7 +354,7 @@ table.compact-table th,table.compact-table td{padding:5px 10px}
 .usage-window-stats{font-size:11px;color:var(--text-2);white-space:nowrap}
 .usage-not-reported{color:var(--text-3);cursor:help}
 tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset;cursor:pointer;color:var(--text-2);font-size:var(--type-small);overflow-wrap:anywhere}tr.spent-summary button::before{content:"▸ ";color:var(--text-3)}tr.spent-summary button[aria-expanded=true]::before{content:"▾ "}tr.spent-summary button:focus-visible{outline:2px solid var(--border);outline-offset:2px}
-@media(max-width:650px){table.agents-table,table.agents-table tbody,table.agents-table tr,table.agents-table th,table.agents-table td{display:block;width:100%}table.agents-table thead{display:none}table.agents-table tr{border:1px solid var(--border);border-radius:6px;margin-bottom:10px}table.agents-table tr[hidden]{display:none}table.agents-table th,table.agents-table td{border:0;white-space:normal;min-width:0}table.agents-table td[data-label]::before{content:attr(data-label) ": ";color:var(--text-2)}.plan-header-content{flex-direction:column;align-items:flex-start;gap:6px}}
+@media(max-width:650px){.plan-header-content{flex-direction:column;align-items:flex-start;gap:6px}}
 .project-memory{margin-top:var(--space-4)}.project-memory .memory-content{display:grid;gap:var(--space-3);margin-top:var(--space-2)}.project-memory .memory-block h3{font-size:var(--type-small);color:var(--text-2);margin:0 0 var(--space-1)}.project-memory .memory-list{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:var(--type-small)}
 
 /* The Master terminal uses the rest of the viewport, including on a phone. */
