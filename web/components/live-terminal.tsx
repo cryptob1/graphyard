@@ -88,9 +88,11 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
         section.current.style.height = `calc(100dvh - ${section.current.getBoundingClientRect().top + below}px)`;
         const screen = host.current.querySelector('.xterm-screen')?.getBoundingClientRect();
         if (!screen?.width || !screen.height) return;
-        // xterm 6's scrollbar overlays the text: the columns take the container's whole width (GY-3313).
-        const cols = Math.max(10, Math.min(500, Math.floor(host.current.clientWidth / (screen.width / terminal.cols))));
-        const rows = Math.max(10, Math.min(500, Math.floor(host.current.clientHeight / (screen.height / terminal.rows))));
+        // xterm 6's scrollbar overlays the text: the columns take the container's whole width (GY-3313),
+        // measured unrounded, since clientWidth rounds a fractional width up past the edge.
+        const box = host.current.getBoundingClientRect();
+        const cols = Math.max(10, Math.min(500, Math.floor(box.width / (screen.width / terminal.cols))));
+        const rows = Math.max(10, Math.min(500, Math.floor(box.height / (screen.height / terminal.rows))));
         if (cols !== terminal.cols || rows !== terminal.rows) terminal.resize(cols, rows);
         send({ type: 'resize', cols, rows });
       };

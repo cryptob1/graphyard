@@ -42,9 +42,12 @@ const fill = (page: Page) => page.evaluate(() => {
   };
 });
 
-/** The pane's drawing spans the container's width (its last column within one cell of the right edge) and its rows fill the height. */
+/**
+ * The pane's drawing spans the container's width (its last column within one cell of the right edge) and its rows fill
+ * the height. A glyph may overhang an edge by sub-pixel rounding (0.05 cell), never by a visible amount.
+ */
 async function fillsThePage(page: Page) {
-  const fills = (at: Awaited<ReturnType<typeof fill>>) => !!at && at.right >= 0 && at.right <= 1 && at.bottom >= 0 && at.bottom <= 1 && at.drawnRows === at.rows;
+  const fills = (at: Awaited<ReturnType<typeof fill>>) => !!at && at.right >= -0.05 && at.right <= 1 && at.bottom >= -0.05 && at.bottom <= 1 && at.drawnRows === at.rows;
   await expect.poll(async () => fills(await fill(page)), settled).toBe(true).catch(async error => {
     throw new Error(`The terminal does not fill its container (gaps in cells): ${JSON.stringify(await fill(page))}\n${error}`);
   });
