@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
 import { NOW, boardApi, emptyApi } from './ui-board';
 
@@ -37,6 +37,8 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
   test(`e2e:pages-seeded-review — every dashboard page shows its seeded items, fits and reads plainly at ${viewport.name} width`, async ({ page }) => {
     test.setTimeout(480_000);
     expect(routes.length, 'the router lists its pages').toBeGreaterThan(10);
+    // With PAGES_REVIEW_SHOTS set, each pass's pictures land on disk for eyes to read.
+    const shots = process.env.PAGES_REVIEW_SHOTS ? `${process.env.PAGES_REVIEW_SHOTS}/${viewport.name}` : null;
     // The Work page's playful line and the confetti choose with Math.random: pin it, so the
     // seeded and empty pictures of a page differ only through their data.
     await page.addInitScript(() => { Math.random = () => 0.42; });
@@ -56,7 +58,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
 
     const visit = async (seeded: boolean) => {
       data.seeded = seeded;
-      const shots = new Map<string, Buffer>();
+      const pictures = new Map<string, Buffer>();
       // The token of the pass before stays in storage: sign the next pass in from a clean session.
       await page.goto('/?sign-in');
       await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
@@ -71,7 +73,11 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
         expect(read.sideways, `${route} never scrolls sideways at ${viewport.name} width`).toBeLessThanOrEqual(0);
         const internal = read.words.match(banned);
         expect(internal, `${route} keeps internal words out of sight at ${viewport.name} width (found ${internal?.[0]})`).toBe(null);
-        if (lists.includes(route)) shots.set(route, await page.screenshot({ fullPage: true }));
+        if (lists.includes(route)) {
+          const buffer = await page.screenshot({ fullPage: true });
+          if (shots) { mkdirSync(shots, { recursive: true }); writeFileSync(`${shots}/${route}${seeded ? '' : '-empty'}.png`, buffer); }
+          pictures.set(route, buffer);
+        }
         console.log(`pages-seeded-review ${seeded ? 'seeded' : 'empty'} ${viewport.width} ${route}: ${Date.now() - started}ms`);
       }
       if (seeded) {
@@ -81,8 +87,9 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
         const read = await review(page, 'the item page', viewport.width);
         expect(read.sideways, 'the item page never scrolls sideways').toBeLessThanOrEqual(0);
         expect(read.words.match(banned), 'the item page reads plainly').toBe(null);
+        if (shots) { mkdirSync(shots, { recursive: true }); writeFileSync(`${shots}/item-page.png`, await page.screenshot({ fullPage: true })); }
       }
-      return shots;
+      return pictures;
     };
 
     const seeded = await visit(true);

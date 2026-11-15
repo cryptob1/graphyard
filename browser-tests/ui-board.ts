@@ -37,7 +37,8 @@ export function live<T>(item: T): T {
 export function boardWork(): any[] {
   const audit = fixtureWork() as any[];
   const template = audit.find(item => item.key === 'GY-13');
-  const make = (n: number, title: string, fields: Record<string, unknown>) => ({ ...template, id: id(n), key: `GY-${n}`, title, description: `${title}.`, ...fields });
+  const make = (n: number, title: string, fields: Record<string, unknown>) => ({ ...template, id: id(n), key: `GY-${n}`, title, description: `${title}.`,
+    criteria: [{ id: 'AC-1', text: 'The change works for a signed-in customer.', proofs: [`integration:gy-${n}`] }], ...fields });
   const candidate = (pr: number, head: string) => ({ sha: head, baseSha: sha('b'), pr, branch: `graphyard/pr-${pr}`, author: 'worker', createdAt: at(-3 * hour) });
   const observed = (pr: number, head: string, checks: { name: string; result: string }[], reviews: unknown[] = []) =>
     ({ candidate: candidate(pr, head), checks: checks.map(check => ({ ...check, appId: 1 })), reviews, protected: true, mergeable: true, merged: false, mergeSha: null, mergedAt: null, files: ['src/app.ts'], scopeFiles: [], at: at(-minute) });
@@ -166,12 +167,17 @@ export function testsSummary() {
   const run = (seq: number, result: 'pass' | 'fail' | 'skipped', commit: number, scenarioId = 'checkout-pays') => ({ seq, scenarioId, proof: `e2e:${scenarioId}`, result, scenarioRevision: 1, environment: 'staging',
     executed: 4, skipped: result === 'skipped' ? 1 : 0, sha: sha(commit), baseSha: sha(9), policyRevision: 1, workId: 'w', workKey: 'GY-16', pr: 40 + commit,
     run: { kind: 'github-actions', id: String(9000 + seq), attempt: 1, url: null }, evidenceId: `e${seq}`, producer: 'e2e-producer', at: at(-seq * hour) });
+  // Where each case last ran (GY-3396): the merge writer's test merge, the batch gate on main, the served release.
+  const cell = (result: 'pass' | 'fail' | 'skipped', place: string, link: { item: string; key: string } | { url: string } | null, detail: string): { result: 'pass' | 'fail' | 'skipped'; at: string; link: { item: string; key: string } | { url: string } | null; detail: string } =>
+    ({ result, at: at(-2 * hour), link, detail: `${place}: ${detail}` });
+  const matrix = (cells: Record<string, ReturnType<typeof cell>>) => cells;
   const entry = (id: string, title: string, runs: ReturnType<typeof run>[], extra: Record<string, unknown> = {}) => ({ id, title, purpose: `${title}.`, testPath: `tests/e2e/${id}.spec.ts`, environment: 'staging', revision: 1,
     changed: { at: at(-72 * hour), by: 'operator' }, links: [{ key: 'GY-16', title: 'Checkout', stage: 'review', criteria: ['AC-1'] }], latest: runs[0] ?? null, staleRevision: false,
     runs: runs.length, failures: runs.filter(r => r.result === 'fail').length, lastFailure: runs.find(r => r.result === 'fail') ?? null, flaky: false, flakyReason: null, history: runs, ...extra });
   return { window: 20, cases: [
-    entry('checkout-pays', 'Checkout takes payment', [run(1, 'fail', 3), run(2, 'pass', 3), run(3, 'pass', 2)], { flaky: true, flakyReason: `passed and failed on commit ${sha(3).slice(0, 8)}` }),
-    entry('refund-issued', 'Refunds are issued', [run(4, 'skipped', 3, 'refund-issued')]),
+    entry('checkout-pays', 'Checkout takes payment', [run(1, 'fail', 3), run(2, 'pass', 3), run(3, 'pass', 2)], { flaky: true, flakyReason: `passed and failed on commit ${sha(3).slice(0, 8)}`,
+      matrix: matrix({ trial: cell('pass', 'the test merge of GY-21', { item: id(21), key: 'GY-21' }, '12 test files ran, none failed'), main: cell('fail', 'the batch gate on main', { item: id(22), key: 'GY-22' }, 'step 3 expects the totals in dollars'), served: cell('pass', 'the served release', { url: 'https://example.test/run/9003' }, '4 executed, 0 skipped') }) }),
+    entry('refund-issued', 'Refunds are issued', [run(4, 'skipped', 3, 'refund-issued')], { matrix: matrix({ trial: cell('skipped', 'the test merge of GY-21', null, 'its environment was busy: 1 skipped') }) }),
     entry('login-works', 'Signing in works', [], { links: [] }),
   ] };
 }
