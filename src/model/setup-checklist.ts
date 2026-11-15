@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'checkout-trust' | 'step-failure' | 'fetch-refusal' | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -100,6 +100,12 @@ function accountItems(status: any | null): SetupItem[] {
   // while it stands — naming the step and the error — gone once the step succeeds again.
   const stepFailure = typeof status?.setup?.stepFailure === 'string' ? status.setup.stepFailure.trim() : '';
   if (stepFailure) items.push({ id: 'step-failure', title: 'A loop step keeps failing', done: false, human: true, line: stepFailure, action: { kind: 'wait', label: 'Check again' } });
+  // GY-3336: the standing fetch refusal the live loop raised (`setup.fetchRefusal`, its own
+  // attention line): the remote refuses the base branch's fetch — a SAML organization that has not
+  // authorised the merge writer's key — and the owner is the one who can. One item while it
+  // stands, quoting the remote's refusal and the fix, gone once a fetch succeeds again.
+  const fetchRefusal = typeof status?.setup?.fetchRefusal === 'string' ? status.setup.fetchRefusal.trim() : '';
+  if (fetchRefusal) items.push({ id: 'fetch-refusal', title: 'Authorise the repository for the merge writer', done: false, human: true, line: fetchRefusal, action: { kind: 'wait', label: 'Check again' } });
   const loop = status?.setup?.loop === true;
   items.push({ id: 'master-loop', title: 'Coordinator running', done: loop, human: false,
     line: loop ? 'The coordinator is running and will hand out work.' : 'The setup command starts the coordinator on your machine; this turns green once it runs.',

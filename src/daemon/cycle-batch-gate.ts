@@ -13,7 +13,7 @@ import { availableParallelism } from 'node:os';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
-import { message, storeAction } from './state.js';
+import { actionDetailMax, message, storeAction } from './state.js';
 import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
 import { faultItem } from './control-plane.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
@@ -25,6 +25,26 @@ const gateKey = gateTrialKey;
 /** How many lines of a failure's output its diagnostic filing carries (GY-3265). */
 const outputLines = 80;
 const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(Boolean);
+
+/**
+ * GY-3336: the cursor key of the standing fetch-refusal line. A remote that refuses the base
+ * branch's fetch — a SAML organization that has not authorised the merge writer's SSH key — is the
+ * owner's to fix, so the loop raises one attention line quoting the remote's refusal and the fix,
+ * and retries the fetch with a growing backoff instead of failing every cycle.
+ */
+export const fetchRefusalKey = 'fetch-refusal';
+/** How long the loop waits before refetching after the refusal's `attempts`-th failure: one minute doubling, capped at fifteen. */
+export const fetchRetryBackoffMs = (attempts: number) => Math.min(60_000 * 2 ** Math.max(0, attempts - 1), 15 * 60_000);
+/** git's generic trailer for every refused remote read; the remote's own words come above it. */
+const genericFetchFailure = /^fatal: (?:Could not read from remote repository|could not read from remote repository)/;
+/** The remote's refusal, as one line quoting it: the first non-generic line of git's stderr, else the error's own words. */
+export function fetchRefusalLine(repository: string, baseBranch: string, error: unknown): string {
+  const failed = error as { stderr?: unknown };
+  const quoted = `${typeof failed?.stderr === 'string' ? failed.stderr : ''}\n${message(error)}`.split('\n')
+    .map(line => line.trim()).filter(line => line && !genericFetchFailure.test(line));
+  const refusal = (quoted[0] ?? message(error).split('\n')[0] ?? 'the fetch failed').slice(0, 300);
+  return `The remote refuses the fetch of ${baseBranch} for ${repository}: "${refusal}". The owner must authorise the merge writer's access — for a SAML organization, authorise the SSH key for it on GitHub (Settings → SSH and GPG keys → Configure SSO → Authorize), or reinstall with --push-auth gh so the merge writer fetches over https with the gh login — and the loop retries with backoff until then.`.slice(0, actionDetailMax);
+}
 
 /**
  * What one trial run of `checks` on `commit` failed, as gate check ids, with each failing case's
@@ -129,7 +149,13 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch), input.key);
     return { item: created?.key ?? null };
   };
-  const catalog = async (commit: string) => lines(await git(['ls-tree', '--name-only', `${commit}:e2e/cases`])).filter(name => name.endsWith('.json')).map(name => name.slice(0, -5));
+  const catalog = async (commit: string) => {
+    // GY-3336: a repository with no e2e/cases directory — a fresh install of a repository Graphyard
+    // has never gated — answers an empty catalog, not a failing gate: `ls-tree COMMIT:e2e/cases`
+    // errors "Not a valid object name" on a path the commit does not hold.
+    try { return lines(await git(['ls-tree', '--name-only', `${commit}:e2e/cases`])).filter(name => name.endsWith('.json')).map(name => name.slice(0, -5)); }
+    catch { return []; }
+  };
   return {
     now: reads.now,
     fetch: reads.fetch,
@@ -208,14 +234,32 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   // GY-3304: while the host's heavy work is drained no gate or diagnostics run starts; the batch waits on its record.
   if (!reads?.git || !gate || reads.drain?.()) return null;
   const file = gateRecordPath(gate.root);
+  const git = reads.git;
+  // GY-3336: while the fetch-refusal backoff stands, neither the gate nor its bootstrap fetches —
+  // the refusal is the owner's to fix, and the loop has already said so in one standing line.
+  const standing = cycle.state.actions[fetchRefusalKey];
+  if (standing?.state === 'failed' && cycle.now() - Date.parse(standing.at) < fetchRetryBackoffMs(standing.attempts)) return null;
+  const reading: MergeWriterReads = { ...reads, fetch: async () => {
+    try {
+      const tip = await reads.fetch();
+      if (cycle.state.actions[fetchRefusalKey]) { delete cycle.state.actions[fetchRefusalKey]; await cycle.effects.persist?.(cycle.state); }
+      return tip;
+    } catch (error) {
+      const entry = storeAction(cycle.state, fetchRefusalKey, { kind: 'attention', work: null, principal: null, state: 'failed',
+        detail: fetchRefusalLine(gate.repository, reads.baseBranch, error), attempts: (cycle.state.actions[fetchRefusalKey]?.attempts ?? 0) + 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
+      cycle.log(actionLine(cycle.state.cycle, entry));
+      await cycle.effects.persist?.(cycle.state);
+      throw error;
+    }
+  } };
   const live = flights.get(cycle.state) ?? { gate: null, diagnostics: null };
   flights.set(cycle.state, live);
   let record: GateRecord | null = readGateRecord(file);
   if (!record || record.repository?.toLowerCase() !== gate.repository.toLowerCase()) {
-    record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reads));
+    record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reading));
     await writeGateRecord(file, record);
   }
-  const ports = batchGatePorts({ ...reads, git: reads.git,
+  const ports = batchGatePorts({ ...reading, git,
     trial: (sha, files, item, base, step, timing, heads, _share, signal, timeout) =>
       reads.trial(sha, files, item, base, step, timing, heads, Math.max(1, busyTrialSlots(cycle.state)), signal, timeout),
   }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
