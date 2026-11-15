@@ -214,7 +214,7 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
     });
   };
 
-  return <div className="table-scroll"><table className="sessions-table agents-table" aria-label="Accounts at a glance"><thead><tr>{['Account', 'Status', 'Why', 'Back', 'Usage', 'Roles', 'Runs'].map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
+  return <div className="table-scroll"><table className="sessions-table compact-table agents-table" aria-label="Accounts at a glance"><thead><tr>{['Account', 'Status', 'Why', 'Back', 'Usage', 'Roles', 'Runs'].map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
     {bodies.map((body, index) => <tbody key={body.plan?.id ?? `accounts-${index}`} data-plan-group={body.plan?.name}>
       {body.plan && <tr className="plan-header-row" data-plan={body.plan.name}><th colSpan={7} className="plan-header">
         <span className="plan-header-content"><span className="plan-name" data-plan-name={body.plan.name}>{body.plan.name}</span><UsageBars plan={body.plan}/></span>
@@ -261,7 +261,7 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
       </MoreDetails>}
     </PageSection>
     <PageSection title="Running sessions" count={running.length}>
-      {running.length > 0 && <table className="sessions-table" aria-label="Running sessions by account"><thead><tr>{runningColumns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
+      {running.length > 0 && <table className="sessions-table compact-table" aria-label="Running sessions by account"><thead><tr>{runningColumns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
         <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}>{[session.role, session.work ?? '—', session.account, session.runtime, session.model, session.host, when(session.selectedAt)].map((cell, index) => <td key={runningColumns[index]} data-label={runningColumns[index]}>{cell}</td>)}</tr>)}</tbody></table>}
       {!running.length && <p>No session launched from the registry is running.</p>}
     </PageSection>
@@ -410,7 +410,7 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
   return <><PageHeader title="Agents" fact={!fleet ? (loadError ? 'The agents could not be read.' : 'Reading the agents…') : fleet.roles.length ? `${launchable} of ${fleet.roles.length} roles can launch now · ${accounts}.` : `${accounts}; no role is configured yet.`}
       actions={<>{onOpenSetup && <button type="button" className="text-button" data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}
         {fleet && canEdit && !wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</>}>
-      Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
+      Each role launches its first eligible account. Changes apply on the next launch.
     </PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
     {!fleet && !loadError && <p role="status">Loading the agents…</p>}
