@@ -74,11 +74,30 @@ def take_slot():
         if probe is None:
             return None
         os.close(probe)
-    for slot in range(load['cap']):
-        fd = locked('slot-' + str(slot), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if fd is not None:
-            return fd
-    return None
+    # A lower cap must count containers already holding higher-numbered slots. Serialize
+    # counting and claiming, so simultaneous starts cannot both spend the same free capacity.
+    admission = locked('admission', fcntl.LOCK_EX)
+    spare = None
+    try:
+        names = set(os.path.basename(path) for path in glob.glob(os.path.join(load['slots'], 'slot-*')))
+        names.update('slot-' + str(slot) for slot in range(load['cap']))
+        occupied = 0
+        for name in sorted(names):
+            fd = locked(name, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fd is None:
+                occupied += 1
+            elif spare is None:
+                spare = fd
+            else:
+                os.close(fd)
+        if occupied < load['cap']:
+            return spare
+        if spare is not None:
+            os.close(spare)
+        return None
+    finally:
+        os.close(admission)
+
 def admit():
     # The kernel drops a flock with its last holder, so a killed launcher leaves no slot and no place in the queue.
     os.makedirs(load['slots'], exist_ok=True)

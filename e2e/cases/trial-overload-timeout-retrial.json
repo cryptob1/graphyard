@@ -8,7 +8,7 @@
   "steps": [{
     "kind": "command",
     "name": "Overloaded timeouts, retry limit, attention and CPU-sized shards",
-    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-overload-timeout-retrial.test.ts",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-overload-timeout-retrial.test.ts tests/trial-load-cap.test.ts",
     "timeoutSeconds": 300
   }]
 }
