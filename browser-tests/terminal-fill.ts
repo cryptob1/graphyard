@@ -4,11 +4,11 @@ import type { Page } from '@playwright/test';
  * How the pane's drawing sits in the terminal container: the host-side herdr stub's master pane is
  * laid out at 70 columns and draws a ruler, every row filled to the pane's width and ending in `|`.
  * `right` is the gap from the last drawn column to the container's right edge, `bottom` from the last
- * drawn row to its bottom edge, each in character cells. Null while the screen carries no ruler
- * rows — an empty terminal, or a buffer mid-rewrite.
+ * drawn row to its bottom edge, each in character cells.
  */
 export interface FillSample { right: number; bottom: number; drawnRows: number; rows: number; documentScrolls: boolean }
 
+/** One measurement of the pane's drawing, or null while the screen carries no ruler rows: an empty terminal, or a buffer mid-rewrite. */
 const fill = (page: Page) => page.evaluate(() => {
   const host = document.querySelector('.terminal-host')!.getBoundingClientRect();
   const rows = [...document.querySelectorAll('.xterm-rows > div')].filter(row => /^row \d+ =*\|$/.test((row.textContent ?? '').trimEnd()));
