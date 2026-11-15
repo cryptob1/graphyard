@@ -15,6 +15,15 @@ Prerequisites: Linux 7.0+ with Landlock ABI 9+ (`uname -r`; Ubuntu 26.04: `sudo 
 ## Quick start
 
 ```sh
+git clone https://github.com/cryptob1/graphyard.git && cd graphyard
+npm ci
+npm run build
+node bin/graphyard.mjs up --repo OWNER/NAME
+```
+
+Once published to npm:
+
+```sh
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
@@ -24,10 +33,10 @@ The Setup link connects worker and reviewer accounts, file goals under **New wor
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
-`graphyard guide infra` lists every part, its logs, and where tests and the app under test run.
+`graphyard guide infra` lists every part and its logs.
 
 ## Learn more
 
-- `graphyard guide TOPIC` and `graphyard master guide` print every procedure.
-- Verified deploys publish `@cryptob1/graphyard` with npm OIDC provenance plus both GHCR images via Actions — no host publish token. `graphyard guide publishing` covers owner setup.
+- `graphyard guide TOPIC` and `graphyard master guide` print procedures.
+- Deploys publish `@cryptob1/graphyard` and both GHCR images; `graphyard guide publishing` covers setup.
 - [Re-render the walkthrough](docs/walkthrough.md) · [Contributing](AGENTS.md) · [Apache 2.0](LICENSE)
