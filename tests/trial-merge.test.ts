@@ -151,11 +151,11 @@ const fixture = async () => {
   gitIn(repo.root, 'config', 'user.name', 'x');
   return repo;
 };
-const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove']) => {
+const trialOf = async (repo: Awaited<ReturnType<typeof fixture>>, head: string, changedFiles: string[], environment: NodeJS.ProcessEnv = { PATH: process.env.PATH! }, remove?: RunTrialInput['remove'], cpu?: RunTrialInput['cpu']) => {
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
   const base = await temporaryDirectory('trial-merge-root', tmpdir());
-  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove });
+  const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles, timeoutMs: 120_000, key: 'GY-9', environment, remove, ...(cpu ? { cpu } : {}) });
   return { result, base };
 };
 
@@ -197,21 +197,26 @@ test('integration:trial-run-build-and-tests — a full selection runs exactly th
 });
 
 test('integration:trial-run-build-and-tests — a trial checkout that cannot be removed is reported: runTrial rejects with TrialCleanupError naming the directory and carrying the verdict it reached, or the failure it met', async () => {
+  // Pin a healthy host: the reporting is this test's concern, and on a saturated one the real
+  // monitor attributes the timed-out child below as the host's own overload (GY-3332), so the
+  // message the assertions read would name host noise instead of the trial's timeout.
+  let ticks = 0;
+  const cpu: RunTrialInput['cpu'] = () => ({ total: ++ticks * 100, idle: ticks * 90, steal: 0, load: 0, at: ticks * 1000 });
   const repo = await fixture();
   const head = repo.commitOnBase({ 'tests/a.test.ts': 'x\n' }, 'head');
   const stuck: RunTrialInput['remove'] = async () => { throw new Error('EBUSY: the checkout is in use'); };
-  await assert.rejects(trialOf(repo, head, ['tests/a.test.ts'], { PATH: process.env.PATH! }, stuck), (error: unknown) =>
+  await assert.rejects(trialOf(repo, head, ['tests/a.test.ts'], { PATH: process.env.PATH! }, stuck, cpu), (error: unknown) =>
     error instanceof TrialCleanupError && /graphyard-trial-gy-9-/.test(error.directory) && /EBUSY/.test(error.message) && /answered build pass, 0 failing/.test(error.message)
     && error.verdict?.build === 'pass' && error.verdict.tests.files === 1);
   const broken = repo.commitOnBase({ 'break-build': '' }, 'breaks the build');
-  await assert.rejects(trialOf(repo, broken, [], { PATH: process.env.PATH! }, stuck), (error: unknown) => error instanceof TrialCleanupError && error.verdict?.build === 'fail');
+  await assert.rejects(trialOf(repo, broken, [], { PATH: process.env.PATH! }, stuck, cpu), (error: unknown) => error instanceof TrialCleanupError && error.verdict?.build === 'fail');
   const run = ((command: string, args: string[], options: unknown) => {
     if (command === 'npm' && args[0] === 'run') throw Object.assign(new Error('killed'), { timedOut: true, stdout: '', stderr: '' });
     return defaultChildRun(command, args, options as never);
   }) as never;
   const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
   assert.ok('mergeSha' in merged);
-  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck }),
+  await assert.rejects(runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, remove: stuck, cpu }),
     (error: unknown) => error instanceof TrialCleanupError && error.verdict === null && /the trial itself failed: The trial timed out during its build/.test(error.message));
 });
 
@@ -240,7 +245,12 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   const hung = 'tests/hung.test.ts', slow = 'tests/slow.test.ts';
   writeFileSync(join(trial.root, hung), "import { test } from 'node:test'; test('hung', async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n");
   writeFileSync(join(trial.root, slow), "import { test } from 'node:test'; test('slow', async () => { await new Promise(resolve => setTimeout(resolve, 500)); });\n");
-  gitIn(trial.root, 'add', hung, slow, 'tests/helpers');
+  // The subject is the bound and its verdict, not this repository's own build: a trial host loaded
+  // enough to run six trials spent most of this trial's deadline building the scratch tree, leaving
+  // the runner this regression exercises too little of it (GY-3366's trial), so the scratch builds nothing.
+  const manifest = JSON.parse(readFileSync(join(trial.root, 'package.json'), 'utf8'));
+  writeFileSync(join(trial.root, 'package.json'), JSON.stringify({ ...manifest, scripts: { ...manifest.scripts, build: 'node -e 0' } }));
+  gitIn(trial.root, 'add', hung, slow, 'tests/helpers', 'package.json');
   gitIn(trial.root, 'commit', '-q', '-m', 'hung and slow fixtures');
   let testRuns = 0;
   const result = await runTrial({
@@ -250,8 +260,9 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
       if (args.includes('tests/helpers/run-tests.ts')) {
         testRuns++;
         assert.ok(args.includes('--file-timeout=300000'), 'production bounds each file at five minutes');
-        // Exercise the real runner, reporter and trial verdict with a shortened clock.
-        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=3000' : arg);
+        // Exercise the real runner, reporter and trial verdict with a shortened clock that still
+        // leaves a loaded host's file start-up room inside the slow file's own bound.
+        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=10000' : arg);
       }
       // This regression exercises test processes, not the separately tested container boundary.
       // All executed code belongs to this repository or the two fixtures above.
@@ -264,7 +275,7 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   assert.equal(result.runnerExit, 1);
   assert.match(result.logTail, /hung\.test\.ts/);
   assert.match(result.logTail, /timed out/);
-  assert.ok(result.phases!.tests < 15_000, `file bound, not overall deadline: ${result.phases!.tests}ms`);
+  assert.ok(result.phases!.tests < 45_000, `file bound, not overall deadline: ${result.phases!.tests}ms`);
   assert.deepEqual(result.retried ?? [], [], 'a named failure is a verdict, not a no-verdict retry');
 });
 

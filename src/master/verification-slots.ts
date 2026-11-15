@@ -52,7 +52,35 @@ export interface AcquireOptions {
   /** Called once, when every slot is held, with the line the run prints. */
   onWait?: (line: string) => void;
   pollMs?: number; firstSlot?: number; files?: number;
+  /** GY-3304: wait while the host's heavy work is drained (`master drain`); a running trial's own declaration never waits. */
+  drainable?: boolean;
 }
+
+/**
+ * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
+ * removes it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
+ * batch gate, declared checks, host worker verification and sessions' own suites and type checks wait;
+ * jobs already running finish, and claims, heartbeats and status go on. A file, so a restart keeps it.
+ */
+export interface HeavyDrain { reason: string; requestedBy: string; at: string }
+export const heavyDrainFile = (directory: string) => join(directory, 'drain.json');
+export function readHeavyDrain(directory: string): HeavyDrain | null {
+  try { const drain = JSON.parse(readFileSync(heavyDrainFile(directory), 'utf8')); return typeof drain?.reason === 'string' ? drain : null; } catch { return null; }
+}
+export function requestHeavyDrain(directory: string, reason: string, requestedBy: string, now = new Date()): HeavyDrain {
+  const drain: HeavyDrain = { reason: reason.slice(0, 500), requestedBy, at: now.toISOString() }, pending = `${heavyDrainFile(directory)}.${randomUUID()}`;
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(pending, JSON.stringify(drain));
+  renameSync(pending, heavyDrainFile(directory));
+  return drain;
+}
+/** Remove the drain; answers the one it lifted, or null when none stood. */
+export function resumeHeavyDrain(directory: string): HeavyDrain | null {
+  const drain = readHeavyDrain(directory);
+  rmSync(heavyDrainFile(directory), { force: true });
+  return drain;
+}
+export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish; new merge trials, batch gates, declared checks, worker verification and session suites wait until graphyard master resume.`;
 
 // flock locks the inherited open file description; this process retains its fd after
 // the short-lived utility exits. The kernel releases it on death, across PID namespaces.
@@ -175,8 +203,14 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
   const pollMs = options.pollMs ?? 1000;
   mkdirSync(options.directory, { recursive: true });
   const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, cwd: process.cwd(), at: new Date().toISOString() };
-  let told = false;
+  let told = false, drained = false;
   for (;;) {
+    const drain = options.drainable ? readHeavyDrain(options.directory) : null;
+    if (drain) {
+      if (!drained) { drained = true; options.onWait?.(`graphyard: ${options.label} waits: ${heavyDrainLine(drain)}`); }
+      await new Promise(done => setTimeout(done, pollMs));
+      continue;
+    }
     const held = await tryTake(options.directory, options.slots, owner, options.firstSlot);
     if (held) {
       if (told) options.onWait?.(`graphyard: ${options.label} took host verification slot ${held.slot}`);
@@ -196,7 +230,7 @@ export async function sessionVerificationSlot(label: string, environment: NodeJS
   const directory = environment[slotsDirectoryVariable];
   if (!directory || environment[heldVariable]) return null;
   let held: HeldSlot;
-  try { held = await acquireVerificationSlot({ directory, slots: configuredVerificationSlots(environment), label, onWait: log }); }
+  try { held = await acquireVerificationSlot({ directory, slots: configuredVerificationSlots(environment), label, onWait: log, drainable: true }); }
   catch (error) { log(`graphyard: ${label} runs without a host verification slot: ${directory} cannot be used (${error instanceof Error ? error.message : String(error)})`); return null; }
   process.once('exit', held.release);
   return held;

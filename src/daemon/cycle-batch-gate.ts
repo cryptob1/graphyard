@@ -12,6 +12,7 @@ import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { message, storeAction } from './state.js';
+import { faultItem } from './control-plane.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
@@ -114,18 +115,9 @@ async function gateEnvironments(reads: MergeWriterReads, commit: string, cases: 
 export const pinningProof = (key: string) =>
   `unit:${key.slice(key.indexOf(':') + 1).toLowerCase().replace(/^test:tests\//, '').replace(/\.test\.ts$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-pinned`;
 
-/**
- * The bug item a gate filing creates (GY-3160): AC-1 binds a new pinning test, which fails on the
- * base, so the bug trial reproduces the defect there; create-work-item, which passes on any base, is
- * a separate preservation criterion.
- */
-export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) => ({
-  title: input.title.slice(0, 200), type: 'bug' as const, priority: 1, description: input.description, dependencies: [],
-  criteria: [
-    { id: 'AC-1', text: `${input.title} is fixed at its cause, not skipped or weakened; a new test pins it and fails without the fix`.slice(0, 2000), proofs: [pinningProof(input.key)] },
-    { id: 'AC-2', text: 'The batch gate passes again and creating a work item still works', proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] },
-  ],
-  reason: `Filed by the batch gate on ${baseBranch}` });
+/** A batch gate filing's item: its pinning test is named from its check. */
+export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) =>
+  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: 'manual:batch-gate-repaired' }, reason: `Filed by the batch gate on ${baseBranch}` });
 
 /** The gate's ports over the merge writer's reads. */
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
@@ -211,7 +203,8 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  */
 export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'now' | 'log'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
-  if (!reads?.git || !gate) return null;
+  // GY-3304: while the host's heavy work is drained no gate or diagnostics run starts; the batch waits on its record.
+  if (!reads?.git || !gate || reads.drain?.()) return null;
   const file = gateRecordPath(gate.root);
   const live = flights.get(cycle.state) ?? { gate: null, diagnostics: null };
   flights.set(cycle.state, live);

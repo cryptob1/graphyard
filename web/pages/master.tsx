@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Dashboard } from './dashboard';
 import LiveTerminal from '../components/live-terminal';
+import { PageHeader } from '../components/page-layout';
 
 type Message = { id: number; from: string; to?: string; thread: string; text: string; at: string; replies: { id: number; by: string; text: string; at: string }[] };
 type Entry = { id: number; who: string; text: string; at: string };
@@ -29,7 +30,7 @@ export default function MasterPage({ token, api }: Pick<Dashboard, 'token' | 'ap
   }, [token]);
   const threads = messageThreads(messages);
   return <>
-    <div className="master-heading"><h1>Master</h1></div>
+    <PageHeader title="Master" fact="Files, routes and unsticks the work."/>
     {threads.length > 0 && <section className="master-messages" aria-label="Messages with other installs">
       {threads.slice(0, 5).map(thread => <article key={thread.entries[0]!.id} className="master-thread" aria-label={`Thread with ${thread.peer}`}>
         <h2>With {thread.peer}</h2>

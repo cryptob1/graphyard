@@ -189,7 +189,7 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
 
   const accountRow = ({ account, status, plan, shared }: AccountRow, hidden = false) =>
     <tr key={account.name} data-account-row={account.name} data-status={status.chip} data-plan={plan?.name} hidden={hidden}>
-      <th scope="row">{account.name}</th>
+      <th scope="row" data-label="Account">{account.name}</th>
       <td data-label="Status"><StatusChip status={status}/></td>
       <td data-label="Why" className="why">{whyText(account, status, fleet, now) || <span className="muted">—</span>}</td>
       <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
@@ -214,14 +214,14 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
     });
   };
 
-  return <table className="flow-data agents-table compact-table" aria-label="Accounts at a glance"><thead><tr><th>Account</th><th>Status</th><th>Why</th><th>Back</th><th>Usage</th><th>Roles</th><th>Runs</th></tr></thead>
+  return <div className="table-scroll"><table className="sessions-table compact-table agents-table" aria-label="Accounts at a glance"><thead><tr>{['Account', 'Status', 'Why', 'Back', 'Usage', 'Roles', 'Runs'].map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
     {bodies.map((body, index) => <tbody key={body.plan?.id ?? `accounts-${index}`} data-plan-group={body.plan?.name}>
       {body.plan && <tr className="plan-header-row" data-plan={body.plan.name}><th colSpan={7} className="plan-header">
         <span className="plan-header-content"><span className="plan-name" data-plan-name={body.plan.name}>{body.plan.name}</span><UsageBars plan={body.plan}/></span>
       </th></tr>}
       {bodyRows(body.rows)}
     </tbody>)}
-  </table>;
+  </table></div>;
 }
 
 /**
@@ -241,6 +241,7 @@ export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) 
 }
 
 /** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
+const runningColumns = ['Role', 'Work', 'Account', 'Runtime', 'Model', 'Host', 'Since'];
 export function FleetOverview({ fleet, connects = [], now = Date.now(), onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
@@ -260,8 +261,8 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
       </MoreDetails>}
     </PageSection>
     <PageSection title="Running sessions" count={running.length}>
-      {running.length > 0 && <table className="flow-data compact-table" aria-label="Running sessions by account"><thead><tr><th>Role</th><th>Work</th><th>Account</th><th>Runtime</th><th>Model</th><th>Host</th><th>Since</th></tr></thead>
-        <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}><td>{session.role}</td><td>{session.work ?? '—'}</td><td>{session.account}</td><td>{session.runtime}</td><td>{session.model}</td><td>{session.host}</td><td>{when(session.selectedAt)}</td></tr>)}</tbody></table>}
+      {running.length > 0 && <table className="sessions-table compact-table" aria-label="Running sessions by account"><thead><tr>{runningColumns.map(column => <th key={column} scope="col">{column}</th>)}</tr></thead>
+        <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}>{[session.role, session.work ?? '—', session.account, session.runtime, session.model, session.host, when(session.selectedAt)].map((cell, index) => <td key={runningColumns[index]} data-label={runningColumns[index]}>{cell}</td>)}</tr>)}</tbody></table>}
       {!running.length && <p>No session launched from the registry is running.</p>}
     </PageSection>
     {/* Each role's launch verdict reads above; its preference order and launch policy are one click away (GY-1325). */}
@@ -404,16 +405,20 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
     if (input) { const names = input.value.split(',').map(entry => entry.trim()).filter(Boolean); if (!names.includes(account)) input.value = [...names, account].join(', '); }
     document.getElementById('role-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  return <><PageHeader crumbs={['Settings', 'Agents']} eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents" actions={onOpenSetup && <button data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}>
-      Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
+  const launchable = fleet ? fleet.roles.filter(role => roleLaunch(role, fleet, now).canLaunch).length : 0;
+  const accounts = fleet ? `${fleet.accounts.length} ${fleet.accounts.length === 1 ? 'account' : 'accounts'} connected` : '';
+  return <><PageHeader title="Agents" fact={!fleet ? (loadError ? 'The agents could not be read.' : 'Reading the agents…') : fleet.roles.length ? `${launchable} of ${fleet.roles.length} roles can launch now · ${accounts}.` : `${accounts}; no role is configured yet.`}
+      actions={<>{onOpenSetup && <button type="button" className="text-button" data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}
+        {fleet && canEdit && !wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</>}>
+      Each role launches its first eligible account. Changes apply on the next launch.
     </PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
     {!fleet && !loadError && <p role="status">Loading the agents…</p>}
-    {fleet && canEdit && <PageSection title="Connect an account" actions={!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}>
-      {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
+    {fleet && canEdit && wizard.open && <PageSection title="Connect an account">
+      <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>
     </PageSection>}
     {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} now={now} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
-    {fleet && canEdit && <section><MoreDetails className="advanced" detailsRef={advanced} summary="Advanced: runtimes, models, roles and policies">
+    {fleet && canEdit && <section className="panel"><MoreDetails className="advanced" detailsRef={advanced} summary="Advanced: runtimes, models, roles and policies">
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
       <form className="grant-form" aria-label="Add or change a runtime" onSubmit={submit(() => 'agent-registry/runtimes', form => ({ runtime: { name: field(form, 'name'), launch: { kind: field(form, 'kind') || field(form, 'name'), args: field(form, 'args').split(/\s+/).filter(Boolean), homeVariable: optional(form, 'homeVariable'), modelFlag: optional(form, 'modelFlag'), toolsFlag: optional(form, 'toolsFlag'), login: optional(form, 'login'), loginFile: optional(form, 'loginFile') } }, reason: field(form, 'reason') }))}>

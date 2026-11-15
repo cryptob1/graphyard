@@ -1,0 +1,16 @@
+{
+  "id": "deploy-source-own-clone",
+  "title": "Each install's deploy source is its own clone, never a worktree of another checkout",
+  "description": "On temporary repositories: an install's deploy source that is a linked worktree of another checkout is replaced by a standalone clone at the same commit on the next upgrade --watch start, keeping its origin and release pointer, and still resolves its commit after the other checkout is deleted; a fresh setup creates a standalone clone and adds no worktree to the source; doctor's deploy-source line fails naming a worktree deploy source and passes for a clone.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Replace a worktree deploy source with a clone, delete the other checkout, and read doctor's line",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/deploy-source-own-clone.test.ts",
+      "timeoutSeconds": 120
+    }
+  ]
+}
