@@ -2,6 +2,7 @@
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
 import { providerUsageErrors, runtimeAdapter } from './runtimes.js';
+import { runtimeReport } from '../model/token-costs.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -224,4 +225,13 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
   }
   return null;
+}
+/**
+ * A headless run's limit notice (GY-3389): the reply inside its JSON report (`claude -p`'s usage-credits
+ * result), else a line it printed — such as OpenCode's Z.AI `{"type":"provider.quota",…}` error, which a
+ * text reply before it must not hide.
+ */
+export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
+  const reply = runtimeReport(output).reply;
+  return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
 }
