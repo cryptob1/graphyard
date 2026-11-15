@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.** An AI master plans the rest.
+- **You decide goals, money, credentials.**
 - **Every change is proven.** Workers build, agents review, heads are trialled on main.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
@@ -21,19 +21,19 @@ npm run build
 node bin/graphyard.mjs up --repo OWNER/NAME
 ```
 
-On npm:
+Once published to npm:
 
 ```sh
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each.
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
 
 ## Where things run
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
-`graphyard guide infra` lists every part and its logs.
+`graphyard guide infra` lists every part.
 
 ## Learn more
 
