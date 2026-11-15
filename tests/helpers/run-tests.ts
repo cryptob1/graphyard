@@ -5,8 +5,8 @@ import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
-import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
+import { isolatedTestEnvironment, reserveTestPorts, sharedClusterPort, suiteRunEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { hostMemoryFloor, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
 import { stopServersUnder } from '../../src/postgres-stop.js';
@@ -100,30 +100,6 @@ export async function hostSuiteBreadth(environment: NodeJS.ProcessEnv = process.
   const otherFiles = directory ? await othersDeclaredFiles(directory, pid) : 0;
   const budgetBytes = reading.availableBytes - hostMemoryFloor(reading.totalBytes) - memoryRecoveryMarginBytes;
   return suiteBreadth({ budgetBytes, otherFiles, cpus: availableParallelism() });
-}
-
-/** The port one run's shared Postgres cluster sits on: the Node run's own base, or one window above the browser run's port. */
-export const sharedClusterPort = (base: number, browser?: boolean) => browser ? base + testPortSpan : base;
-
-/**
- * The variables one suite run hands its children (GY-3356): both suites name the run's one shared
- * Postgres cluster through GRAPHYARD_TEST_DATABASE_URL. The Node suite always did; the browser
- * suite booted one cluster per worker process instead, so every database-backed browser spec — 24
- * of them, headless-workers among it — spent its own test budget copying the template and starting
- * Postgres, the part of its boot that scales worst on a loaded host. On 15 November 2026 that blew
- * browser-tests/headless-workers.spec.ts's 120 s cap once on main, beside two other specs' own caps
- * in the same loaded run, and all three passed their re-run. With the cluster named,
- * signInDatabase and withDatabase create a database on it (tests/helpers/postgres.ts `clusterUrl`)
- * and no browser spec boots a cluster of its own.
- */
-export function suiteRunEnvironment(input: { browser?: boolean; browserPort: number; clusterPort: number; clusterUrl: string; dataHome: string; tmpRoot?: string | null }): Record<string, string> {
-  return {
-    ...(input.browser
-      ? { GRAPHYARD_BROWSER_PORT: String(input.browserPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl }
-      : { ...testPortEnvironment(input.clusterPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl, [hostMemoryVariable]: 'unreadable' }),
-    GRAPHYARD_DATA_HOME: input.dataHome,
-    ...(input.tmpRoot ? { TMPDIR: input.tmpRoot, TMP: input.tmpRoot, TEMP: input.tmpRoot } : {}),
-  };
 }
 
 export interface RunOptions {

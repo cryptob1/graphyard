@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { suiteRunEnvironment } from './helpers/run-tests.js';
+import { suiteRunEnvironment } from '../src/cli/test-isolation.js';
 
 // GY-3356: the batch gate's browser run failed browser-tests/headless-workers.spec.ts once on main
 // (9486206a04b2) and passed its re-run, beside two other specs' own caps in the same loaded run.
@@ -8,8 +8,9 @@ import { suiteRunEnvironment } from './helpers/run-tests.js';
 // the spec's budget went first to copying the template and booting an embedded-Postgres cluster
 // inside its own worker process — the part of its boot that scales worst under load — while the
 // Node suite already ran on one shared warm cluster per run. The browser suite names that same
-// cluster now. This test fails on the base, where the browser run's environment names no cluster
-// (and the helper does not exist), and whenever either suite's run stops naming it.
+// cluster now, in the environment every run hands its children (src/cli/test-isolation.ts).
+// This test fails on the base, where the browser run's environment names no cluster and the
+// helper does not exist, and whenever either suite's run stops naming it.
 test(`unit:test-browser-tests-headless-workers-spec-ts-pinned — both suites' runs name one shared Postgres cluster, so headless-workers.spec.ts spends its budget on the page it proves and boots no cluster of its own`, () => {
   const clusterUrl = 'postgres://graphyard:testing-only@127.0.0.1:15440/postgres';
   const browser = suiteRunEnvironment({ browser: true, browserPort: 4319, clusterPort: 15440, clusterUrl, dataHome: '/suite/test-data', tmpRoot: null });
