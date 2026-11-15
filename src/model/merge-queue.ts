@@ -29,6 +29,7 @@ export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 
  * records that reason as the item's blocker, and the queue holds the head while the blocker stands.
  */
 export const readOnlyTrialBlocker = 'Read-only file system';
+export const trialOverloadPrefix = 'Trial-host overload:';
 
 /** One queued control-plane candidate, highest priority first, oldest on ties. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
@@ -103,7 +104,7 @@ export function keptTrialAheadOfReview(candidate: Work['candidate'], state: Merg
 export function awaitsMerge(item: Work, ledger: Readonly<Record<string, MergeLedgerState>>, now: number): boolean {
   const candidate = item.candidate;
   if (item.stage === 'done' || !item.submission || !candidate || item.observation?.source !== 'control-plane' || item.reworkRequested || item.observation?.merged) return false;
-  if (!gate(item, 'build') || item.blocker?.startsWith(readOnlyTrialBlocker)) return false;
+  if (!gate(item, 'build') || (item.blocker?.startsWith(readOnlyTrialBlocker) || item.blocker?.startsWith(trialOverloadPrefix))) return false;
   const state = ledger[item.key];
   // GY-3164: the trial already passed; only the review gate still stands between the head and its landing.
   if (keptTrialAheadOfReview(candidate, state)) return gate(item, 'review') && item.gates.find(g => g.name === 'acceptance')?.passed !== false;

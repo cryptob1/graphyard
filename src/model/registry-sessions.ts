@@ -285,6 +285,8 @@ export interface FleetAccountView {
   liveSessions: { id: string; role: FleetRoleName; work: string | null; host: string; since: string }[];
   /** `exhausted` only with evidence that still holds, named in `evidence` with its reset; an exhausted reading without it is `unknown` (GY-3094). */
   quota: ObservedQuota['state']; evidence: string | null; loggedIn: boolean | null; usage: ObservedQuota['usage']; resetsAt: string | null; observedAt: string | null; quotaSource: ObservedQuota['source'];
+  /** The hold's `resetsAt` is the bounded unknown-reset window, not a reset the provider named (GY-3302). */
+  resetUnknown?: boolean;
   eligible: boolean;
   /** Why the account cannot take a session now; null when it can. */
   ineligible: string | null;
@@ -293,6 +295,12 @@ export interface FleetAccountView {
   /** The roles it is held from after runs that ended without a result, and why. */
   held: { role: FleetRoleName; reason: string }[];
 }
+/**
+ * What an account whose model names no concrete id runs (GY-3302): the runtime's own default, which
+ * may be a free model with its own usage limit, so the provider and model actually used may be unknown.
+ */
+export const unspecifiedModel = (account: Pick<FleetAccountView, 'name' | 'runtime' | 'model' | 'modelId'>): string | null => account.modelId ? null
+  : `${account.name} runs model ${account.model} with no model id, so runtime ${account.runtime} picks its own default model, which may be a free model with its own usage limit; the provider and model it actually runs may be unknown`;
 export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; /** Sessions the role runs at once (`roleLimit`). */ limit?: number; live: number; next: string | null; blocked: string | null; policy: RolePolicy }
 export interface FleetView {
   revision: number; updatedAt: string | null; configured: boolean; host: string | null;
@@ -321,7 +329,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
       plan: account.plan ?? planInfo.planName,
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
-      quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source,
+      quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source, resetUnknown: account.quota.session === 'guessed',
       eligible: !ineligible, ineligible, smoke: account.smoke ?? null,
       held: fleetRoles.flatMap(role => { const reason = roleIneligibility(account, role, now); return reason ? [{ role, reason }] : []; }) };
   });

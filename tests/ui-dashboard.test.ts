@@ -17,7 +17,8 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 import GuidePage from '../web/pages/guide.js';
 import WorkCard from '../web/components/work-card.js';
-import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
+import WorkersPage, { SessionPanel, roleWords, shortShas } from '../web/pages/workers.js';
+import { workersView } from '../web/workers-view.js';
 import { friendlyName } from '../web/fun.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
@@ -284,45 +285,52 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
 /** The part of a page a reader sees without opening anything: every closed <details> reduced to its summary. */
 const unopened = (html: string) => html.replace(/<details(?![^>]*\sopen)[^>]*>(<summary>[\s\S]*?<\/summary>)[\s\S]*?<\/details>/g, '$1');
 
-test('unit:ui-workers-page — Workers is one table of agent sessions (agent, role in plain words, item, doing now, since, health); a session the runtime no longer reports is never running; no jargon paragraph and no Principals table on the first screen; no column cut off at 1440px or 390px', async () => {
+test('unit:ui-workers-page — Workers is one compact table of agent sessions (agent, item with a truncated title, state of at most three words, age); a session the runtime no longer reports is never running; no jargon paragraph and no Principals table on the first screen; no column cut off at 1440px or 390px', async () => {
   const d = dashboard();
   const html = markup(createElement(WorkersPage, d));
   const first = unopened(html);
-  // One table on the first screen, with exactly the design's columns.
+  // One table on the first screen, with exactly the compact line's columns (GY-3314).
   assert.equal((first.match(/<table/g) ?? []).length, 1, 'one table');
-  assert.match(first, /<table class="sessions-table" aria-label="Agent sessions">/);
-  assert.deepEqual([...first.matchAll(/<th scope="col">([^<]+)<\/th>/g)].map(match => match[1]), ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']);
+  assert.match(first, /<table class="sessions-table workers" aria-label="Agent sessions">/);
+  assert.deepEqual([...first.matchAll(/<th scope="col">([^<]+)<\/th>/g)].map(match => match[1]), ['Agent', 'Working on', 'State', 'Age']);
   // The per-account summary and the ended sessions are folded away below it.
   assert.doesNotMatch(first, /aria-label="Principals"/); assert.match(html, /aria-label="Principals"/);
-  // Each role in plain words; the item by key and title; what it is doing; since when; health.
+  // The item by key and title, truncated on the row with the whole title one hover away; the state in at most three words and how long it has held it.
   const row = (id: string) => { const start = first.indexOf(`data-session="${id}"`); assert.ok(start >= 0, id); return first.slice(start, first.indexOf('</tr>', start)); };
   assert.deepEqual(Object.values(roleWords).slice(0, 4), ['Builds code', 'Reviews code', 'Proves requirements', 'Runs the loop']);
   const builder = row('s14');
-  assert.match(builder, /<td data-label="Role">Builds code<\/td>/);
-  assert.match(builder, /<span class="mono">GY-14<\/span> Export monthly reports as CSV<\/button>/);
-  assert.match(builder, new RegExp(`<td data-label="Doing now">${prSteps(find('GY-14'), NOW).label}</td>`));
-  assert.match(builder, /<td data-label="Since"[^>]*>started <span class="spent">18m 00s<\/span> ago<\/td>/);
-  assert.match(builder, /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Seen 1m 00s ago/);
-  assert.match(row('r15'), /<td data-label="Role">Reviews code<\/td>/);
-  // Recorded running but not seen for forty minutes: stale, in plain words, never running or active.
+  assert.match(builder, /data-role="worker"/);
+  assert.match(builder, /<span class="mono">GY-14<\/span> <span class="row-title">Export monthly reports as CSV<\/span><\/button>/);
+  assert.match(builder, /title="Export monthly reports as CSV"/);
+  assert.match(builder, /data-state="Building"/);
+  assert.match(builder, /<td data-label="Age"[^>]*><span class="spent">28m 30s<\/span><\/td>/);
+  assert.match(row('r15'), /data-role="reviewer"/);
+  assert.match(row('r15'), /data-state="In review"/);
+  // Recorded running but not seen for forty minutes: its state says so, in plain words, never running or active.
   const stale = row('s12');
-  assert.match(stale, /data-health="stale"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Not seen for 40m 00s/);
-  assert.doesNotMatch(stale, /running|Active/i);
+  assert.match(stale, /data-state="Not seen"/);
+  assert.match(stale, /title="Not seen for 40m 00s"/);
+  assert.doesNotMatch(stale, /data-state="(Building|In review)"/);
   assert.match(first, /2 agent sessions open\. 1 not seen recently\. 2 ended\./);
   // A session the runtime stopped reporting is ended, in plain words, and is not in the open table.
   assert.doesNotMatch(first, /data-session="p16"/);
-  assert.match(html, /data-session="p16"[\s\S]*?Ended · stopped responding/);
-  assert.match(html, /data-session="a15"[\s\S]*?<td data-label="Role">Runs the loop<\/td>[\s\S]*?<td data-label="Doing now">Approved the rework request<\/td>/);
-  // No explanatory jargon on the first screen.
+  assert.match(html, /data-session="p16"[\s\S]*?data-state="Ended"/);
+  assert.match(html, /data-session="a15"[\s\S]*?data-state="Ended"/);
+  // No explanatory jargon on the first screen; the roles footnote reads as the page's help text.
   const words = visibleWords(first).join(' ');
   for (const term of ['principal', 'handle', 'liveness', 'sweep', 'epoch', 'lease', 'pane', 'reconcil']) assert.ok(!new RegExp(term, 'i').test(words), `"${term}" on the first screen: ${words}`);
-  // No column is cut off: the table fills its width and wraps its cells, and on a phone each row is a card of labelled cells.
+  assert.match(words, /An agent never reviews or approves its own work/);
+  // No column is cut off: the table fills its width, the title truncates in its cell, and on a phone each agent is one card.
   const css = await read('web/style.css');
   assert.match(css, /\.sessions-table\{width:100%;/);
   assert.match(css, /\.sessions-table td,\.sessions-table th\[scope=row\]\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css, /\.sessions-table\.workers tr\[data-session\] th\[scope=row\],\.sessions-table\.workers tr\[data-session\] td\{height:44px/);
+  assert.match(css, /\.sessions-table\.workers \.row-open \.row-title\{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\}/);
   const phone = /@media\(max-width:650px\)\{\.sessions-table,[^\n]*/.exec(css)?.[0] ?? '';
   assert.match(phone, /display:block;width:100%/); assert.match(phone, /\.sessions-table thead\{display:none\}/); assert.match(phone, /td::before\{content:attr\(data-label\)/);
-  for (const label of ['Agent', 'Role', 'Working on', 'Doing now', 'Since', 'Health']) assert.match(builder, new RegExp(`data-label="${label}"`));
+  const cards = /\.sessions-table\.workers tr\[data-session\]\{display:block[^}]*border-radius[^}]*\}/.exec(css)?.[0] ?? '';
+  assert.ok(cards, 'on a phone each agent is one card');
+  for (const label of ['Agent', 'Working on', 'State', 'Age']) assert.match(builder, new RegExp(`data-label="${label}"`));
   // The browser suite measures it at both widths.
   assert.match(await read('browser-tests/screenshots.spec.ts'), /sessions-table[\s\S]*scrollWidth/);
 });
@@ -338,17 +346,24 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
     endedAt: new Date(NOW - 2 * hour).toISOString(), state: 'finished', outcome: `superseded: ${sha} was replaced by the next candidate` }] } as Work);
   const html = markup(createElement(WorkersPage, dashboard({ work })));
   const text = visibleWords(html).join(' ');
-  // Commit SHAs are 8 characters in the text itself, not only clipped by the stylesheet.
-  assert.ok(text.includes(sha.slice(0, 8)), 'the short SHA is shown');
+  // Commit SHAs are 8 characters wherever they show (the opened panel's doing sentence), never a longer run in the page text.
+  const view = workersView(work, new Date(NOW));
+  const p16b = [...view.running, ...view.finished].find(row => row.id === 'p16b')!;
+  const panel = markup(createElement(SessionPanel, { row: p16b, item: work.find(item => item.id === p16b.workId), now: NOW, release: noRelease, token: 'fixture', setSelected: () => {} }));
+  assert.ok(panel.includes(sha.slice(0, 8)), 'the short SHA is shown');
+  assert.doesNotMatch(panel, new RegExp(sha.slice(0, 9)), 'never longer than 8 characters');
   assert.doesNotMatch(text, /\b[0-9a-f]{9,}\b/, 'no longer hex run in the page text');
   assert.doesNotMatch(html, new RegExp(sha.slice(0, 9)), 'nor in any attribute');
   assert.equal(shortShas(`on ${sha} and ${sha.slice(0, 12)}; PR #156`), 'on 23d8dfbf and 23d8dfbf; PR #156');
-  // Health and Since are relative: "Seen 12s ago", "started 5m 00s ago", never an absolute timestamp.
+  // Health and Age are relative: "Seen 12s ago", "5m 00s", never an absolute timestamp.
   const row = (id: string) => { const start = html.indexOf(`data-session="${id}"`); assert.ok(start >= 0, id); return html.slice(start, html.indexOf('</tr>', start)); };
-  assert.match(row('p16b'), /<td data-label="Since"[^>]*>started <span class="spent">5m 00s<\/span> ago<\/td>/);
-  assert.match(row('p16b'), /data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\/span>Seen 12s ago<\/span>/);
-  assert.match(row('s12'), /Not seen for 40m 00s/);
-  assert.match(row('p16c'), /<td data-label="Since"[^>]*>ended 2h 00m 00s ago · ran <span class="spent">1h 00m 00s<\/span><\/td>/);
+  assert.match(row('p16b'), /data-state="Proving"/);
+  assert.match(row('p16b'), /<td data-label="Age"[^>]*><span class="spent">5m 00s<\/span><\/td>/);
+  assert.match(row('p16b'), /data-health="live"[^>]*title="Seen 12s ago"/);
+  assert.match(row('s12'), /data-state="Not seen"/);
+  assert.match(row('s12'), /title="Not seen for 40m 00s"/);
+  assert.match(row('p16c'), /data-state="Ended"/);
+  assert.match(row('p16c'), /<td data-label="Age"[^>]*><span class="spent">2h 00m 00s<\/span><\/td>/);
   const stamps = work.flatMap(item => (item.sessions ?? []).flatMap(handle => [handle.startedAt, handle.updatedAt, handle.endedAt])).filter((at): at is string => !!at);
   for (const at of stamps) { assert.ok(!html.includes(at), at); assert.ok(!html.includes(new Date(at).toLocaleString()), new Date(at).toLocaleString()); }
   assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}|\d{1,2}:\d{2}:\d{2}/, 'no date or clock time on the page');
@@ -362,8 +377,8 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   assert.match(css, /\.sessions-table th\[scope=row\]\[data-label=Agent\],\.sessions-table td\[data-label=Role\]\{overflow-wrap:normal;word-break:keep-all\}/);
   assert.match(css, /\.sessions-table \.agent-name,\.sessions-table td\[data-label=Role\]\{white-space:nowrap\}/);
   assert.match(css, /\.sessions-table \.attach\{display:flex;[^}]*flex-wrap:wrap\}/); assert.match(css, /\.sessions-table \.copy\{[^}]*white-space:nowrap/);
-  // GY-3268: the account by its friendly name, its id on hover.
-  assert.match(row('s14'), new RegExp(`<th scope="row" data-label="Agent"><span class="agent-name"><span class="agent" data-agent="worker-3" title="worker-3 · [^"]+">${friendlyName('worker-3')}</span></span><span class="attach">`));
+  // GY-3268: the account by its friendly name, its id on hover, with its health as one dot beside it.
+  assert.match(row('s14'), new RegExp(`<th scope="row" data-label="Agent"><span class="agent-line"><span class="health live" data-health="live"[^>]*><span class="health-dot" aria-hidden="true"><\\/span><\\/span><span class="agent-name"><span class="agent" data-agent="worker-3" title="worker-3 · [^"]+">${friendlyName('worker-3')}<\\/span><\\/span><\\/span><\\/th>`));
   // The browser suite measures both at 1440px and 390px: each name and role on one line.
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });
