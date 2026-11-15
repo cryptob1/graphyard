@@ -2,7 +2,7 @@ import { readInstallLoopCode } from './loop-code.js';
 import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
@@ -10,7 +10,7 @@ import type { LoopCodeReading } from './repository-setup.js';
 import { installUnitsFile, parseInstallUnits } from './install/units.js';
 import { defaultChildRun } from './child-runner.js';
 import type { UserSystemctl } from './master/loop-restart.js';
-import { herdrServerUnit } from './herdr-host.js';
+import { herdrInstaller, herdrServerUnit } from './herdr-host.js';
 import { readServeRecord, serveRecordPath } from './serve-app.js';
 import { landlockRefusal } from './landlock.js';
 import { appArmorEnabled, trialAppArmorFix, trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
@@ -25,7 +25,8 @@ export const setupSteps = {
   install: 'run graphyard up from this checkout',
   environments: 'run graphyard up and connect agent accounts at the Setup link it prints',
   sandbox: 'install bubblewrap: sudo apt install bubblewrap (Debian/Ubuntu) or sudo pacman -S bubblewrap (Arch)',
-  kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9',
+  herdr: `install Herdr as the README's Herdr prerequisite says: ${herdrInstaller}`,
+  kernel: 'boot Linux 7.0 or later, which offers Landlock ABI 9 (Ubuntu 26.04: sudo apt install linux-image-oem-7.3, then reboot)',
   trialAppArmor: trialAppArmorFix,
   loopCode: 'rerun graphyard up --agent from this checkout',
   unitOverrides: 'remove the conflicting systemd drop-in this line names, then rerun graphyard up',
@@ -234,6 +235,15 @@ async function serveCheck(root: string): Promise<SetupCheck | null> {
     : check('fail', `the declared serve does not answer ${record.url}${record.failed ? `; the build of ${record.failed.slice(0, 12)} failed last: ${(record.reason ?? '').slice(0, 200)}` : ''}`);
 }
 
+/** Whether herdr, which the master window runs in, is on PATH (GY-3324). */
+async function herdrCheck(path: string): Promise<SetupCheck> {
+  for (const directory of path.split(delimiter).filter(Boolean)) {
+    const binary = join(directory, 'herdr');
+    if (await access(binary, constants.X_OK).then(() => true, () => false)) return { id: 'herdr', status: 'pass', step: setupSteps.herdr, detail: `herdr is on PATH at ${binary}` };
+  }
+  return { id: 'herdr', status: 'fail', step: setupSteps.herdr, detail: 'herdr is not on PATH' };
+}
+
 /** Every setup-from-zero line for this machine and installation, in checklist order. */
 export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<SetupCheck[]> {
   const env = input.env ?? process.env, status = input.status;
@@ -246,6 +256,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
+  lines.push(await herdrCheck(env.PATH ?? ''));
   if (input.landlockAbi) {
     const read = input.landlockAbi; let abi = 0;
     const refusal = landlockRefusal(() => (abi = read()));

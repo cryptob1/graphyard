@@ -1,0 +1,13 @@
+{
+  "id": "readme-quick-start-runs",
+  "title": "The README Quick start works from the repository checkout before the package is published",
+  "description": "Extract the README Quick start blocks: the first clones the repository, installs, builds and runs up from the checkout; the npx @cryptob1/graphyard line is labelled as available once published. Run the checkout block in a scratch directory, cloning this checkout instead of GitHub and linking its installed dependencies instead of npm ci (the network steps), building exactly as written and running the checkout CLI's up --help.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run the README Quick start from a checkout",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/readme-quick-start-runs.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

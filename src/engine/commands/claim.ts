@@ -42,6 +42,9 @@ export async function run(c: Ctx) {
   // GY-3266: a fresh claim starts under the current criteria, so a revision a previous attempt
   // never synced is nothing for this one to wait for.
   work.unsyncedRevision = null;
+  // GY-3335: a fresh attempt supersedes any finished head an earlier blocker recorded; its owner
+  // submits, and the loop has nothing left to resubmit.
+  work.finishedBlockerHead = null;
 }
 
 export async function prepare({ engine, actor, id, key }: Prepare) {

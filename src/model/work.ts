@@ -212,6 +212,16 @@ export interface Work extends Create {
    * back to the end of the attempt that recorded the blocker.
    */
   blockedAt?: string | null;
+  /**
+   * GY-3335: the finished head a worker named in a blocker its own `complete` failed on — a fault
+   * of the host, never the change (a trial-host fault, the control plane unreachable, a timeout).
+   * Recorded by `blocked --finished` from the attempt's own worktree, kept past the master's
+   * unblock, and submitted by the loop itself as the next attempt after re-running complete's
+   * verification, so no worker session and no worker slot is spent re-running `complete` on an
+   * unchanged head. Cleared by that submission, by a verification that failed on the change, and
+   * by any fresh claim. While it stands on an unblocked item the item is not offered to a worker.
+   */
+  finishedBlockerHead?: { head: string; epoch: number; branch: string; owner: string; at: string; reason: string } | null;
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
