@@ -10,7 +10,7 @@ const settled = { timeout: 15_000 };
 
 async function seed(url: string) {
   const file = async (n: number, title: string) => (await (await fetch(`${url}/api/work`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `ui-shell-${n}` },
-    body: JSON.stringify({ title, type: 'feature', description: 'Seeded for the page shell.', criteria: [{ id: 'AC-1', text: 'It works in the browser', proofs: ['e2e:fixture'] }] }) })).json() as { id: string; key: string });
+    body: JSON.stringify({ title, why: 'People finish the task faster.', simplest: 'One small change on an existing page.', type: 'feature', description: 'Seeded for the page shell.', criteria: [{ id: 'AC-1', text: 'It works in the browser', proofs: ['e2e:fixture'] }] }) })).json() as { id: string; key: string });
   for (const [n, title] of [[1, 'Sign-up form remembers the email'], [2, 'Faster search on the Work page']] as const) {
     const item = await file(n, title);
     await fetch(`${url}/api/work/${item.id}/ready`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `ui-shell-ready-${n}` }, body: JSON.stringify({ reason: 'Released by the ui-shell case' }) });

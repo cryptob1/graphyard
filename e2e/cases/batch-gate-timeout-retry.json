@@ -1,0 +1,15 @@
+{
+  "id": "batch-gate-timeout-retry",
+  "title": "A batch gate held for timing out twice retries on its own",
+  "description": "Runs the real gate over ports whose clock the case controls: a hold raised because the gate timed out twice on a tip reruns that tip after its 30-minute cool-off without main moving and verifies it, master status attention names the hold and its reason while it stands, and a gate held for a failing case still waits for main to move.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a timeout hold retries its tip; a failing-case hold waits for main",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:batch-gate-timeout-retry tests/main-batch-gate.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

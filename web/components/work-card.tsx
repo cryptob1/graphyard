@@ -12,6 +12,7 @@ import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
 import { Agent, failedTrial } from '../fun';
+import ItemLead from './item-lead';
 
 /** The plain sentence without its leading "Stuck: ": the group already says it is blocked. */
 const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
@@ -53,6 +54,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
+      <ItemLead item={item} row/>
       <Priority item={item} disabled={busy} onChange={onPriority}/>{item.owner && <span className="row-owner">Owner · {item.owner}</span>}
       <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>

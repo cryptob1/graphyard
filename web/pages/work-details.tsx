@@ -31,6 +31,7 @@ import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
 import type { Dashboard } from './dashboard';
 import type { ItemPreview, ItemPreviewState } from '../../src/project-previews';
+import ItemLead from '../components/item-lead';
 
 const marker: Record<string, { symbol: string; word: string; tone: string }> = {
   passed: { symbol: '✓', word: 'passed', tone: 'pass' }, failed: { symbol: '×', word: 'failed', tone: 'fail' }, revoked: { symbol: '×', word: 'withdrawn', tone: 'fail' },
@@ -271,6 +272,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())}</span><Priority item={item} disabled={busy} onChange={mayChangePriority(status?.actor) ? priority => { void action(item.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
+        <ItemLead item={item}/>
         <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={why}/></p>
       </div>
       {(item.candidate || (!item.ready && admin)) && <div className="page-actions">

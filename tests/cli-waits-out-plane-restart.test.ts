@@ -61,7 +61,7 @@ test('integration:cli-waits-out-plane-restart — CLI survives refusal during re
     assert.ok(JSON.parse(status.stdout));
     await restart;
     const input = join(cwd, 'work.json');
-    await writeFile(input, JSON.stringify({ title: 'Created across restart', type: 'chore', criteria: [{ id: 'AC-1', text: 'Fixture', proofs: ['integration:fixture', 'e2e:fixture'] }] }));
+    await writeFile(input, JSON.stringify({ title: 'Created across restart', why: 'w', simplest: 's', type: 'chore', criteria: [{ id: 'AC-1', text: 'Fixture', proofs: ['integration:fixture', 'e2e:fixture'] }] }));
     const created = JSON.parse((await exec(process.execPath, [launcher, 'create', input], { cwd, env })).stdout);
     assert.equal(posts.length, 2);
     assert.ok(posts[0].key);

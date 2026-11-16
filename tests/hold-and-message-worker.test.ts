@@ -99,7 +99,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); if (root) await rm(root, { recursive: true, force: true }); });
 
 test('integration:hold-and-message-worker — a held item is skipped by dispatch for several cycles with its lease, history and candidate kept; its worker reads and acknowledges the master message at sync, a restart keeps an unread one, the successor inherits it, and release resumes dispatch', async () => {
-  const file = (title: string) => call(token(operator.id), 'POST', 'work', { title, type: 'chore', description: 'A fixture item',
+  const file = (title: string) => call(token(operator.id), 'POST', 'work', { why: 'w', simplest: 's', title, type: 'chore', description: 'A fixture item',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:hold-and-message-worker', 'e2e:fixture'] }], policy: { checks: ['test'], review: true } }) as Promise<Work>;
   const item = await file('Held while leased'), submitted = await file('Held with a candidate');
   await master('release', item.key, 'Ready to build'); await master('release', submitted.key, 'Ready to build');

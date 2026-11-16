@@ -47,6 +47,8 @@ export const placeholderServeRefusal = 'e2e.serve is onboarding\'s placeholder s
 export function onboardingWorkRequest(commit: string, checks: string[] | null, caseId: string | null) {
   return {
     title: onboardingWorkTitle, type: 'chore' as const, priority: 0,
+    why: 'Lands the onboarding files so Graphyard can start delivering this repository\'s work.',
+    simplest: 'It merges only the files graphyard up wrote; nothing else changes.',
     description: `${commit.slice(0, 12)} on ${onboardingBranch}\n\nThe commit graphyard up published with the files it wrote while onboarding this repository: coordination instructions (AGENTS.md), configuration (graphyard.json) and, when the repository had no E2E case, the first one (${onboardingCasePath}). It changes nothing else. Filed by graphyard up so the loop reviews and merges it under the normal gates (GY-1478).`,
     criteria: [{ id: 'AC-1', text: `The change adds only Graphyard's onboarding files (AGENTS.md, .gitignore, graphyard.json and, when written, ${onboardingCasePath}); no .github/workflows file is written.`, proofs: caseId ? [`e2e:${caseId}`] : [] }],
     policy: { checks: checks?.length ? checks : ['test', 'typecheck'], review: true },

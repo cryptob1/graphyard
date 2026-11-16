@@ -16,9 +16,10 @@ import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/rep
 import type { Work } from '../src/model';
 
 const waiting = 'Waiting on the master: writing the criteria';
+const lead = { why: 'Owners find exports where they look.', simplest: 'One link on the page they already use.' };
 const criteria = [{ id: 'AC-1', text: 'The requested change works through the dashboard', proofs: ['e2e:create-work-one-box'] }];
 
-test('e2e:create-work-one-box — title-only filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
+test('e2e:create-work-one-box — one-box filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
   // The body takes ~10 s on two loaded cores (GY-3362 trace); the headroom is for a busy trial host.
   test.setTimeout(180_000);
   setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -55,6 +56,8 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     await expect(form.getByText('Advanced', { exact: true })).toBeVisible();
     await expect(form.getByLabel('Acceptance criterion')).not.toBeVisible();
     await form.getByLabel('Title', { exact: true }).fill('Make exports easier to find');
+    await form.getByLabel('Why it helps users').fill('Owners find exports where they look.');
+    await form.getByLabel('Why it is the simplest thing that works').fill('One link on the page they already use.');
     const created = page.waitForResponse(response => response.url().endsWith('/api/work') && response.request().method() === 'POST');
     await form.getByRole('button', { name: 'Create work item', exact: true }).click();
     let draft = await (await created).json() as Work;
@@ -64,15 +67,15 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     expect(draft.policy).toEqual({ review: true, checks: ['test', 'typecheck'] });
     expect(draft.scenarioRequirements).toEqual([]); expect(draft.evidence).toEqual([]);
     expect(storedWorkSchema.shape.criteria.safeParse(draft.criteria).success).toBe(true);
-    const omitted = await post('work', { title: 'API title-only draft' });
+    const omitted = await post('work', { ...lead, title: 'API title-only draft' });
     expect(omitted.criteria).toEqual([]); expect(omitted.ready).toBe(false); expect(omitted.lease).toBeNull(); expect(omitted.candidate).toBeNull();
     expect(omitted.policy).toEqual(draft.policy);
-    const empty = await post('work', { title: 'Explicit empty draft', criteria: [] });
+    const empty = await post('work', { ...lead, title: 'Explicit empty draft', criteria: [] });
     expect(empty.criteria).toEqual([]); expect(empty.ready).toBe(false);
     for (const invalid of [[{ id: 'AC-1', text: 'Incomplete' }], [{ id: 'AC-1', text: 'No e2e', proofs: ['unit:only'] }]]) {
-      expect((await request('work', { title: 'Invalid Advanced', criteria: invalid })).status).toBeGreaterThanOrEqual(400);
+      expect((await request('work', { ...lead, title: 'Invalid Advanced', criteria: invalid })).status).toBeGreaterThanOrEqual(400);
     }
-    expect((await request('work', { title: 'Client ready', ready: true })).status).toBeGreaterThanOrEqual(400);
+    expect((await request('work', { ...lead, title: 'Client ready', ready: true })).status).toBeGreaterThanOrEqual(400);
     expect((await request(`work/${draft.id}/ready`, { expectedRevision: draft.revision, reason: 'Try releasing draft' }, masterToken)).body.error).toContain(waiting);
     expect((await request(`work/${draft.id}/claim`, {}, 'browser-worker')).status).toBeGreaterThanOrEqual(400);
     const forged = { ...draft, ready: true };
@@ -124,6 +127,8 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     await page.getByRole('button', { name: '← Back' }).click();
     await page.getByRole('button', { name: '＋ New work item' }).click();
     await form.getByLabel('Title', { exact: true }).fill('Advanced export change');
+    await form.getByLabel('Why it helps users').fill('Owners find exports where they look.');
+    await form.getByLabel('Why it is the simplest thing that works').fill('One link on the page they already use.');
     await form.getByText('Advanced', { exact: true }).click();
     await form.getByLabel('Acceptance criterion').fill(criteria[0].text);
     await form.getByLabel('Required proof').fill(criteria[0].proofs[0]);
@@ -138,6 +143,8 @@ test('e2e:create-work-one-box — title-only filing waits for master requirement
     await page.getByRole('button', { name: '← Back' }).click();
     await page.getByRole('button', { name: '＋ New work item' }).click();
     await form.getByLabel('Title', { exact: true }).fill('Export checks change');
+    await form.getByLabel('Why it helps users').fill('Owners find exports where they look.');
+    await form.getByLabel('Why it is the simplest thing that works').fill('One link on the page they already use.');
     await form.getByText('Advanced', { exact: true }).click();
     const criterion = form.getByLabel('Acceptance criterion');
     const proof = form.getByLabel('Required proof');

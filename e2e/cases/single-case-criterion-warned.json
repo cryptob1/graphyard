@@ -8,7 +8,7 @@
   "steps": [
     {
       "kind": "http", "name": "create the single-seed chore", "method": "POST", "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} single seed",
         "description": "Created by the single-case-criterion-warned E2E case.",
         "type": "chore", "priority": 3,
@@ -25,7 +25,7 @@
     },
     {
       "kind": "http", "name": "create the three-seed chore", "method": "POST", "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} three seeds",
         "description": "Created by the single-case-criterion-warned E2E case.",
         "type": "chore", "priority": 3,
