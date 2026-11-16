@@ -216,6 +216,10 @@ export const daemonStateSchema = z.object({
     /** GY-3401: the test parallelism a session launched now gets, and the merge writer's trial cap now and when cool. */
     testBudget: z.number().int().min(0).nullable().default(null),
     trialCap: z.object({ now: z.number().int().min(0), full: z.number().int().min(0) }).strict().nullable().default(null) }).strict().nullable().default(null),
+  /** GY-3407: every host as the last cycle read it — this machine first, then each added host (src/hosts.ts); an unanswering host reads away. */
+  hosts: z.array(z.object({ host: z.string().max(300), local: z.boolean().optional(), away: z.boolean(), reason: z.string().max(1000).optional(),
+    cores: z.number().nullable(), celsius: z.number().nullable(), steal: z.number().nullable(), runs: z.number().nullable(),
+    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().optional() }).strict()).default([]),
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()
