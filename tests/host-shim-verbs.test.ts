@@ -27,7 +27,8 @@ test(`${proof} — host prepare installs the shim as the only command of this ma
   const script = hostPrepareScript('ssh-ed25519 AAAAC3NzaOperatorKey operator@vishrog');
   assert.match(script, /'restrict,command="graphyard-host-shim" ssh-ed25519 AAAAC3NzaOperatorKey operator@vishrog' > "\$home\/\.ssh\/authorized_keys"/);
   assert.match(script, /gpasswd -d "\$user" docker/);
-  assert.match(script, /dockerd-rootless-setuptool\.sh install/, 'rootless Docker');
+  // GY-3419: the host's own tools when both are installed, else the static extras fetched into the home; either way the install runs.
+  assert.match(script, /"\$setuptool" install/, 'rootless Docker');
   const installed = /<<'GRAPHYARD_SHIM'\n([\s\S]*?)GRAPHYARD_SHIM\n/.exec(script)![1]!;
   assert.equal(spawnSync('python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'], { input: installed }).status, 0, 'the installed shim is valid Python');
 });

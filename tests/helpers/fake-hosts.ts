@@ -168,6 +168,10 @@ D='${dir}'
 [ "$1" = install ] || exit 0
 mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
 : > "$D$XDG_RUNTIME_DIR/docker.sock"
+# GY-3412's shim names its socket by the real uid (os.getuid), which in the fixture is the test
+# process's, not gy-compute's 1001: the socket exists for both, as one user's own rootless socket.
+mkdir -p "$D/run/user/${process.getuid()}"
+: > "$D/run/user/${process.getuid()}/docker.sock"
 cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
 /usr/bin/chmod 755 "$HOME/bin/docker"
 echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
@@ -207,6 +211,8 @@ D='${dir}'
 [ "$1" = install ] || exit 0
 mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
 : > "$D$XDG_RUNTIME_DIR/docker.sock"
+mkdir -p "$D/run/user/${process.getuid()}"
+: > "$D/run/user/${process.getuid()}/docker.sock"
 cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
 /usr/bin/chmod 755 "$HOME/bin/docker"
 echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
