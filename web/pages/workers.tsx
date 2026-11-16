@@ -180,6 +180,28 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   </table>;
 }
 
+type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
+/**
+ * GY-3407: the hosts the loop watches — this machine first, then each one added with
+ * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
+ * reads Away and is read again next cycle. Work runs only on this machine for now, which the note says.
+ */
+function Hosts({ hosts }: { hosts: HostRow[] }) {
+  if (!hosts.length) return null;
+  const figure = (value: number | null, unit = '') => value === null ? '—' : `${Math.round(value)}${unit}`;
+  return <section className="hosts-section"><h2>Hosts</h2><table className="sessions-table hosts" aria-label="Hosts" data-hosts>
+    <thead><tr><th scope="col">Host</th><th scope="col">Cores</th><th scope="col">Temperature</th><th scope="col">Steal</th><th scope="col">Runs now</th></tr></thead>
+    <tbody>{hosts.map(host => <tr key={host.host} data-host={host.host} data-away={host.away || undefined}>
+      <th scope="row" data-label="Host">{host.host}{host.local ? <span className="muted"> (this machine)</span> : null}</th>
+      {host.away ? <td data-label="State" colSpan={4}><span className="muted" title={host.reason}>Away: not answering, tried again each cycle</span></td> : <>
+        <td data-label="Cores">{figure(host.cores)}</td>
+        <td data-label="Temperature">{figure(host.celsius, '°C')}</td>
+        <td data-label="Steal">{figure(host.steal, '%')}</td>
+        <td data-label="Runs now">{figure(host.runs)}</td></>}
+    </tr>)}</tbody>
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
+}
+
 function ProjectMemorySection({ memory }: { memory?: any }) {
   if (!memory || (!memory.notes?.length && !memory.changes?.length)) return null;
   const count = (memory.notes?.length ?? 0) + (memory.changes?.length ?? 0);
@@ -220,7 +242,8 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
  * words and how long it has held it — where each row unfolds its session's live, read-only view,
  * with the sessions that ended and the per-account summary folded below.
  * The heading carries the host's CPU as the loop last read it (GY-3348): pressure and steal, the
- * two figures that explain why nothing new is launching when the host is saturated.
+ * two figures that explain why nothing new is launching when the host is saturated. Below the
+ * sessions, the hosts table (GY-3407) lists this machine and every added host it watches.
  */
 export default function WorkersPage({ work, observedAt, setSelected, setView, token, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected' | 'setView' | 'token'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
@@ -244,6 +267,7 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
       {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
     {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
+    <Hosts hosts={status?.hosts ?? []}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
     <details className="panel finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>

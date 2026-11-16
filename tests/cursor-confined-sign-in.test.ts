@@ -76,7 +76,8 @@ function fixture(home: string) {
   const account = (name: string, token: string | null) => {
     const accountHome = join(accounts, name);
     mkdirSync(join(accountHome, 'cursor'), { recursive: true });
-    writeFileSync(join(accountHome, 'cli-config.json'), `${JSON.stringify({ authInfo: { userId: name } }, null, 2)}\n`, { mode: 0o600 });
+    // GY-3414: a signed-in profile names its user in authInfo; a profile-only one does not.
+    writeFileSync(join(accountHome, 'cli-config.json'), `${JSON.stringify(token ? { authInfo: { userId: name } } : {}, null, 2)}\n`, { mode: 0o600 });
     if (token) writeFileSync(join(accountHome, 'cursor', 'auth.json'), `${JSON.stringify({ accessToken: token }, null, 2)}\n`, { mode: 0o600 });
     return accountHome;
   };
@@ -188,7 +189,7 @@ test('e2e:cursor-confined-sign-in — a confined cursor worker authenticates on 
     assert.match(smoke.error!, /Authentication required\. Please run 'agent login' first/);
     const health = await checkAgentEnvironment({ name: 'cursor-c', kind: 'cursor', home: f.cursorC }, { quota: false, cacheMs: 0 });
     assert.equal(health.loggedIn, false, 'the probe reads the profile-only account as not logged in');
-    assert.equal(health.reason, 'cursor-c is not logged in');
+    assert.match(health.reason ?? '', /^cursor-c is not logged in: .*cli-config\.json names no signed-in user$/);
     assert.ok(health.login!.startsWith('CURSOR_CONFIG_DIR=') && health.login!.includes('XDG_CONFIG_HOME=') && health.login!.includes('cursor-c') && health.login!.endsWith('agent login'),
       `the report names the account and the login command: ${health.login}`);
 
