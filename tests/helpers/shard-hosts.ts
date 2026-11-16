@@ -79,12 +79,14 @@ elif command == 'start':
 
 export interface ShardHostsFixture { root: string; bin: string; shim: string; localState: string; home(name: string): string; state(name: string): string; down(name: string, down: boolean): Promise<void> }
 
-/** Hosts `names`, each with its own home and Docker state, reached as gy-compute@NAME through the ssh on `bin`. */
-export async function shardHosts(label: string, names: string[]): Promise<ShardHostsFixture> {
+/** Hosts `names`, each with its own home and Docker state, reached as gy-compute@NAME through the ssh on `bin`; this machine's Docker holds `images` (name to id). */
+export async function shardHosts(label: string, names: string[], images: Record<string, string> = {}): Promise<ShardHostsFixture> {
   const root = await temporaryDirectory(label), bin = join(root, 'bin'), shim = join(root, 'graphyard-host-shim'), localState = join(root, 'local-docker');
   await mkdir(bin, { recursive: true });
   await executable(shim, hostShimScript);
   await executable(join(bin, 'docker'), dockerStandIn(localState));
+  await mkdir(localState);
+  await writeFile(join(localState, 'state.json'), JSON.stringify({ images, containers: {} }));
   for (const name of names) {
     await mkdir(join(root, 'hosts', name, 'home'), { recursive: true }); await mkdir(join(root, 'hosts', name, 'bin'));
     await executable(join(root, 'hosts', name, 'bin', 'docker'), dockerStandIn(join(root, 'hosts', name, 'docker')));

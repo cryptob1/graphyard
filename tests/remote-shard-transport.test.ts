@@ -19,8 +19,7 @@ const argv = (list: string, records: string) => ['node', 'scripts/tests.mjs', '-
 let hosts: ShardHostsFixture;
 
 before(async () => {
-  hosts = await shardHosts('remote-transport', ['box']);
-  await import('node:fs/promises').then(fs => fs.mkdir(hosts.localState, { recursive: true }).then(() => fs.writeFile(join(hosts.localState, 'state.json'), JSON.stringify({ images: { [image]: digest }, containers: {} }))));
+  hosts = await shardHosts('remote-transport', ['box'], { [image]: digest });
   process.env.PATH = `${hosts.bin}:${process.env.PATH}`;
 });
 
