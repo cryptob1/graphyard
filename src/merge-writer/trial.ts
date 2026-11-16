@@ -23,7 +23,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
-import { HostDroppedError, readHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, underHeatLimit, type HostReading, type PlacedHost, type ShardHost } from './remote-shards.js';
+import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
@@ -754,8 +754,8 @@ export interface RunTrialInput {
   services?: typeof startCheckServices;
   /** GY-3283: run only the declared check of this name, whatever paths it is limited to (a worker's `graphyard check NAME`). */
   only?: string;
-  /** GY-3406: the remote hosts a selection's shards fan out to — master.json `run.hosts` unless a test names others — the SSH program, and how hosts are read. */
-  remote?: { hosts: readonly ShardHost[]; ssh?: string; read?: (hosts: readonly ShardHost[]) => Promise<HostReading[]> };
+  /** GY-3412: the hosts a selection's shards fan out to — those `graphyard host add` recorded unless a test names others — and how they are read. */
+  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[]) => Promise<HostReading[]> };
 }
 const tailLength = 4000;
 /**
@@ -1384,10 +1384,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
     // shard named one: a named failing test is the merge's, and stays a failing verdict.
     const cores = cpu.cores();
-    // GY-3406: with remote hosts, every host is read once and the selection is cut for this machine's
+    // GY-3412: with added hosts, every host is read once and the selection is cut for this machine's
     // lanes plus the real free cores of every remote host under its heat limit.
-    const hosts = input.remote?.hosts ?? shardHosts(input.root), ssh = input.remote?.ssh;
-    const readings = hosts.length ? await (input.remote?.read ?? (named => readHosts(named, run, ssh)))(hosts) : [];
+    const hosts = input.remote?.hosts ?? await shardHosts();
+    const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
     const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores) + remoteLanes, await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
     const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
@@ -1395,9 +1395,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
     let stopped: unknown = null;
-    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, ssh, deadline, order: input.key === gateTrialKey ? 'gate' : 'merge', signal: input.signal }) : null;
+    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
-    const shard = async (index: number, remote?: { host: ShardHost; reading: HostReading }) => {
+    const shard = async (index: number, remote?: string) => {
       const group = shards[index]!, entries: string[] = [];
       try {
         const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
@@ -1406,8 +1406,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         let tests: Ended, recordText: string;
         try {
           if (remote) {
-            const ended = await session!.run(remote.host, remote.reading, index, group, (list, records) => [check.argv[0]!, ...argv(list, records)]);
-            entries.push(`$ [${remote.host.name}] ${check.argv.join(' ')} (shard ${index + 1})\n${ended.out}`);
+            const ended = await session!.run(remote, index, group, (list, records) => [check.argv[0]!, ...argv(list, records)], breadth);
+            entries.push(`$ [${remote}] ${check.argv.join(' ')} (shard ${index + 1})\n${ended.out}`);
             tests = { ok: ended.ok, out: ended.out, status: ended.status, signal: null, cause: undefined };
             recordText = ended.records;
           } else {
@@ -1415,7 +1415,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
             tests = await child('tests', check.argv[0]!, argv(list, records), { entries });
             recordText = await readFile(records, 'utf8').catch(() => '');
           }
-        } finally { input.onTiming?.(`tests: shard ${index + 1}${remote ? ` on ${remote.host.name}` : ''}`, Math.max(0, now() - shardAt)); }
+        } finally { input.onTiming?.(`tests: shard ${index + 1}${remote ? ` on ${remote}` : ''}`, Math.max(0, now() - shardAt)); }
         const recorded = runnerRecords(recordText);
         // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
         const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
@@ -1433,10 +1433,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
     try {
       // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
-      const local: PlacedHost<ShardHost> = { name: readings[0]?.name ?? 'local', room: lanes, reading: readings[0] ?? { name: 'local', cores, busy: 0, steal: 0, celsius: null, limit: Infinity, away: false } };
-      const placed = [local, ...hosts.map((host, index) => ({ name: host.name, remote: host, reading: readings[index + 1]!, room: Math.floor(realFreeCores(readings[index + 1]!) / breadth) }))];
+      const local: PlacedHost<string> = { name: readings[0]?.name ?? 'local', room: lanes, reading: readings[0] ?? { name: 'local', cores, busy: 0, steal: 0, celsius: null, limit: Infinity, away: false } };
+      const placed = [local, ...hosts.map((host, index) => ({ name: host, remote: host, reading: readings[index + 1]!, room: Math.floor(realFreeCores(readings[index + 1]!) / breadth) }))];
       const placement = await runShardsOnHosts({ count: shards.length, hosts: placed, breadth, stopped: () => stopped !== null,
-        run: (host, index) => shard(index, host.remote ? { host: host.remote, reading: host.reading } : undefined) });
+        run: (host, index) => shard(index, host.remote) });
       if (hosts.length) await recordRemoteShardRun(input.root, { at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
         queuedWhileIdle: placement.queuedWhileIdle, host: local.name, celsius: local.reading.celsius,
         hosts: readings.map(reading => ({ name: reading.name, away: reading.away || placement.dropped.includes(reading.name), celsius: reading.celsius, freeCores: Math.round(realFreeCores(reading) * 10) / 10 })) }).catch(() => {});

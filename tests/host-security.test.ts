@@ -45,7 +45,7 @@ test(`${proof} — host prepare prints a one-time sudo script: an unprivileged g
 });
 
 test(`${proof} — the shim answers only its verbs: a plain shell command is refused`, async () => {
-  const run = (command: string) => spawnSync('sh', [hosts.shim], { env: { PATH: `${join(hosts.root, 'hosts', 'box', 'bin')}:/usr/bin:/bin`, SSH_ORIGINAL_COMMAND: command }, encoding: 'utf8' });
+  const run = (command: string) => spawnSync(hosts.shim, { env: { PATH: `${join(hosts.root, 'hosts', 'box', 'bin')}:/usr/bin:/bin`, SSH_ORIGINAL_COMMAND: command }, encoding: 'utf8' });
   for (const command of ['sh', 'cat /etc/passwd', 'probe; sh', 'docker run -v /:/host alpine']) {
     const result = run(command);
     assert.equal(result.status, 1, command); assert.equal(result.stdout, '', command);

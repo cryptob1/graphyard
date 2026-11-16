@@ -35,7 +35,7 @@ host="\${target#*@}"; dir="${root}/hosts/$host"
 if [ ! -d "$dir" ]; then echo "ssh: connect to host $host port 22: Connection refused" >&2; exit 255; fi
 cd "$dir/home" && export HOME="$dir/home" PATH="$dir/bin:/usr/bin:/bin"
 if [ -f "$dir/plain-shell" ]; then exec sh -c "$last"; fi
-SSH_ORIGINAL_COMMAND="$last" exec sh "${shim}"
+SSH_ORIGINAL_COMMAND="$last" exec "${shim}"
 `);
   return { root, bin, shim, home: (name: string) => join(root, 'hosts', name, 'home') };
 }

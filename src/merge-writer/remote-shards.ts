@@ -1,8 +1,8 @@
-// Concern: GY-3406 — a trial's test shards fanned out across hosts over SSH. A host is any Linux box
-// with Docker, python3 and our SSH key, named in master.json `run.hosts`; this machine is always one.
-// Each trial reads every host once, places each shard on the host with the most real free CPU under
-// its heat limit, and runs it there with the same trial launcher (slots, heat, cleanup) over SSH. A
-// host that drops or turns away a shard has it re-queued on another host: capacity, never a fault.
+// Concern: GY-3412 — a trial's test shards fanned out across hosts over SSH. The hosts are the one host
+// list `graphyard host add` keeps (GY-3407); this machine is always one. Each trial reads every host
+// once, places each shard on the host with the most real free CPU under its heat limit, and runs it
+// there through graphyard-host-shim (src/host-shim.ts), whose fixed verbs are all this machine's key
+// may run. A host that drops or turns away a shard has it re-queued on another host: capacity, never a fault.
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -10,76 +10,29 @@ import { basename, dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { trialContainerLaunch } from './trial-container.js';
-import { cpuSensorNames, trialContainerFault, defaultDiskFloorGb, trialContainerCap, trialHotCelsius, trialPressureBoundSeconds, trialStartOrder } from './trial-load.js';
+import { probeHost, readHosts } from '../hosts.js';
+import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
-/** A remote host from master.json `run.hosts`: its name and the SSH destination that reaches it. */
-export interface ShardHost { name: string; ssh: string }
-/** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against that sensor's limit. */
+/** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
 export interface HostReading { name: string; cores: number; busy: number; steal: number; celsius: number | null; limit: number; away: boolean }
 
-/** The hosts master.json names under `run.hosts`; none when it names none. */
-export function shardHosts(root: string): ShardHost[] {
-  try {
-    const hosts = JSON.parse(readFileSync(join(root, '.graphyard', 'master.json'), 'utf8')).run?.hosts;
-    return Array.isArray(hosts) ? hosts.filter((host): host is ShardHost => typeof host?.name === 'string' && typeof host?.ssh === 'string') : [];
-  } catch { return []; }
-}
+/** The targets of the hosts `graphyard host add` recorded; none when it recorded none. */
+export const shardHosts = async () => (await readHosts().catch(() => [])).map(host => host.target);
 
 /** Real free CPU in cores: idle cores less the share the hypervisor steals. */
 export const realFreeCores = (reading: HostReading) => Math.max(0, reading.cores - reading.busy - reading.steal * reading.cores);
 /** A host takes shards while it answers and its hottest CPU sensor is under its limit. */
 export const underHeatLimit = (reading: HostReading) => !reading.away && (reading.celsius === null || reading.celsius < reading.limit);
 
-/** The one command that reads a host: JSON of cores, 1-minute load, CPU steal over one second, hottest CPU sensor and its limit. */
-export const hostReadingScript = String.raw`
-import glob, json, os, time
-def read(path):
-    try:
-        with open(path) as file:
-            return file.read().strip()
-    except OSError:
-        return ''
-def stat():
-    values = [int(value) for value in read('/proc/stat').split('\n')[0].split()[1:]]
-    return sum(values), values[7] if len(values) > 7 else 0
-first = stat(); time.sleep(1); second = stat()
-hot, limit = None, ${trialHotCelsius}
-for path in glob.glob('/sys/class/hwmon/*/temp*_input'):
-    value = read(path)
-    if not value.isdigit() or read(os.path.dirname(path) + '/name') not in ${JSON.stringify(cpuSensorNames)}:
-        continue
-    own = ${trialHotCelsius}
-    for kind in ('_crit', '_max'):
-        bound = read(path.replace('_input', kind))
-        if bound.isdigit() and int(bound) > 0:
-            own = int(bound) // 1000 - 3
-            break
-    if hot is None or int(value) // 1000 > hot:
-        hot, limit = int(value) // 1000, own
-print(json.dumps({'cores': os.cpu_count(), 'busy': os.getloadavg()[0], 'steal': (second[1] - first[1]) / max(1, second[0] - first[0]), 'celsius': hot, 'limit': limit}))
-`;
-const readingWords = ['python3', '-I', '-S', '-c', hostReadingScript];
-
-/** A host's reading from the script's output; a host whose output does not parse is away. */
-export function parseHostReading(name: string, text: string): HostReading {
-  try {
-    const value = JSON.parse(text.trim().split('\n').at(-1)!) as Partial<HostReading>;
-    if (typeof value.cores === 'number' && typeof value.busy === 'number') return { name, cores: value.cores, busy: value.busy, steal: value.steal ?? 0, celsius: value.celsius ?? null, limit: value.limit ?? trialHotCelsius, away: false };
-  } catch { /* away */ }
-  return { name, cores: 0, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: true };
-}
-
-export const sshWords = (ssh: string, host: ShardHost, command: string) => [ssh, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host.ssh, command];
-
-/** This machine's reading and every remote host's, read at once; a host that does not answer is away for this trial. */
-export async function readHosts(hosts: readonly ShardHost[], run: ChildRun, ssh = 'ssh'): Promise<HostReading[]> {
-  const local = Promise.resolve(run(readingWords[0]!, readingWords.slice(1), { timeoutMs: 15_000 })).then(String, () => '');
-  const remote = hosts.map(host => { const [command, ...args] = sshWords(ssh, host, readingWords.map(shellQuote).join(' ')); return Promise.resolve(run(command!, args, { timeoutMs: 20_000 })).then(String, () => ''); });
-  const [mine, ...theirs] = await Promise.all([local, ...remote]);
-  const own = parseHostReading(hostname(), mine!);
-  // This machine always takes shards: an unreadable reading here means only that no sensor or /proc answered.
-  return [own.away ? { ...own, away: false, cores: 1 } : own, ...hosts.map((host, index) => parseHostReading(host.name, theirs[index]!))];
+/** This machine's reading and every host's, read at once through the shim's probe; a host that does not answer is away for this trial. */
+export async function readShardHosts(targets: readonly string[], run: ChildRun, cores: number): Promise<HostReading[]> {
+  return Promise.all([null, ...targets].map(async target => {
+    const probe = await probeHost(target, run);
+    const name = target ?? hostname();
+    // This machine always takes shards: an unreadable reading here means only that its Docker or sensors did not answer.
+    if (!probe.ok) return { name, cores: target ? 0 : cores, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: target !== null };
+    return { name, cores: probe.cores ?? cores, busy: probe.load ?? 0, steal: probe.stat?.total ? probe.stat.steal / probe.stat.total : 0, celsius: probe.celsius, limit: trialHotCelsius, away: false };
+  }));
 }
 
 /** A shard its host turned away — dropped, unreachable, too hot to start, or not ready — to run on another host: capacity, never a fault. */
@@ -133,89 +86,88 @@ export async function runShardsOnHosts<R>(input: { count: number; hosts: readonl
 /** What a remote shard answered: its exit and output, and the per-file records it wrote. */
 export interface RemoteShardEnd { ok: boolean; out: string; status: number | null; records: string }
 
-/** The per-repo mirror a host keeps under its home: one per checkout this install trials from. */
-export const mirrorPath = (root: string) => `.graphyard/mirrors/${basename(root).replace(/[^\w.-]/g, '-')}-${createHash('sha1').update(root).digest('hex').slice(0, 8)}.git`;
-/** The warm dependency image for a trial image's digest and a lockfile's hash: dependencies installed once, then reused. */
+/** The name of this checkout's mirror on a host (~/.graphyard/mirrors/NAME.git): one per checkout this install trials from. */
+export const mirrorName = (root: string) => `${createHash('sha1').update(root).digest('hex').slice(0, 8)}-${basename(root).replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 100);
+/** The warm image for a trial image's digest and a lockfile's hash (`none` without one): dependencies installed once, then reused. */
 export const warmImageTag = (digest: string, lockHash: string) => `graphyard-warm:${digest.replace(/^sha256:/, '').slice(0, 12)}-${lockHash.slice(0, 12)}`;
 
 /**
- * One trial's remote hosts: each host is made ready once — the commit sent into its mirror as a pack of
- * only what the mirror lacks, cloned into a fresh run directory, the trial image there by digest
- * (pulled, else `docker save | docker load` over SSH) and the warm dependency image for the image digest
- * and lockfile hash (installed and committed on a miss) — then runs shards with the trial launcher.
- * `close` removes every run directory it made.
+ * One trial's remote hosts. The warm image — the trial image with the commit's locked dependencies
+ * installed in /deps — is built once on this machine, so hosts never need the network. Each host is
+ * made ready once through the shim: `prepare-run` answers what it lacks — the commit, sent as a pack of
+ * only what its mirror lacks, or the warm image, sent once per tag — then clones the commit into a run
+ * directory. Shards run there through the shim's `run-shard`; `close` cleans every run directory.
  */
-export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; ssh?: string; deadline: number; order?: keyof typeof trialStartOrder; signal?: AbortSignal }) {
-  const ssh = input.ssh ?? 'ssh', mirror = mirrorPath(input.root);
+export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; deadline: number; signal?: AbortSignal }) {
+  const repo = mirrorName(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
-  const on = async (host: ShardHost, command: string, pipe?: string) => {
-    try {
-      if (!pipe) { const [program, ...args] = sshWords(ssh, host, command); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
-      // A local shell command's output piped into the host's: `docker save | ssh host docker load`.
-      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${pipe} | ${sshWords(ssh, host, command).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
-    } catch (error) {
-      throw new HostDroppedError(host.name, error instanceof Error ? error.message.slice(0, 500) : String(error));
-    }
-  };
   const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
-  const ready = new Map<string, { host: ShardHost; prepared: Promise<{ directory: string; image: string }> }>();
-  const prepare = async (host: ShardHost) => {
-    // A fresh run directory (run directories a killed trial left over a day ago go first), and the mirror's last commit.
-    const [directory, last] = (await on(host, `git init -q --bare ${mirror} && mkdir -p "$HOME/.graphyard/runs" && find "$HOME/.graphyard/runs" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + ; mktemp -d "$HOME/.graphyard/runs/trial-XXXXXX" && (git --git-dir=${mirror} rev-parse -q --verify refs/graphyard/last || true)`)).trim().split('\n');
-    // Only the objects the mirror lacks travel: a pack of the commit less what its last commit holds, when this checkout knows that commit.
-    const known = last && await local('git', ['-C', input.root, 'cat-file', '-e', `${last}^{commit}`]).then(() => true, () => false);
-    await on(host, `git --git-dir=${mirror} index-pack --stdin >/dev/null && git --git-dir=${mirror} update-ref refs/graphyard/last ${input.sha} && git --git-dir=${mirror} gc --auto -q`,
-      `printf '%s\\n' ${[input.sha, ...(known ? [`^${last}`] : [])].map(shellQuote).join(' ')} | git -C ${shellQuote(input.root)} pack-objects --revs --stdout -q`);
-    // A clone, not an export, so tests that read the checkout's own git history run as they do here; --local hardlinks the mirror's objects.
-    await on(host, `git clone -q --local --no-checkout ${mirror} ${shellQuote(directory!)} && git -C ${shellQuote(directory!)} -c advice.detachedHead=false checkout -q --detach ${input.sha}`);
-    const digest = await local('docker', ['image', 'inspect', '--format', '{{.Id}}', input.image]);
-    const has = async (image: string) => (await on(host, `docker image inspect --format '{{.Id}}' ${shellQuote(image)} 2>/dev/null || true`)).trim();
-    if (await has(input.image) !== digest) {
-      if (input.image.includes('/')) await on(host, `docker pull -q ${shellQuote(input.image)} >/dev/null 2>&1 || true`);
-      if (await has(input.image) !== digest) await on(host, 'docker load -q', `docker save ${shellQuote(input.image)}`);
+  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target, verb];
+  /** One shim verb on `target`, with `source`'s output as its input; any failure turns the host away. */
+  const shim = async (target: string, verb: string, source?: string) => {
+    try {
+      if (!source) { const [program, ...args] = ssh(target, verb); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
+      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${source} | ${ssh(target, verb).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
+    } catch (error) {
+      const failed = error as { stderr?: unknown; message?: string };
+      throw new HostDroppedError(target, (String(failed.stderr ?? '').trim() || String(failed.message ?? error)).slice(-500));
     }
-    const lock = await local('git', ['-C', input.root, 'show', `${input.sha}:package-lock.json`]).catch(() => null);
-    if (lock === null) return { directory: directory!, image: input.image };
-    const warm = warmImageTag(digest, createHash('sha256').update(lock).digest('hex'));
-    if (!await has(warm)) {
-      const name = `graphyard-warm-${randomUUID().slice(0, 8)}`;
-      const install = 'mkdir -p /deps && cp /src/package.json /src/package-lock.json /deps/ && cd /deps && npm ci --no-audit --no-fund';
-      await on(host, `docker run --name ${name} --user 0:0 -v ${shellQuote(directory)}:/src:ro --entrypoint /bin/sh ${shellQuote(input.image)} -c ${shellQuote(install)} >/dev/null && docker commit ${name} ${warm} >/dev/null; status=$?; docker rm -f ${name} >/dev/null 2>&1; exit $status`);
-    }
-    await on(host, `ln -sfn /deps/node_modules ${shellQuote(join(directory, 'node_modules'))}`);
-    return { directory: directory!, image: warm };
   };
+  let warm: Promise<string> | null = null;
+  const warmImage = async () => {
+    const digest = await local('docker', ['image', 'inspect', '--format', '{{.Id}}', input.image]);
+    const lock = await local('git', ['-C', input.root, 'show', `${input.sha}:package-lock.json`]).catch(() => null);
+    const tag = warmImageTag(digest, lock === null ? 'none' : createHash('sha256').update(lock).digest('hex'));
+    if (await local('docker', ['image', 'inspect', '--format', '{{.Id}}', tag]).then(() => true, () => false)) return tag;
+    if (lock === null) { await local('docker', ['tag', input.image, tag]); return tag; }
+    const name = `graphyard-warm-${randomUUID().slice(0, 8)}`, install = 'mkdir -p /deps && cd /deps && tar -xf - && npm ci --no-audit --no-fund >/dev/null';
+    try {
+      await local('sh', ['-c', `set -o pipefail 2>/dev/null; git -C ${shellQuote(input.root)} archive ${input.sha} package.json package-lock.json | docker run -i --name ${name} --user 0:0 --entrypoint /bin/sh ${shellQuote(input.image)} -c ${shellQuote(install)}`]);
+      await local('docker', ['commit', name, tag]);
+    } finally { await local('docker', ['rm', '-f', name]).catch(() => {}); }
+    return tag;
+  };
+  const prepare = async (target: string) => {
+    const image = await (warm ??= warmImage());
+    for (let step = 0; step < 3; step++) {
+      const answer = (await shim(target, `prepare-run ${repo} ${input.sha} ${image}`)).trim().split('\n').at(-1) ?? '';
+      if (answer.startsWith('run ')) return answer.slice(4);
+      if (answer.startsWith('need-pack ')) {
+        // Only the objects the mirror lacks travel: the commit less what the mirror's last commit holds, when this checkout knows that commit.
+        const last = answer.slice('need-pack '.length);
+        const known = /^[0-9a-f]+$/.test(last) && await local('git', ['-C', input.root, 'cat-file', '-e', `${last}^{commit}`]).then(() => true, () => false);
+        await shim(target, `receive-pack ${repo} ${input.sha}`, `printf '%s\\n' ${[input.sha, ...(known ? [`^${last}`] : [])].join(' ')} | git -C ${shellQuote(input.root)} pack-objects --revs --stdout -q`);
+      } else if (answer === 'need-image') await shim(target, `receive-image ${image}`, `docker save ${image}`);
+      else throw new HostDroppedError(target, `prepare-run answered ${answer.slice(0, 200)}`);
+    }
+    throw new HostDroppedError(target, 'not ready after the commit and image were sent');
+  };
+  const ready = new Map<string, Promise<string>>();
   return {
-    /** Run one shard on `host`: its file list written there, `argv(list, records)` run by the trial launcher in the run directory, the output and records brought back. */
-    async run(host: ShardHost, reading: HostReading, index: number, files: readonly string[], argv: (list: string, records: string) => string[]): Promise<RemoteShardEnd> {
-      if (!ready.has(host.name)) ready.set(host.name, { host, prepared: prepare(host) });
-      const { directory, image } = await ready.get(host.name)!.prepared;
-      const list = join(directory, `.graphyard-tests-${index + 1}.txt`), records = join(directory, `.graphyard-tests-${index + 1}.jsonl`);
-      // The run directory is HOME/.graphyard/runs/trial-…, so the launcher's slots live in that host's own ~/.gy.
-      const home = dirname(dirname(dirname(directory)));
-      const launcher = trialContainerLaunch({ image, mounts: [[directory, directory, false]], network: 'bridge', deadline: input.deadline, apparmor: null,
-        load: { slots: join(home, '.gy', 'trial-slots'), cap: trialContainerCap(reading.cores || 1), order: trialStartOrder[input.order ?? 'merge'], hotCelsius: trialHotCelsius, floorBytes: defaultDiskFloorGb * 1e9, hwmon: '/sys/class/hwmon', pressureBoundSeconds: trialPressureBoundSeconds } });
-      const command = `cd ${shellQuote(directory)} && printf '%s\\n' ${files.map(shellQuote).join(' ')} > ${shellQuote(list)} && env -i PATH="$PATH" HOME=/tmp CI=1 ${[...launcher, ...argv(list, records)].map(shellQuote).join(' ')}`;
-      const [program, ...args] = sshWords(ssh, host, command);
+    /** Run one shard on `target` through the shim: its files, `argv(list, records)` run by the trial launcher there with `cpus` CPUs, the output and records brought back. */
+    async run(target: string, index: number, files: readonly string[], argv: (list: string, records: string) => string[], cpus: number): Promise<RemoteShardEnd> {
+      if (!ready.has(target)) ready.set(target, prepare(target));
+      const run = await ready.get(target)!, shard = index + 1;
+      const request = JSON.stringify({ files, argv: argv('{list}', '{records}'), cpus, deadline: input.deadline });
+      const words = ssh(target, `run-shard ${run} ${shard}`);
       let end: Omit<RemoteShardEnd, 'records'>;
-      try { end = { ok: true, out: String(await input.run(program!, args, { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) })), status: 0 }; }
+      try { end = { ok: true, out: String(await input.run('sh', ['-c', `printf '%s' ${shellQuote(request)} | ${words.map(shellQuote).join(' ')}`], { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) })), status: 0 }; }
       catch (error) {
         const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown; timedOut?: boolean };
         if (failed.timedOut) throw error;
-        const out = `${String(failed.stdout ?? '')}${String(failed.stderr ?? '')}`;
-        // SSH's own failure (255), or a launcher that gave up on the host's heat or disk: the shard runs elsewhere.
-        const fault = trialContainerFault(out);
-        if (failed.status === 255 || failed.status === undefined || fault) throw new HostDroppedError(host.name, fault ?? out.slice(-500));
-        end = { ok: false, out, status: failed.status ?? null };
+        end = { ok: false, out: `${String(failed.stdout ?? '')}${String(failed.stderr ?? '')}`, status: failed.status ?? null };
       }
-      return { ...end, records: await on(host, `cat ${shellQuote(records)} 2>/dev/null || true`) };
+      const records = end.ok || end.status !== 255 ? await shim(target, `fetch-records ${run} ${shard}`) : '';
+      // SSH's own failure (255), a launcher that gave up on the host's heat or disk, or a shard that died
+      // without a verdict (no records): the shard runs on another host, its output's tail kept in the trial log.
+      const fault = trialContainerFault(end.out);
+      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? end.out.slice(-500));
+      return { ...end, records };
     },
     async close() {
-      await Promise.all([...ready.values()].map(async ({ host, prepared }) => {
-        const directory = await prepared.then(value => value.directory, () => null);
-        if (!directory) return;
-        const [program, ...args] = sshWords(ssh, host, `rm -rf -- ${shellQuote(directory)}`);
-        await Promise.resolve(input.run(program!, args, { timeoutMs: 60_000 })).catch(() => {});
+      await Promise.all([...ready.entries()].map(async ([target, prepared]) => {
+        const run = await prepared.catch(() => null);
+        if (run) await shim(target, `clean ${run}`).catch(() => {});
       }));
     },
   };
