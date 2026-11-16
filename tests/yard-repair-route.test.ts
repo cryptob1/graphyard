@@ -65,7 +65,7 @@ const call = async (bearer: string, path: string, body?: unknown, headers: Recor
   assert.equal(response.status, 200, JSON.stringify(parsed));
   return parsed;
 };
-const file = (title: string, extra: Record<string, unknown> = {}) => call(credentials[0].token, 'work', {
+const file = (title: string, extra: Record<string, unknown> = {}) => call(credentials[0].token, 'work', { why: 'w', simplest: 's',
   title, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:yard-repair-route', 'e2e:fixture'] }], policy: { checks: ['test'], review: true }, ...extra,
 }) as Promise<Work>;
 

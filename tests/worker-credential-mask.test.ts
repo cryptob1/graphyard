@@ -25,8 +25,8 @@ const deploySecret = 'deploy-key-secret-'.padEnd(48, 'x');
 const collectorSecret = 'collector-secret-'.padEnd(48, 'x');
 const ownToken = 'worker-own-token-'.padEnd(40, 'x');
 
-/** A coordinator checkout with a linked assignment worktree, an operator config home holding the install's credentials, and the recorded credential paths beside it. */
-function fixture(base: string) {
+/** A coordinator checkout with a linked assignment worktree, an operator config home holding the install's credentials, and the recorded credential paths — under `beside`, outside the checkout's parent, whose sibling entries GY-3384 masks without a mask of its own. */
+function fixture(base: string, beside: string) {
   const root = join(base, 'coordinator');
   const run = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   mkdirSync(join(root, 'src'), { recursive: true });
@@ -55,12 +55,12 @@ function fixture(base: string) {
   prepareConfinedGitPaths(root);
   // The operator config home, with two installs' directories, the worker's own token, a recorded
   // deployment credential outside it, and a configured mask path — each with a secret in it.
-  const configHome = join(base, 'config-home'), ownCredentialFile = join(configHome, 'workers', 'worker-a.token');
+  const configHome = join(beside, 'config-home'), ownCredentialFile = join(configHome, 'workers', 'worker-a.token');
   const coordinatorCredential = join(configHome, 'install-a', 'masters', 'coordinator.token');
   const otherInstall = join(configHome, 'install-b', 'tokens', 'other-principal.token');
-  const deployKey = join(base, 'deploy', 'deploy-key');
-  const collectorCredential = join(base, 'collector', 'collector.token');
-  const runtimeHome = join(base, 'runtime-home');
+  const deployKey = join(beside, 'deploy', 'deploy-key');
+  const collectorCredential = join(beside, 'collector', 'collector.token');
+  const runtimeHome = join(beside, 'runtime-home');
   for (const file of [coordinatorCredential, otherInstall, ownCredentialFile, deployKey, collectorCredential]) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, `${file === ownCredentialFile ? ownToken : file === coordinatorCredential ? coordinatorSecret : file === otherInstall ? otherSecret : file === deployKey ? deploySecret : collectorSecret}\n`, { mode: 0o600 }); }
   mkdirSync(runtimeHome, { recursive: true });
   writeFileSync(join(runtimeHome, 'cli-config.json'), '{"authInfo":{"userId":"own-login"}}\n', { mode: 0o600 });
@@ -70,7 +70,7 @@ function fixture(base: string) {
     confinement: { maskPaths: [collectorCredential] },
   };
   const mask = credentialMaskFor(config, { credentialFile: ownCredentialFile, runtimeHomes: [runtimeHome] }, configHome);
-  return { root, worktree, base, configHome, coordinatorCredential, otherInstall, deployKey, collectorCredential, ownCredentialFile, runtimeHome, mask };
+  return { root, worktree, base, beside, configHome, coordinatorCredential, otherInstall, deployKey, collectorCredential, ownCredentialFile, runtimeHome, mask };
 }
 
 test('unit:credential-mask-covers-recorded-credential-locations — the mask gathers the config home, every recorded credential path, and keeps only the session\'s own', async () => {
@@ -133,15 +133,15 @@ test('unit:credential-mask-words — a location that exists is masked at the dir
 });
 
 test('unit:worker-wrapper-masks-credentials — the read-only mount hides the credential locations and re-exposes the session\'s own last', async () => {
-  const base = await temporaryDirectory('credential mask wrapper');
+  const base = await temporaryDirectory('credential mask wrapper'), beside = await temporaryDirectory('credential mask wrapper beside');
   try {
-    const f = fixture(base);
+    const f = fixture(base, beside);
     const wrapper = readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, bwrap: 'bwrap' });
-    assert.ok(!wrapper.includes(f.configHome) && !wrapper.includes(join(f.base, 'deploy')), 'without a mask no credential location is hidden');
+    assert.ok(!wrapper.includes(f.configHome) && !wrapper.includes(join(f.beside, 'deploy')), 'without a mask no credential location is hidden');
     const masked = readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, bwrap: 'bwrap', credentialMask: f.mask });
     assert.ok(masked.includes(f.configHome), 'the wrapper hides the operator config home');
-    assert.ok(masked.includes(join(f.base, 'deploy')), 'the recorded deployment credential path is hidden at its directory');
-    assert.ok(masked.includes(join(f.base, 'collector')), 'the configured mask path is hidden at its directory');
+    assert.ok(masked.includes(join(f.beside, 'deploy')), 'the recorded deployment credential path is hidden at its directory');
+    assert.ok(masked.includes(join(f.beside, 'collector')), 'the configured mask path is hidden at its directory');
     const configIdx = masked.indexOf(f.configHome);
     assert.ok(configIdx > 0 && masked[configIdx - 1] === '--tmpfs', 'the config home is masked with an empty tmpfs');
     const ownIdx = masked.indexOf(f.ownCredentialFile);
@@ -162,13 +162,13 @@ test('unit:worker-wrapper-masks-credentials — the read-only mount hides the cr
     // The headless producer run carries the same mask through its runner.
     const headless = headlessConfinementWrapper(f.root, f.worktree, 'bwrap', f.mask);
     assert.ok(headless.includes(f.configHome), 'the headless run hides the operator config home too');
-  } finally { rmSync(base, { recursive: true, force: true }); }
+  } finally { rmSync(base, { recursive: true, force: true }); rmSync(beside, { recursive: true, force: true }); }
 });
 
 test('integration:worker-credential-paths-denied — under the actual worker confinement the coordinator credential, another install\'s directory, a recorded deployment credential and a configured mask path are each unreadable, and no secret value is reachable', async () => {
-  const base = await temporaryDirectory('credential mask denied');
+  const base = await temporaryDirectory('credential mask denied'), beside = await temporaryDirectory('credential mask denied beside');
   try {
-    const f = fixture(base);
+    const f = fixture(base, beside);
     const confinement = await coordinatorConfinement({ kind: 'pi', args: [], coordinatorRoot: f.root, sessionDirectory: f.worktree, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap', credentialMask: f.mask });
     assert.ok(confinement, 'the worker launch carries a confinement');
     assert.equal(confinement.mechanism, 'read-only-mount');
@@ -192,13 +192,13 @@ test('integration:worker-credential-paths-denied — under the actual worker con
     for (const secret of [coordinatorSecret, otherSecret, deploySecret, collectorSecret])
       assert.ok(!output.includes(secret), 'no secret value appears in the probe output');
     for (const marker of ['READABLE', 'CONFIG-HOME-LISTED']) assert.ok(!run.stdout.includes(marker), marker);
-  } finally { rmSync(base, { recursive: true, force: true }); }
+  } finally { rmSync(base, { recursive: true, force: true }); rmSync(beside, { recursive: true, force: true }); }
 });
 
 test('integration:worker-own-credentials-work — under the same confinement the worker\'s own runtime login and token are readable, and git status, git commit, graphyard sync and the repository\'s test command succeed in its worktree', async () => {
-  const base = await temporaryDirectory('credential mask own work');
+  const base = await temporaryDirectory('credential mask own work'), beside = await temporaryDirectory('credential mask own work beside');
   try {
-    const f = fixture(base);
+    const f = fixture(base, beside);
     const confinement = await coordinatorConfinement({ kind: 'pi', args: [], coordinatorRoot: f.root, sessionDirectory: f.worktree, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap', credentialMask: f.mask });
     assert.ok(confinement, 'the worker launch carries a confinement');
     if (process.platform !== 'linux') return;
@@ -248,5 +248,5 @@ test('integration:worker-own-credentials-work — under the same confinement the
     assert.ok(existsSync(join(f.worktree, 'docs', 'advance.md')), 'the base tip landed in the worktree');
     for (const marker of ['OWN-TOKEN-DENIED', 'LOGIN-DENIED', 'LOGIN-NOTWRITABLE', 'GIT-STATUS-FAILED', 'GIT-COMMIT-FAILED', 'SYNC-FAILED', 'TEST-COMMAND-FAILED', 'Read-only file system'])
       assert.ok(!output.includes(marker), marker);
-  } finally { rmSync(base, { recursive: true, force: true }); }
+  } finally { rmSync(base, { recursive: true, force: true }); rmSync(beside, { recursive: true, force: true }); }
 });

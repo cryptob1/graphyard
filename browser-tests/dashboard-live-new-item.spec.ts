@@ -25,7 +25,7 @@ test('e2e:dashboard-live-new-item — an item filed through the CLI, and its sta
     const ids: string[] = [];
     for (let batch = 0; batch < 10; batch++) ids.push(...await Promise.all(Array.from({ length: 20 }, async (_, n) => {
       const response = await fetch(http.url + '/api/work', { method: 'POST', headers: { ...operator, 'Idempotency-Key': `ledger-${batch}-${n}` },
-        body: JSON.stringify({ title: `Delivered ${batch * 20 + n}`, type: 'chore', criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['e2e:fixture'] }] }) });
+        body: JSON.stringify({ title: `Delivered ${batch * 20 + n}`, why: 'w', simplest: 's', type: 'chore', criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['e2e:fixture'] }] }) });
       return (await response.json() as { id: string }).id;
     })));
     await database.store.pool.query(`UPDATE work_items SET document = (jsonb_set(document, '{criteria,0,text}', to_jsonb(repeat('delivered ', 2000))) || jsonb_build_object('stage', 'done', 'actionQueue', jsonb_build_object('actions', '[]'::jsonb, 'history', '[]'::jsonb))) - 'lease' - 'nextAction' - 'queue' WHERE id = ANY($1::uuid[])`, [ids]);
@@ -50,7 +50,7 @@ test('e2e:dashboard-live-new-item — an item filed through the CLI, and its sta
     const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: http.url, GRAPHYARD_TOKEN: 'test-human-operator' };
     delete env.GRAPHYARD_TOKEN_FILE;
     const cli = async (...args: string[]) => JSON.parse((await exec(process.execPath, [launcher, ...args], { cwd, env })).stdout);
-    await writeFile(join(cwd, 'work.json'), JSON.stringify({ title: 'Filed while the dashboard is open', type: 'chore', owner: 'operator',
+    await writeFile(join(cwd, 'work.json'), JSON.stringify({ title: 'Filed while the dashboard is open', why: 'The owner sees new work at once.', simplest: 'The page already polls.', type: 'chore', owner: 'operator',
       criteria: [{ id: 'AC-1', text: 'Shows without a reload', proofs: ['e2e:dashboard-live-new-item'] }] }));
     const filed = await cli('create', join(cwd, 'work.json'));
     const filedAt = Date.now();
