@@ -154,8 +154,9 @@ img.mark{width:26px;height:26px}
 .shipped-line{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-radius:10px;background:var(--surface);font-size:var(--type-small);color:var(--text-2)}
 .shipped-line svg{color:var(--shipped);flex-shrink:0}.shipped-line strong{color:var(--text);font-weight:600}.shipped-line .text-button{font-size:var(--type-small);color:var(--text)}.shipped-line .push{margin-left:auto;color:var(--accent)}
 /* GY-3393: the Taste feed's cards — a shipped item, its why and evidence, and the two actions. */
-.taste-feed{gap:var(--space-3)}
-.taste-list{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-3)}
+.taste-feed{padding:0;gap:0}
+.taste-feed>summary{align-items:center;padding:var(--space-3) var(--space-4)}
+.taste-list{list-style:none;margin:0;padding:var(--space-3) var(--space-4);display:grid;gap:var(--space-3)}
 .taste-card{display:flex;flex-direction:column;gap:8px;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:10px;background:var(--raised)}
 .taste-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
 .taste-head .text-button{font-size:var(--type-body);color:var(--text)}

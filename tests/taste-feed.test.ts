@@ -43,7 +43,7 @@ const snapshot = async (): Promise<Work[]> => (await ok(operator, 'work-snapshot
 
 /** A delivered item as the control plane leaves one after its merge: create it, then settle the delivery directly. */
 async function delivered(title: string, why: string): Promise<Work> {
-  const created = await ok(operator, 'work', { title, type: 'feature', summary: why, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }] }) as Work;
+  const created = await ok(operator, 'work', { title, type: 'feature', summary: why, why: 'It shows the owner what shipped.', simplest: 'It reuses the Work page they already open.', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }] }) as Work;
   const sha = 'abcdef1234567890abcdef1234567890abcdef12', mergedAt = new Date().toISOString();
   const candidate = { sha, baseSha: sha, pr: 42, branch: 'graphyard/gy-delivery', author: 'w' };
   const document = {
@@ -85,11 +85,12 @@ test('integration:taste-looks-good — a delivered item shows in Taste with its 
   const served = (await snapshot()).find(item => item.id === work.id)!;
   assert.equal((served as any).summary, true);
   assert.equal((served as any).plainSummary, 'The delivery’s why sentence.');
-  // …and the Work page shows its card with both.
+  // …and the Work page shows its card with both, in the folded Taste section (the home screen keeps its word budget).
   const html = page(await snapshot());
+  assert.match(html, /<details[^>]*class="panel taste-feed"[^>]*data-taste-section/);
   assert.deepEqual(cards(html), [work.key]);
   assert.match(html, /The delivery’s why sentence\./);
-  assert.match(html, /e2e:fixture · 1 executed/);
+  assert.match(html, /e2e:fixture<\/abbr> · 1 executed/);
   // Looks good records the taste.
   const tasted = await ok(operator, `work/${work.id}/taste`, { verdict: 'good' }) as Work;
   assert.equal(tasted.taste?.verdict, 'good');
@@ -141,7 +142,7 @@ test('integration:taste-send-back — the note files a follow-up whose reason it
 });
 
 test('integration:taste-refuses-what-has-not-shipped — Taste tastes delivered work only', async () => {
-  const open = await ok(operator, 'work', { title: 'Not shipped yet', type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }] }) as Work;
+  const open = await ok(operator, 'work', { title: 'Not shipped yet', type: 'chore', why: 'It checks Taste refuses undelivered work.', simplest: 'One taste call on an open item.', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }] }) as Work;
   const refused = await call(operator, `work/${open.id}/taste`, { verdict: 'good' });
   assert.equal(refused.status, 409);
   assert.match(refused.body.error, /has not shipped/);

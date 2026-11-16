@@ -93,13 +93,15 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
         <div className="rows">{byGroup.backlog.map(w => row(w, 'backlog'))}</div>
       </details>}
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Inbox zero, factory edition.'}</p>}
-      {/* GY-3393: what shipped and awaits the owner's taste, with its evidence; tasting gates nothing. */}
-      <TasteFeed work={work} status={status} token={token} observedAt={now} busy={busy} action={action} setSelected={setSelected}/>
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
         <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, now, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
+      {/* GY-3393: what shipped and awaits the owner's taste, with its evidence; tasting gates nothing. The fold
+          sits after the shipped line so its folded cards never precede the page's visible text in the DOM —
+          a case's text lookup finds the visible words first. */}
+      <TasteFeed work={work} status={status} token={token} observedAt={now} busy={busy} action={action} setSelected={setSelected}/>
     </>}
     <Replay api={api} onOpen={setSelected}/>
   </>;

@@ -46,6 +46,8 @@ async function tastePage(page: Page, role = 'admin') {
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
+  // The feed folds on the Work page (the home screen keeps its word budget); the owner opens it.
+  await page.locator('[data-taste-section] summary').click();
   return state;
 }
 

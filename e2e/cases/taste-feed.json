@@ -22,9 +22,8 @@
     { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
     {
       "kind": "browser",
-      "name": "the Work page has a Taste section",
-      "action": "expectText",
-      "role": "heading",
+      "name": "open the Work page's folded Taste section",
+      "action": "click",
       "text": "Taste",
       "exact": false
     },
@@ -39,7 +38,7 @@
       "kind": "browser",
       "name": "the card shows the evidence of the proof that ran",
       "action": "expectText",
-      "text": "e2e:taste-feed · 1 executed",
+      "text": "taste-feed · 1 executed",
       "exact": false
     },
     {

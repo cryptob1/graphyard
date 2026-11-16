@@ -18,6 +18,8 @@ export function tasteFollowUp(delivered: Pick<Work, 'key' | 'title' | 'policy'> 
   const e2e = delivered.criteria?.flatMap(criterion => criterion.proofs).filter(proof => proof.startsWith('e2e:')) ?? [];
   return {
     title: `Taste send-back of ${delivered.key}: ${note}`.slice(0, 200),
+    why: 'The owner tasted this delivery and asked for the change its note names.',
+    simplest: 'A follow-up item reuses the delivery loop rather than reopening the merge.',
     description: `Sent back from the Work page's Taste feed by ${by} at ${at}. The note is this item's reason:\n\n${note}\n\nProposed master lesson carrying the note — keep it with \`graphyard master lesson add "${note.slice(0, 280)}"\` or drop it by recording nothing.`,
     type: 'bug' as const, priority: 1, summary: `Sent back from Taste: ${note}`.slice(0, 400), dependencies: [], systemDriven: true,
     criteria: [{ id: 'AC-1', text: `The send-back note is addressed: ${note}`.slice(0, 2000), proofs: ['unit:taste-follow-up', ...(e2e.length ? [...new Set(e2e)] : ['e2e:create-work-item'])] }],
