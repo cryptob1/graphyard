@@ -20,7 +20,7 @@ async function wrapperExiting(body: string) {
 }
 const failure = async (body: string) => {
   const { bwrap, directory } = await wrapperExiting(body);
-  return spawnHeadless(bwrap, [], { cwd: directory, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 60_000, run: join(directory, 'run') }).then(() => assert.fail('the run failed'), (error: Error) => error.message);
+  return spawnHeadless(bwrap, [], { cwd: directory, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 60_000, run: join(directory, 'run'), signal: new AbortController().signal, detached: new AbortController().signal }).then(() => assert.fail('the run failed'), (error: Error) => error.message);
 };
 
 test('integration:headless-failure-summary — a run that exits inside bwrap with its error on stdout names the runtime\'s own error', async () => {
