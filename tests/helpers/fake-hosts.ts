@@ -8,7 +8,7 @@
 // line gives a plain shell. Key material is never read, exactly as tests/helpers/ssh-origin.ts does
 // not. A host with no directory refuses the connection exactly as OpenSSH words it.
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { temporaryDirectory } from './temp-dirs.js';
 import { hostPrepareScript, hostUser } from '../../src/hosts.js';
@@ -23,6 +23,10 @@ export interface FakeHost {
   dockerGroup?: boolean;
   /** the prepared rootless Docker does not answer, as one installed but not running. */
   docker?: boolean;
+  /** GY-3419: the host has neither dockerd-rootless-setuptool.sh nor slirp4netns installed; the printed script must fetch the static extras itself. */
+  rootlessExtrasMissing?: boolean;
+  /** with rootlessExtrasMissing: the served slirp4netns checksum is wrong, so the script must refuse. */
+  tamperSlirpChecksum?: boolean;
 }
 
 /** The operator public key the fixture authorizes on every host (the wrapper reads no key material). */
@@ -34,6 +38,7 @@ const restrictLine = () => `restrict,command="graphyard-host-shim" ${fixturePubl
 /** The user's own Docker, as dockerd-rootless-setuptool.sh leaves it: it answers only through its own socket. */
 const rootlessDockerTemplate = (dir: string) => `#!/bin/sh
 D='${dir}'
+case "$1" in --version) echo "Docker version 29.10.0, build graphyard-fixture" ;; esac
 case "$DOCKER_HOST" in unix://*) [ -e "$D\${DOCKER_HOST#unix://}" ] || { echo "Cannot connect to the Docker daemon at $DOCKER_HOST" >&2; exit 1; } ;; esac
 case "$1" in info) exit 0 ;; ps) printf 'a1\nb2\n' ;; esac
 `;
@@ -42,7 +47,10 @@ case "$1" in info) exit 0 ;; ps) printf 'a1\nb2\n' ;; esac
 const systemDocker = "#!/bin/sh\ncase \"$1\" in info) exit 0 ;; ps) printf 'a1\\nb2\\n' ;; esac\n";
 
 /** Stand-ins for the privileged commands the printed script calls, each acting on the host's fixture root. */
-const standins = (dir: string, name: string): Record<string, string> => ({
+const standins = (dir: string, host: FakeHost): Record<string, string> => ({
+  docker: `#!/bin/sh
+case "$1" in --version) echo "Docker version 29.10.0, build graphyard-fixture" ;; info) exit 0 ;; ps) printf 'a1\nb2\n' ;; *) exit 1 ;; esac
+`,
   useradd: `#!/bin/sh
 D='${dir}'
 name=
@@ -138,7 +146,11 @@ exec /usr/bin/grep "$@"
 exit 0
 `,
   hostname: `#!/bin/sh
-echo '${name}'
+echo '${host.name}'
+`,
+  slirp4netns: `#!/bin/sh
+[ "$1" = --version ] && echo "slirp4netns version v1.3.7 (stand-in)"
+exit 0
 `,
   sudo: `#!/bin/sh
 D='${dir}'
@@ -149,7 +161,9 @@ export HOME="$D/home/$user" USER="$user" LOGNAME="$user" FAKE_SSH_USER="$user"
 echo "sudo $full" >> "$D/log"
 exec "$@"
 `,
-  'dockerd-rootless-setuptool.sh': `#!/bin/sh
+  // GY-3419: a host without the rootless tools installs no setuptool stand-in; the curl stand-in
+  // that serves the downloads is added by runPrepareScript with its serve directory.
+  ...(host.rootlessExtrasMissing ? {} : { 'dockerd-rootless-setuptool.sh': `#!/bin/sh
 D='${dir}'
 [ "$1" = install ] || exit 0
 mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
@@ -157,8 +171,54 @@ mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
 cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
 /usr/bin/chmod 755 "$HOME/bin/docker"
 echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
-`,
+` }),
 });
+
+/** GY-3419: the fixture's answer to the downloads the printed script makes when the host lacks the rootless tools. */
+const slirpFixture = `#!/bin/sh
+[ "$1" = --version ] && echo "slirp4netns version v1.3.7 (fixture)"
+exit 0
+`;
+const rootlessKitFixture = `#!/bin/sh
+[ "$1" = --version ] && echo "rootlesskit version 0.17.0 (fixture)"
+exit 0
+`;
+/** The `curl` stand-in: records every URL and serves the fixture extras tarball, slirp4netns binary and checksums. */
+const curlStandIn = (host: string, serve: string) => `#!/bin/sh
+for last; do :; done
+out= prev=
+for arg in "$@"; do [ "$prev" = -o ] && out="$arg"; prev="$arg"; done
+echo "curl $last" >> ${JSON.stringify(join(host, 'log'))}
+case "$last" in
+  */docker-rootless-extras-*.tgz) cat ${JSON.stringify(join(serve, 'docker-rootless-extras.tgz'))} > "$out" ;;
+  */slirp4netns-*) cat ${JSON.stringify(join(serve, 'slirp4netns'))} > "$out" ;;
+  */SHA256SUMS) cat ${JSON.stringify(join(serve, 'SHA256SUMS'))} > "$out" ;;
+  *) echo "curl: (6) Could not resolve host: ${'$'}{last#https://}" >&2; exit 6 ;;
+esac
+`;
+
+/** Build the fixture downloads a host without the rootless tools is served. */
+async function buildServeDirectory(dir: string, host: FakeHost) {
+  const serve = join(dir, 'serve'), staging = join(serve, 'staging', 'docker-rootless-extras');
+  await mkdir(staging, { recursive: true });
+  // The setuptool the tarball carries behaves exactly as the installed stand-in does.
+  await executable(join(staging, 'dockerd-rootless-setuptool.sh'), `#!/bin/sh
+D='${dir}'
+[ "$1" = install ] || exit 0
+mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
+: > "$D$XDG_RUNTIME_DIR/docker.sock"
+cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
+/usr/bin/chmod 755 "$HOME/bin/docker"
+echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
+`);
+  await executable(join(staging, 'dockerd-rootless.sh'), '#!/bin/sh\nexec dockerd "$@"\n');
+  await executable(join(staging, 'rootlesskit'), rootlessKitFixture);
+  await executable(join(serve, 'slirp4netns'), slirpFixture);
+  execFileSync('tar', ['czf', join(serve, 'docker-rootless-extras.tgz'), '-C', join(serve, 'staging'), 'docker-rootless-extras']);
+  const sum = execFileSync('sha256sum', [join(serve, 'slirp4netns')], { encoding: 'utf8' }).split(/\s+/)[0]!;
+  await writeFile(join(serve, 'SHA256SUMS'), `${host.tamperSlirpChecksum ? `0${sum}` : sum}  slirp4netns-${execFileSync('uname', ['-m'], { encoding: 'utf8' }).trim()}\n`);
+  return serve;
+}
 
 /** Run the printed script itself against the stand-in host: gy-compute, linger, subuid, shim, key, rootless Docker. */
 async function runPrepareScript(host: FakeHost, dir: string) {
@@ -170,7 +230,9 @@ async function runPrepareScript(host: FakeHost, dir: string) {
     writeFile(join(dir, 'etc', 'subgid'), ''),
     writeFile(join(dir, 'standins', 'rootless-docker-template'), rootlessDockerTemplate(dir)),
   ]);
-  for (const [name, text] of Object.entries(standins(dir, host.name))) await executable(join(dir, 'standins', name), text);
+  const entries = standins(dir, host);
+  if (host.rootlessExtrasMissing) Object.assign(entries, { curl: curlStandIn(dir, await buildServeDirectory(dir, host)) });
+  for (const [name, text] of Object.entries(entries)) await executable(join(dir, 'standins', name), text);
   // The one rewrite of the printed script: the test is not root, so the shim's /usr/local/bin lands
   // inside the fixture. Every other line runs exactly as printed.
   const script = hostPrepareScript(fixturePublicKey).replaceAll('/usr/local/bin/graphyard-host-shim', join(dir, 'usr-local-bin', 'graphyard-host-shim'));
@@ -191,6 +253,8 @@ export interface FakeHosts {
   home: (name: string, user?: string) => string;
   /** What running the printed script printed on that host. */
   prepareOutput: (name: string) => string;
+  /** Run the printed script on a prepared host again (GY-3419): what it printed this time. */
+  prepare: (name: string) => Promise<string>;
 }
 
 export async function fakeHosts(label: string, hosts: FakeHost[]): Promise<FakeHosts> {
@@ -199,6 +263,7 @@ export async function fakeHosts(label: string, hosts: FakeHost[]): Promise<FakeH
   // This machine answers with the same stand-in Docker.
   await executable(join(bin, 'docker'), systemDocker);
   const outputs = new Map<string, string>();
+  const byName = new Map(hosts.map(host => [host.name, host]));
   for (const host of hosts) {
     const dir = join(root, 'hosts', host.name);
     if (host.unrestricted) {
@@ -239,5 +304,6 @@ case "$line" in
     ;;
 esac
 `);
-  return { root, bin, publicKey: fixturePublicKey, host: (name: string) => join(root, 'hosts', name), home: (name: string, user = hostUser) => join(root, 'hosts', name, 'home', user), prepareOutput: (name: string) => outputs.get(name) ?? '' };
+  return { root, bin, publicKey: fixturePublicKey, host: (name: string) => join(root, 'hosts', name), home: (name: string, user = hostUser) => join(root, 'hosts', name, 'home', user), prepareOutput: (name: string) => outputs.get(name) ?? '',
+    prepare: async (name: string) => runPrepareScript(byName.get(name)!, join(root, 'hosts', name)) };
 }
