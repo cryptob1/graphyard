@@ -157,7 +157,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       throw new HostDroppedError(host.name, error instanceof Error ? error.message.slice(0, 500) : String(error));
     }
   };
-  const local = async (command: string, args: string[], env?: NodeJS.ProcessEnv) => String(await input.run(command, args, { timeoutMs: remaining(), ...(env ? { env } : {}) })).trim();
+  const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
   const ready = new Map<string, { host: ShardHost; prepared: Promise<{ directory: string; image: string }> }>();
   const prepare = async (host: ShardHost) => {
     // A fresh run directory (run directories a killed trial left over a day ago go first), and the mirror's last commit.
