@@ -151,16 +151,16 @@ const freePort = () => new Promise<number>((resolve, reject) => { const server =
 
 /**
  * A real OpenSSH server on 127.0.0.1 for this user, whose only key may run the shim with `home` as the
- * host's own folder (restrict,command=…, as `graphyard host prepare` writes it), and an `ssh` on `bin`
+ * host's own folder and `hostBin` (its Docker) first on PATH (restrict,command=…, as `graphyard host prepare` writes it), and an `ssh` on `bin`
  * that reaches it as USER@127.0.0.1 with that key. `kill` drops the host mid-run.
  */
-export async function sshdHost(root: string, shim: string, home: string, bin: string) {
+export async function sshdHost(root: string, shim: string, home: string, hostBin: string, bin: string) {
   const dir = join(root, 'sshd'), port = await freePort();
   await mkdir(dir, { recursive: true }); await mkdir(home, { recursive: true });
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(dir, 'host')]);
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(dir, 'client')]);
   const key = (await readFile(join(dir, 'client.pub'), 'utf8')).trim();
-  await writeFile(join(dir, 'authorized_keys'), `restrict,command="GRAPHYARD_HOST_FLOOR_GB=0 PATH=${bin}:/usr/bin:/bin ${shim} --home ${home}" ${key}\n`);
+  await writeFile(join(dir, 'authorized_keys'), `restrict,command="GRAPHYARD_HOST_FLOOR_GB=0 PATH=${hostBin}:/usr/bin:/bin ${shim} --home ${home}" ${key}\n`);
   await writeFile(join(dir, 'sshd_config'), [`Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${join(dir, 'host')}`, `AuthorizedKeysFile ${join(dir, 'authorized_keys')}`,
     `PidFile ${join(dir, 'pid')}`, 'UsePAM no', 'StrictModes no', 'PasswordAuthentication no', 'KbdInteractiveAuthentication no', 'PermitUserEnvironment no', ''].join('\n'));
   const sshd = execFileSync('sh', ['-c', 'command -v sshd || echo /usr/sbin/sshd'], { encoding: 'utf8' }).trim();
