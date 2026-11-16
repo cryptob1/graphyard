@@ -1,3 +1,4 @@
+import { featureMapCaseId, featureMapCase, readAppOnboarding } from '../app-feature-check.js';
 // Concern: GY-2965 — the merge trial serves the head and runs its bound E2E cases (AC-2).
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -102,11 +103,15 @@ export async function runTrialE2eCases(input: {
   const pending: string[] = [];
   for (const proof of input.proofs) {
     const name = proof.slice('e2e:'.length);
-    if (await input.holds(`e2e/cases/${name}.json`)) pending.push(proof);
+    if (name === featureMapCaseId || await input.holds(`e2e/cases/${name}.json`)) pending.push(proof);
     else cases.push({ proof, case: name, executed: 0, failed: 1, missing: true });
   }
   if (!pending.length) return cases;
   const declared = declaredServe(input.worktree);
+  if (pending.includes(`e2e:${featureMapCaseId}`)) {
+    const app = readAppOnboarding(input.worktree);
+    if (app.fault) return [...cases, ...pending.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1, failingStep: app.fault }))];
+  }
   // GY-3145: a case delivery.cases binds to an application runs against it; every other case runs
   // against `e2e.serve`, or, with no serve declared, against the only application.
   const groups = new Map<string, { target: ServedApplication; proofs: string[]; origin?: string }>();
@@ -131,7 +136,7 @@ export async function runTrialE2eCases(input: {
       cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: noServeRefusal });
       continue;
     }
-    const bound = declared.applications.find(application => application.id === declared.bindings[name]);
+    const bound = name === featureMapCaseId ? undefined : declared.applications.find(application => application.id === declared.bindings[name]);
     const fallback = declared.serve ? null : declared.applications.length === 1 ? declared.applications[0]! : null;
     const application = bound ?? fallback;
     const id = application ? `application:${application.id}` : declared.serve && !declared.bindings[name] ? 'serve' : null;
@@ -191,7 +196,7 @@ export async function runTrialE2eGroup(target: ServedApplication, proofs: readon
     const loaded: { proof: string; caseFile: CaseFile }[] = [];
     for (const proof of proofs) {
       const name = proof.slice(4), file = `e2e/cases/${name}.json`;
-      try { loaded.push({ proof, caseFile: { file, definition: parseCase(file, await readFile(join(input.worktree, file), 'utf8')) } }); }
+      try { loaded.push({ proof, caseFile: name === featureMapCaseId ? featureMapCase(input.worktree) : { file, definition: parseCase(file, await readFile(join(input.worktree, file), 'utf8')) } }); }
       catch (error) { cases.push({ proof, case: name, executed: 0, failed: 1, failingStep: error instanceof Error ? error.message : String(error) }); }
     }
     if (loaded.length) {

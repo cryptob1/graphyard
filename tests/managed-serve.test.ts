@@ -230,7 +230,7 @@ test('unit:tests/managed-serve.test.ts — a repository declaring no node applic
   assert.equal(readServeRecord(serveRecordPath(root)), null, 'nothing was recorded');
 
   assert.deepEqual((await statusOf(root, 'owner/game')).serving,
-    { unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, serve: null });
+    { onboarding: { onboarded: false, fault: 'Declare e2e.serve in graphyard.json to start the real application.', features: [] }, unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, serve: null });
   // doctor prints no serve line for a repository that declares nothing.
   const doctorInput = { root, env: {}, status: null, reachable: true, environments: '/nonexistent', sandbox: () => null };
   assert.equal((await setupFromZeroChecks(doctorInput)).find(check => check.id === 'serve'), undefined);

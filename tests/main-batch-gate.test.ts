@@ -115,7 +115,7 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   assert.ok(loop.trials.filter(entry => entry.commit !== tip).every(entry => entry.commit === verified));
   const [trial] = gated;
   assert.equal(trial!.commit, tip, 'the gate runs on the main tip');
-  assert.deepEqual(trial!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:smoke'], 'the bound cases of every merged item and the gate.core cases (create-work-item and the smoke)');
+  assert.deepEqual(trial!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:smoke'], 'the bound cases of every merged item and the gate.core cases (create-work-item and the smoke)');
   assert.deepEqual([...trial!.files].sort(), ['src/f1.ts', 'src/f2.ts', 'src/f3.ts'], 'the affected selection runs over the files the batch changed');
   const record = readGateRecord(gateRecordPath(coordinator))!;
   assert.equal(record.verified, tip, 'a passing gate records the tip verified');
@@ -129,7 +129,7 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   const whole = reads(coordinator);
   const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
   assert.equal((await runGate(batchGatePorts({ ...whole.value, git: whole.value.git! }, work), fits)).outcome, 'verified');
-  assert.deepEqual(whole.trials[0]!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:other', 'e2e:smoke'], 'the whole E2E catalog');
+  assert.deepEqual(whole.trials[0]!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:other', 'e2e:smoke'], 'the whole E2E catalog');
 
   // The deploy watch serves the verified commit, never the fetched main tip.
   const deployed: string[] = [];
@@ -195,7 +195,7 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
   await second!.gate;
   await second!.diagnostics;
   assert.equal(fetches, 1, 'the adopted batch fetches nothing: no new run is cut on the newer main');
-  assert.deepEqual(onTip.map(entry => entry.proofs.length), [5, 1, 1], 'the batch\'s whole run ran once, then only the interrupted re-run of the failing check');
+  assert.deepEqual(onTip.map(entry => entry.proofs.length), [6, 1, 1], 'the batch\'s whole run ran once, then only the interrupted re-run of the failing check');
   const adopted = readGateRecord(gateRecordPath(coordinator))!;
   assert.equal(adopted.verified, tip, 'the adopted batch verifies its own candidate tip, not the newer main');
   assert.equal(adopted.inFlight, null);
@@ -839,4 +839,22 @@ test('e2e:diagnostic-failure-details — a scheduled diagnostic through batchGat
   delete older.diagnosticFailures;
   await writeGateRecord(file, older);
   assert.deepEqual(gateSummary(readGateRecord(file))!.diagnosticFailures, []);
+});
+
+// A project that was never onboarded needs a repair, not a revert of an unrelated merge.
+test('integration:real-app-onboarding — a pre-existing feature-map fault holds; a new regression reverts', async () => {
+  const verified = sha(1), check = 'e2e:graphyard-feature-map';
+  for (const alreadyBroken of [true, false]) {
+    const { ports, reverted } = gatePorts([landing(2)], (commit, name) => name === check && (alreadyBroken || commit !== verified));
+    ports.core = async () => ['graphyard-feature-map'];
+    const record = bootstrapGate(repository, verified);
+    const result = await runGate(ports, record);
+    assert.equal(result.outcome, alreadyBroken ? 'held' : 'reverted');
+    assert.equal(record.verified, verified);
+    assert.deepEqual(reverted, alreadyBroken ? [] : ['GY-2']);
+    if (alreadyBroken) {
+      assert.match(record.held!.reason, /Master fault: owner\/project/);
+      assert.equal((await runGate(ports, record)).outcome, 'idle', 'one standing fault until main changes');
+    }
+  }
 });

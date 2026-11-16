@@ -32,6 +32,7 @@ test('e2e:status-placeholder-serve-from-main — the Placeholder serve line foll
 
   // Main declares the application's serve; the checkout's working tree stays at the onboarding commit.
   const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
+  config.featureMap = [{ name: 'Home', url: '/', traps: [] }];
   config.e2e.serve = { command: 'sh scripts/serve.sh 127.0.0.1:43911', url: 'http://127.0.0.1:43911/', readySeconds: 30 };
   await writeFile(join(root, 'graphyard.json'), JSON.stringify(config));
   git(root, 'commit', '-q', '-am', 'declare the serve');

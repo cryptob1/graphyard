@@ -33,6 +33,7 @@ const baseStatus = (loop: boolean) => ({
   githubRepository: 'acme/shop',
   mergeWriter: { merger: 'control-plane' },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-b'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: true }, { name: 'claude-b', enabled: true, loggedIn: true, eligible: true }] },
+  serving: { onboarding: { onboarded: true, fault: null, features: [] } },
   setup: { protection: 'checks', loop },
 });
 const named = (w: QuotedWorld, args: string[]) => w.calls.filter(call => call.args.join(' ') === args.join(' '));

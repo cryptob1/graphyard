@@ -159,6 +159,7 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
     fleet: fleetReady
       ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }
       : { roles: [], accounts: [] },
+    serving: { onboarding: { onboarded: true, fault: null, features: [] } },
     setup: { protection: 'checks', loop },
   });
   const deps: UpDependencies = {

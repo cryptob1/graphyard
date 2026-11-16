@@ -29,6 +29,8 @@ npx @cryptob1/graphyard up --repo OWNER/NAME
 
 The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
 
+A project is onboarded when main declares its real application serve and a feature map in `graphyard.json`. Batch and deploy checks exercise that map; missing declarations and placeholder serves are faults for the master to fix. Setup shows the current state.
+
 ## Where things run
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
