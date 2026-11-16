@@ -15,7 +15,9 @@ export interface ProbedHome { name: string; kind: string; home: string; plan?: s
 /** What a usage reader reports of one account home: its login, the provider's usage windows, and a shared plan reading when it took one. */
 export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading;
   /** Why a logged-out reading is logged out, when the probe can say more than that. */
-  loggedOutReason?: string }
+  loggedOutReason?: string;
+  /** GY-3414: why a logged-in account still cannot run (its configured model is unavailable). */
+  unready?: string }
 /**
  * Everything Graphyard knows of one runtime kind. Every field is optional but `kind`: a kind with
  * no `recipe` is still a kind profiles may name, and is refused at launch unless an agent-registry
@@ -67,25 +69,40 @@ const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\
 /**
  * GY-3414: an OpenCode account is logged in only when the runtime itself lists an authenticated
  * provider for its home: an `opencode/auth.json` that holds a key OpenCode does not take ran on the
- * free fallback model and failed every review while the file alone read as logged in.
+ * free fallback model and failed every review while the file alone read as logged in. It is ready
+ * only when `opencode models` lists its configured model: an installed OpenCode that dropped the
+ * provider falls back to the free model too.
  */
 async function opencodeAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<AccountReading> {
   const reading = await zaiAccount(environment, probe, plan);
-  const list = probe.opencodeAuth === undefined ? (underTestRunner() ? null : opencodeAuthList) : probe.opencodeAuth;
+  const run = (probed: EnvironmentProbe['opencodeAuth'], args: string[]) => probed === undefined ? (underTestRunner() ? null : (home: string) => opencodeCommand(home, args)) : probed;
+  const list = run(probe.opencodeAuth, ['auth', 'list']), models = run(probe.opencodeModels, ['models']);
+  if (!reading.loggedIn) return reading;
   // A declared key file reaches OpenCode as an environment variable at launch, never through its store.
-  if (!reading.loggedIn || !list || environment.keyFile) return reading;
-  const listed = await list(environment.home).then(output => output.split('\n').some(line => line.trim() && !/no authenticated integrations/i.test(line)) ? null : 'opencode auth list shows no authenticated provider',
-    (error: Error) => `opencode auth list failed: ${error.message.split('\n')[0]!.slice(0, 200)}`);
-  return listed ? { loggedIn: false, usage: [], note: null, loggedOutReason: listed } : reading;
+  if (list && !environment.keyFile) {
+    const listed = await list(environment.home).then(output => output.split('\n').some(line => line.trim() && !/no authenticated integrations/i.test(line)) ? null : 'opencode auth list shows no authenticated provider',
+      (error: Error) => `opencode auth list failed: ${error.message.split('\n')[0]!.slice(0, 200)}`);
+    if (listed) return { loggedIn: false, usage: [], note: null, loggedOutReason: listed };
+  }
+  const model = environment.model;
+  if (!models || !model) return reading;
+  const available = await models(environment.home).then(output => output.split('\n').map(line => line.trim()).some(line => line === model || line.startsWith(`${model}/`)), () => false);
+  return available ? reading : { ...reading, unready: `model unavailable: ${model}` };
 }
-/** The providers OpenCode itself holds for a home: `--standalone`, or the host's background service answers with its own. */
-export const opencodeAuthList = async (home: string) => String(await defaultChildRun(realRuntimeBinary('opencode'), ['auth', 'list', '--standalone'], { env: { ...process.env, XDG_DATA_HOME: home }, timeoutMs: 30_000 }));
-/** GY-3329: where cursor-agent keeps its sign-in on a host with no desktop keyring: `$XDG_CONFIG_HOME/cursor/auth.json`, falling back to `$HOME/.config/cursor/auth.json`. It never reads its sign-in from `CURSOR_CONFIG_DIR`, which holds the profile in cli-config.json. */
+/** What OpenCode itself answers for a home: `--standalone`, or the host's background service answers with its own login. */
+const opencodeCommand = async (home: string, args: string[]) => String(await defaultChildRun(realRuntimeBinary('opencode'), [...args, '--standalone'], { env: { ...process.env, XDG_DATA_HOME: home }, timeoutMs: 30_000 }));
+export const opencodeAuthList = (home: string) => opencodeCommand(home, ['auth', 'list']);
+export const opencodeModels = (home: string) => opencodeCommand(home, ['models']);
+/** GY-3329: where cursor-agent keeps its sign-in on a host with no desktop keyring: `$XDG_CONFIG_HOME/cursor/auth.json`. */
 export const cursorSignInFile = 'cursor/auth.json';
-/** Cursor keeps its profile in cli-config.json and its sign-in in `cursor/auth.json` under the account's XDG config home (GY-3329) — the file a confined session, with a private HOME and no keyring, actually authenticates with. It exposes no quota. */
+/** GY-3414: the file cursor-agent records its login in, under `CURSOR_CONFIG_DIR`: its `authInfo` names the signed-in user. */
+export const cursorLoginFile = 'cli-config.json';
+/** Cursor is logged in when cli-config.json in the account home names a signed-in user, or a keyring-less sign-in sits at `cursor/auth.json` (GY-3329). It exposes no quota. */
 async function cursorAccount(environment: ProbedHome): Promise<AccountReading> {
+  const config = await readFile(resolve(environment.home, cursorLoginFile), 'utf8').then(text => JSON.parse(text), () => null);
   const signIn = await readFile(resolve(environment.home, cursorSignInFile), 'utf8').then(text => text.trim(), () => '');
-  return { loggedIn: !!signIn, usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+  const loggedIn = !!(config?.authInfo?.userId || config?.authInfo?.email) || !!signIn;
+  return { loggedIn, usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit', ...(loggedIn ? {} : { loggedOutReason: `${resolve(environment.home, cursorLoginFile)} names no signed-in user` }) };
 }
 /**
  * GY-3329: the login-home variables an account's home is applied to beyond its home variable.

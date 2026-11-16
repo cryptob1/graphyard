@@ -3,13 +3,14 @@ import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { launchRecipe } from './harness.js';
 import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
-import { runtimeAdapter, cursorSignInFile, accountHomeEnvironment } from './master/runtimes.js';
+import { runtimeAdapter, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
 import { readCredentialFile } from './private-file.js';
+import { masterConfinementVariable } from './master/confinement.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
@@ -153,21 +154,26 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
  */
 export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
-  if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
+  const unknown = { quota: { loggedIn: null, state: 'unknown' as const, usage: [], resetsAt: null, reason: null }, health: null };
+  if (!home) return unknown;
+  // GY-3414: a confined session (the master's) masks every other account's home with an empty,
+  // unreadable tmpfs, so what it reads there is unknown, never a logout.
+  if (await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES')) return unknown;
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
     // A Pi account is read through the OpenCode probe's files only: `opencode auth list` knows nothing of Pi's login.
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable, model }, runtime.launch.kind === 'pi' ? { ...probe, opencodeAuth: null } : probe);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable, model }, runtime.launch.kind === 'pi' ? { ...probe, opencodeAuth: null, opencodeModels: null } : probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     // No Z.AI credential found for a Pi account is not proof it is logged out: Pi may hold another provider's login,
     // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
-    return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
+    // A logged-in account that is not ready (its model is unavailable) is held like a logged-out one, with its reason (GY-3414).
+    return { health, quota: { loggedIn: health.loggedIn && health.quota !== 'exhausted' ? health.healthy : health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity } };
   }
-  if (!runtime.launch.loginFile) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
-  const loggedIn = await access(resolve(home, runtime.launch.loginFile)).then(() => true, () => false);
-  return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
+  if (!runtime.launch.loginFile) return unknown;
+  const file = resolve(home, runtime.launch.loginFile), loggedIn = await access(file).then(() => true, () => false);
+  return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in: ${file} does not exist${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
 /** The smoke test running for each account in this process, keyed by control plane, host, account and registry revision. */
@@ -529,7 +535,7 @@ export const connectProviders: readonly ConnectProvider[] = [
     // GY-3329: the login also runs with XDG_CONFIG_HOME on the account home, so on a host with no
     // desktop keyring the sign-in lands at ACCOUNT_HOME/cursor/auth.json, where a confined session
     // reads it — never in the operator's own ~/.config.
-    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: cursorSignInFile,
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: cursorLoginFile,
     smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
