@@ -7,6 +7,6 @@
   "required": false,
   "steps": [
     { "kind": "command", "name": "create refusal, revision, creators and prompts", "run": "node --import tsx tests/helpers/run-tests.ts tests/item-why-and-simplest.test.ts", "timeoutSeconds": 240 },
-    { "kind": "command", "name": "file through the create box and read both sentences on the page and in the Work list", "run": "npm run test:browser -- browser-tests/item-why-and-simplest.spec.ts", "timeoutSeconds": 240 }
+    { "kind": "command", "name": "file through the create box and read both sentences on the page and in the Work list", "run": "npm run test:browser -- browser-tests/item-why-and-simplest.spec.ts", "timeoutSeconds": 360 }
   ]
 }

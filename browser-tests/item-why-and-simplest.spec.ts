@@ -75,7 +75,9 @@ test('e2e:item-why-and-simplest — the create box files both sentences, the ite
     await expect(itemPage.locator('h1')).toHaveText('Older item', settled);
     await expect(itemPage.locator('h1[data-why="true"], [data-simplest]')).toHaveCount(0);
   } finally {
-    await page.unrouteAll({ behavior: 'wait' });
+    // GY-3362: 'wait' hung to the test timeout when a dashboard poll was in flight at teardown; the handler
+    // already tolerates a closed server.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
     await f.close();
   }
 });

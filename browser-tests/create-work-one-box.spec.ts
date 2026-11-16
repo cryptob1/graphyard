@@ -19,11 +19,9 @@ const waiting = 'Waiting on the master: writing the criteria';
 const lead = { why: 'Owners find exports where they look.', simplest: 'One link on the page they already use.' };
 const criteria = [{ id: 'AC-1', text: 'The requested change works through the dashboard', proofs: ['e2e:create-work-one-box'] }];
 
-test('e2e:create-work-one-box — title-only filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
-  // Embedded Postgres setup alone takes ~40 s on a loaded host before the first page step (GY-3293 trial timed out at 120 s;
-  // the GY-3382 trial's full-suite browser step, every database file starting its cluster beside the browsers, outran 180 s
-  // while the same test passes in seconds unloaded). The trial's whole-suite budget (20 min) leaves room for the slower bound.
-  test.setTimeout(300_000);
+test('e2e:create-work-one-box — one-box filing waits for master requirements, then ordinary release and dispatch', async ({ page }) => {
+  // The body takes ~10 s on two loaded cores (GY-3362 trace); the headroom is for a busy trial host.
+  test.setTimeout(180_000);
   setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
   const store = await withDatabase('create-work-one-box'); await store.init();
   const engine = new Engine(store, 300, 'owner/project'); engine.gitRunner = null;

@@ -12,7 +12,10 @@
 // fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
 // merge order: the last item of the smallest failing prefix is reverted through the serve-revert
 // path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
-// commit served and wakes the master. The full suite and catalog run daily against the verified
+// commit served and wakes the master; a hold for timeouts is the host's, not the change's, so after
+// a cool-off it expires and the gate reruns its tip on its own, while a hold for a failing case
+// waits for main to move (GY-3383), and any held gate is one master status attention line. The
+// full suite and catalog run daily against the verified
 // commit as diagnostics that file items and never block; the three preview cases run with them on
 // the host, the verified commit in its own scratch install (GY-3193), and each one's last run and
 // verdict stays on the record for master status.
@@ -27,6 +30,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { EnvironmentFault } from './app-environments.js';
+import { formatAge } from './model/duration.js';
 import type { Work } from './model.js';
 import type { ServeLanding } from './merge-writer/serve-revert.js';
 import type { PreviewCaseRun } from './merge-writer/served-previews.js';
@@ -41,6 +45,8 @@ export const catalogBudgetMs = gateLimitMs / 2;
 export const gateRunsWindow = 5, gateRunsMaxAgeMs = 7 * 24 * 60 * 60_000;
 /** The merges the revert rate reads, and the rate above which the master is woken. */
 export const revertRateWindow = 20, revertRateLimit = 1 / 5;
+/** GY-3383: how long a gate held for two timeouts cools off before the gate reruns its tip on its own. */
+export const gateHoldCoolOffMs = 30 * 60_000;
 
 /** One merge the gate judged: its landing commit, its item, and whether the gate reverted it. */
 export interface GateMerge { sha: string; item: string; reverted: boolean }
@@ -82,7 +88,7 @@ export interface GateRecord {
   published?: string | null;
   /** Last successfully deployed commit handed to the release workflow; retained across loop restarts. */
   releaseTagged?: string | null;
-  /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
+  /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves — except a timeout hold, which expires after a cool-off and reruns its tip (GY-3383). */
   held: { tip: string; reason: string; at: string } | null;
   /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
   results: Record<string, Record<string, boolean>>;
@@ -255,7 +261,8 @@ function gatedCases(flight: GateRecord['inFlight']): Record<string, 'pass' | 'fa
 
 /**
  * One gate of the batch from the last verified commit to the main tip, updating `record` in place.
- * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle. A batch a
+ * Nothing to gate (main is the verified commit, or a held tip has not moved and, for a timeout
+ * hold, its cool-off has not passed) answers idle. A batch a
  * previous gate cut and never settled is adopted as it was cut — the same candidate tip, files and
  * checks, its finished steps' results with it — so a loop restart never recuts a batch onto a newer
  * tip: merges that landed meanwhile ride the next batch.
@@ -284,8 +291,13 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   // since the cut stay outside the batch and wait for the next one.
   const adopted = record.inFlight && record.inFlight.tip !== verified ? record.inFlight : null;
   const tip = adopted?.tip ?? (await ports.fetch()).toLowerCase();
-  if (tip === verified || record.held?.tip === tip) return { outcome: 'idle' };
-  if (record.held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
+  if (tip === verified) return { outcome: 'idle' };
+  // GY-3383: a hold for a failing case waits for main to move; a hold for timeouts is the host's,
+  // not the change's — once its cool-off has passed it expires and the gate reruns the held tip
+  // itself, so a slow host never strands a project on its last verified commit for good.
+  const held = record.held;
+  if (held && held.tip === tip && (!timeoutHold(held) || ports.now() - Date.parse(held.at) < gateHoldCoolOffMs)) return { outcome: 'idle' };
+  if (held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
   const at = () => new Date(ports.now()).toISOString();
   const landings = await ports.landings(verified, tip);
   // The cut is the cut: an adopted batch keeps the files and checks it was cut with, re-derived only
@@ -461,6 +473,26 @@ export function gateCauses(record: GateRecord | null): { key: string; detail: st
     ...(record.held ? [{ key: 'batch-gate', detail: `Batch gate held: ${record.held.reason}` }] : []),
     ...(rate.rate > revertRateLimit ? [{ key: 'revert-rate', detail: `Revert rate ${rate.reverted}/${rate.merges} over the last ${revertRateWindow} merges is above 1 in 5` }] : []),
   ];
+}
+
+/**
+ * GY-3383: a hold raised for timeouts is the host's, not the change's — it expires and its tip is
+ * gated again after a cool-off — while a hold for a failing case waits for main to move. Read from
+ * the reason's words, so a hold a loop before this change wrote still counts.
+ */
+export const timeoutHold = (held: GateRecord['held']): boolean => !!held && /timed out twice/.test(held.reason);
+
+/** GY-3383: any held gate is one master status attention line naming the hold and its reason, with what clears it. */
+export function gateHoldAttention(record: Pick<GateRecord, 'held'> | null, now: number): { subject: string; text: string; next: string }[] {
+  const held = record?.held;
+  if (!held) return [];
+  return [{
+    subject: 'the batch gate',
+    text: `The batch gate is held on ${held.tip.slice(0, 12)} (for ${formatAge(held.at, now)}): ${held.reason}`,
+    next: timeoutHold(held)
+      ? `A timeout is the host, not the change: the gate reruns the held tip on its own once its ${gateHoldCoolOffMs / 60_000}-minute cool-off passes; look at what loads the host only if it times out again`
+      : 'The hold clears when a merge moves main off the held tip: repair what the reason names',
+  }];
 }
 
 /** The commit the deploy watch serves for `owner`: the verified one; null while no gate record names that repository (the loop writes it at rollout). */
