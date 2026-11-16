@@ -9,7 +9,7 @@ import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/st
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
 import { cpuWaiting } from '../daemon/cpu-pressure.js';
-import { profileHealth } from '../daemon/sessions.js';
+import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { heavyDrainLine, readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
 import { worktreeRoot } from '../install/worktree-root.js';
@@ -152,6 +152,12 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
   const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
+  // GY-3413: an item whose worker launch failed the same way twice waits out its backoff, one line naming the reason and the retry.
+  const launchFailures = (state ? repeatedLaunchFailures(state, now) : []).flatMap(entry => {
+    const item = open.find(candidate => candidate.id === entry.id);
+    return item ? [{ subject: item.key, text: `${item.key}'s worker launch failed ${entry.failures} times with the same reason, so it is not relaunched until ${entry.until}: ${entry.reason}`,
+      next: `Repair the cause the reason names; the loop launches ${item.key} again once its backoff ends` }] : [];
+  });
   const reworked = reworkAttention(open);
   // GY-3331: a product review that could not run, one line per item — the fault is the launch's
   // or the reviewer's own environment, retried on another eligible reviewer, never the worker's.
@@ -192,7 +198,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
