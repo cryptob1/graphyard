@@ -117,8 +117,8 @@ else:
     else:
         shard = json.load(sys.stdin)
         files, argv, cpus, deadline = shard.get('files'), shard.get('argv'), shard.get('cpus'), shard.get('deadline')
-        strings = lambda values: isinstance(values, list) and 0 < len(values) <= 5000 and all(isinstance(value, str) and '\\0' not in value and '\\n' not in value for value in values)
-        if not strings(files) or not strings(argv) or type(cpus) is not int or type(deadline) is not int:
+        strings = lambda values, forbidden: isinstance(values, list) and 0 < len(values) <= 5000 and all(isinstance(value, str) and not set(forbidden) & set(value) for value in values)
+        if not strings(files, '\\0\\n') or not strings(argv, '\\0') or type(cpus) is not int or type(deadline) is not int:
             refuse()
         cores = os.cpu_count() or 1
         cap = max(2, max(${minimumTrialContainers}, cores // 2))

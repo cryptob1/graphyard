@@ -69,7 +69,7 @@ elif command == 'create':
     env = dict(value.split('=', 1) for flag, value in zip(args, args[1:]) if flag == '--env')
     s['containers'][args[args.index('--name') + 1]] = {'workdir': args[args.index('--workdir') + 1], 'env': env, 'image': args[at + 2],
         'command': (['unshare', '-rn'] if '--network=none' in args else []) + [args[at + 1]] + args[at + 3:]}
-    open(os.path.join(STATE, 'creates.jsonl'), 'a').write(json.dumps(args) + '\\n')
+    open(os.path.join(STATE, 'creates.jsonl'), 'a').write(json.dumps(sys.argv[1:]) + '\\n')
     save()
 elif command == 'start':
     container = s['containers'][args[-1]]
