@@ -1,4 +1,4 @@
-// Concern: GY-3407 — the hosts Graphyard may run work on. `graphyard host add USER@HOST` checks
+// Concern: GY-3407 — the hosts Graphyard watches; work runs only on this machine for now. `graphyard host add USER@HOST` checks
 // Docker over SSH and records the host in this machine's hosts file; nothing is installed or
 // written on the host (the probe only reads). Each loop cycle reads every host with the same
 // probe — cores, hottest CPU sensor, steal and the trial containers running now — and this
@@ -44,7 +44,7 @@ export function parseHostProbe(text: string) {
 
 const lastLine = (text: string) => text.trim().split('\n').filter(Boolean).at(-1) ?? '';
 
-/** One probe of a host (null: this machine): its readings, or the plain reason it cannot run work. */
+/** One probe of a host (null: this machine): its readings, or the plain reason it cannot be read. */
 export async function probeHost(target: string | null, run: ChildRun = defaultChildRun) {
   const command = target ? 'ssh' : 'sh';
   const args = target ? ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', target, `sh -c ${shellQuote(hostProbeScript)}`] : ['-c', hostProbeScript];

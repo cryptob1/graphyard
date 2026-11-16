@@ -9,9 +9,9 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 ## More hosts
 
-- Put a spare laptop or VPS to work with `graphyard host add USER@HOST`. The host needs only Docker, Tailscale and this machine's SSH key; nothing is installed on it. The command checks Docker over SSH and refuses, with the reason, a host it cannot reach or one without Docker.
+- Watch a spare laptop or VPS with `graphyard host add USER@HOST`. Work does not run there yet: trials and previews still run on this machine. The host needs only Docker, Tailscale and this machine's SSH key; nothing is installed on it. The command checks Docker over SSH and refuses, with the reason, a host it cannot reach or one without Docker.
 - Workers lists every host, this machine first, with cores, temperature, CPU steal and runs now. A host that stops answering shows Away and the master's loop tries it again each cycle.
-- `graphyard host remove USER@HOST` stops using one; `graphyard host list` shows what is added.
+- `graphyard host remove USER@HOST` stops reading one; `graphyard host list` shows what is added.
 
 ## Accounts and access
 

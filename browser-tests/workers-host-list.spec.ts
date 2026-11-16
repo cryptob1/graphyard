@@ -38,7 +38,7 @@ async function seedLoopRead(url: string) {
     [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: '15', [loopSupervisionHeader]: 'autonomous',
     [loopHostsHeader]: encodeLoopHosts([
       { host: 'vishrog', local: true, away: false, cores: 24, celsius: 71, steal: 0, runs: 3 },
-      { host: 'vish@vish-rexera', away: false, cores: 8, celsius: null, steal: 14, runs: 2 },
+      { host: 'vish@vish-rexera', away: false, cores: 8, celsius: null, steal: 14, runs: 0 },
       { host: 'vish@old-laptop', away: true, cores: null, celsius: null, steal: null, runs: null },
     ]),
   } });
@@ -79,8 +79,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(added.locator('[data-label="Cores"]')).toHaveText('8');
       await expect(added.locator('[data-label="Temperature"]')).toHaveText('—');
       await expect(added.locator('[data-label="Steal"]')).toHaveText('14%');
-      await expect(added.locator('[data-label="Runs now"]')).toHaveText('2');
+      await expect(added.locator('[data-label="Runs now"]')).toHaveText('0');
       await expect(hosts.locator('[data-host="vish@old-laptop"]')).toContainText('Away');
+      await expect(page.locator('[data-hosts-note]')).toHaveText('Added hosts are watched, not given work yet: trials and previews run on this machine.');
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
       expect(width).toBeLessThanOrEqual(viewport.width);
     } finally { await page.close(); await close(); }

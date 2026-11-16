@@ -182,9 +182,9 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 
 type HostRow = { host: string; local?: boolean; away: boolean; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
 /**
- * GY-3407: the hosts work runs on — this machine first, then each one added with
+ * GY-3407: the hosts the loop watches — this machine first, then each one added with
  * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
- * reads Away and is read again next cycle.
+ * reads Away and is read again next cycle. Work runs only on this machine for now, which the note says.
  */
 function Hosts({ hosts }: { hosts: HostRow[] }) {
   if (!hosts.length) return null;
@@ -199,7 +199,7 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
         <td data-label="Steal">{figure(host.steal, '%')}</td>
         <td data-label="Runs now">{figure(host.runs)}</td></>}
     </tr>)}</tbody>
-  </table></section>;
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {
@@ -243,7 +243,7 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
  * with the sessions that ended and the per-account summary folded below.
  * The heading carries the host's CPU as the loop last read it (GY-3348): pressure and steal, the
  * two figures that explain why nothing new is launching when the host is saturated. Below the
- * sessions, the hosts table (GY-3407) lists every machine work runs on.
+ * sessions, the hosts table (GY-3407) lists this machine and every added host it watches.
  */
 export default function WorkersPage({ work, observedAt, setSelected, setView, token, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected' | 'setView' | 'token'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
