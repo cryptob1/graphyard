@@ -36,8 +36,11 @@ export async function commitDependencies(managedRoot: string, key: string, nodeM
     await cp(nodeModules, join(staging, 'node_modules'), { recursive: true, verbatimSymlinks: true });
     await rename(staging, target).catch(() => {}); // another trial committed the same key first
   } finally { await rm(staging, { recursive: true, force: true }); }
-  const images = await Promise.all((await readdir(directory)).filter(name => !name.startsWith('.')).map(async name => ({ name, at: (await stat(join(directory, name))).mtimeMs })));
-  for (const old of images.sort((a, b) => b.at - a.at).slice(keptDependencyImages)) await rm(join(directory, old.name), { recursive: true, force: true });
+  const entries = await Promise.all((await readdir(directory)).map(async name => ({ name, at: (await stat(join(directory, name))).mtimeMs })));
+  // A copy a killed trial left half-staged goes after an hour; of the committed images the newest few stay.
+  const stale = entries.filter(entry => entry.name.startsWith('.staging-') && entry.at < Date.now() - 3_600_000);
+  const old = entries.filter(entry => !entry.name.startsWith('.')).sort((a, b) => b.at - a.at).slice(keptDependencyImages);
+  for (const entry of [...stale, ...old]) await rm(join(directory, entry.name), { recursive: true, force: true });
 }
 
 /** The extensions whose imports the test-result key follows; a change to any other file runs every selected test. */
