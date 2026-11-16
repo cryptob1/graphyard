@@ -49,7 +49,7 @@ export async function runDoctor(context: CliContext) {
   if (plugin) checks.push(plugin);
   const document = live ? await api('agent-registry/document').catch(() => null) : null;
   const host = (await loadStoredMasterConfig(root).catch(() => null))?.hostId ?? context.individualHostId();
-  if (document) checks.push(...accountRuntimeChecks(document, host, path));
+  if (Array.isArray(document?.accounts)) checks.push(...accountRuntimeChecks(document, host, path));
   checks.push(gitRemoteCheck(await remoteFetchProbe(root)));
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and
