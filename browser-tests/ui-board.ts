@@ -114,6 +114,8 @@ export function realDeliveredWork(): any[] {
 /** The status read for the board: the audit fixture's, with the human-only row the server derives for GY-20. */
 export function boardStatus(role = 'admin') {
   return { ...fixtureStatus(role), repository: 'fixture/shop',
+    // The Workers page header reads the host CPU figures (GY-3401); seeded so its words are reviewed too.
+    cpu: { avg60: 41, steal: 3, celsius: 72, testBudget: 2, trialCap: { now: 2, full: 4 } },
     // The Delivery view reads the effective delivery declaration the status carries (GY-1901).
     project: { delivery: { previews: 'local', mode: 'managed', candidateMaxChanges: 400, productionVerification: false,
       applications: [{ id: 'shop-web', kind: 'compose', file: 'compose.yaml', service: 'web', port: 8080 }], cases: {} } } };
