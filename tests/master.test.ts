@@ -34,7 +34,7 @@ function work(overrides: Partial<Work> = {}) {
 test('master instructions carry the operating loop the master guide prints first', () => {
   const first = masterInstructions;
   assert.match(first, /dedicated, visible master-agent session/);
-  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, record what the merge\nwriter's trial and push landed\. Repeat until both conditions hold/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, record what the merge\nwriter's test merge and push landed\. Repeat until both conditions hold/);
   assert.match(first, /\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) the release health line in `master status` is healthy, or a\ngenuinely external deployment blocker is recorded in Graphyard as a follow-up work item/);
   assert.match(first, /An item is delivered at merge; release health is one status line/);
   assert.doesNotMatch(first, /verify-deployment/);

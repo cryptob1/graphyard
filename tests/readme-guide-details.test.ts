@@ -16,7 +16,7 @@ test('unit:readme-guide-details — guide setup prints every prerequisite, check
     'Linux 7.0+ with Landlock ABI 9+', 'uname -r', 'doctor checks the ABI',
     'Node.js 24+ and npm', 'node --version && npm --version',
     'durable checkout with an SSH origin', 'git --version && git rev-parse --show-toplevel && git remote -v',
-    'Docker Engine usable by your user', 'merge trials need it even with `--local`', 'docker version',
+    'Docker Engine usable by your user', 'test merges need it even with `--local`', 'docker version',
     'Docker Compose plugin', 'docker compose version',
     'GitHub CLI signed in with repo scope and admin access', 'gh auth status && gh repo view OWNER/NAME --json viewerPermission',
     'Bubblewrap (worker confinement)', 'bwrap --version', 'sudo apt install bubblewrap', 'sudo pacman -S bubblewrap',

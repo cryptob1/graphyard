@@ -59,8 +59,9 @@ test('unit:tests/where-things-run-docs.test.ts — the diagram SVG exists, names
   for (const fact of ['graphyard-master-OWNER-NAME.service', 'graphyard-deploy-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', 'graphyard-OWNER-NAME-db-1', 'graphyard-trial-', '4310', 'YOUR HOST', 'DOCKER', 'GitHub', 'Agent providers', 'npm + GHCR', 'Your browser', 'Herdr'])
     assert.ok(svg.includes(fact), `the diagram names ${fact}`);
   // GY-3295: the Guide shows where things run as HTML panels, readable at any width, naming the same parts.
+  // GY-3396: the visible Guide says test merges run in Docker containers; guide infra and the diagram keep their name.
   const guidePage = read('web/pages/guide.tsx');
-  for (const fact of ['graphyard-master-OWNER-NAME.service', 'graphyard-deploy-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', 'graphyard-OWNER-NAME-db-1', 'graphyard-trial-', '4310', 'Your Linux host', 'GitHub', 'Agent providers', 'npm and GHCR', 'Your browser'])
+  for (const fact of ['graphyard-master-OWNER-NAME.service', 'graphyard-deploy-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', 'graphyard-OWNER-NAME-db-1', 'Test merges', 'Docker containers', '4310', 'Your Linux host', 'GitHub', 'Agent providers', 'npm and GHCR', 'Your browser'])
     assert.ok(guidePage.includes(fact), `the Guide's Where things run panels name ${fact}`);
 });
 

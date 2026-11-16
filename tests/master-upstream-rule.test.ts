@@ -17,6 +17,6 @@ test('unit:tests/master-upstream-rule.test.ts — the master prompt names trial-
 });
 
 test('unit:tests/master-upstream-rule.test.ts — guide master names trial-host faults and forbids changing the managed repository around them', () => {
-  assert.match(guideTopics.master, /trial-host fault: the trial host's network, disk or a tool missing from the trial image\) on an install for another repository belongs to Graphyard/);
+  assert.match(guideTopics.master, /a fault of the host that runs the test merges: its network, disk or a tool missing from the graphyard-trial image\) on an install for another repository belongs to Graphyard/);
   assert.match(guideTopics.master, /never file it as work in the managed repository or change that repository to work around it\./);
 });
