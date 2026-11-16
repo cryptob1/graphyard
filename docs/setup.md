@@ -9,9 +9,10 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 ## More hosts
 
-- Watch a spare laptop or VPS with `graphyard host add USER@HOST`. Work does not run there yet: trials and previews still run on this machine. The host needs only Docker, Tailscale and this machine's SSH key; nothing is installed on it. The command checks Docker over SSH and refuses, with the reason, a host it cannot reach or one without Docker.
-- Workers lists every host, this machine first, with cores, temperature, CPU steal and runs now. A host that stops answering shows Away and the master's loop tries it again each cycle.
-- `graphyard host remove USER@HOST` stops reading one; `graphyard host list` shows what is added.
+- A host lends Graphyard its compute and nothing else; work does not run there yet, the loop only watches it. Run `graphyard host prepare` here and the script it prints once on the host with sudo: it creates the unprivileged `gy-compute` user (no sudo, not in the docker group) with rootless Docker, and lets this machine's SSH key run only `graphyard-host-shim`, never a shell.
+- `graphyard host add gy-compute@HOST` refuses a host it cannot reach, one without Docker, a key that opens a plain shell, root, and a docker-group user, each with the reason. Workers lists every host, this machine first, with cores, temperature, CPU steal and runs now; one that stops answering shows Away.
+- `graphyard host remove USER@HOST` stops reading one; `graphyard host list` shows the one host list.
+- Accepted risk: a host can forge its own results, so add only machines you own.
 
 ## Accounts and access
 
