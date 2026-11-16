@@ -116,7 +116,7 @@ export async function revertMergeCommit(git: ServeRevertGit, input: { mergeSha: 
 /** The title of the follow-up the loop files for a reverted item. */
 export const relandTitle = (item: Pick<Work, 'key'>) => `Re-land ${item.key}`;
 /** What the loop files for a reverted item (`POST /api/work` as the master's operator-agent identity). */
-export interface RelandInput { title: string; type: Work['type']; priority: number; description: string; criteria: { id: string; text: string; proofs: string[] }[]; dependencies: string[]; reason: string; owner?: string }
+export interface RelandInput { title: string; type: Work['type']; priority: number; description: string; why: string; simplest: string; criteria: { id: string; text: string; proofs: string[] }[]; dependencies: string[]; reason: string; owner?: string }
 
 /** The most criteria, the most proofs on one and the longest text the create route accepts (model/work.ts, model/policy.ts). */
 const relandCriteriaLimit = 50, criterionProofLimit = 20, criterionTextLimit = 2000;
@@ -147,6 +147,9 @@ export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: 
   return {
     title: `${relandTitle(original)}${original.title ? `: ${original.title}` : ''}`.slice(0, 200),
     type: original.type, priority: original.priority,
+    // GY-3382: the re-land helps users as the original did, and stays as small.
+    why: original.why ?? `Gives users ${original.key}'s change back, now passing the case that reverted it.`,
+    simplest: original.simplest ?? 'The same change landed again with the failing case fixed; nothing new is added.',
     ...(original.owner ? { owner: original.owner } : {}),
     description: [
       `Re-land of ${original.key}${original.title ? ` ("${original.title}")` : ''}: the merge writer reverted its merge ${input.mergeSha.slice(0, 12)} from ${input.baseBranch} after the served commit ${input.serve.slice(0, 12)} failed the required E2E case "${input.failingCase}"${step}${reason}.`,

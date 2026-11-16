@@ -58,7 +58,7 @@ test('e2e:teammate-invite-roles — invited viewer and maintainer sign in as the
     for (const session of [viewer, maintainer]) assert.equal((await call('GET', 'work-snapshot', session.token)).status, 200);
 
     // The maintainer files an item attributed to them; the viewer is refused.
-    const item = { type: 'chore', title: 'Filed by a teammate', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], owner: 'mo-gh' };
+    const item = { type: 'chore', why: 'w', simplest: 's', title: 'Filed by a teammate', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], owner: 'mo-gh' };
     const filed = await call('POST', 'work', maintainer.token, item);
     assert.equal(filed.status, 200, JSON.stringify(filed.body));
     const history = await database.store.pool.query('SELECT actor FROM events WHERE work_id=$1 ORDER BY seq LIMIT 1', [filed.body.id]);

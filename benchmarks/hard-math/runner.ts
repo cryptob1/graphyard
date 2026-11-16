@@ -68,7 +68,7 @@ export async function createItems(context:RunContext) {
     const criterion=component.id==='single'?'Complete all eight component requirements in the full description and CONTRACT.md: exact arithmetic, square-free multiplicities, certified isolation, CLI, HTTP batch API, browser UI and integration tests.':component.brief;
     const item=await context.plane.call('work',context.operator,{
       reason:`Run ${context.config.id}: create ${component.id} for the ${context.config.mode} frozen-v1 certified real-root workbench rebuild, seed ${context.config.seed}.`,
-      type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
+      type:'chore',title:component.title,why:'The benchmark measures how well the factory delivers real work.',simplest:'One component of the frozen workbench, built to its contract.',description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
       criteria:[{id:'AC-1',text:`${criterion} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
       dependencies:component.depends.map(id=>ids.get(id)),producerProofs:final?['manual:certified-artifact']:[],policy:{checks:['test'],review:true},
     });

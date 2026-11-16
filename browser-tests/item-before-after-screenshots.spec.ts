@@ -67,7 +67,7 @@ async function fixtureRepo() {
 
 /** One fixture item submitted as a real worker submits it, with its trial recorded as the merge writer records it. */
 async function itemWithTrial(url: string, title: string, proof: string, head: string, baseTip: string, trial: { e2eCase?: string; screenshots?: { case: string; before?: string; after?: string }[] }) {
-  const filed = await call(url, 'test-human-operator', 'work', 'POST', { title, type: 'feature', priority: 3, criteria: [{ id: 'AC-1', text: 'The change is proven', proofs: [proof] }] }, `gy-3267-${filedKey(title)}-create`);
+  const filed = await call(url, 'test-human-operator', 'work', 'POST', { title, why: 'The owner sees what a merge changed.', simplest: 'Screenshots the trial already keeps.', type: 'feature', priority: 3, criteria: [{ id: 'AC-1', text: 'The change is proven', proofs: [proof] }] }, `gy-3267-${filedKey(title)}-create`);
   await call(url, 'test-human-operator', `work/${filed.id}/ready`, 'POST', {}, `gy-3267-${filedKey(title)}-ready`);
   const claimed = await call(url, 'test-worker-operator', `work/${filed.id}/claim`, 'POST', {}, `gy-3267-${filedKey(title)}-claim`);
   await call(url, 'test-worker-operator', `work/${filed.id}/workspace`, 'POST', { epoch: claimed.epoch, host: 'machine-a', path: `/tmp/${filed.key}`, branch: `graphyard/${filed.key.toLowerCase()}-1` }, `gy-3267-${filedKey(title)}-workspace`);

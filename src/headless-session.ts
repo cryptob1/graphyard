@@ -16,11 +16,11 @@ import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
 import { realRuntimeBinary } from './runtime-binary.js';
-import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
+import { detectHeadlessExhaustion } from './master/runtime-prompt.js';
 import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
-import { endRun, liveRun, registerRun, type AdoptedRun } from './runner/registry.js';
+import { endRun, liveRun, registerRun, sessionTestBudget, type AdoptedRun } from './runner/registry.js';
 import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
 import { underTestRunner } from './runtime-environment.js';
@@ -153,6 +153,8 @@ export interface HeadlessSession<T> {
   /** The session's role text (prepareSessionHarness), which a pane session reads from its role file: here it opens the request. */
   role?: string | null;
   prompt: string;
+  /** The host's cores the session's test budget divides (GY-3401); the host's own by default. */
+  cores?: number;
   /** Posts what the run printed; a throw refuses the answer and names why. */
   answer: (output: string) => Promise<T>;
   /** The loop root whose run directory holds the run, and how a restarted loop posts its answer: the route's adopter and what it needs, never a credential (GY-3113). */
@@ -177,7 +179,9 @@ export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'acc
  * folder cannot be trusted or it cannot be confined, exactly as a pane session is. `ownGitHubCredential`
  * is false for a worker, which reaches no keyring at all (GY-1523).
  */
-async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, directory: string, coordinatorRoot: string | undefined, ownGitHubCredential: boolean) {
+async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, directory: string, coordinatorRoot: string | undefined, ownGitHubCredential: boolean, cores?: number) {
+  // GY-3401: the session's share of the host's test parallelism, recomputed at every launch.
+  on = { ...on, environment: { ...on.environment, VITEST_MAX_WORKERS: String(sessionTestBudget(cores)) } };
   headlessArgs(on.kind, on.args, prompt, on.contract);
   assertLaunchable(on.kind, on.contract ? { ...on.contract, args: on.contract.headlessArgs ?? on.contract.args } : null);
   const trust = await launchRecipe(on.kind)?.trust?.(directory, on.environment, on.args);
@@ -196,7 +200,7 @@ async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, dir
  * session; `settled` is its posted answer, or the reason no answer was accepted.
  */
 export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promise<{ settled: Promise<T> }> {
-  const prepare = (on: HeadlessAccountLaunch) => prepareHeadlessRun(on, input.prompt, input.directory, input.coordinatorRoot, true);
+  const prepare = (on: HeadlessAccountLaunch) => prepareHeadlessRun(on, input.prompt, input.directory, input.coordinatorRoot, true, input.cores);
   const prepareAccount = async (initial: HeadlessAccountLaunch) => {
     let on = initial;
     for (;;) {
@@ -251,7 +255,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
         const raw = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), printed = runtimeReport(raw).reply ?? raw;
-        const notice = detectRuntimeExhaustion(printed, launch.kind, Date.now());
+        const notice = detectHeadlessExhaustion(raw, launch.kind, Date.now());
         if (notice) {
           await input.holdAccount?.(notice);
           if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${notice.reason}`, 'limit')); attempt = 0; continue; }
@@ -339,7 +343,7 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
   name: string; work: string; subject: string; epoch: number; principal: string; account: string | null;
   /** The worktree the attempt was assigned; `supervisor` the `graphyard watch KEY EPOCH --` words that hold its lease. */
   directory: string; supervisor: string[]; coordinatorRoot?: string; prompt: string;
-  root: string; exec: HeadlessExec;
+  root: string; exec: HeadlessExec; cores?: number;
   /** The run's hard bound, the configured attempt ceiling; the loop's attempt bound stops a run without progress first. */
   timeoutMs: number;
   /** How long the start is watched; `workerStartupMs` by default. */
@@ -357,7 +361,7 @@ export interface HeadlessWorker extends HeadlessAccountLaunch {
  * a live session until it ends, and its log and record stay on disk after.
  */
 export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: string; ended: { output: string; ok: boolean } | null }> {
-  const launch = await prepareHeadlessRun(input, input.prompt, input.directory, input.coordinatorRoot, false);
+  const launch = await prepareHeadlessRun(input, input.prompt, input.directory, input.coordinatorRoot, false, input.cores);
   const id = randomUUID(), directory = resolve(workerRunsDirectory(input.root), id);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const record: HeadlessWorkerRecord = { id, name: input.name, work: input.work, epoch: input.epoch, principal: input.principal, account: input.account, kind: launch.kind, subject: input.subject.slice(0, 300), startedAt: new Date().toISOString() };

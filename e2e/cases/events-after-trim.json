@@ -1,0 +1,14 @@
+{
+  "id": "events-after-trim",
+  "title": "Pages and item history read the same after the events index and a retention pass",
+  "description": "On the temporary Postgres with 200,000 old loop bookkeeping rows, an item with its create and heartbeats, an agent registry, a connect request and a host's team-access report (each written through its real route), the Agents page registry and its history, the connect requests, team access and the item's history are read, one retention pass trims the old bookkeeping rows, and every one of those reads answers exactly what it answered before. The same run proves the registry, connect and team-access reads use the events_unowned_family index, never a sequential scan of events.",
+  "tags": ["control-plane"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the pages that read events show the same before and after a retention pass",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/events-hot-query.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
