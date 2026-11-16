@@ -12,7 +12,7 @@ import { runTrial, runnerRecords } from '../src/merge-writer/trial.js';
 // GY-3406: a remote shard host is a Linux box reached over SSH that runs Docker. Here SSH is a shim
 // that runs the remote command in the host's own home directory, and that host's Docker is a fake
 // keeping its images and containers in a state file and running each container's command in its
-// working directory, so the real transport — git push into the per-repo mirror, docker save | load,
+// working directory, so the real transport — the commit sent as a pack into the per-repo mirror, docker save | load,
 // the warm dependency image, the trial launcher, output and records brought back — runs end to end.
 
 const identity = { GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.com', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com' };

@@ -139,20 +139,20 @@ export const mirrorPath = (root: string) => `.graphyard/mirrors/${basename(root)
 export const warmImageTag = (digest: string, lockHash: string) => `graphyard-warm:${digest.replace(/^sha256:/, '').slice(0, 12)}-${lockHash.slice(0, 12)}`;
 
 /**
- * One trial's remote hosts: each host is made ready once — the commit pushed into its mirror (git sends
- * only what the mirror lacks), unpacked in a fresh run directory, the trial image there by digest
+ * One trial's remote hosts: each host is made ready once — the commit sent into its mirror as a pack of
+ * only what the mirror lacks, cloned into a fresh run directory, the trial image there by digest
  * (pulled, else `docker save | docker load` over SSH) and the warm dependency image for the image digest
  * and lockfile hash (installed and committed on a miss) — then runs shards with the trial launcher.
  * `close` removes every run directory it made.
  */
-export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; ssh?: string; deadline: number; order?: keyof typeof trialStartOrder }) {
+export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; ssh?: string; deadline: number; order?: keyof typeof trialStartOrder; signal?: AbortSignal }) {
   const ssh = input.ssh ?? 'ssh', mirror = mirrorPath(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
-  const on = async (host: ShardHost, command: string, stdin?: string[]) => {
+  const on = async (host: ShardHost, command: string, pipe?: string) => {
     try {
-      if (!stdin) { const [program, ...args] = sshWords(ssh, host, command); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
-      // A local command's output piped into the host's: `docker save | ssh host docker load`.
-      return String(await input.run('sh', ['-c', `"$@" | ${sshWords(ssh, host, command).map(shellQuote).join(' ')}`, 'sh', ...stdin], { timeoutMs: remaining() }));
+      if (!pipe) { const [program, ...args] = sshWords(ssh, host, command); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
+      // A local shell command's output piped into the host's: `docker save | ssh host docker load`.
+      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${pipe} | ${sshWords(ssh, host, command).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
     } catch (error) {
       throw new HostDroppedError(host.name, error instanceof Error ? error.message.slice(0, 500) : String(error));
     }
@@ -160,18 +160,22 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   const local = async (command: string, args: string[], env?: NodeJS.ProcessEnv) => String(await input.run(command, args, { timeoutMs: remaining(), ...(env ? { env } : {}) })).trim();
   const ready = new Map<string, { host: ShardHost; prepared: Promise<{ directory: string; image: string }> }>();
   const prepare = async (host: ShardHost) => {
-    const directory = (await on(host, `git init -q --bare ${mirror} && mkdir -p "$HOME/.graphyard/runs" && mktemp -d "$HOME/.graphyard/runs/trial-XXXXXX"`)).trim();
-    try { await local('git', ['-C', input.root, 'push', '-q', '--force', `${host.ssh}:${mirror}`, `${input.sha}:refs/graphyard/${input.sha}`], { ...process.env, GIT_SSH_COMMAND: `${shellQuote(ssh)} -o BatchMode=yes -o ConnectTimeout=10` }); }
-    catch (error) { throw new HostDroppedError(host.name, `the commit did not reach its mirror: ${error instanceof Error ? error.message.slice(0, 500) : String(error)}`); }
-    await on(host, `git --git-dir=${mirror} archive ${input.sha} | tar -x -C ${shellQuote(directory)}`);
+    // A fresh run directory (run directories a killed trial left over a day ago go first), and the mirror's last commit.
+    const [directory, last] = (await on(host, `git init -q --bare ${mirror} && mkdir -p "$HOME/.graphyard/runs" && find "$HOME/.graphyard/runs" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + ; mktemp -d "$HOME/.graphyard/runs/trial-XXXXXX" && (git --git-dir=${mirror} rev-parse -q --verify refs/graphyard/last || true)`)).trim().split('\n');
+    // Only the objects the mirror lacks travel: a pack of the commit less what its last commit holds, when this checkout knows that commit.
+    const known = last && await local('git', ['-C', input.root, 'cat-file', '-e', `${last}^{commit}`]).then(() => true, () => false);
+    await on(host, `git --git-dir=${mirror} index-pack --stdin >/dev/null && git --git-dir=${mirror} update-ref refs/graphyard/last ${input.sha} && git --git-dir=${mirror} gc --auto -q`,
+      `printf '%s\\n' ${[input.sha, ...(known ? [`^${last}`] : [])].map(shellQuote).join(' ')} | git -C ${shellQuote(input.root)} pack-objects --revs --stdout -q`);
+    // A clone, not an export, so tests that read the checkout's own git history run as they do here; --local hardlinks the mirror's objects.
+    await on(host, `git clone -q --local --no-checkout ${mirror} ${shellQuote(directory!)} && git -C ${shellQuote(directory!)} -c advice.detachedHead=false checkout -q --detach ${input.sha}`);
     const digest = await local('docker', ['image', 'inspect', '--format', '{{.Id}}', input.image]);
     const has = async (image: string) => (await on(host, `docker image inspect --format '{{.Id}}' ${shellQuote(image)} 2>/dev/null || true`)).trim();
     if (await has(input.image) !== digest) {
       if (input.image.includes('/')) await on(host, `docker pull -q ${shellQuote(input.image)} >/dev/null 2>&1 || true`);
-      if (await has(input.image) !== digest) await on(host, 'docker load -q', ['docker', 'save', input.image]);
+      if (await has(input.image) !== digest) await on(host, 'docker load -q', `docker save ${shellQuote(input.image)}`);
     }
     const lock = await local('git', ['-C', input.root, 'show', `${input.sha}:package-lock.json`]).catch(() => null);
-    if (lock === null) return { directory, image: input.image };
+    if (lock === null) return { directory: directory!, image: input.image };
     const warm = warmImageTag(digest, createHash('sha256').update(lock).digest('hex'));
     if (!await has(warm)) {
       const name = `graphyard-warm-${randomUUID().slice(0, 8)}`;
@@ -179,7 +183,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       await on(host, `docker run --name ${name} --user 0:0 -v ${shellQuote(directory)}:/src:ro --entrypoint /bin/sh ${shellQuote(input.image)} -c ${shellQuote(install)} >/dev/null && docker commit ${name} ${warm} >/dev/null; status=$?; docker rm -f ${name} >/dev/null 2>&1; exit $status`);
     }
     await on(host, `ln -sfn /deps/node_modules ${shellQuote(join(directory, 'node_modules'))}`);
-    return { directory, image: warm };
+    return { directory: directory!, image: warm };
   };
   return {
     /** Run one shard on `host`: its file list written there, `argv(list, records)` run by the trial launcher in the run directory, the output and records brought back. */
@@ -194,7 +198,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       const command = `cd ${shellQuote(directory)} && printf '%s\\n' ${files.map(shellQuote).join(' ')} > ${shellQuote(list)} && env -i PATH="$PATH" HOME=/tmp CI=1 ${[...launcher, ...argv(list, records)].map(shellQuote).join(' ')}`;
       const [program, ...args] = sshWords(ssh, host, command);
       let end: Omit<RemoteShardEnd, 'records'>;
-      try { end = { ok: true, out: String(await input.run(program!, args, { timeoutMs: remaining() })), status: 0 }; }
+      try { end = { ok: true, out: String(await input.run(program!, args, { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) })), status: 0 }; }
       catch (error) {
         const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown; timedOut?: boolean };
         if (failed.timedOut) throw error;

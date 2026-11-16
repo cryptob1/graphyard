@@ -1395,7 +1395,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
     let stopped: unknown = null;
-    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, ssh, deadline, order: input.key === gateTrialKey ? 'gate' : 'merge' }) : null;
+    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, ssh, deadline, order: input.key === gateTrialKey ? 'gate' : 'merge', signal: input.signal }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: { host: ShardHost; reading: HostReading }) => {
       const group = shards[index]!, entries: string[] = [];
@@ -1424,7 +1424,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
         if (error instanceof HostDroppedError) { log.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
-        log.push(...entries); stopped ??= error;
+        log.push(...entries);
+        // A remote shard past the deadline ends the trial as a timeout, as a local one does.
+        stopped ??= (error as { timedOut?: boolean }).timedOut ? new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail()) : error;
       }
     };
     // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.

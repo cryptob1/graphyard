@@ -19,7 +19,7 @@ const host: [string, string, string][] = [
   ['Deploy watch', 'graphyard-deploy-OWNER-NAME.service', 'Deploys and rolls back.'],
   ['Server and dashboard', 'graphyard-OWNER-NAME-server-1', 'Docker, on 127.0.0.1:4310.'],
   ['Database', 'graphyard-OWNER-NAME-db-1', 'Postgres 17 in Docker.'],
-  ['Merge trials', 'graphyard-trial-…', 'One container per trial. Its test shards also run on any host you add.'],
+  ['Merge trials', 'graphyard-trial-…', 'One per trial, shards across added hosts.'],
   ['Agent sessions', 'Workers, reviewers, the Master', 'Confined, one worktree each.'],
   ['Hosts', 'graphyard host prepare', 'Compute only, as gy-compute.'],
 ];
