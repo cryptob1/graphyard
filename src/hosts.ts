@@ -61,7 +61,7 @@ export async function probeHost(target: string | null, run: ChildRun = defaultCh
 
 export async function addHost(target: string, options: { file?: string; run?: ChildRun } = {}) {
   const file = options.file ?? hostsFile();
-  if (!hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, for example vish@vish-rexera: got ${JSON.stringify(target)}`);
+  if (!hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, for example vish@omarchypc: got ${JSON.stringify(target)}`);
   const hosts = await readHosts(file);
   if (hosts.some(host => host.target === target)) return { added: false, hosts };
   const probe = await probeHost(target, options.run);
