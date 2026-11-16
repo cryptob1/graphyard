@@ -46,7 +46,9 @@ test('e2e:real-app-onboarding — Setup names the placeholder fault and recogniz
     await expect(item).toHaveAttribute('data-done', 'yes');
     await expect(item).not.toContainText('Master fault');
   } finally {
+    http.closeAllConnections();
     await new Promise<void>(resolve => http.close(() => resolve()));
+    await store.close();
     if (previous === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = previous;
   }
 });
