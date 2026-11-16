@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statfsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
+import { delimiter, dirname, join, relative, isAbsolute, resolve } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, removeTree, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -1003,7 +1003,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>;
-  let dependencies: string | null = null, warm: string | null = null;
+  let dependencies: string | null = null, warm: string | null = null, caches = '';
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await removeTree(directory); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -1059,7 +1059,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // later head with the same two reuses, and keys the test-result cache; a checkout with no lockfile has neither.
     const show = (path: string) => Promise.resolve().then(() => run('git', ['-C', input.root, 'show', `${input.mergeSha}:${path}`], { timeoutMs: remaining() })).then(String);
     const lockfile = await show('package-lock.json').catch(() => show('pnpm-lock.yaml')).catch(() => null);
-    if (lockfile !== null) { dependencies = dependencyKey(chosen ?? trialImage(), lockfile); warm = warmDependencies(input.base, dependencies); }
+    if (lockfile !== null) {
+      // The caches live in the repository's git directory beside its objects, never in the worktree root a trial leaves empty.
+      caches = resolve(input.root, String(await run('git', ['-C', input.root, 'rev-parse', '--git-common-dir'], { timeoutMs: remaining() })).trim());
+      dependencies = dependencyKey(chosen ?? trialImage(), lockfile); warm = warmDependencies(caches, dependencies);
+    }
     boundary = trialContainerBoundary([checkout.directory, place, temporary, home], [...trialContainerDependencies(input.root), ...(warm ? [warm] : [])], Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), chosen ?? undefined);
     wrapper = boundary();
   };
@@ -1241,7 +1245,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         readOnly('install', installed);
         if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         if (manager.name === 'npm' && dependencies) {
-          await commitDependencies(input.base, dependencies, join(worktree, 'node_modules'))
+          await commitDependencies(caches, dependencies, join(worktree, 'node_modules'))
             .then(() => log.push(`dependency image ${dependencies!.slice(0, 12)} committed for later trials with the same trial image and lockfile`),
               error => log.push(`the dependency image was not committed (the next trial installs again): ${error instanceof Error ? error.message : String(error)}`));
         }
@@ -1382,7 +1386,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // GY-3418: a selected file that passed in an earlier trial with the same content, imports and
     // dependencies is not run again — unless the change touches a file whose effect imports cannot
     // trace (docs, data, configuration); the proof files the caller adds always run.
-    const cached = dependencies && input.changedFiles.every(moduleFile) ? cachedPasses(input.base, testResultKeys(worktree, selected, dependencies)) : new Set<string>();
+    const cached = dependencies && input.changedFiles.every(moduleFile) ? cachedPasses(caches, testResultKeys(worktree, selected, dependencies)) : new Set<string>();
     if (cached.size) {
       log.push(`test-result cache: ${cached.size} file(s) passed in an earlier trial with the same content, imports and dependencies, so they are not run again: ${[...cached].join(', ')}`);
       selected = selected.filter(file => !cached.has(file));
@@ -1440,7 +1444,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const groups = ran.map(shard => shard.group);
     // GY-3418: a trial's passing files key the test-result cache (a worker's own run never reaches here).
     const passedFiles = ran.flatMap(shard => shard.passed);
-    if (dependencies && passedFiles.length) await recordPasses(input.base, [...testResultKeys(worktree, passedFiles, dependencies).values()]).catch(() => {});
+    if (dependencies && passedFiles.length) await recordPasses(caches, [...testResultKeys(worktree, passedFiles, dependencies).values()]).catch(() => {});
     const failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
     const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
     const failed = [...new Set(groups.flatMap(group => group.failed))];

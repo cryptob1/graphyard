@@ -93,7 +93,7 @@ test('integration:warm-deps-local — two trials of different heads with the sam
   assert.equal(first.verdict.build, 'pass', first.verdict.logTail);
   assert.equal(installs.length, 1, 'the first trial installs');
   assert.match(first.verdict.logTail, /dependency image \w+ committed/);
-  assert.equal(readdirSync(dependencyImagesDirectory(fixture.base)).filter(name => !name.startsWith('.')).length, 1, 'one dependency image is committed');
+  assert.equal(readdirSync(dependencyImagesDirectory(join(fixture.root, '.git'))).filter(name => !name.startsWith('.')).length, 1, 'one dependency image is committed');
 
   const second = await mergeAndTrial(fixture, run, { 'src/b.ts': "import { shared } from './shared.js';\nexport const b = shared + 1;\n" });
   assert.equal(second.verdict.build, 'pass', second.verdict.logTail);

@@ -1,7 +1,7 @@
 // Concern: GY-3418 — two caches keyed by content that spare trials work they already did. A miss
 // runs exactly as before; nothing here decides a verdict.
-// The warm dependency image: the node_modules an `npm ci` installed, committed under the managed
-// root by the trial image and the lockfile, so a later trial of another head with the same two
+// The warm dependency image: the node_modules an `npm ci` installed, committed in the repository's
+// git directory by the trial image and the lockfile, so a later trial of another head with the same two
 // reuses it read-only instead of installing again. The test-result cache: a test file that passed
 // in a trial (a merge trial or the batch gate, never a worker's own run) is not run again while
 // its own content, the local sources it imports (transitively) and the dependency key are the same.
@@ -15,20 +15,20 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex').sl
 /** The dependency key: the image the trial runs in and its lockfile's content. */
 export const dependencyKey = (image: string, lockfile: string) => sha(`${image}\0${lockfile}`);
 
-/** Where the committed dependency images live under the managed root. */
-export const dependencyImagesDirectory = (managedRoot: string) => resolve(managedRoot, '.dependency-images');
+/** Where the committed dependency images live in the cache root (the repository's git directory, never the worktree root a trial must leave empty). */
+export const dependencyImagesDirectory = (cacheRoot: string) => resolve(cacheRoot, 'graphyard-dependency-images');
 /** How many dependency images stay: a lockfile change commits a new one and the oldest goes. */
 export const keptDependencyImages = 3;
 
 /** The committed node_modules for `key`, or null when none is committed yet. */
-export function warmDependencies(managedRoot: string, key: string): string | null {
-  const modules = join(dependencyImagesDirectory(managedRoot), key, 'node_modules');
+export function warmDependencies(cacheRoot: string, key: string): string | null {
+  const modules = join(dependencyImagesDirectory(cacheRoot), key, 'node_modules');
   return existsSync(modules) ? modules : null;
 }
 
 /** Commit an installed node_modules under `key` (copied, then renamed into place whole), keeping the newest few. */
-export async function commitDependencies(managedRoot: string, key: string, nodeModules: string): Promise<void> {
-  const directory = dependencyImagesDirectory(managedRoot), target = join(directory, key);
+export async function commitDependencies(cacheRoot: string, key: string, nodeModules: string): Promise<void> {
+  const directory = dependencyImagesDirectory(cacheRoot), target = join(directory, key);
   if (existsSync(target)) return;
   const staging = join(directory, `.staging-${randomUUID()}`);
   await mkdir(staging, { recursive: true });
@@ -80,20 +80,20 @@ export function testResultKeys(worktree: string, files: readonly string[], depen
 }
 
 /** Where passing results live: one directory per UTC day, the last seven read and kept. */
-export const testResultsDirectory = (managedRoot: string) => resolve(managedRoot, '.test-results');
+export const testResultsDirectory = (cacheRoot: string) => resolve(cacheRoot, 'graphyard-test-results');
 const keptDays = 7;
 const days = (now: number) => Array.from({ length: keptDays }, (_, index) => new Date(now - index * 86_400_000).toISOString().slice(0, 10));
 
 /** The files whose key passed in a trial within the last seven days. */
-export function cachedPasses(managedRoot: string, keys: ReadonlyMap<string, string>, now = Date.now()): Set<string> {
-  const directory = testResultsDirectory(managedRoot), recent = days(now);
+export function cachedPasses(cacheRoot: string, keys: ReadonlyMap<string, string>, now = Date.now()): Set<string> {
+  const directory = testResultsDirectory(cacheRoot), recent = days(now);
   return new Set([...keys].filter(([, key]) => recent.some(day => existsSync(join(directory, day, key)))).map(([file]) => file));
 }
 
 /** Record each passing file's key under today, and drop days older than seven. */
-export async function recordPasses(managedRoot: string, keys: readonly string[], now = Date.now()): Promise<void> {
+export async function recordPasses(cacheRoot: string, keys: readonly string[], now = Date.now()): Promise<void> {
   if (!keys.length) return;
-  const directory = testResultsDirectory(managedRoot), recent = days(now);
+  const directory = testResultsDirectory(cacheRoot), recent = days(now);
   await mkdir(join(directory, recent[0]!), { recursive: true });
   await Promise.all(keys.map(key => writeFile(join(directory, recent[0]!, key), '')));
   for (const day of await readdir(directory)) if (!recent.includes(day)) await rm(join(directory, day), { recursive: true, force: true });
