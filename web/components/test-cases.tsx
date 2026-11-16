@@ -6,11 +6,11 @@ import { Result } from '../pages/tests';
 import Term from './term';
 
 /**
- * The tests linked to this item's pull request, with their result on its current head (GY-162,
+ * The tests linked to this item's change, with their result on its current head (GY-162,
  * GY-2091): every test proof its criteria name — a `unit:`/`integration:` proof as the merge
  * writer's trial of the head judged it, an `e2e:` proof as the acceptance gate selects it. The
- * registry is read only for e2e titles and for the cases whose test file the pull request
- * changes, listed apart and never as a requirement.
+ * registry is read only for e2e titles and for the cases whose test file the change
+ * touches, listed apart and never as a requirement.
  */
 export default function TestCases({ item, api }: { item: Work; api: (path: string) => Promise<any> }) {
   const [registry, setRegistry] = useState<Scenario[] | null>(null);
@@ -31,6 +31,6 @@ export function TestCasesView({ item, registry, now = new Date() }: { item: Work
       {entry.trial && <><br/><small className="muted">{entry.trial.executed} executed in the test merge{entry.trial.failed ? ` · ${entry.trial.failed} failed` : ''}</small></>}
       {entry.evidence && <><br/><small className="muted">{entry.evidence.executed} executed / {entry.evidence.skipped} skipped · {entry.evidence.run.kind} run {entry.evidence.run.id.slice(0, 12)}{entry.evidence.run.attempt ? ` attempt ${String(entry.evidence.run.attempt).slice(0, 8)}` : ''} · {entry.evidence.producer} · {new Date(entry.evidence.at).toLocaleString()}</small></>}
     </li>)}</ul>}
-    {touched.length > 0 && <><h3>Touched by this <Term term="pull request">pull request</Term> <small>· not required</small></h3><ul className="test-case-list">{touched.map(entry => <li key={entry.id} data-touched={entry.id}><Term term="end-to-end test">e2e:</Term>{entry.id} {entry.title} <small className="muted">· changes <code>{entry.testPath}</code></small></li>)}</ul></>}
+    {touched.length > 0 && <><h3>Touched by this change <small>· not required</small></h3><ul className="test-case-list">{touched.map(entry => <li key={entry.id} data-touched={entry.id}><Term term="end-to-end test">e2e:</Term>{entry.id} {entry.title} <small className="muted">· changes <code>{entry.testPath}</code></small></li>)}</ul></>}
   </section>;
 }

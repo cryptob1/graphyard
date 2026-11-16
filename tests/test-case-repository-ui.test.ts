@@ -66,14 +66,14 @@ test('unit:test-case-repository-ui — a work item page lists the tests linked t
   assert.match(row('receipt-mailed'), /◌ skipped e2e:receipt-mailed/, 'a skipped run is its own state, never a pass');
   assert.match(row('login-works'), /○ not run yet e2e:login-works · AC-2/, 'a pass on an older head is not a result on this one');
   assert.match(row('search-finds'), /○ not run yet/, 'a builder\'s own assertion is never a result');
-  // A registered case whose test file the pull request changes is listed apart, and never as required.
-  assert.match(text(html), /Touched by this pull request · not required e2e: cart-totals Cart totals add up · changes tests\/e2e\/cart-totals\.spec\.ts/);
+  // A registered case whose test file the change touches is listed apart, and never as required.
+  assert.match(text(html), /Touched by this change · not required e2e: cart-totals Cart totals add up · changes tests\/e2e\/cart-totals\.spec\.ts/);
   // Without a pull request there is no head to report on.
   const unsubmitted = { ...item, candidate: null, observation: null };
   assert.match(text(renderToStaticMarkup(createElement(TestCasesView, { item: unsubmitted, registry: null, now: new Date(NOW) }))), /0 of 5 passed on no head yet.*○ no pull request yet e2e:checkout-pays/);
-  // On the page itself it sits between Pull request and Activity.
+  // On the page itself the trials fold with the gate detail: Tests sits inside Technical details (GY-3392).
   const page = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard([item]), item }));
-  const order = ['aria-label="Pull request"', 'aria-label="Tests"', 'aria-label="Activity"'].map(label => page.indexOf(label));
+  const order = ['aria-label="Activity"', 'aria-label="Technical details"', 'aria-label="Tests"'].map(label => page.indexOf(label));
   assert.ok(order.every(index => index > 0) && order[0] < order[1] && order[1] < order[2], `section order ${order}`);
 });
 

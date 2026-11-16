@@ -10,7 +10,7 @@ import Priority, { mayChangePriority } from '../components/priority';
 import History from '../history';
 import RequirementsEditor from '../requirements';
 import { assignment } from '../../src/model/assignment';
-import { CandidatePr, CandidateSha, shortShas } from '../candidate';
+import { CandidateSha, shortShas } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
 import TestCases from '../components/test-cases';
@@ -31,13 +31,12 @@ import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
 import type { Dashboard } from './dashboard';
 import type { ItemPreview, ItemPreviewState } from '../../src/project-previews';
-import ItemLead from '../components/item-lead';
 
 const marker: Record<string, { symbol: string; word: string; tone: string }> = {
   passed: { symbol: '✓', word: 'passed', tone: 'pass' }, failed: { symbol: '×', word: 'failed', tone: 'fail' }, revoked: { symbol: '×', word: 'withdrawn', tone: 'fail' },
   deferred: { symbol: '○', word: 'put off', tone: 'pending' }, unmeasured: { symbol: '○', word: 'pending', tone: 'pending' }, incomplete: { symbol: '○', word: 'pending', tone: 'pending' },
 };
-/** A sentence without its pull request mention: the page header links the pull request once. */
+/** A sentence without its pull request mention: the plate names no pull request (GY-3392). */
 const withoutPr = (sentence: string) => sentence.replace(/\s*(?:of|on|in)?\s*PR #\d+/g, '').replace(/\s+—/, ' —');
 /** The first sentence, capped: the plain meaning on one line; the whole text stays in the tooltip and in the details. */
 const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0]; return first.length > 90 ? `${first.slice(0, 88).replace(/\s+\S*$/, '')}…` : first; };
@@ -176,7 +175,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
       <div><dt>Link</dt><dd>{preview.state === 'running' || preview.endReason === 'idle' ? <a href={`${preview.path}/`} target="_blank" rel="noopener noreferrer">{preview.path}/ ↗</a> : <span className="mono">{preview.path}</span>}{preview.endReason === 'idle' ? ' · stopped while unused; open it to restart' : ''}</dd></div>
       {preview.lastUsedAt && <div><dt>Last used</dt><dd>{new Date(preview.lastUsedAt).toLocaleString()}</dd></div>}
       <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
-      <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 8)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
+      <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 8)}</span>{preview.source === 'base' ? ' · the base branch, until a change is submitted' : ''}</dd></div>
       <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>
       {preview.instance && <div><dt>Isolation</dt><dd>state <span className="mono">{preview.instance}</span>{preview.database ? <> · database <span className="mono">{preview.database}</span></> : null} · {preview.secrets?.length ? preview.secrets.join(', ') : 'no production credentials'}</dd></div>}
     </dl>
@@ -186,16 +185,17 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
 }
 
 /**
- * One work item's page (GY-161). Its first screen answers, without scrolling or a click: the plain
- * summary sentence (GY-2011; or the title when none), what state it is in (its group's badge), why
- * (one plain sentence), who acts next (a role, never a code name), where it is in the seven
- * pull-request steps, and its pull request, linked once in the header. A decision only the human
- * may make is answered right here. Below it (GY-171): What is left, then Details (the full
- * description and criteria, folded), Pull request, Tests (every test proof the criteria name with
- * its result on the head — `unit:`/`integration:` from the merge trial, `e2e:` from the evidence,
- * GY-162/GY-2091) and Activity. Everything technical — gate internals, sessions and their attach
- * commands, review provider, next action, agent requests, evidence — is in one
- * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
+ * One work item's page (GY-161). Its first screen is the plate (GY-3392): the why sentence — the
+ * item's own why (GY-3382) or its plain summary (GY-2011), or the title when neither exists — then
+ * the evidence the proofs kept (the merge trial's browser screenshots, the product review, the
+ * real-world checks, the worker runs' output), then one plain line on what changed for the user,
+ * then who acts next (a role, never a code name), the state sentence and the four states. A
+ * decision only the human may make is answered right here. Below it: Details (the full description
+ * and criteria, folded, GY-2011), the preview, Costs and Activity. Everything technical — what is
+ * left per gate and who clears it (GY-171), the change's commit, checks and trials, gate
+ * internals, sessions and their attach commands, review provider, next action, agent requests,
+ * evidence — is in one collapsed "Technical details" section, and policy changes are in the admin
+ * Edit menu.
  */
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -239,17 +239,15 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // Work closed without merging has no state: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
-  // The why, in plain words and without the pull request, which the header links once.
+  // The state sentence, in plain words and without the pull request: the plate names none (GY-3392).
   // A parked request says what it is about once; its card below carries the ask (GY-1408), so neither line restates it.
-  const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
+  const stateSentence = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
     : group === 'moving' ? `${steps.label}.`
       // Waiting work is described by what it waits for, never by who last held it.
       : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a worker.' : 'Released for work; waiting for a worker.')
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
   // What is left, one plain line per unmet requirement, grouped by the step that owns it (web/item-page.ts).
   const left = whatIsLeft(item, now, release);
-  const [currentLeft, ...laterLeft] = left;
-  const leftCount = left.reduce((sum, group) => sum + group.lines.length, 0);
   const overlap = overlapLine(item, work);
   const leftGroup = (group: LeftGroup) => <section key={group.state} className="left-step" aria-label={`${group.label} state`}>
     <h3>{group.label} <small>· cleared by {group.who}</small></h3>
@@ -262,35 +260,39 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
   const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
-  // GY-2011: open on the plain sentence (or the title) and the state; description and criteria fold under Details.
+  // GY-3392: the page leads with why — the item's own why sentence (GY-3382), else its plain summary
+  // (GY-2011), else the title. What changed for the user is the plain summary, once it is not itself the lead.
   const plainSentence = typeof item.summary === 'string' ? item.summary.trim() : '';
-  const plainLead = plainSentence || item.title;
+  const whySentence = typeof item.why === 'string' ? item.why.trim() : '';
+  const lead = whySentence || plainSentence || item.title;
+  const whatChanged = plainSentence && plainSentence !== lead ? plainSentence : '';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="page-heading">
       <div>
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())}</span><Priority item={item} disabled={busy} onChange={mayChangePriority(status?.actor) ? priority => { void action(item.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
-        <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
-        {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
-        <ItemLead item={item}/>
-        <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={why}/></p>
+        <h1 data-title data-why={whySentence ? 'true' : 'false'} data-plain-summary={!whySentence && plainSentence ? 'true' : 'false'}>{lead}</h1>
+        {item.title !== lead && <p className="item-title-full muted">{item.title}</p>}
+        {item.simplest && <p className="item-title-full muted" data-simplest><strong>Simplest:</strong> {item.simplest}</p>}
       </div>
-      {(item.candidate || (!item.ready && admin)) && <div className="page-actions">
-        {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key} observation={item.observation}/> on GitHub ↗</span>}
-        {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
+      {!item.ready && admin && <div className="page-actions">
+        <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>
       </div>}
     </div>
+    <TrialScreenshotsPanel item={item} token={token}/>
+    <ProductReviewPanel item={item} token={token}/>
+    <HumanChecksPanel item={item} token={token}/>
+    <WorkerRunsPanel item={item} token={token}/>
+    {whatChanged && <p className="what-changed" data-what-changed><strong>What changed:</strong> {whatChanged}</p>}
     <section className={`panel where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
       {item.reworkRequested && item.lastRework?.reason && <p className="notice" data-rework-reason>Sent back because: {item.lastRework.reason}</p>}
       <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label && !waitingOnYou.length ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
+      <p className={`status-sentence tone-${plain.tone} page-fact`}><Explained sentence={stateSentence}/></p>
       {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
     </section>
-    <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
-      {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
-      {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
     <details className="panel item-details-fold" aria-label="Details"><summary>Details</summary>
       {item.description ? <p className="item-description">{item.description}</p> : <p className="muted">No description.</p>}
       <section className="requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
@@ -300,22 +302,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
             <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
             <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     </details>
-    <section className="panel" aria-label={controlPlane ? 'Commit' : 'Pull request'}><h2>{controlPlane ? 'Commit' : 'Pull request'}</h2>
-      {item.candidate ? <dl className="facts">
-        {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
-        <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
-        {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
-        <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>
-        <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
-        <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
-      </dl> : <p className="muted">{controlPlane ? 'No commit submitted yet.' : 'No pull request yet.'}</p>}
-    </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
-    <TrialScreenshotsPanel item={item} token={token}/>
-    <ProductReviewPanel item={item} token={token}/>
-    <HumanChecksPanel item={item} token={token}/>
-    <WorkerRunsPanel item={item} token={token}/>
-    <TestCases item={item} api={api}/>
     <ItemCosts item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
@@ -328,6 +315,20 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}
     {/* Everything technical, one click down, in the control plane's own vocabulary. */}
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
+      {/* GY-3392: the plate says who acts next; the gate detail it replaced lives here, still one plain
+          line per unmet requirement with who clears it, but without the count. */}
+      {left.length > 0 && <section aria-label="What is left"><h3>What is left</h3>{left.map(leftGroup)}</section>}
+      <section aria-label="Change"><h3>Change</h3>
+        {item.candidate ? <dl className="facts">
+          {prUrl && <div><dt>Link</dt><dd><a className="pr-open candidate-link" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`The change on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
+          <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
+          {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
+          <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>
+          <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
+          <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
+        </dl> : <p className="muted">No change submitted yet.</p>}
+      </section>
+      <TestCases item={item} api={api}/>
       <h3>About this item</h3>
       <dl className="facts">
         <div><dt>Owner</dt><dd>{item.owner ?? 'Nobody yet'}</dd></div>

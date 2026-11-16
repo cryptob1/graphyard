@@ -105,7 +105,7 @@ export function activityLabel(kind: string): string {
     resubmit: 'Graphyard handed in the finished head the blocker named',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', reading: 'The loop recorded its reading', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
     repair: 'Asked to repair the branch', mergerefused: 'The merge kept being refused, so a fresh review or rework was asked for',
-    refresh: 'Asked to merge the repaired base in', adopt: 'An existing pull request was adopted into it',
+    refresh: 'Asked to merge the repaired base in', adopt: 'An existing change was adopted into it',
     // The control plane's own facts.
     'human.requested': 'Asked you for a decision', 'human.answered': 'You answered', 'review.requested': 'Review requested', 'review.failover': 'Handed to another reviewer',
     'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Live in production',
