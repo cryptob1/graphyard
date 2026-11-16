@@ -32,6 +32,8 @@ const title = `E2E case done-item-ends-sessions run ${run}`;
 
 let item = await call('work', token, {
   title, type: 'chore', description: 'Exercise the delivered item\'s gates on the disposable local repository.',
+  why: 'Users need a done item to stop counting as a running worker.',
+  simplest: 'Deliver one fixture item with a running session through the real pipeline and read its sessions.',
   criteria: [{ id: 'AC-1', text: 'The delivered change works and is served', proofs: ['unit:scratch-delivery', 'e2e:scratch-delivery'] }],
   policy: { checks: ['test'], review: true },
 });

@@ -380,6 +380,24 @@ test('e2e:batch-gate-timeout-retry — a gate held for timing out twice on a tip
   }
 });
 
+test('integration:batch-gate-revert-fallback — a case a batch landing added is searched from that landing, since earlier prefixes lack it, and when the culprit\'s revert does not apply the gate reverts the landing that added the case instead of holding, and master status says so (GY-3409)', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3), landing(4)];
+  // GY-3 adds case-3; GY-4 breaks it. The trial fails a case a commit does not hold, so sha(2) fails it too.
+  const { ports, reverted } = gatePorts(batch, (commit, check) => check === 'e2e:case-3' && commit !== sha(3));
+  ports.catalog = async commit => [sha(3), sha(4)].includes(commit) ? ['case-3'] : [];
+  const revert = ports.revert;
+  ports.revert = async (culprit, gated, check) => culprit.item.key === 'GY-4'
+    ? { held: `the revert of GY-4's merge ${culprit.sha.slice(0, 12)} does not apply cleanly` }
+    : revert(culprit, gated, check);
+  const record = bootstrapGate(repository, verified);
+  const outcome = await runGate(ports, record);
+  assert.equal(outcome.outcome, 'reverted', JSON.stringify(outcome));
+  assert.deepEqual(reverted, ['GY-3'], 'GY-2, before the case existed, is never blamed; GY-3, which added it, is reverted when GY-4\'s revert does not apply');
+  assert.equal(record.held, null, 'no hold');
+  const reason = gateSummary(record)!.lastOutcome!.reason!;
+  assert.match(reason, /^reverted GY-3 for failing e2e:case-3 \(the revert of GY-4's merge .* does not apply cleanly; reverted GY-3, which added e2e:case-3, instead\)$/);
+});
+
 test('integration:main-batch-gate-failures — on real git, the culprit\'s merge is reverted on main through the revert-and-reland path and its re-land filed, the other merges stay', async () => {
   const { coordinator, verified, tip, merges, work } = await fixture('batch-gate-revert', 'GY-2');
   const loop = reads(coordinator);

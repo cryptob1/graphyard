@@ -43,9 +43,12 @@ const page = (item: Work, all: Work[], overrides: Partial<Dashboard> = {}) => re
  */
 function midReview(base: Work): Work {
   return {
-    ...base, id: 'gy-171-probe', key: 'GY-171', stage: 'review', 
+    ...base, id: 'gy-171-probe', key: 'GY-171', stage: 'review',
+    why: 'Owners taste a change from its page, not its pipeline.', simplest: 'Reorder what the page already keeps.',
+    summary: 'The item page opens on why, the evidence and who acts next.',
+    trialScreenshots: { mergeSha: 'a'.repeat(40), baseTip: 'b'.repeat(40), at: at(0), cases: [{ case: 'item-page-plate', before: true, after: true }] },
     criteria: [
-      { id: 'AC-1', text: 'Below the existing summary the item page shows What is left, Requirements, Pull request and Activity in this order. A test renders a real-shaped item mid-review and asserts the section order.', proofs: ['unit:item-page-sections'] },
+      { id: 'AC-1', text: 'The item page below its plate folds its sections in a fixed order. A test renders a real-shaped item mid-review and asserts the section order.', proofs: ['unit:item-page-sections'] },
       { id: 'AC-2', text: 'Everything technical sits in one collapsed Technical details section, and planned-file overlaps render as a single line.', proofs: ['unit:item-page-technical-collapsed'] },
     ],
     gates: [
@@ -67,7 +70,7 @@ function midReview(base: Work): Work {
   } as unknown as Work;
 }
 
-test('unit:item-page-sections — below the summary the item page shows What is left (plain lines grouped by step, naming who clears them), Requirements, Pull request and Activity, in that order, and no raw gate reason outside the collapsed technical section', () => {
+test('unit:item-page-sections — the plate leads with the why sentence, the evidence and what changed, then one who-acts-next line; What is left (no count, no pull request wording) and the change sit inside the collapsed Technical details', () => {
   const all = board();
   const item = midReview(all.find(entry => entry.key === 'GY-15')!);
   const work = [...all, item];
@@ -76,13 +79,22 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.ok(technical > 0, 'the page has a Technical details section');
   const above = html.slice(0, technical);
 
-  // The order: the summary (status sentence, who acts next, the six-step tracker), then the four sections, then the technical detail.
-  const order = ['class="status-sentence', 'Who acts next:', 'class="steps-detail', 'aria-label="What is left"', 'aria-label="Requirements"', 'aria-label="Pull request"', 'aria-label="Activity"', 'aria-label="Technical details"'].map(needle => html.indexOf(needle));
+  // The plate (GY-3392): the why sentence, then the evidence the proof kept, then what changed for the
+  // user, then who acts next and the state sentence. Below it the Details fold, Activity, then the
+  // technical fold with the gate detail. No count, no pull request wording outside the control plane's own reasons.
+  const order = ['data-why="true"', 'data-simplest', 'aria-label="Screenshots"', 'data-what-changed', 'Who acts next:', 'class="steps-detail', 'class="status-sentence',
+    'aria-label="Details"', 'aria-label="Requirements"', 'aria-label="Activity"', 'aria-label="Technical details"', 'aria-label="What is left"', 'aria-label="Change"'].map(needle => html.indexOf(needle));
   assert.ok(order.every(index => index >= 0), `every section is rendered: ${order}`);
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'summary, What is left, Requirements, Pull request, Activity, Technical details');
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'why, simplest, the evidence, what changed, who acts next, Details, Activity, then the folded gate detail');
+  assert.match(html, /<h1 data-title="true" data-why="true"[^>]*>Owners taste a change from its page, not its pipeline\.<\/h1>/);
+  assert.match(html, /data-what-changed="true"><strong>What changed:<\/strong> The item page opens on why, the evidence and who acts next\./);
+  assert.equal((html.match(/class="next-line"/g) ?? []).length, 1, 'one who-acts-next line');
+  assert.doesNotMatch(above, /\d+ things?/, 'no What is left count');
+  assert.doesNotMatch(above, /pull request/i, 'no pull request wording above the technical fold');
 
-  // What is left: one plain line per unmet requirement, grouped by state, each group naming who clears it.
-  // Checking folds review, proof and merge (GY-1979), so one group carries all five lines.
+  // What is left keeps one plain line per unmet requirement, grouped by state and naming who clears it
+  // (GY-171), now inside the collapsed Technical details and without its count. Checking folds review,
+  // proof and merge (GY-1979), so one group carries all five lines.
   const groups = whatIsLeft(item, NOW);
   assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Testing, review, merge', 'Reviewer agent', true]]);
   for (const name of ['review', 'acceptance', 'merge']) {
@@ -90,15 +102,13 @@ test('unit:item-page-sections — below the summary the item page shows What is 
     for (const line of plainLines(gate, item, NOW)) assert.ok(groups[0].lines.includes(line), `${name}: ${line}`);
   }
   assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-reading the latest code', 'The pull request conflicts with the main branch']);
-  const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
-  assert.match(left, /<small>5 things<\/small>/);
+  const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Change"'));
+  assert.ok(html.indexOf('aria-label="What is left"') > technical, 'what is left is gate detail, inside Technical details');
   assert.match(left, /<section class="left-step" aria-label="Testing, review, merge state"><h3>Testing, review, merge <small>\u00b7 cleared by Reviewer agent<\/small><\/h3>/);
-  // The folded gates are all listed at once; there is no later state left to collapse.
-  assert.doesNotMatch(left, /later-steps/);
   assert.equal(left.match(/<li>/g)?.length, 5, 'one line per unmet requirement');
 
   // Requirements: one line per criterion with a met or pending mark; the full text on expand.
-  const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Pull request"'));
+  const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Activity"'));
   assert.equal(requirements.match(/<details class="criterion-full"><summary><span class="criterion-mark" title="Pending">○<\/span> <span class="mono">AC-\d<\/span>/g)?.length, 2, 'each criterion once, marked pending');
   for (const ac of item.criteria) assert.ok(requirements.includes(`<p>${escape(ac.text)}</p></details>`), `${ac.id}: full text behind its line`);
   // The criteria fold with the description under one closed Details (GY-2011 AC-3); inside it each criterion's full text folds again.
@@ -106,20 +116,21 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.match(html, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
   // What a reader sees once Details is opened: each criterion's line, its full text still folded.
   const shown = visibleWords(html.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"')).join(' ');
-  assert.match(shown, /AC-1 Below the existing summary the item page shows What is left, Requirements, Pull request… unit:item-page-sections pending/, 'one line: the first sentence, capped');
+  assert.match(shown, /AC-1 The item page below its plate folds its sections in a fixed order\. unit:item-page-sections pending/, 'one line: the first sentence, capped');
   assert.doesNotMatch(shown, /A test renders a real-shaped item mid-review/, 'the rest waits for the expand');
   // A criterion whose every proof passed is marked met (GY-16 in the fixture: two of its three proofs passed).
   const proven = all.find(entry => entry.key === 'GY-16')!;
   const marks = [...page(proven, all).matchAll(/<span class="criterion-mark" title="(Met|Pending)">[✓○]<\/span> <span class="mono">(AC-\d)<\/span>/g)].map(match => `${match[2]} ${match[1]}`);
   assert.deepEqual(marks, ['AC-1 Met', 'AC-2 Met', 'AC-3 Pending']);
 
-  // Pull request: link, 8-character commit, changed-file count, checks and review state.
-  const pr = html.slice(html.indexOf('aria-label="Pull request"'), html.indexOf('aria-label="Activity"'));
-  assert.match(pr, /<dt>Link<\/dt><dd><a class="pr-open" href="https:\/\/github\.com\/[^"]+\/pull\/42"/);
-  assert.match(pr, /<code class="sha" title="d{40}">d{8}<\/code>/);
-  assert.match(pr, /<dt>Changes<\/dt><dd>1 file<\/dd>/);
-  assert.match(pr, /<dt>Checks<\/dt><dd>test passed · typecheck passed<\/dd>/);
-  assert.match(pr, /<dt>Review<\/dt><dd>Waiting for approval<\/dd>/);
+  // The change: linked and described without pull request wording, inside the collapsed details.
+  const change = html.slice(html.indexOf('aria-label="Change"'), html.indexOf('aria-label="Tests"'));
+  assert.ok(html.indexOf('aria-label="Change"') > technical, 'the change is technical detail');
+  assert.match(change, /<dt>Link<\/dt><dd><a class="pr-open candidate-link" href="https:\/\/github\.com\/[^"]+\/pull\/42" target="_blank" rel="noopener noreferrer" aria-label="The change on GitHub for GY-171">Open on GitHub ↗<\/a>/);
+  assert.match(change, /<code class="sha" title="d{40}">d{8}<\/code>/);
+  assert.match(change, /<dt>Changes<\/dt><dd>1 file<\/dd>/);
+  assert.match(change, /<dt>Checks<\/dt><dd>test passed · typecheck passed<\/dd>/);
+  assert.match(change, /<dt>Review<\/dt><dd>Waiting for approval<\/dd>/);
 
   // Activity: the latest few events in plain words; the full history on expand.
   const activity = html.slice(html.indexOf('aria-label="Activity"'), technical);
