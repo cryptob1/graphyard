@@ -18,6 +18,9 @@ const routes = [...router.slice(router.indexOf('export const views')).matchAll(/
 // Pages that list what the control plane holds: with nothing to list they draw the shared empty state.
 const lists = ['work', 'now', 'needs-you', 'shipped', 'workers', 'releases', 'tests', 'scenarios', 'product', 'costs', 'agents', 'automation'];
 const banned = /\b(?:trial|epoch|lease|builder)s?\b/i;
+// The two widths share one worker, one after the other: the walk is heavy, and a trial host runs
+// the rest of the browser suite beside it.
+test.describe.configure({ mode: 'serial' });
 
 /** One page visited: does it fit, and what does it say? */
 async function review(page: Page, route: string, width: number) {
