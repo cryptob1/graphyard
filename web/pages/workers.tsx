@@ -265,7 +265,7 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
       {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
     {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
-    <Hosts hosts={(status as { hosts?: HostRow[] } | undefined)?.hosts ?? []}/>
+    <Hosts hosts={status?.hosts ?? []}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
     <details className="panel finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
