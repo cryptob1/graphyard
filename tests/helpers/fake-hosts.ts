@@ -31,6 +31,8 @@ export interface FakeHost {
 
 /** The operator public key the fixture authorizes on every host (the wrapper reads no key material). */
 export const fixturePublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFJpeHR1cmU graphyard-host-fixture';
+/** This process's uid: GY-3412's shim names its socket by the real uid (os.getuid), which in the fixture is this, not gy-compute's 1001. */
+const uid = process.getuid?.() ?? 1000;
 
 const executable = async (path: string, text: string) => { await writeFile(path, text); await chmod(path, 0o755); };
 const restrictLine = () => `restrict,command="graphyard-host-shim" ${fixturePublicKey}`;
@@ -170,8 +172,8 @@ mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
 : > "$D$XDG_RUNTIME_DIR/docker.sock"
 # GY-3412's shim names its socket by the real uid (os.getuid), which in the fixture is the test
 # process's, not gy-compute's 1001: the socket exists for both, as one user's own rootless socket.
-mkdir -p "$D/run/user/${process.getuid()}"
-: > "$D/run/user/${process.getuid()}/docker.sock"
+mkdir -p "$D/run/user/${uid}"
+: > "$D/run/user/${uid}/docker.sock"
 cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
 /usr/bin/chmod 755 "$HOME/bin/docker"
 echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
@@ -211,8 +213,8 @@ D='${dir}'
 [ "$1" = install ] || exit 0
 mkdir -p "$HOME/bin" "$D$XDG_RUNTIME_DIR"
 : > "$D$XDG_RUNTIME_DIR/docker.sock"
-mkdir -p "$D/run/user/${process.getuid()}"
-: > "$D/run/user/${process.getuid()}/docker.sock"
+mkdir -p "$D/run/user/${uid}"
+: > "$D/run/user/${uid}/docker.sock"
 cp "$D/standins/rootless-docker-template" "$HOME/bin/docker"
 /usr/bin/chmod 755 "$HOME/bin/docker"
 echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker.sock" >> "$D/log"
