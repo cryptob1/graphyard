@@ -39,7 +39,7 @@ async function seedLoopRead(url: string) {
     [loopHostsHeader]: encodeLoopHosts([
       { host: 'vishrog', local: true, away: false, cores: 24, celsius: 71, steal: 0, runs: 3 },
       { host: 'vish@vish-rexera', away: false, cores: 8, celsius: null, steal: 14, runs: 0 },
-      { host: 'vish@old-laptop', away: true, cores: null, celsius: null, steal: null, runs: null },
+      { host: 'vish@old-laptop', away: true, reason: 'vish@old-laptop is unreachable over SSH: ssh: connect to host old-laptop port 22: Connection refused', cores: null, celsius: null, steal: null, runs: null },
     ]),
   } });
   expect(read.status).toBe(200);
@@ -81,6 +81,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(added.locator('[data-label="Steal"]')).toHaveText('14%');
       await expect(added.locator('[data-label="Runs now"]')).toHaveText('0');
       await expect(hosts.locator('[data-host="vish@old-laptop"]')).toContainText('Away');
+      await expect(hosts.locator('[data-host="vish@old-laptop"] [data-label="State"] span')).toHaveAttribute('title', /is unreachable over SSH/);
       await expect(page.locator('[data-hosts-note]')).toHaveText('Added hosts are watched, not given work yet: trials and previews run on this machine.');
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
       expect(width).toBeLessThanOrEqual(viewport.width);

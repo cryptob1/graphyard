@@ -122,7 +122,7 @@ async function opensPlainShell(target: string, run: ChildRun) {
 
 export async function addHost(target: string, options: { file?: string; run?: ChildRun } = {}) {
   const file = options.file ?? hostsFile(), run = options.run ?? defaultChildRun;
-  if (!hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, for example ${hostUser}@omarchypc: got ${JSON.stringify(target)}`);
+  if (target.length > 300 || !hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, for example ${hostUser}@omarchypc: got ${JSON.stringify(target)}`);
   const hosts = await readHosts(file);
   if (hosts.some(host => host.target === target)) return { added: false, hosts };
   const refuse = (reason: string) => { throw new Error(`${target} was not added: ${reason}`); };

@@ -180,7 +180,7 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   </table>;
 }
 
-type HostRow = { host: string; local?: boolean; away: boolean; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
+type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
 /**
  * GY-3407: the hosts the loop watches — this machine first, then each one added with
  * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
@@ -193,7 +193,7 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
     <thead><tr><th scope="col">Host</th><th scope="col">Cores</th><th scope="col">Temperature</th><th scope="col">Steal</th><th scope="col">Runs now</th></tr></thead>
     <tbody>{hosts.map(host => <tr key={host.host} data-host={host.host} data-away={host.away || undefined}>
       <th scope="row" data-label="Host">{host.host}{host.local ? <span className="muted"> (this machine)</span> : null}</th>
-      {host.away ? <td data-label="State" colSpan={4}><span className="muted">Away: not answering, tried again each cycle</span></td> : <>
+      {host.away ? <td data-label="State" colSpan={4}><span className="muted" title={host.reason}>Away: not answering, tried again each cycle</span></td> : <>
         <td data-label="Cores">{figure(host.cores)}</td>
         <td data-label="Temperature">{figure(host.celsius, '°C')}</td>
         <td data-label="Steal">{figure(host.steal, '%')}</td>

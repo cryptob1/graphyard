@@ -73,8 +73,9 @@ test(`${proof} e2e:workers-host-list — each cycle reads this machine and every
   try {
     const read = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: 'Bearer host-add-loop-token-xxxxxxxxxxxxxxxxxxxxx', [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: '15', [loopSupervisionHeader]: 'autonomous', [loopHostsHeader]: encodeLoopHosts(second) } });
     assert.equal(read.status, 200);
-    const status = await (await fetch(`${url}/api/status`, { headers: { Authorization: 'Bearer host-add-operator-token-xxxxxxxxxxxxxxxx' } })).json() as { hosts: Array<{ host: string; away: boolean; runs: number | null; local?: boolean }> };
+    const status = await (await fetch(`${url}/api/status`, { headers: { Authorization: 'Bearer host-add-operator-token-xxxxxxxxxxxxxxxx' } })).json() as { hosts: Array<{ host: string; away: boolean; reason?: string; runs: number | null; local?: boolean }> };
     assert.deepEqual(status.hosts.map(host => [host.host, host.away, host.local ?? false]), [['vishrog', false, true], ['gy-compute@box', false, false], ['gy-compute@gone', true, false]]);
     assert.equal(status.hosts[1]!.runs, 2);
+    assert.match(status.hosts[2]!.reason!, /is unreachable over SSH/, "the away host's reason reaches the dashboard");
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await store.close(); }
 });

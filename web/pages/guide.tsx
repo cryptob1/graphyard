@@ -8,9 +8,9 @@ const flow: [string, string][] = [
   ['Goal', 'You or the Master files a work item with the criteria it must meet.'],
   ['Build', 'A worker writes it in its own worktree, a private copy of the repository.'],
   ['Review', 'A different agent checks it against every criterion.'],
-  ['Merge trial', 'It is tested on top of the latest main.'],
+  ['Merge trial', 'Tested on top of the latest main.'],
   ['Merge', 'The loop merges it to main. No pull request is opened.'],
-  ['Deploy and verify', 'Merges are verified in batches; a failing batch reverts its culprit. Main deploys.'],
+  ['Deploy and verify', 'Verified in batches; a failing batch reverts its culprit. Main deploys.'],
 ];
 
 /** Where each part runs: the same parts `graphyard guide infra` lists, in two panels instead of one wiring diagram. */
@@ -124,7 +124,7 @@ export default function GuidePage() {
           <ul>{outside.map(([part, line]) => <li key={part} className="guide-card"><strong>{part}</strong><span>{line}</span></li>)}</ul>
         </div>
       </figure>
-      <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s own names.</p>
+      <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s names.</p>
     </section>
 
     <section id="docs-faq" className="panel" aria-labelledby="docs-faq-title">
