@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import type { DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
 import { cpuSensorNames, trialHotCelsius } from '../merge-writer/trial-load.js';
+import { sessionTestBudget } from '../runner/registry.js';
 
 /** The one constant, no setting: while 'some avg60' reads above this, no new worker, reviewer or trial starts. */
 export const cpuPressureCeiling = 85;
@@ -30,6 +31,18 @@ export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | nu
   return null;
 }
 export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuWaiting(state) !== null;
+/** GY-3401: whether the hottest CPU sensor sits at the launch guard's limit. */
+export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= launchHotCelsius;
+/**
+ * GY-3401: the merge writer's trial cap this cycle. A hot CPU no longer stops every trial: trials
+ * running finish, and no new one starts beyond half the cap until the reading falls below the limit.
+ * A saturated CPU (pressure over its ceiling) still starts none.
+ */
+export function trialCapNow(state: Pick<DaemonState, 'cpuPressure'>, full: number): number {
+  const cpu = state.cpuPressure;
+  if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return 0;
+  return cpuHot(state) ? Math.floor(full / 2) : full;
+}
 
 /** The hottest CPU sensor under `hwmon` in whole degrees, as the trial guard reads it; null where none is readable. */
 export async function hottestCpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
@@ -76,7 +89,7 @@ export async function cpuPressureStep(cycle: { state: DaemonState; effects: Daem
   const previous = state.cpuPressure, was = cpuWaiting(state);
   const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null;
   state.cpuPressure = avg60 === null && celsius === null ? null
-    : { at: new Date(now()).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius };
+    : { at: new Date(now()).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
   const waiting = cpuWaiting(state);
   if (!!waiting !== !!was) log(`[graphyard-master] cycle ${state.cycle}: ${waiting ? `${waiting}; no new worker, reviewer or trial starts until it falls` : 'launches resume'}`);
 }
