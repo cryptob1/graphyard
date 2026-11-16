@@ -27,7 +27,7 @@ export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
 export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[] }
 /** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373). */
-export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null }
+export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null }
 /** One host as the loop last read it (GY-3407): this machine (`local`) or an added one; `away` while it does not answer. */
 export interface LoopHost { host: string; local?: boolean; away: boolean; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
 /**
@@ -143,10 +143,13 @@ export function loopCpu(header: string | string[] | undefined): LoopCpu | null {
   const value = Array.isArray(header) ? header[0] : header;
   if (!value || value.length > 500) return null;
   try {
-    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown; celsius?: unknown };
+    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown; celsius?: unknown; testBudget?: unknown; trialCap?: { now?: unknown; full?: unknown } | null };
     const figure = (raw: unknown, max: number) => { const value = raw === null || raw === undefined ? NaN : Number(raw); return Number.isFinite(value) && value >= 0 ? Math.min(value, max) : null; };
     const avg60 = figure(parsed.avg60, 100), celsius = figure(parsed.celsius, 200);
-    return avg60 === null && celsius === null ? null : { avg60, steal: figure(parsed.steal, 100), celsius };
+    // GY-3401: the test budget a new session gets and the trial cap now and in full.
+    const testBudget = figure(parsed.testBudget, 1024), now = figure(parsed.trialCap?.now, 1024), full = figure(parsed.trialCap?.full, 1024);
+    return avg60 === null && celsius === null ? null
+      : { avg60, steal: figure(parsed.steal, 100), celsius, testBudget, trialCap: now === null || full === null ? null : { now: Math.floor(now), full: Math.floor(full) } };
   } catch { return null; }
 }
 

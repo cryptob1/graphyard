@@ -217,6 +217,8 @@ export class ComposeScratchInstall implements GoldenInstall {
   async file(item: GoldenItem, scaffold: string, run: number): Promise<Filed> {
     const work = await this.request('work', {
       title: item.title,
+      why: 'The golden eval measures how well agents deliver this kind of item.',
+      simplest: 'The golden item as written, on a fresh scaffold copy.',
       description: `${item.description}\n\nGolden eval ${item.name} run ${run}: this run's fresh scaffold copy stands at ${scaffold}.`,
       type: item.type,
       priority: item.priority,

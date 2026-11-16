@@ -55,7 +55,7 @@ export const workCommands = defineCommands([
   },
   {
     name: 'create',
-    help: ['  create path/to/work.json      Create work with acceptance criteria (operator)'],
+    help: ['  create path/to/work.json      Create work: "why" and "simplest" first, one sentence each, then criteria'],
     run: async ({ id, api, print }) => print(await api('work', JSON.parse(await readFile(id!, 'utf8')))),
   },
   {

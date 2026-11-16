@@ -157,6 +157,8 @@ export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'polic
     title: `Post-merge review of ${delivered.key} (${mergeSha.slice(0, 12)}): ${finding.text.slice(0, 120)}`.slice(0, 200),
     description: `The post-merge review of ${delivered.key} ("${delivered.title}"), delivered as merge commit ${mergeSha}, found this BLOCKING${where}:\n\n${finding.text}\n\nFix it on its own head; the delivered item is not reopened.`,
     type: 'bug' as const, priority: 1,
+    why: `Fixes a defect the post-merge review of ${delivered.key} found in what users now run.`,
+    simplest: 'Fix the one finding on its own head; the delivered item is not reopened.',
     criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`, ...(e2e.length ? [...new Set(e2e)] : ['e2e:create-work-item'])] }],
     policy: { checks: delivered.policy?.checks ?? ['test', 'typecheck'], review: true },
     origin: { reviewFollowUps: { parent: delivered.key, findings: [{ path: finding.path, text: finding.text.slice(0, 2000), ref: mergeSha }] } },

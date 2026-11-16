@@ -49,7 +49,7 @@ const ok = async (bearer: string, method: 'GET' | 'POST', path: string, body?: u
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const events = async (id: string) => (await store.pool.query('SELECT kind, actor FROM events WHERE work_id=$1', [id])).rows as { kind: string; actor: string }[];
 /** One backlog item as the operator filed it, older than every item filed after it. */
-const file = async (key: string, overrides: Record<string, unknown> = {}) => ok(token(operator.id), 'POST', 'work', {
+const file = async (key: string, overrides: Record<string, unknown> = {}) => ok(token(operator.id), 'POST', 'work', { why: 'w', simplest: 's',
   title: `Pipeline ${key}`, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop-releases-backlog-to-concurrency', 'e2e:fixture'] }],
   policy: { checks: ['test'], review: true }, ...overrides,
 }) as Promise<Work>;
