@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { boardFromStatus } from '../src/model/board';
-import { openHumanOnly } from '../src/model/human-request';
+import { boardFromStatus } from '../../src/model/board';
+import { openHumanOnly } from '../../src/model/human-request';
 
 // GY-3364: a background poll already in flight when the operator answers must not undo the answer.
 // Hold the first background status read until the answer's refresh has landed; without ordering
