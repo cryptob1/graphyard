@@ -6,6 +6,7 @@ import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 import { sealedSchema } from './agent-registry.js';
 import { aclExample, aclGuidance, installUrl, invitationMessage, missingShareGuidance, missingTailnetGuidance, shareLink, shareState, teamAccessSummary, type MachineTailnet, type ShareLink } from '../../team-access.js';
+import { unownedFamilySql } from '../../store/tables/work.js';
 
 /**
  * GY-3294: the operator's team access for this install on its machine (team-access.ts). The server
@@ -31,7 +32,7 @@ const record = (context: RouteContext, kind: string, payload: unknown) =>
 
 /** The newest events fold into: the latest host report, the latest owner changes and the device invites. */
 async function fold(context: RouteContext) {
-  const rows = (await context.services.engine.store.pool.query<Row>(`SELECT kind, payload FROM events WHERE work_id IS NULL AND kind LIKE '${prefix}%' ORDER BY seq DESC LIMIT 200`)).rows;
+  const rows = (await context.services.engine.store.pool.query<Row>(`SELECT kind, payload FROM events WHERE ${unownedFamilySql(prefix)} ORDER BY seq DESC LIMIT 200`)).rows;
   const latest = (kind: string) => rows.find(row => row.kind === prefix + kind)?.payload;
   const report = latest('host') as HostReport | undefined;
   const share = latest('share-link') as { op: string; shareLink: ShareLink } | undefined;
