@@ -15,7 +15,7 @@ const flow: [string, string][] = [
 
 /** Where each part runs: the same parts `graphyard guide infra` lists, in two panels instead of one wiring diagram. */
 const host: [string, string, string][] = [
-  ['The loop', 'graphyard-master-OWNER-NAME.service', 'Hands out work, tests each change, merges.'],
+  ['The loop', 'graphyard-master-OWNER-NAME.service', 'Hands out work, tests and merges.'],
   ['Deploy watch', 'graphyard-deploy-OWNER-NAME.service', 'Deploys and rolls back.'],
   ['Server and dashboard', 'graphyard-OWNER-NAME-server-1', 'Docker, on 127.0.0.1:4310.'],
   ['Database', 'graphyard-OWNER-NAME-db-1', 'Postgres 17 in Docker.'],
@@ -84,7 +84,7 @@ export default function GuidePage() {
       <ul>
         <li><strong>You, the owner</strong>: goals and priorities, money and accounts, and sign-ins for people.</li>
         <li><strong>The Master</strong>: the AI coordinator. It keeps the product brief, plans work items and unsticks them.</li>
-        <li><strong>The loop</strong>: plain code, no AI. It hands work to agents, tests each change, merges and deploys.</li>
+        <li><strong>The loop</strong>: plain code, no AI. It hands work to agents, tests, merges and deploys.</li>
         <li><strong>Workers and reviewers</strong>: AI coding sessions. Nobody reviews their own work.</li>
       </ul>
       <p>Your repository is the <strong>managed app</strong>: the product being built. Graphyard is the factory beside it, with its own server, dashboard and database.</p>
