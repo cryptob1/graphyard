@@ -210,12 +210,14 @@ export const daemonStateSchema = z.object({
    * figures.
    */
   cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
-    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null),
+    stat: z.object({ total: z.number().min(0), steal: z.number().min(0), idle: z.number().min(0).optional() }).strict().nullable().default(null),
     /** GY-3373: the hottest CPU sensor in whole degrees; null where none is readable. */
     celsius: z.number().nullable().default(null),
     /** GY-3401: the test parallelism a session launched now gets, and the merge writer's trial cap now and when cool. */
     testBudget: z.number().int().min(0).nullable().default(null),
     trialCap: z.object({ now: z.number().int().min(0), full: z.number().int().min(0) }).strict().nullable().default(null) }).strict().nullable().default(null),
+  /** GY-3418: the host's busy CPU-seconds per UTC day, from the /proc/stat counters above: the first day measured (the baseline) and the last eight. */
+  cpuSeconds: z.object({ days: z.record(z.string().max(10), z.number().min(0)) }).strict().default({ days: {} }),
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */
   leftovers: z.object({ day: z.string().max(10).nullable(), counts: leftoverCountsSchema,
     report: z.object({ day: z.string().max(10), counts: leftoverCountsSchema, disk: leftoverDiskSchema, at: z.string() }).strict().nullable() }).strict()

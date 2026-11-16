@@ -8,7 +8,7 @@ import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
-import { cpuWaiting } from '../daemon/cpu-pressure.js';
+import { cpuPerMergedItem, cpuWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { heavyDrainLine, readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
@@ -86,6 +86,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const fleet = unreachable ? null : await (masterApi(`agent-registry?host=${encodeURIComponent(master.hostId)}`) as Promise<FleetView>).catch(() => null);
   // The install master lists only unowned items; count personal scopes so the operator still sees them.
   const personalScopes = master.forPerson ? 0 : snapshot.work.filter(item => item.owner).length;
+  // GY-3418: every merge counts against the host's CPU, whoever's scope it is in.
+  const mergedAt = snapshot.work.flatMap(item => item.stage === 'done' ? [item.delivery?.mergedAt ?? item.observation?.mergedAt].filter((at): at is string => !!at) : []);
   snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
   const now = Date.parse(snapshot.now) || Date.now();
   // The managed repository's release health reads only what its own deployment records as served,
@@ -229,6 +231,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
       : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     deliverySpeed: deliverySpeed(merged, open, now),
+    // GY-3418: the host's busy CPU-seconds per merged item over the last 7 days, with the target: half the first measured day's figure.
+    cpuPerMergedItem: cpuPerMergedItem(state?.cpuSeconds?.days ?? {}, mergedAt, now),
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
     mergeWriter: (({ queue, inFlight, inFlights, lastMergeAt, refusals, serveRevert, trials, stepMedians }) => ({ queue, inFlight, ...(inFlights ? { inFlights } : {}), lastMergeAt, trials: trials ?? [], stepMedians: stepMedians ?? {}, lastRefusal: refusals.at(-1) ?? null,
