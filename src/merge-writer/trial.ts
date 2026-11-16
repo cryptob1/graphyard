@@ -1407,7 +1407,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
-    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
+    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[] } | undefined)[] = [];
     let next = 0, stopped: unknown = null;
     const lane = async () => {
       // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
@@ -1422,7 +1422,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
           const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
           const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
-          settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
+          // GY-3418: the files that passed — the whole shard when it exited 0 naming none, else those its records name passing.
+          const passed = tests.ok && !failing.length ? group : recorded.filter(record => record.passed && group.includes(record.file) && !failing.includes(record.file)).map(record => record.file);
+          settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
             unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
         } catch (error) { log.push(...entries); stopped ??= error; }
       }
@@ -1437,7 +1439,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (stopped !== null) throw stopped;
     const groups = ran.map(shard => shard.group);
     // GY-3418: a trial's passing files key the test-result cache (a worker's own run never reaches here).
-    const passedFiles = groups.filter(group => group.status === 0 && !group.failed.length).flatMap(group => group.files);
+    const passedFiles = ran.flatMap(shard => shard.passed);
     if (dependencies && passedFiles.length) await recordPasses(input.base, [...testResultKeys(worktree, passedFiles, dependencies).values()]).catch(() => {});
     const failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
     const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
