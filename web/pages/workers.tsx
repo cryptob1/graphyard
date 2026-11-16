@@ -184,7 +184,7 @@ type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; 
 /**
  * GY-3407: the hosts the loop watches — this machine first, then each one added with
  * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
- * reads Away and is read again next cycle. Work runs only on this machine for now, which the note says.
+ * reads Away and is read again next cycle. Merge trials send test shards to added hosts (GY-3412), which the note says.
  */
 function Hosts({ hosts }: { hosts: HostRow[] }) {
   if (!hosts.length) return null;
@@ -199,7 +199,7 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
         <td data-label="Steal">{figure(host.steal, '%')}</td>
         <td data-label="Runs now">{figure(host.runs)}</td></>}
     </tr>)}</tbody>
-  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Merge trials send test shards to added hosts too; previews run on this machine.</p> : null}</section>;
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {
