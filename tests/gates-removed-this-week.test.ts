@@ -64,7 +64,7 @@ test('e2e:gates-removed-this-week — a delivered lesson-to-code item removes it
   assert.match(filed, /^GY-\d+$/, 'the pass filed a real item');
 
   // A batch-gate revert this week, of another real item.
-  const culprit = await api('work', { type: 'chore', title: 'A change the batch gate reverted', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept', 'e2e:smoke'] }] });
+  const culprit = await api('work', { type: 'chore', why: 'w', simplest: 's', title: 'A change the batch gate reverted', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept', 'e2e:smoke'] }] });
   await writeGateRecord(gateRecordPath(root), { ...bootstrapGate('owner/game', 'c'.repeat(40)), reverts: [{ item: culprit.key, at: new Date().toISOString() }] });
 
   // The item is delivered: the next pass removes the lesson, and the loop mirrors its memory to the file.
