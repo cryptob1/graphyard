@@ -68,10 +68,16 @@ test('integration:real-app-onboarding — Graphyard maps its real dashboard and 
   await store.init();
   const http = server(new Engine(store, 120, 'cryptob1/graphyard'), [{ id: 'fixture-operator', role: 'admin', sessionKind: 'human', token: 'fixture-operator-token' }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  // The server serves the dashboard from ./dist; a trial that has not built it gets a stand-in page.
+  const repo = process.cwd(), served = await temporaryDirectory('real-app-dist');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(served, 'dist'));
+  await writeFile(join(served, 'dist', 'index.html'), '<!doctype html><title>Graphyard</title>');
+  process.chdir(served);
   try {
-    const mapped = featureMapCase(process.cwd());
+    const mapped = featureMapCase(repo);
     assert.ok(mapped.definition.steps.length >= 5, 'the product features are mapped, not just readiness');
-    const report = await runCases([mapped], { root: process.cwd(), url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: 'fixture-operator-token' });
+    const report = await runCases([mapped], { root: repo, url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: 'fixture-operator-token' });
     assert.equal(report.cases[0].verdict, 'passed', JSON.stringify(report.cases[0].failingStep));
-  } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
+  } finally { process.chdir(repo); await new Promise<void>(resolve => http.close(() => resolve())); }
 });
