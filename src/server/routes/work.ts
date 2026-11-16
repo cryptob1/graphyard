@@ -11,6 +11,7 @@ import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
+import { installAddress } from './team-access.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { readTrialScreenshot } from '../trial-screenshots.js';
 import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
@@ -69,7 +70,7 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
-        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
+        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key, await installAddress(context))
         : recordCapacity(context.services, context.actor, target, data, key);
     },
   },

@@ -14,6 +14,7 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { requestedView } from '../src/model/setup-checklist';
+const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-\d+)$/.exec(hash)?.[1] ?? null;
 import { idempotencyKey } from './idempotency-key';
 import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
@@ -136,6 +137,10 @@ function App() {
     const follow = () => { const page = requestedView(location.hash, views.map(entry => entry.id)).view; if (page) { setSelected(null); setView(page); } };
     addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow);
   }, []);
+  // GY-3415: #GY-N is an item's address, so the link the master hands an owner opens that item with its Answer.
+  const [linked, setLinked] = useState(() => itemLink(location.hash));
+  useEffect(() => { const follow = () => setLinked(itemLink(location.hash)); addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow); }, []);
+  useEffect(() => { const found = linked && work.find(w => w.key === linked); if (found) { setSelected(found.id); setLinked(null); } }, [work, linked]);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));

@@ -55,6 +55,11 @@ async function fold(context: RouteContext) {
   };
 }
 
+/** GY-3415: the address the owner opens this install at — its tailnet name when the host reported one, else the address this request reached. */
+export async function installAddress(context: RouteContext) {
+  return installUrl((await fold(context)).report ?? {}, port(context)) ?? `http://${context.req.headers.host}`;
+}
+
 async function view(context: RouteContext) {
   operator(context);
   const state = await fold(context), machine: MachineTailnet = state.report ?? {}, share = shareState(state.shareLink, now(context));
