@@ -50,9 +50,9 @@
     },
     {
       "kind": "browser",
-      "name": "the link lands on the item",
+      "name": "the link lands on the item page, which says it waits on the owner",
       "action": "expectText",
-      "text": "Owner decision from the master chat",
+      "text": "Waiting on your decision about goals and priorities.",
       "exact": false
     },
     {

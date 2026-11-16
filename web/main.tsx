@@ -14,7 +14,7 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { requestedView } from '../src/model/setup-checklist';
-const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-\d+)$/.exec(hash)?.[1] ?? null;
+const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-[A-Z0-9]+)$/.exec(hash)?.[1] ?? null;
 import { idempotencyKey } from './idempotency-key';
 import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
