@@ -12,25 +12,30 @@ import { generate } from '../benchmarks/hard-math/generator.js';
 import { oracleSource } from '../benchmarks/hard-math/oracle.js';
 import { pinnedPython } from '../benchmarks/hard-math/python.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { dockerCreates, shardHosts, shardRepository, sshdHost, type ShardHostsFixture } from './helpers/shard-hosts.js';
+import { dockerCreates, killTrees, shardHosts, shardRepository, sshdHost, type ShardHostsFixture } from './helpers/shard-hosts.js';
 
 // GY-3412 AC-3: a merge trial on two hosts — this machine, and this same machine reached over a real
 // OpenSSH server at 127.0.0.1 whose only key runs graphyard-host-shim with its own host folders — so
 // the real remote path runs: the commit packed into the host's mirror, the warm image loaded there, the
 // trial launcher run over SSH, output and records back. The workload is the hard-math benchmark: each
 // test file computes the pinned SymPy oracle's root intervals for its slice of the 24 v1 polynomials and
-// has the oracle verify them. Only Docker is a stand-in on both hosts (see helpers/shard-hosts.ts).
+// has the oracle verify them. Only Docker is a stand-in on both hosts (see helpers/shard-hosts.ts). A
+// trial image from before openssh-server was added has no sshd: there the fixture's ssh stand-in reaches
+// the same shim in the same host folders.
 
 const proof = 'e2e:two-host-trial';
 const image = 'graphyard-trial:two-host';
 const files = Array.from({ length: 8 }, (_, index) => `tests/math-${index}.test.ts`);
-let hosts: ShardHostsFixture, server: Awaited<ReturnType<typeof sshdHost>>, target: string, repository: { root: string; sha: string }, answers: string, slow: string;
+let hosts: ShardHostsFixture, second: { target: string; kill(): void; start(): Promise<void> }, target: string, repository: { root: string; sha: string }, answers: string, slow: string;
 const previous = process.env.GRAPHYARD_TRIAL_IMAGE;
 
 before(async () => {
   hosts = await shardHosts('two-host-trial', ['loopback'], { [image]: `sha256:${'7a7a'.repeat(16)}` });
-  server = await sshdHost(hosts.root, hosts.shim, hosts.home('loopback'), join(hosts.root, 'hosts', 'loopback', 'bin'), hosts.bin);
-  target = `${server.user}@127.0.0.1`;
+  if (spawnSync('sh', ['-c', 'command -v sshd || test -x /usr/sbin/sshd']).status === 0) {
+    const server = await sshdHost(hosts.root, hosts.shim, hosts.home('loopback'), join(hosts.root, 'hosts', 'loopback', 'bin'), hosts.bin);
+    second = { target: `${server.user}@127.0.0.1`, kill: server.kill, start: server.start };
+  } else second = { target: 'gy-compute@loopback', kill: () => killTrees((_, command) => command.includes(hosts.shim)), start: async () => {} };
+  target = second.target;
   const python = await pinnedPython(await temporaryDirectory('two-host-oracle'));
   answers = join(hosts.root, 'answers.jsonl'); slow = join(hosts.root, 'slow');
   const samples = [1, 2, 3].flatMap(seed => generate(seed));
@@ -58,7 +63,7 @@ for (const file of readFileSync(at('--files-from'), 'utf8').split('\\n').filter(
   });
   process.env.GRAPHYARD_TRIAL_IMAGE = image;
 });
-after(() => { server?.kill(); if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; });
+after(() => { second?.kill(); if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; });
 
 /** This machine's shards run the runner directly; git, ssh and Docker calls find the fixture's ssh and Docker first on PATH. */
 const run: ChildRun = async (command, args, options) => {
@@ -105,7 +110,7 @@ test(`${proof} — killing the second host's SSH mid-shard re-queues that shard 
   await writeFile(slow, '');
   const waiting = (async () => {
     while (!(await readFile(slow, 'utf8').catch(() => '')).includes('started')) await new Promise(resolve => setTimeout(resolve, 100));
-    server.kill();
+    second.kill();
   })();
   try {
     const killed = await trial([target]);
@@ -115,7 +120,7 @@ test(`${proof} — killing the second host's SSH mid-shard re-queues that shard 
     assert.match(killed.result.logTail ?? '', new RegExp(`\\[remote\\] host ${target.replace(/\./g, '\\.')} dropped a shard: .*its shard runs on another host`, 's'));
     assert.ok(killed.lines.filter(line => !line.remote).length === files.length, 'every file finally ran on this machine');
     assert.equal(remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.at(-1)!.state, 'away');
-  } finally { await rm(slow, { force: true }); await server.start(); }
+  } finally { await rm(slow, { force: true }); await second.start(); }
 });
 
 test(`${proof} — over the second host's key a plain shell, another user's files and docker run with the root filesystem are refused, and a shard reaches no private address, the tailnet or the host`, { timeout: 120_000 }, async () => {

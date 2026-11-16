@@ -6,7 +6,7 @@
 // NAME.down exists, as OpenSSH does for a host it cannot reach); `sshd` runs a real OpenSSH server.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { temporaryDirectory } from './temp-dirs.js';
@@ -147,6 +147,16 @@ export async function shardRepository(label: string, files: readonly string[], e
 }
 export const commitFile = async (root: string, path: string, text: string) => { await writeFile(join(root, path), text); git(root, 'add', '-A'); git(root, 'commit', '-qm', `change ${path}`); return git(root, 'rev-parse', 'HEAD'); };
 
+/** Kill every process under the ones `matches` picks (by command line), and those too. */
+export function killTrees(matches: (pid: number, command: string) => boolean) {
+  const table = readdirSync('/proc').filter(name => /^\d+$/.test(name)).flatMap(pid => {
+    try { return [{ pid: Number(pid), ppid: Number(readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[1]), command: readFileSync(`/proc/${pid}/cmdline`, 'utf8') }]; } catch { return []; }
+  });
+  const tree = new Set(table.filter(entry => matches(entry.pid, entry.command)).map(entry => entry.pid));
+  for (let grew = true; grew;) { grew = false; for (const { pid, ppid } of table) if (tree.has(ppid) && !tree.has(pid)) { tree.add(pid); grew = true; } }
+  for (const pid of tree) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+}
+
 const freePort = () => new Promise<number>((resolve, reject) => { const server = createServer().listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => resolve(port)); }).on('error', reject); });
 
 /**
@@ -178,11 +188,6 @@ export async function sshdHost(root: string, shim: string, home: string, hostBin
   const real = execFileSync('sh', ['-c', 'command -v ssh'], { encoding: 'utf8' }).trim();
   await executable(join(bin, 'ssh'), `#!/bin/sh\nexec ${real} -i ${join(dir, 'client')} -p ${port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$@"\n`);
   /** Every process the server started — its sessions, the shim, the launcher and the shard — then the server itself: the host drops off. */
-  const kill = () => {
-    const parents = execFileSync('ps', ['-e', '-o', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
-    const tree = new Set([server!.pid!]);
-    for (let grew = true; grew;) { grew = false; for (const [pid, ppid] of parents) if (tree.has(ppid!) && !tree.has(pid!)) { tree.add(pid!); grew = true; } }
-    for (const pid of tree) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
-  };
+  const kill = () => killTrees(pid => pid === server?.pid);
   return { port, user: execFileSync('id', ['-un'], { encoding: 'utf8' }).trim(), start, kill };
 }

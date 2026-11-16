@@ -3,7 +3,7 @@
 // unprivileged gy-compute user with rootless Docker and answers fixed verbs with validated arguments:
 //   probe                          read cores, load, CPU steal, sensors and running trial containers
 //   receive-pack REPO SHA          a git pack on stdin into the per-repo mirror ~/.graphyard/mirrors/REPO.git
-//   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image
+//   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image; older warm images go
 //   prepare-run REPO SHA IMAGE     a checkout of SHA cloned from the mirror under ~/.graphyard/runs,
 //                                  or `need-pack LAST` / `need-image` when the host lacks either
 //   run-shard RUN INDEX            JSON {files, argv, cpus, deadline} on stdin; the trial launcher runs argv
@@ -80,6 +80,10 @@ elif verb == 'receive-image':
     subprocess.check_call(['docker', 'load', '-q'], stdout=subprocess.DEVNULL)
     if not has_image(args[0]):
         sys.exit('graphyard-host-shim: the image stream does not hold ' + args[0])
+    # One warm image is kept: the others go unless a running shard still uses one.
+    for image in subprocess.run(['docker', 'images', 'graphyard-warm', '--format', '{{.Repository}}:{{.Tag}}'], capture_output=True, text=True).stdout.split():
+        if image != args[0]:
+            quiet('docker', 'image', 'rm', image)
 elif verb == 'prepare-run':
     if not has_commit(args[1]):
         last = subprocess.run(['git', '--git-dir=' + mirror, 'rev-parse', '-q', '--verify', 'refs/graphyard/last'], capture_output=True, text=True).stdout.strip()
