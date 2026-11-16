@@ -82,7 +82,7 @@ async function mergeAndTrial(fixture: Awaited<ReturnType<typeof repository>>, ru
   assert.ok('mergeSha' in merged);
   writeFileSync(fixture.ran, '');
   const verdict = await runTrial({ root: fixture.root, base: fixture.base, mergeSha: merged.mergeSha, baseTip: tip, changedFiles: Object.keys(files),
-    timeoutMs: 120_000, key: 'GY-1', groupSize: 10, environment: { PATH: process.env.PATH! }, run, retries: 0, secretScan: false });
+    timeoutMs: 120_000, key: 'GY-1', groupSize: 10, caches: true, environment: { PATH: process.env.PATH! }, run, retries: 0, secretScan: false });
   git(fixture.root, 'update-ref', 'refs/heads/main', merged.mergeSha);
   return { verdict, ran: readFileSync(fixture.ran, 'utf8').split('\n').filter(Boolean).sort() };
 }

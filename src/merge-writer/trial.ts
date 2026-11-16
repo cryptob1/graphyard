@@ -697,6 +697,8 @@ export interface RunTrialInput {
   baseTip?: string;
   changedFiles: readonly string[];
   timeoutMs: number;
+  /** GY-3418: keep the dependency image and test-result caches in the repository's git directory (the detached merge trial and batch gate do); absent, a trial caches nothing. */
+  caches?: boolean;
   key?: string;
   run?: ChildRun;
   /** Add criterion files to a declared selector's output before sharding. */
@@ -1058,7 +1060,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // GY-3418: the dependency key — the image and the lockfile — names the committed dependency image a
     // later head with the same two reuses, and keys the test-result cache; a checkout with no lockfile has neither.
     const show = (path: string) => Promise.resolve().then(() => run('git', ['-C', input.root, 'show', `${input.mergeSha}:${path}`], { timeoutMs: remaining() })).then(String);
-    const lockfile = await show('package-lock.json').catch(() => show('pnpm-lock.yaml')).catch(() => null);
+    const lockfile = input.caches ? await show('package-lock.json').catch(() => show('pnpm-lock.yaml')).catch(() => null) : null;
     if (lockfile !== null) {
       // The caches live in the repository's git directory beside its objects, never in the worktree root a trial leaves empty.
       caches = resolve(input.root, String(await run('git', ['-C', input.root, 'rev-parse', '--git-common-dir'], { timeoutMs: remaining() })).trim());
@@ -1397,8 +1399,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       if ((error as { timedOut?: boolean }).timedOut) throw new TrialTimeoutError('selection', Math.max(0, now() - startedAt), tail());
       throw runnerFailure('selection', endedOf(error, output(error)));
     }
+    // A cached pass counts in the verdict as the pass it was; a file selectFiles runs anyway counts once.
+    const counted = new Set([...files, ...cached]).size;
     // An affected selection of nothing runs nothing.
-    if (!files.length) return result({ passed: 0, failed: [], files: 0 });
+    if (!files.length) return result({ passed: counted, failed: [], files: counted });
     enter('tests');
     enterStep('tests');
     // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
@@ -1450,7 +1454,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const failed = [...new Set(groups.flatMap(group => group.failed))];
     if (!failed.length && unattributed) throw unattributed;
     const worst = groups.find(group => group.status !== 0);
-    return result({ passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
+    return result({ passed: Math.max(0, counted - failed.length), failed, files: counted }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
       failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());
   };
   const trial = async (): Promise<TrialRun> => {
