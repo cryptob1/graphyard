@@ -24,7 +24,9 @@ test.describe.configure({ mode: 'serial' });
 
 /** One page visited: does it fit, and what does it say? */
 async function review(page: Page, route: string, width: number) {
-  const fact = page.locator('main .page-heading .page-fact');
+  // The page's primary fact: under the heading on every router page, and the state sentence on the
+  // item page (web/pages/work-details.tsx), which carries it in its "Where it is now" plate.
+  const fact = page.locator('main .page-fact');
   await expect(fact, `${route} shows its primary fact`).toBeVisible({ timeout: 15_000 });
   await expect(fact, `${route} finishes reading`).not.toHaveText(/…$/, { timeout: 15_000 });
   await page.waitForTimeout(150);
@@ -38,7 +40,9 @@ async function review(page: Page, route: string, width: number) {
 
 for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
   test(`e2e:pages-seeded-review — every dashboard page shows its seeded items, fits and reads plainly at ${viewport.name} width`, async ({ page }) => {
-    test.setTimeout(480_000);
+    // The case's command bound (e2e/cases/pages-seeded-review.json) is 900 s for both serial tests,
+    // so each test's worst case stays under half of it.
+    test.setTimeout(420_000);
     expect(routes.length, 'the router lists its pages').toBeGreaterThan(10);
     // With PAGES_REVIEW_SHOTS set, each pass's pictures land on disk for eyes to read.
     const shots = process.env.PAGES_REVIEW_SHOTS ? `${process.env.PAGES_REVIEW_SHOTS}/${viewport.name}` : null;
