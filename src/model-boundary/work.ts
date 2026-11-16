@@ -26,6 +26,9 @@ export const createSchema = z.object({
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   /** One plain sentence a person can read first on the item page (GY-2011); optional on master create, set from a plan item's `plain` at release. */
   summary: z.string().trim().min(1).max(400).optional(),
+  /** GY-3382: one sentence on how the item helps users, and one on why it is the simplest thing that works; the create route refuses an item without both, and items from before carry neither. */
+  why: z.string().trim().min(1).max(300).optional(),
+  simplest: z.string().trim().min(1).max(300).optional(),
   /** Held items stay in backlog, out of dispatch, until someone releases them (`ready`). */
   hold: z.boolean().optional(),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
@@ -75,3 +78,11 @@ export const storedWorkSchema = createSchema.extend({
   observation: z.record(z.string(), z.unknown()).nullable(), blocker: z.string().nullable(),
   gates: z.array(gateSchema), violations: z.array(z.string()),
 }).passthrough();
+
+/** GY-3382: why a create body lacks the two sentences every new item states first, naming each missing field; null when both are there. */
+export function whyAndSimplestRefusal(input: unknown): string | null {
+  const body = (input ?? {}) as Record<string, unknown>;
+  const missing = [['why', 'one sentence on how it helps users'], ['simplest', 'one sentence on why it is the simplest thing that works']]
+    .filter(([field]) => typeof body[field] !== 'string' || !(body[field] as string).trim());
+  return missing.length ? `A work item needs ${missing.map(([field, meaning]) => `${field} (${meaning})`).join(' and ')}` : null;
+}

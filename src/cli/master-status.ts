@@ -16,7 +16,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
-import { gateRecordPath, gateSummary, readGateRecord } from '../batch-gate.js';
+import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
@@ -186,10 +186,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     text: `${message.from} wrote ${formatAge(message.at, now)} ago: ${message.text}`, next: master.peers?.some(peer => peer.name === message.from)
       ? `Act on it, then graphyard master send ${message.from} --reply ${message.id} TEXT (or master reply ${message.id} TEXT to dismiss it without sending)` : `Act on it, then graphyard master reply ${message.id} TEXT` }));
   const stepFailureAttention = standingStepFailures(state ?? { actions: {} }).map(detail => ({ subject: 'the master loop', text: detail, next: 'Read the loop journal for the failing step and repair its cause; the alert clears on the first cycle the step succeeds' }));
+  // GY-3383: the gate record once — a held batch gate is one attention line naming the hold and its reason.
+  const gateRecord = readGateRecord(gateRecordPath(root));
+  const heldGateAttention = gateHoldAttention(gateRecord, now);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -227,7 +230,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
-    batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
+    batchGate: gateSummary(gateRecord),
     // GY-3146: what the latest verified batch changed and how to try it.
     releaseNote: latestReleaseNote(releaseNotesPath(root)),
     // GY-3285: worker sessions running of the number the registry worker role allows (master workers N sets it).

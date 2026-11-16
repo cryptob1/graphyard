@@ -32,6 +32,8 @@ const title = `E2E case done-item-gates-clean run ${run}`;
 
 let item = await call('work', token, {
   title, type: 'chore', description: 'Exercise the delivered item\'s gates on the disposable local repository.',
+  why: 'Users need completed items to show passed gates without stale proof gaps.',
+  simplest: 'Deliver one fixture item through the real pipeline and inspect its final gates.',
   criteria: [{ id: 'AC-1', text: 'The delivered change works and is served', proofs: ['unit:scratch-delivery', 'e2e:scratch-delivery'] }],
   policy: { checks: ['test'], review: true },
 });
