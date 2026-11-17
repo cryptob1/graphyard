@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { cpuPressureStep, hottestCpuCelsius } from '../src/daemon/cpu-pressure.js';
+import { cpuPressureStep, cpuCelsius } from '../src/daemon/cpu-pressure.js';
 import { mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
@@ -39,7 +39,7 @@ test('e2e:heat-limit-laptop — with a fixture hwmon reporting package 95C and c
   const state = emptyDaemonState(config), now = () => Date.parse('2030-01-01T00:00:00Z'), snapshot = { work: [], now: new Date(now()).toISOString() };
   const ports = { baseBranch: 'main', now, fetch: async () => 'a'.repeat(40), merge: async () => { throw new Error('nothing to merge'); }, trial: async () => { throw new Error('nothing to trial'); },
     push: async () => 'pushed', holds: async () => false, record: async () => {}, parallel: 4, cores: 24 } as unknown as MergeWriterReads;
-  const effects = { cpuPressure: async () => ({ pressure: 'some avg10=20.00 avg60=20.00 avg300=20.00 total=1\n', stat: null, celsius: await hottestCpuCelsius(sensors) }), mergeWriter: ports, persist: async () => {} } as unknown as DaemonEffects;
+  const effects = { cpuPressure: async () => ({ pressure: 'some avg10=20.00 avg60=20.00 avg300=20.00 total=1\n', stat: null, celsius: await cpuCelsius(sensors) }), mergeWriter: ports, persist: async () => {} } as unknown as DaemonEffects;
 
   // The loop's close step reads the host, then its merge writer step runs: one cycle.
   await cpuPressureStep({ state, effects, now, log: () => {} });

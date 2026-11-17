@@ -14,6 +14,9 @@
 // the sensor's own crit-3) — a laptop whose sensors read 95-98C against a 102C crit-3 cooked with no
 // launch ever held — and trials halve their cap from 5C under it, so concurrency restores on its own
 // as the reading falls. Where no sensor is readable, no heat holds.
+// GY-3426: the reading is the package sensor (the hottest core only where no package sensor exists),
+// averaged over the cycles of the last 60 s — one core spikes to 95-100C for a second whenever
+// anything starts, and comparing that instant to the limit held nearly every launch on a 60C host.
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DaemonState } from './state.js';
@@ -27,6 +30,9 @@ export const cpuPressureCeiling = 85;
 export const launchHotCelsius = trialHotCelsius;
 /** GY-3401, GY-3416: from 5C under the limit the trial cap halves, before any launch waits. */
 export const trialHalfCelsius = trialHotCelsius - 5;
+
+/** GY-3426: the guard compares the average of the readings taken over this window to the limit. */
+export const heatWindowMs = 60_000;
 
 /** The one status line master status carries while launches wait — heat first, then pressure — or null when nothing holds them. */
 export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
@@ -49,15 +55,17 @@ export function trialCapNow(state: Pick<DaemonState, 'cpuPressure'>, full: numbe
   return cpuHot(state) ? Math.floor(full / 2) : full;
 }
 
-/** The hottest CPU sensor under `hwmon` in whole degrees, as the trial guard reads it; null where none is readable. */
-export async function hottestCpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
+/** The CPU package sensor under `hwmon` in whole degrees (the hottest core where no package sensor exists); null where none is readable. */
+export async function cpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
   const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');
   const readings = (await Promise.all((await readdir(hwmon).catch(() => [] as string[])).map(async sensor => {
     if (!cpuSensorNames.includes(await read(join(hwmon, sensor, 'name')))) return [];
     const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => name.startsWith('temp') && name.endsWith('_input'));
-    return (await Promise.all(inputs.map(name => read(join(hwmon, sensor, name))))).filter(text => /^\d+$/.test(text)).map(text => Math.floor(Number(text) / 1000));
+    return (await Promise.all(inputs.map(async name => ({ text: await read(join(hwmon, sensor, name)), label: await read(join(hwmon, sensor, name.replace('_input', '_label'))) }))))
+      .filter(({ text }) => /^\d+$/.test(text)).map(({ text, label }) => ({ celsius: Math.floor(Number(text) / 1000), package: /^(Package id|Tctl|Tdie)/.test(label) }));
   }))).flat();
-  return readings.length ? Math.max(...readings) : null;
+  const packages = readings.filter(reading => reading.package), chosen = packages.length ? packages : readings;
+  return chosen.length ? Math.max(...chosen.map(reading => reading.celsius)) : null;
 }
 
 /** 'some avg60' of /proc/pressure/cpu: the kernel's own average of the time some task waited for a CPU. */
@@ -84,17 +92,18 @@ export function stealPercent(previous: { total: number; steal: number } | null, 
 /**
  * One cycle's reading (GY-3348): the pressure and steal figures the Workers page and master status
  * show, with the counters the next cycle's steal is measured from, kept on the cursor so a restart
- * loses only one reading, and the hottest sensor (GY-3373). With neither readable (not Linux) the record clears — launches run and
+ * loses only one reading, and the package sensor's 60 s average with the readings it is taken over (GY-3373, GY-3426). With neither readable (not Linux) the record clears — launches run and
  * the pages show nothing, exactly as before — and a hold that begins or ends is one journal line.
  */
 export async function cpuPressureStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   const reading = await Promise.resolve(effects.cpuPressure?.()).catch(() => null) ?? null;
-  const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, celsius = reading?.celsius ?? null;
-  const previous = state.cpuPressure, was = cpuWaiting(state);
+  const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, at = now(), previous = state.cpuPressure, was = cpuWaiting(state);
+  const samples = reading?.celsius == null ? [] : [...(previous?.samples ?? []).filter(([when]) => at - when < heatWindowMs && when <= at), [at, reading.celsius] as [number, number]];
+  const celsius = samples.length ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
   const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null;
   state.cpuPressure = avg60 === null && celsius === null ? null
-    : { at: new Date(now()).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
+    : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
   const waiting = cpuWaiting(state);
   if (!!waiting !== !!was) log(`[graphyard-master] cycle ${state.cycle}: ${waiting ? `${waiting}; no new worker, reviewer or trial starts until it falls` : 'launches resume'}`);
 }
