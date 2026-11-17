@@ -34,7 +34,7 @@ test('e2e:headless-claude-usage-limit — a headless claude usage-credits result
 const zaiQuota = '{"type":"provider.quota","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15","status":429}';
 const zaiReset = '2026-11-20T12:49:15.000Z';
 // GY-3427: the worker run prints that error inside its JSON error event, with the 429 code 1310 body nested in it.
-const zaiQuotaEvent = `{"type":"error","sessionID":"ses_etX5zluld0JtaK5","error":${zaiQuota.slice(0, -1)},"response":{"body":${JSON.stringify(JSON.stringify({ error: { code: '1310', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15' } }))}}}`;
+const zaiQuotaEvent = JSON.stringify({ type: 'error', sessionID: 'ses_etX5zluld0JtaK5', error: { ...JSON.parse(zaiQuota), response: { body: JSON.stringify({ error: { code: '1310', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15' } }) } } });
 
 for (const [shape, printed, key] of [['quota line', zaiQuota, 'GY-9671'], ['quota error event', zaiQuotaEvent, 'GY-9674']] as const) test(`e2e:headless-claude-usage-limit — a headless opencode worker exiting on the Z.AI ${shape} is held until its reset and the same dispatch moves on`, async () => {
   await workers.configure([{ name: 'opencode-spent', kind: 'opencode', printed }, { name: 'next-z', kind: 'codex', wait: true }]);
