@@ -9,7 +9,8 @@ import { requestAttemptLimit } from '../producer.js';
 export const launchWaitLimit = 50;
 export const cursorTextLimit = 500, capacityReasonLimit = 1000, dispatchFailureReasonLimit = 300, closureFailureReasonLimit = 300;
 export const ellipsis = '…';
-export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length))}${ellipsis}` : text;
+/** Never cuts a surrogate pair in half (GY-3424): a lone surrogate is invalid jsonb and fails the cursor's save. */
+export const bounded = (text: string, limit: number) => text.length > limit ? `${text.slice(0, Math.max(0, limit - ellipsis.length)).replace(/[\ud800-\udbff]$/, '')}${ellipsis}` : text;
 /** The latest closure failures shown in status. */
 export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
   failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
