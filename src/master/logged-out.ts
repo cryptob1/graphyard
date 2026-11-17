@@ -11,9 +11,10 @@ import { selectAccount, type LaunchSelection } from './environments.js';
  * Each runtime's not-logged-in message, as its one-shot form prints it before exiting non-zero:
  * Cursor ("Authentication required. Please run 'agent login' first"), Claude Code ("Not logged in ·
  * Please run /login", "Invalid API key · Please run /login"), Codex ("Not logged in", "run codex
- * login"), OpenCode ("opencode auth login") and Pi ("No API key found").
+ * login"), OpenCode ("opencode auth login"), Pi ("No API key found") and Muse, which names the login
+ * file it reads and found missing (`~/.config/muse/auth.json`, GY-3414).
  */
-const loggedOutMessage = /authentication required|not logged in|not authenticated|please run .{0,20}login|(codex|agent|auth) login|no api key found/i;
+const loggedOutMessage = /authentication required|not logged in|not authenticated|please run .{0,20}login|(codex|agent|auth) login|no api key found|\bauth\.json\b.{0,60}\b(?:does not exist|not found|is missing)\b|\b(?:no such file or directory|does not exist|not found)\b.{0,80}\bauth\.json\b/i;
 /** The line of a failed run's output that says its account is not logged in, or null. Only short output is read: a login refusal is the whole of what the agent printed, never a line inside its work. */
 export function detectLoggedOut(output: string): string | null {
   if (output.length > 4000) return null;

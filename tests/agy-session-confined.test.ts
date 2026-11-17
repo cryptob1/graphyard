@@ -48,7 +48,7 @@ test('unit:agy-session-works-confined — a confined agy session reads its login
   // The smoke test runs agy the same way — HOME whose .gemini/antigravity-cli is the login — and
   // passes only when agy acts on its prompt.
   const bin = await temporaryDirectory('agy-bin');
-  const account = (command: string): Pick<FleetLaunchAccount, 'home' | 'fleet'> => ({ home, fleet: { runtime: 'agy', contract: { kind: command, args: [], environment: {}, homeVariable: 'AGY_CONFIG_DIR', modelFlag: null, toolsFlag: null, login: null, loginFile: null } as any, model: 'agy', modelId: null, session: 'smoke', reason: 'smoke test', role: 'worker', revision: 1 } as any });
+  const account = (command: string): Pick<FleetLaunchAccount, 'name' | 'home' | 'fleet'> => ({ name: 'agy-confined', home, fleet: { runtime: 'agy', contract: { kind: command, args: [], environment: {}, homeVariable: 'AGY_CONFIG_DIR', modelFlag: null, toolsFlag: null, login: null, loginFile: null } as any, model: 'agy', modelId: null, session: 'smoke', reason: 'smoke test', role: 'worker', revision: 1 } as any });
   assert.deepEqual(await agySmoke(account(fakeAgy(bin, loginReader)), { timeoutMs: 10_000 }), { ok: true, error: null });
 
   // Without a login it waits at the prompt, and a session that starts but never acts fails at the bound.

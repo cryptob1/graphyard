@@ -23,6 +23,8 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
  *   cites as its authorization, nor a row of an item observed
  *   merged but not yet done (its merge is still judged against the record before it).
  * Every surviving row therefore resolves to exactly the document it resolved to before.
+ * Executor bookkeeping rows (`bookkeepingKinds`, no work item, records kept in `loop_state`) older
+ * than the window go whole (GY-3342). Every other row is kept.
  *
  * A batch reads a window of the ledger in seq order from a saved cursor (GY-3111), never the whole
  * ledger ordered by age: each finishes well inside the statement timeout, and a run keeps the
@@ -43,7 +45,16 @@ export const ledgerCompactionIntervalMs = 10 * 60_000;
 /** The audit row each batch that removed anything appends (never itself compacted: not a routine kind). */
 export const ledgerCompactedKind = 'ledger.compacted';
 
-const kinds = `ARRAY[${routineSaveKinds.map(kind => `'${kind}'`).join(',')}]::text[]`;
+/**
+ * GY-3342: executor bookkeeping rows (no work item). The records themselves live in `loop_state`;
+ * the ledger row only names which ids changed, and goes whole once past the retention window.
+ */
+export const bookkeepingKinds = ['loop-state.saved', 'loop-state.migrated'] as const;
+/** Pause between batches, so a pass never holds the database for more than one short batch at a time. */
+export const ledgerCompactionPauseMs = 100;
+
+const literal = (list: readonly string[]) => `ARRAY[${list.map(kind => `'${kind}'`).join(',')}]::text[]`;
+const kinds = literal([...routineSaveKinds, ...bookkeepingKinds]);
 
 /**
  * The events table's own immutability trigger: every UPDATE is refused, and every DELETE unless it
@@ -69,11 +80,11 @@ const items = `WITH items AS MATERIALIZED (SELECT w.work_id, (SELECT x.payload->
 // `revision` is the revision the candidate row stands for.
 const scope = (revision: string) => `e.seq > $3 AND e.seq <= $4 AND e.kind = ANY($1::text[]) AND e.created_at < $2 AND c.cited IS DISTINCT FROM ${revision}`;
 /** Delta and document-less routine rows: never a base. The item's newest save, its current document, stays. */
-const loose = `${items} SELECT e.seq FROM events e JOIN items c ON c.work_id = e.work_id
+const loose = `SELECT e.seq FROM events e JOIN items c ON c.work_id = e.work_id
   WHERE ${scope("e.payload->'delta'->>'revision'")} AND NOT (e.payload ? 'work')
     AND EXISTS (SELECT 1 FROM events n WHERE n.work_id = e.work_id AND n.seq > e.seq AND (n.payload ? 'work' OR n.payload ? 'delta'))`;
 /** Whole routine rows that no save or delta can still need, repeating the previous whole row's stage and delivery. */
-const whole = `${items} SELECT e.seq FROM events e JOIN items c ON c.work_id = e.work_id
+const whole = `SELECT e.seq FROM events e JOIN items c ON c.work_id = e.work_id
   CROSS JOIN LATERAL (SELECT n.seq FROM events n WHERE n.work_id = e.work_id AND n.seq > e.seq AND n.payload ? 'work' ORDER BY n.seq LIMIT 1) nxt
   CROSS JOIN LATERAL (SELECT p.payload->'work'->'stage' AS stage, p.payload->'work'->'delivery' AS delivery FROM events p
     WHERE p.work_id = e.work_id AND p.seq < e.seq AND p.payload ? 'work' ORDER BY p.seq DESC LIMIT 1) prev
@@ -81,7 +92,14 @@ const whole = `${items} SELECT e.seq FROM events e JOIN items c ON c.work_id = e
     AND prev.stage IS NOT DISTINCT FROM e.payload->'work'->'stage' AND prev.delivery IS NOT DISTINCT FROM e.payload->'work'->'delivery'
     AND NOT EXISTS (SELECT 1 FROM events d WHERE d.work_id = e.work_id AND d.payload ? 'delta' AND d.payload->'delta'->>'base' = e.seq::text AND d.seq > e.seq AND d.seq < nxt.seq)
     AND NOT EXISTS (SELECT 1 FROM events x WHERE x.seq = e.seq AND ${DELIVERY_EVENT_PREDICATE})`;
-const remove = (candidates: string) => `DELETE FROM events WHERE seq IN (${candidates}) RETURNING seq, kind`;
+/** Bookkeeping rows past the window: they cite no item, and their records live in `loop_state`. */
+const bookkeeping = `SELECT seq FROM events WHERE seq > $3 AND seq <= $4 AND work_id IS NULL AND kind = ANY(${literal(bookkeepingKinds)}) AND created_at < $2`;
+/**
+ * A batch's candidate reads, in order: loose rows first, so a whole row whose deltas just went is
+ * judged without them. Each picks seqs inside the window; the delete then goes by primary key alone,
+ * never a semi-join the planner may answer with a scan of the whole ledger.
+ */
+export const candidateSql = [`${items} ${loose} UNION ALL ${bookkeeping}`, `${items} ${whole}`];
 
 export interface LedgerCompaction { removed: Record<string, number>; total: number; batches: number; cutoff: string; cursor: number; skipped?: 'busy' }
 
@@ -94,7 +112,7 @@ export interface LedgerCompaction { removed: Record<string, number>; total: numb
  * the start for the next pass. Runs on the pool, outside the coordination lock: a save only ever
  * extends its item's newest whole row, which is never removed.
  */
-export async function compactLedger(pool: pg.Pool, options: { retentionMs?: number; batch?: number; batches?: number; actor?: string } = {}): Promise<LedgerCompaction> {
+export async function compactLedger(pool: pg.Pool, options: { retentionMs?: number; batch?: number; batches?: number; actor?: string; pauseMs?: number } = {}): Promise<LedgerCompaction> {
   const retentionMs = Math.max(0, Math.floor(options.retentionMs ?? ledgerRetentionMs));
   const batch = Math.max(1, Math.floor(options.batch ?? ledgerCompactionBatch)), batches = Math.max(1, Math.floor(options.batches ?? ledgerCompactionBatches));
   const removed: Record<string, number> = {};
@@ -112,16 +130,17 @@ export async function compactLedger(pool: pg.Pool, options: { retentionMs?: numb
       if (!measured) {
         measured = true;
         cutoff = (await db.query(`SELECT clock_timestamp() - ($1::text||' milliseconds')::interval AS cutoff`, [String(retentionMs)])).rows[0].cutoff;
-        upper = (await db.query('SELECT seq FROM events WHERE created_at < $1 ORDER BY created_at DESC, seq DESC LIMIT 1', [cutoff])).rows[0]?.seq ?? '0';
+        // The newest old row by two probes of the created_at index, never a sort of every old row.
+        upper = (await db.query('SELECT max(seq) AS seq FROM events WHERE created_at = (SELECT max(created_at) FROM events WHERE created_at < $1)', [cutoff])).rows[0]?.seq ?? '0';
         cursor = (await db.query('SELECT seq FROM ledger_compaction_cursor')).rows[0]?.seq ?? '0';
       }
       end = (await db.query('SELECT max(seq) AS seq FROM (SELECT seq FROM events WHERE seq > $1 AND seq <= $2 ORDER BY seq LIMIT $3) w', [cursor, upper, batch])).rows[0].seq;
       await db.query("SET LOCAL graphyard.ledger_compaction = 'on'");
-      const rows = end === null ? [] : [
-        ...(await db.query(remove(loose), [[...routineSaveKinds], cutoff, cursor, end])).rows,
-        ...(await db.query(remove(whole), [[...routineSaveKinds], cutoff, cursor, end])).rows,
-      ] as { seq: string; kind: string }[];
-      await db.query("SET LOCAL graphyard.ledger_compaction = 'off'");
+      const rows: { seq: string; kind: string }[] = [];
+      for (const sql of end === null ? [] : candidateSql) {
+        const seqs = (await db.query(sql, [[...routineSaveKinds], cutoff, cursor, end])).rows.map(row => row.seq as string);
+        if (seqs.length) rows.push(...(await db.query('DELETE FROM events WHERE seq = ANY($1::bigint[]) RETURNING seq, kind', [seqs])).rows);
+      }
       for (const row of rows) byKind[row.kind] = (byKind[row.kind] ?? 0) + 1;
       if (rows.length) {
         const seqs = rows.map(row => Number(row.seq));
@@ -134,7 +153,10 @@ export async function compactLedger(pool: pg.Pool, options: { retentionMs?: numb
       for (const [kind, n] of Object.entries(byKind)) removed[kind] = (removed[kind] ?? 0) + n;
       total += rows.length;
     } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; } finally { db.release(); }
-    if (end === null) { ran++; break; }
+    if (end === null) break;
+    // The pause follows every batch that did work, the last of a run included, so a caller that
+    // loops runs never reaches the next batch back to back across the seam between runs.
+    await new Promise(resolve => setTimeout(resolve, options.pauseMs ?? ledgerCompactionPauseMs));
   }
   return { removed, total, batches: ran, cutoff: cutoff.toISOString(), cursor: Number(cursor) };
 }

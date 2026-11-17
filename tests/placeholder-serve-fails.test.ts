@@ -34,7 +34,7 @@ test('e2e:placeholder-serve-fails — a case against the placeholder serve fails
   const credentials = await temporaryDirectory('placeholder-serve-credentials');
   const master = { url: 'http://127.0.0.1:5', repository: 'owner/fixture', credentialFile: join(credentials, 'coordinator.token'), hostId: 'test-host', baseBranch: 'main', workers: [], run: { intervalSeconds: 30 } } as unknown as MasterConfig;
   await writeFile(daemonStatePath(master), JSON.stringify({ version: 1, url: master.url, repository: master.repository }));
-  const status = () => masterStatusReport(root, master, async () => ({ work: [], now: new Date().toISOString() }), async () => `${sha}\n`);
+  const status = () => masterStatusReport(root, master, async () => ({ work: [], now: new Date().toISOString() }), async (command, args) => command === 'git' ? git(root, ...args.slice(2)) : `${sha}\n`);
   const run = () => runTrialE2eCases({ worktree: root, mergeSha: sha, proofs: ['e2e:app-home'], env: { PATH: process.env.PATH! }, scratch: root, budgetMs: 30_000, holds: async path => existsSync(join(root, path)), log: () => {} });
 
   const onPlaceholder = await run();
@@ -48,6 +48,7 @@ test('e2e:placeholder-serve-fails — a case against the placeholder serve fails
   const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
   config.e2e.serve = { command: `node -e "require('http').createServer((q,r)=>r.end('the app')).listen(${port},'127.0.0.1')"`, url: `http://127.0.0.1:${port}/`, readySeconds: 30 };
   await writeFile(join(root, 'graphyard.json'), JSON.stringify(config));
+  git(root, 'commit', '-q', '-am', 'declare the serve');
   const declared = await run();
   assert.deepEqual(declared.map(entry => ({ executed: entry.executed, failed: entry.failed })), [{ executed: 1, failed: 0 }], JSON.stringify(declared));
   assert.equal((await status()).attention.find(entry => entry.subject === 'e2e.serve'), undefined, 'the placeholder line is gone');

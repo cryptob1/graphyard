@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, basename, delimiter, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -22,7 +22,7 @@ import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
-import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
+import { profileConcurrency, reviewerProfileSchema, selectReviewerProfile, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
@@ -55,7 +55,7 @@ import type { E2eServe } from './model/repository-policy.js';
 import { servingReport } from './deploy-watch.js';
 import { commandApplication, serveHead } from './merge-writer/serve-head.js';
 import { runEnvironment } from './runner/pi.js';
-import { statSync } from 'node:fs';
+import { browserInstallCommand, browserToolName, provisionBrowserTool } from './browser-tool.js';
 export { controlPlaneFindingSection } from './review-prompt.js';
 export { reviewStandard, reviewStandards, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
 export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection, criteriaVerdictRule } from './review-prompt.js';
@@ -533,19 +533,7 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
   return null;
 }
 
-/** GY-3331: the browser tool a product review walks the app with, as the E2E runner drives it. */
-export const browserToolName = 'agent-browser';
-/** Resolves the browser tool on a PATH, or null when no directory of it holds an executable one. */
-export function browserToolOnPath(environment: { PATH?: string } = process.env): string | null {
-  for (const directory of (environment.PATH ?? '').split(delimiter)) {
-    if (!directory) continue;
-    try {
-      const tool = resolve(directory, browserToolName);
-      if (existsSync(tool) && statSync(tool).isFile() && statSync(tool).mode & 0o111) return tool;
-    } catch { /* an unreadable directory holds nothing to find */ }
-  }
-  return null;
-}
+export { browserToolName, browserToolOnPath } from './browser-tool.js';
 /**
  * GY-3331: why a product-review launch cannot give its session the three things its own
  * environment owes it — the control plane's address, the CLI it posts through, and a browser tool
@@ -553,11 +541,12 @@ export function browserToolOnPath(environment: { PATH?: string } = process.env):
  * not run with the missing thing named, retried on another eligible reviewer, and raised as one
  * attention line; it never becomes a change request and never reaches the item's worker.
  */
-export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null): string | null {
+export function productLaunchRefusal(config: Pick<MasterConfig, 'url' | 'cliPath'>, mask: CredentialMask | undefined, tool: string | null, installError?: string | null): string | null {
   if (!config.url) return 'GRAPHYARD_URL is unset: this launch cannot tell its reviewer the control plane\'s address; set url with graphyard master setup';
   const unreachable = cliUnreachableRefusal(config, mask);
   if (unreachable) return unreachable;
-  if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} on this host`;
+  if (!tool && installError) return `no browser tool on the session's PATH (agent-browser), and ${installError}; the loop tries the install again in 15 minutes, or run: ${browserInstallCommand()}`;
+  if (!tool) return `no browser tool on the session's PATH (agent-browser): a product review walks the app with it, so this launch starts no reviewer; install ${browserToolName} with: ${browserInstallCommand()}`;
   return null;
 }
 /** GY-3331: how the launcher records a could-not-run product review on the item, with the loop's own coordinator credential. */
@@ -583,6 +572,8 @@ export async function headServeDeclaration(root: string, sha: string, run: Child
 export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string;
   /** GY-3331: the head itself, served for this review by the install's own e2e.serve command, on an install that serves nothing else. */
   servedUrl?: string;
+  /** Current-head trial results and screenshot routes from the launch snapshot. */
+  trialEvidence?: string;
   /** GY-3331: this install serves no app and declares no serve command, so no walkthrough is required or owed. */
   noApp?: boolean;
   /** A headless session's answer (headlessReviewAnswer), in place of the `review post` instructions: the launcher posts it. */
@@ -623,6 +614,21 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `GH_CONFIG_DIR holds this launch's review binding and one-time verdict token. `
     + reviewAutonomySection();
 }
+/** Only evidence belonging to the reviewed head is presented as its trial. */
+export function productTrialEvidence(work: Work, head: string): string {
+  const trial = work.mergeLedger?.trial?.head === head ? work.mergeLedger.trial : null;
+  const screenshots = trial && work.trialScreenshots?.mergeSha === trial.mergeSha
+    ? work.trialScreenshots.cases.flatMap(entry => (['before', 'after'] as const)
+      .filter(side => entry[side]).map(side => `$GRAPHYARD_URL/api/work/${encodeURIComponent(work.key)}/trial-screenshots/${encodeURIComponent(entry.case)}/${side}`))
+    : [];
+  return `Trial evidence for head ${head}: ${JSON.stringify({
+    trial,
+    checks: work.observation?.candidate.sha === head ? work.observation.checks : [],
+    evidence: work.evidence.filter(entry => entry.sha === head && entry.policyRevision === work.policyRevision)
+      .map(({ proof, result, trusted, executed, skipped, artifacts }) => ({ proof, result, trusted, executed, skipped, artifacts })),
+    screenshots,
+  })}. `;
+}
 /**
  * The product review's request (GY-2989): the whole app in context, walked, not the diff. The
  * session uses agent-browser on the head's preview (the loop serves the built head there while the
@@ -634,7 +640,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
  * evidence and says so. A session whose own environment failed (no URL, no CLI, no browser, an
  * app it cannot reach) reports COULD_NOT_RUN, never a change request.
  */
-function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, _checkout?: SessionCheckout) {
+function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, _checkout?: SessionCheckout, criteria?: ReviewCriterion[], scenarioRequirements: Work['scenarioRequirements'] = []) {
   const unreachable = `If your own environment fails — GRAPHYARD_URL unset, no Graphyard CLI, no browser tool, or an app you cannot reach — report that as COULD_NOT_RUN with the reason, never as a change request: no worker can fix it. `;
   const walk = plane.previewUrl
     ? `Walk it with agent-browser: open the head's built preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. ${unreachable}`
@@ -645,6 +651,9 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
         : `The head itself is not separately previewed, so walk the app as currently served with agent-browser (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served), use the flows the feature belongs to, and read the head's diff (git diff ${plane.baseTip} ${plane.head}) beside what you see. ${unreachable}`;
   return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane. `
     + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct. `
+    + reviewStandards({ ...binding, criteria, scenarioRequirements }, plane.head).criteria + criteriaVerdictRule
+    + (plane.trialEvidence ?? `No trial evidence recorded for head ${plane.head}. `)
+    + reviewReadSection(config.cliPath ?? launcherPath, plane.head)
     + walk
     + `Then judge: ${reviewStandards(binding).product}`
     + (plane.answer ? readOnlySession + plane.answer : productPostSection(config.cliPath ?? launcherPath) + readOnlySession
@@ -719,7 +728,7 @@ export async function reviewDiff(root: string, base: string, head: string, run: 
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. `plane.baseTip` is the diff base the session judges — for a candidate review the head's merge base with the base branch (GY-2948), for a post-merge review the merge commit's first parent — and anchors the memory digest too: the digest's "changes since" window reaches past that base to the tip, so it names items merged between the two, which a reviewer judging against the merge base still wants in mind. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
-  if (plane.product) return productReviewPrompt(config, binding, plane, checkout);
+  if (plane.product) return productReviewPrompt(config, binding, plane, checkout, criteria, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip} under policy revision ${binding.policyRevision}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
@@ -924,7 +933,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   const postMerge = dependencies.postMerge;
   const product = !!dependencies.product;
   if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
-  const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : selectReviewerProfile(config).profile ?? undefined;
   if (!profile) {
     // GY-1850: a launch naming a profile no configured one carries is a configuration fault, not a
     // failing candidate: left to the dispatcher's widening retries it was knocked out every cycle
@@ -942,7 +951,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       await recordReviewerProfileRefusal(config, profileName, at);
     }
     if (profileName) throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}`);
-    throw new Error(config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
+    throw new Error('Add a reviewer profile with master reviewer add before launching a review');
   }
   // A launch got past the profile lookup: whichever profile it found, the loop launches reviews again
   // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.
@@ -1067,8 +1076,11 @@ export async function launchReview(root: string, work: Work, profileName: string
         // checks the three before anything starts; a launch that cannot give them records the
         // review as could not run with the missing thing named and starts no reviewer.
         if (product) {
-          const tool = (dependencies.browserTool ?? browserToolOnPath)({ PATH: process.env.PATH });
-          const refusal = productLaunchRefusal(config, credentialMask, tool);
+          // GY-3370: a host without the tool installs it once, here, and the review goes on.
+          let installError: string | null = null;
+          const tool = dependencies.browserTool ? dependencies.browserTool({ PATH: process.env.PATH })
+            : await provisionBrowserTool().catch((error: Error) => { installError = error.message; return null; });
+          const refusal = productLaunchRefusal(config, credentialMask, tool, installError);
           if (refusal) {
             await (dependencies.recordCouldNotRun ?? recordCouldNotRunReview)(config, work, { reviewer: reviewerIdentity, sha: binding.sha, baseSha: binding.baseSha, reason: refusal }).catch(() => { /* the launch refusal itself is reported; the record is retried with it */ });
             throw new Error(`The product review of ${binding.key} could not run: ${refusal}`);
@@ -1102,7 +1114,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
-        const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}), ...(serving ? { servedUrl: serving.url } : {}), ...(noApp ? { noApp: true } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
+        const request = (answer?: string) => reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, trialEvidence: productTrialEvidence(work, binding.sha), ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}), ...(serving ? { servedUrl: serving.url } : {}), ...(noApp ? { noApp: true } : {}) } : {}), ...(answer ? { answer } : {}) }, reservation.record.reviewInputs?.scenarioRequirements);
         {
           // GY-3218: a run whose agent says its account is not logged in holds it and runs on the role's next account, under this same launch.
           const moveAccount = moveOffLoggedOutAccount(config, profile, work.key, on, dependencies.probe, async next => {

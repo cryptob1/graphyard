@@ -9,6 +9,9 @@ import { join, resolve } from 'node:path';
 const releaseStore = directory => join(directory, 'deploy', 'build', '.graphyard');
 export const cliReleasePath = (directory, commit) => join(releaseStore(directory), 'cli-releases', commit);
 export const currentCliPath = directory => join(releaseStore(directory), 'cli-published');
+// The one stable launcher path per install (GY-3337): the loop unit's ExecStart names it, and it
+// execs whatever release `cli-published` selects, so no upgrade can leave the unit on a stale path.
+export const installLauncherPath = directory => join(directory, 'bin', 'graphyard.mjs');
 
 /**
  * Create once, install once. A failed install can be retried without touching any published tree.

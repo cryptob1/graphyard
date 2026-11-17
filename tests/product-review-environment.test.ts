@@ -14,7 +14,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { loadMasterConfig, setupMaster } from '../src/master/config.js';
 import type { Principal, Work } from '../src/model.js';
-import { launchReview, readReviewLedger } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reviewPrompt, headlessReviewAnswer, productTrialEvidence } from '../src/reviewer.js';
 import { saveReviewerProfile } from '../src/reviewer.js';
 import { productReviewNeed } from '../src/model-boundary/dispatch.js';
 import { productReviewRefusal } from '../src/model-boundary/product-review.js';
@@ -275,4 +275,61 @@ test('e2e:product-review-environment — master status shows one attention line 
   assert.equal(lines.length, 1, JSON.stringify(report.attention));
   assert.match(lines[0]!.text, /product review could not run/);
   assert.match(lines[0]!.text, /never returns to its worker/);
+});
+
+
+function withTrialInputs(work: Work): Work {
+  work.criteria.push({ id: 'AC-2', text: 'The export button is visible beside the report title', proofs: ['e2e:report-export'] });
+  work.mergeLedger = {
+    key: work.key, state: 'intent', head: headA, baseTip: base, mergeSha: headB, risk: 'normal',
+    intentAt: now(), pushedAt: null, observedTip: null, refusal: null, events: 2,
+    trial: { head: headA, mergeSha: headB, build: 'pass', testFiles: 3,
+      proofs: { 'e2e:report-export': { executed: 2, failed: 0 } },
+      preview: { result: 'pass', mergeSha: headB, detail: 'Report export walkthrough passed', durationMs: 10,
+        cases: [{ case: 'report-export', verdict: 'passed', required: true }], failed: [] } },
+  };
+  work.trialScreenshots = { mergeSha: headB, baseTip: base, at: now(), cases: [{ case: 'report-export', before: true, after: true }] };
+  return work;
+}
+
+function assertProductInputs(prompt: string, work: Work) {
+  for (const criterion of work.criteria) assert.ok(prompt.includes(criterion.text), criterion.id);
+  assert.ok(prompt.includes(`node ${launcher} guide review`), 'the prompt names the executable CLI');
+  assert.ok(prompt.includes(`Trial evidence for head ${headA}`));
+  assert.ok(prompt.includes('"build":"pass"'));
+  assert.ok(prompt.includes('"executed":2,"failed":0'));
+  assert.ok(prompt.includes('"case":"report-export","verdict":"passed"'));
+  for (const side of ['before', 'after']) assert.ok(prompt.includes(`/api/work/${work.key}/trial-screenshots/report-export/${side}`));
+  assert.doesNotMatch(prompt, /(?:which|command -v) (?:graphyard|gy)\b|(?:graphyard|gy) on PATH/);
+}
+
+test('integration:product-review-prompt-inputs — posted and headless prompts carry criteria, exact-head trial results, screenshots and CLI reads', () => {
+  const work = withTrialInputs(productItem('GY-9510', headA));
+  for (const answer of [undefined, headlessReviewAnswer(work.key, true)]) {
+    const prompt = reviewPrompt({ repository: 'owner/project', cliPath: launcher },
+      { key: work.key, pr: 7, sha: headA, baseSha: base, policyRevision: 1 },
+      undefined, undefined, work.criteria, undefined, undefined, undefined, undefined, undefined,
+      { product: true, head: headA, baseTip: base, noApp: true, trialEvidence: productTrialEvidence(work, headA), answer });
+    assertProductInputs(prompt, work);
+    if (answer) assert.doesNotMatch(prompt, /review post --event/);
+    else assert.ok(prompt.includes(`node ${launcher} review post --event`));
+  }
+  const stale = productTrialEvidence(work, base);
+  assert.ok(stale.includes('"trial":null'));
+  assert.ok(stale.includes('"screenshots":[]'));
+  assert.ok(!stale.includes('report-export'));
+});
+
+test('e2e:product-review-headless-inputs — a feature reviewer receives its inputs and posts a verdict through the control plane', async () => {
+  const work = await insert(withTrialInputs(productItem('GY-9511', headA)));
+  // Deterministic runtime double: inspect the actual launched request before answering.
+  // The real launcher, one-time review token, posting route and settlement all run.
+  const fake = runtime(async child => {
+    assertProductInputs(child.args.at(-1)!, work);
+    return approve(headA);
+  });
+  const launched = await launchReview(root, work, 'product-claude', [], now(), { run, headless: fake.exec, product: true });
+  const record = await settledRecord(launched.review);
+  assert.equal(record.verdict?.state, 'APPROVED', record.resolution);
+  assert.equal((await stored(work.id)).productReview?.verdict, 'approved');
 });

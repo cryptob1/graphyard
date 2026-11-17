@@ -55,6 +55,12 @@ export const schemaGenerations: readonly (string | null)[] = [
   // GY-3341: the work index records when a settled delivery merged (merged_at), the recent-merge
   // window the loop's own open-only coordination read keeps.
   'sha256:92dac9aae16df5cec676dd300b3a06bde8ca5e4879ccf05bf83a0ced499ae504',
+  // GY-3342: ledger compaction may delete loop-state bookkeeping rows past the retention window.
+  'sha256:661de45866391f1a2af23e4209ecf6dd1f74e56212a60950db6223f4828a067a',
+  // GY-3385: the reporter identities a Master issues peer installs on its host (reporter_identities).
+  'sha256:4f8d8e3473c38d69bf733e899efb6cc30937564188b320ba0e94cb7ef75243af',
+  // GY-3402: the install-wide record reads (registry, connect, team access) by an index on kind family.
+  'sha256:9de9a189bd4dc3a4eefb2aa95f14728b78bb11abf292b60e8307ea95701546a9',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

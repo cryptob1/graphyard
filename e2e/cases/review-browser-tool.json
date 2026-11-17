@@ -1,0 +1,16 @@
+{
+  "id": "review-browser-tool",
+  "title": "Doctor identifies a missing product review browser and the install step fixes it",
+  "description": "On a host without agent-browser on the review PATH, doctor prints exactly one FAIL line naming the tool and its install command. Running that command makes the same check PASS. Product review provisioning also launches reviewers with the installed tool on PATH.",
+  "tags": ["review", "product-review", "doctor"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "doctor and product reviews resolve the host browser tool",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/review-browser-tool.test.ts tests/product-review-browser-provisioned.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Evidence, type Principal, type Work } from '../model.js';
+import { endImplementationSessions } from '../model/sessions.js';
 import { evaluate } from '../model-boundary/gates.js';
 import { foldMergeLedger, previewVerdictSchema, trialFlakedSchema } from '../model-boundary/merge-ledger.js';
 import { readOnlyTrialBlocker, trialOverloadPrefix } from '../model/merge-queue.js';
@@ -262,6 +263,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       if (observation) work!.observation = { ...observation, merged: true, mergeSha: data.mergeSha, mergedAt };
       work!.violations = work!.violations.filter(entry => !entry.startsWith(reconciliationRefusalPrefix));
       work!.stage = 'done'; work!.stageEnteredAt = now.toISOString();
+      endImplementationSessions(work!, `${work!.key} was delivered`, now);
       work!.delivery = { mergedAt, mergeSha: data.mergeSha, authorizationRevision: work!.revision };
       // GY-3281: the delivered document's gates read the reconciled ledger. The last evaluation
       // before this one wrote the `pushed` save, whose merge gate refuses the push it had not yet

@@ -1,0 +1,14 @@
+{
+  "id": "trial-heat-limit-from-sensor",
+  "title": "The trial heat limit comes from the CPU's own critical temperature",
+  "description": "The real trial-container launcher against an injected hwmon tree: a CPU sensor waits at the lower of 85C and 3C under its own temp_crit (else temp_max, else 85C alone); non-CPU sensors are ignored.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Heat limit read from the sensor's critical and max temperatures",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-heat-limit-from-sensor.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

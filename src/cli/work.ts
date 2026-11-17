@@ -55,8 +55,23 @@ export const workCommands = defineCommands([
   },
   {
     name: 'create',
-    help: ['  create path/to/work.json      Create work with acceptance criteria (operator)'],
+    help: ['  create path/to/work.json      Create work: "why" and "simplest" first, one sentence each, then criteria'],
     run: async ({ id, api, print }) => print(await api('work', JSON.parse(await readFile(id!, 'utf8')))),
+  },
+  {
+    // GY-3344: how a reporter (another install's Master) reaches this install's Master, and reads its replies.
+    name: 'message',
+    help: ['  message TEXT                 Message this install\'s Master; master status shows it until it replies'],
+    run: async ({ id, args, api, print }) => {
+      const text = [id, ...args].filter(Boolean).join(' ').trim();
+      if (!text) throw new Error('Use message TEXT');
+      return print(await api('master/messages', { text }));
+    },
+  },
+  {
+    name: 'messages',
+    help: ['  messages                     Your messages to this install\'s Master, with its replies'],
+    run: async ({ api, print }) => print(await api('master/messages')),
   },
   {
     name: 'handoff',

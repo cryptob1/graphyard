@@ -29,7 +29,7 @@ const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isola
   description: 'Deferred by the owner. This item stays in the backlog until the owner releases it.',
   criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation', 'e2e:fixture'] }], reason: 'Owner deferral' };
 const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Next by priority' };
-const created = async (input: unknown) => { const result = await call(master.token, 'work', input); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body as Work; };
+const created = async (input: unknown) => { const result = await call(master.token, 'work', { why: 'w', simplest: 's', ...(input as object) }); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body as Work; };
 const release = (credential: string, work: Work) => call(credential, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Release it' });
 const fixture = (fields: Partial<Work>) => ({ key: 'GY-1', title: 'Work', description: '', criteria: [{ id: 'AC-1', text: 'Specified work', proofs: ['e2e:fixture'] }], ...fields }) as unknown as Work;
 

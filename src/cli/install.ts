@@ -212,7 +212,7 @@ export const installCommands = defineCommands([
     ],
     async run(context) { return runDoctor(context); },
   },
-  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human]',
+  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer|reporter [--session-kind ai|human]',
     '              [--grant external-runs:import|delivery:observe-sha] [--proof unit:*|integration:*|e2e:*|manual:*]...',
     '              [--token-file PATH] [--repo OWNER/NAME]',
     '  principal remove ID [--repo OWNER/NAME]',
@@ -221,6 +221,8 @@ export const installCommands = defineCommands([
     '                                roster back from the control plane. A producer needs an explicit --grant or --proof; --token-file',
     '                                restores an existing credential instead of minting one; delivery:observe-sha is held alone, by a',
     '                                dedicated observer principal; a later install --apply keeps the entry. Repeating either command',
-    '                                changes nothing.'], readsConnection: () => false,
+    '                                changes nothing. A reporter is another install\'s Master: with GRAPHYARD_URL and its token file it',
+    '                                files items (create), messages this install\'s Master (message) and reads back its own items',
+    '                                and the replies (status GY-N, messages), and nothing else.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
 ]);

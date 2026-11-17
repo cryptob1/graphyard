@@ -1,0 +1,13 @@
+{
+  "id": "dispatch-state-saves",
+  "title": "The loop saves its dispatch state after a relaunch churn and launches other ready work",
+  "description": "On a real temporary Postgres behind the served API, one item carries thousands of launch failures and a running session its runtime no longer lists, as the GY-3406 relaunch churn left it. Two loop cycles run the real dispatch tick: each saves the dispatch state through POST /api/loop-state/<scope>/dispatch without a 500, the churned item keeps only its latest launch failures, and another item's ready review launches.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Two loop cycles save the dispatch state and launch the other ready item",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/dispatch-state-saves.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "confined-ssh-and-siblings",
+  "title": "Confined sessions run ssh and read only the project's declared sibling repositories",
+  "description": "Under real bubblewrap, with a fixture HOME whose code/da holds a project beside two sibling checkouts: ssh -G localhost exits 0 instead of reporting bad owner or permissions on the system ssh include directory; the sibling the repository lists in graphyard.json confinement.readonlyPaths is readable and not writable; an unlisted sibling stays unreadable; and the project's own checkout stays readable.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined ssh and declared siblings",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/confined-ssh-and-siblings.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -11,8 +11,8 @@ export async function open(c: Omit<Ctx, 'work'> & { work?: Work }): Promise<Work
   let work: Work | undefined;
   if (actor.role === 'operator-agent') {
     authorizeOperatorCommand(actor, command, data, undefined, engine.repository);
-  // GY-3215: an invited maintainer files work as themselves; a viewer does not.
-  } else if (actor.team !== 'maintainer') admin(actor);
+  // GY-3215: an invited maintainer files work as themselves; a viewer does not. GY-3344: so does a reporter.
+  } else if (actor.team !== 'maintainer' && actor.role !== 'reporter') admin(actor);
   demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
   demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
   const criteria = data.criteria.length ? declareBootstrap(engine, actor, data, [], 1, now) : [];
@@ -32,7 +32,8 @@ export async function open(c: Omit<Ctx, 'work'> & { work?: Work }): Promise<Work
   const created = now.toISOString();
   const { reason: _reason, ...intent } = data;
   work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
-    ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
+    ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [],
+    ...(actor.role === 'reporter' ? { reportedBy: actor.id } : {}) };
   // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
   work!.proofGaps = unauthorizedProofs(engine.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
   // GY-2975: the create response and the stored document carry the single-case warning, so the author sees it at once.

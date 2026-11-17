@@ -1,5 +1,6 @@
 export { humanOnlyDecisions } from '../model/human-request.js';
 // Concern: session and worker harness permissions, and starting the master session.
+import { itemLeadBrief } from '../review-prompt.js';
 import { lstat, mkdir } from 'node:fs/promises';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -12,7 +13,7 @@ import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnit
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, runtimeLoginHomes, workerConfinementRefusal } from './profiles.js';
-import { masterCredentialMask } from './confinement.js';
+import { masterCredentialMask, preparePeerExchange } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -241,7 +242,7 @@ export function masterPrompt(config: MasterConfig): string {
   // and the users before acting, keeps the product brief, ranks work by its success signals and
   // re-checks those signals after each deploy; the owner's stated mission and priorities override that ranking.
   const founder = `You are the dedicated Graphyard master agent for ${config.repository}, responsible for the product succeeding: learn the problem and users first (repository, docs, the running app, owner messages, item history), write and revise the product brief, turn it into goals and work items ranked by impact on its success signals, re-check them after each deploy, and record lessons; the owner's stated mission and priorities override that ranking.`;
-  const prompt = `${founder}${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Never implement, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, node ${config.cliPath} guide master and master status. Leave dispatch, review, proofs and merge to node ${config.cliPath} master run; workers claim for themselves. Draw the emblem when master emblem reports set: false. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run master autonomy --admin-token-stdin --apply.`}`}`;
+  const prompt = `${founder} ${itemLeadBrief.trim()}${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Never implement, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, node ${config.cliPath} guide master and master status. Leave dispatch, review, proofs and merge to node ${config.cliPath} master run; workers claim for themselves. Draw the emblem when master emblem reports set: false. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run master autonomy --admin-token-stdin --apply.`}`}`;
   const reviewInstruction = supervised
     ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no other session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
     : `Independent review and proof collection start on their own: master run launches them for each candidate's exact head. Read findings and route rework; never review yourself, never submit evidence.`;
@@ -272,7 +273,9 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // GY-3237: the install state the master session's own recovery commands write — reviewer
     // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
     // the managed worktree root its launches allocate checkouts under — granted writable.
-    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
+    // GY-3385: and each recorded peer's peers directory, where the session places the reporter
+    // tokens it issues them (master peer issue), created where missing before the confinement binds.
+    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config), ...preparePeerExchange(config)];
 
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the

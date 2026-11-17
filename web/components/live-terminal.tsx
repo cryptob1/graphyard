@@ -68,7 +68,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       const terminal = new Terminal({ cols: columns, rows, scrollback: 5000, convertEol: false, cursorBlink: true, fontSize: 13 });
       terminal.open(host.current!);
       let socket: WebSocket, reconnect: ReturnType<typeof setTimeout>, delay = 250;
-      let writable = false;
+      let writable = false, doubted = false;
       const send = (value: unknown) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
       const input = (data: string) => { if (writable) send({ type: 'input', data }); };
       sendKey.current = key => { input(key); terminal.focus(); };
@@ -103,7 +103,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
         const query = new URLSearchParams({ cols: String(terminal.cols), rows: String(terminal.rows) });
         socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/terminal?${query}`, ['graphyard', token]);
         socket.binaryType = 'arraybuffer';
-        socket.onopen = () => { opened = true; };
+        socket.onopen = () => { opened = true; doubted = false; };
         socket.onmessage = event => {
           if (!live) return;
           if (typeof event.data === 'string') {
@@ -130,6 +130,9 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
             const response = await fetch('/api/status', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000) }).catch(() => null);
             if (!live) return;
             if (response && response.status < 500) {
+              // A socket that failed while the network was down answers this check once it is back,
+              // looking refused: one more attempt, on the network the check just reached, decides (GY-3368).
+              if (!doubted) { doubted = true; connect(); return; }
               setReason('Not available: sign in, and check the session still has a pane.'); setState('refused'); return;
             }
           }
