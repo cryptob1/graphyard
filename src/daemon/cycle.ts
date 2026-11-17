@@ -48,6 +48,7 @@ import { diskHeadroomStep } from './disk-headroom.js';
 import { cpuPressureStep, cpuWaiting } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
+import { recordStallAlarm, stallAlarm } from './stall-alarm.js';
 import { controlPlaneStep } from './control-plane.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -169,9 +170,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       void effects.persist(state).catch(() => {});
       return;
     }
-    const reason = normalizeFailureReason(message(error)).slice(0, 1000), at = new Date(now()).toISOString();
+    // The run counts equal failures by their normalized words; the entry keeps the last error as it read (the stall alarm names it, GY-3432).
+    const reason = message(error).slice(0, 1000), at = new Date(now()).toISOString();
     const prior = state.stepFailures[name];
-    const run = prior && prior.reason === reason ? { step: name, reason, count: prior.count + 1, at } : { step: name, reason, count: 1, at };
+    const same = !!prior && normalizeFailureReason(prior.reason) === normalizeFailureReason(reason);
+    const run = { step: name, reason, count: same ? prior.count + 1 : 1, at };
     state.stepFailures[name] = run;
     if (run.count < stepFailureThreshold) return;
     const detail = `The loop's ${name} step failed the same way ${stepFailureThreshold} consecutive cycles: ${message(error)}`.slice(0, actionDetailMax);
@@ -670,8 +673,16 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot, cpuWaitingLine);
-  await masterSession(cycle, open);
+  // GY-3432: the stall alarm, before the master is woken, so a raised alarm wakes it this cycle.
+  if (!config.forPerson) {
+    const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
+    const alarm = stallAlarm({ now: clock, open, ready: claimable, freeSlots: allowed - running,
+      state, registry, serving: await Promise.resolve(effects.servingCommit?.()).catch(() => null) ?? null });
+    if (recordStallAlarm(state, alarm, clock)) { cycle.log(`[graphyard-master] cycle ${state.cycle}: ${alarm ?? 'the stall alarm cleared'}`); await effects.persist(state); }
+  }
+  // A dispatch tick that fails (its state cannot be saved) still wakes the master.
+  try { await effects.dispatchTick?.(snapshot, cpuWaitingLine); }
+  finally { await masterSession(cycle, open); }
 }
 
 /**

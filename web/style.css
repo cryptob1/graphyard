@@ -355,6 +355,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* The Master terminal uses the rest of the viewport, including on a phone. */
 .main:has(>.live-terminal){gap:var(--space-4)}
 /* GY-3345: threads with other installs' Masters, above the terminal; long words wrap, never widen the page. */
+.stall-alarm{margin:0 0 var(--space-2);padding:var(--space-2) var(--space-3);border-left:3px solid var(--blocked);border-radius:var(--radius);background:var(--raised);color:var(--text);overflow-wrap:anywhere}
 .master-messages{display:grid;gap:8px;margin-bottom:8px;max-height:30dvh;overflow-y:auto;min-width:0}
 .master-thread{border:1px solid var(--border);border-radius:6px;padding:6px 10px;min-width:0}
 .master-thread h2{font-size:var(--type-small);margin:0 0 4px;color:var(--text-2)}

@@ -20,7 +20,7 @@ export function messageThreads(messages: Message[]) {
 }
 
 /** The Master page (GY-3211): the master agent's live Herdr pane, typed into by the operator and watched by everyone else. Its title reads Master (GY-3307). */
-export default function MasterPage({ token, api }: Pick<Dashboard, 'token' | 'api'>) {
+export default function MasterPage({ token, api, status }: Pick<Dashboard, 'token' | 'api'> & { status?: Dashboard['status'] }) {
   const [messages, setMessages] = useState<Message[]>([]);
   useEffect(() => {
     let live = true;
@@ -29,8 +29,11 @@ export default function MasterPage({ token, api }: Pick<Dashboard, 'token' | 'ap
     return () => { live = false; clearInterval(timer); };
   }, [token]);
   const threads = messageThreads(messages);
+  // GY-3432: the loop's stall alarm, first, until work moves again.
+  const stall = typeof status?.setup?.stallAlarm === 'string' ? status.setup.stallAlarm : null;
   return <>
     <PageHeader title="Master" fact="Files, routes and unsticks the work."/>
+    {stall && <p className="stall-alarm" role="alert">{stall}</p>}
     {threads.length > 0 && <section className="master-messages" aria-label="Messages with other installs">
       {threads.slice(0, 5).map(thread => <article key={thread.entries[0]!.id} className="master-thread" aria-label={`Thread with ${thread.peer}`}>
         <h2>With {thread.peer}</h2>
