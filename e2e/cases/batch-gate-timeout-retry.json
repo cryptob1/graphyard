@@ -1,7 +1,7 @@
 {
   "id": "batch-gate-timeout-retry",
   "title": "A batch gate held for timing out twice retries on its own",
-  "description": "Runs the real gate over ports whose clock the case controls: a hold raised because the gate timed out twice on a tip reruns that tip after its 30-minute cool-off without main moving and verifies it, master status attention names the hold and its reason while it stands, and a gate held for a failing case still waits for main to move.",
+  "description": "Runs the real gate over ports whose clock the case controls: a timeout hold an older loop wrote clears on the next gate run, which reruns main's tip and verifies it without waiting out any cool-off (GY-3444), master status attention names the hold and its reason while it stands, and a gate held for a failing case still waits for main to move.",
   "target": "any",
   "required": false,
   "steps": [

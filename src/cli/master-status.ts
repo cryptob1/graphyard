@@ -31,7 +31,7 @@ import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { trialFloorAttention } from '../merge-writer/trial-load.js';
-import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.js';
+import { parkedOnHuman } from '../model/human-request.js';
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
@@ -126,12 +126,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const controlUpdate = controlPlaneSummary(readControlPlaneRecord(controlPlaneRecordPath(root)), now);
   const open = snapshot.work.filter(item => item.stage !== 'done');
   // GY-3280: every recorded worker blocker is attention the cycle it lands, naming the item, the
-  // blocker and how long it has waited — the master session is prompted the same cycle, and 30
-  // minutes unanswered raises it on the dashboard's Needs you for the owner.
+  // blocker and how long it has waited — the master session is prompted the same cycle. GY-3394:
+  // however long it stands it stays the Master's (the Master page carries it too), never the
+  // owner's Needs you.
   const blockerAttention = open.filter(item => item.blocker && !parkedOnHuman(item)).map(item => {
     const since = blockerSince(item);
     return { subject: item.key, text: `${item.key}'s blocker${since !== null ? ` has waited ${formatAge(since, now)}` : ''}: ${item.blocker}`,
-      next: `Clear the cause, then graphyard master unblock ${item.key} REASON; ${blockerEscalationMinutes} minutes unanswered raises it on the dashboard's Needs you` };
+      next: `Clear the cause, then graphyard master unblock ${item.key} REASON` };
   });
   const leaseLosses = open.flatMap(item => {
     const run = state?.failureRuns[item.id];
