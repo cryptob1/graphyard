@@ -130,11 +130,16 @@ export interface SessionReport {
   missing: Record<string, string>;
 }
 export type ObserveOptions = LivenessOptions & { hostId?: string | null; launchGraceMs?: number; refreshMs?: number;
-  /** Handles already closed this tick by the item's own facts (superseded), keyed `workId\0id`. */
+  /** Handles already closed this tick by the item's own facts (superseded), keyed by `sessionHandleKey`. */
   settled?: ReadonlySet<string>;
   /** When each handle the previous report missed was first missed; a handle in it is missing for a second consecutive report. */
   firstMissed?: Record<string, string> };
-const handleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
+/**
+ * A handle's key in the dispatch cursor's `sessionMisses`. The cursor is stored as jsonb, which
+ * refuses a NUL character anywhere, so a NUL separator made every save of it fail (GY-3424).
+ */
+export const sessionHandleKey = (workId: string, id: string) => `${workId}/${id}`;
+const handleKey = sessionHandleKey;
 /**
  * GY-1532. Why the item's own facts say a session's purpose is over, or null while it stands: an
  * implementation session whose attempt has ended — submitted, released (by its worker, by its

@@ -22,7 +22,7 @@ import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
 import { holdRepeatedLimitAccount } from './master/launch-account.js';
 import { prepareSessionHarness } from './master/harness.js';
-import { profileConcurrency, reviewerProfileSchema, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
+import { profileConcurrency, reviewerProfileSchema, selectReviewerProfile, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
@@ -933,7 +933,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   const postMerge = dependencies.postMerge;
   const product = !!dependencies.product;
   if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
-  const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : selectReviewerProfile(config).profile ?? undefined;
   if (!profile) {
     // GY-1850: a launch naming a profile no configured one carries is a configuration fault, not a
     // failing candidate: left to the dispatcher's widening retries it was knocked out every cycle
@@ -951,7 +951,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       await recordReviewerProfileRefusal(config, profileName, at);
     }
     if (profileName) throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}`);
-    throw new Error(config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
+    throw new Error('Add a reviewer profile with master reviewer add before launching a review');
   }
   // A launch got past the profile lookup: whichever profile it found, the loop launches reviews again
   // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.

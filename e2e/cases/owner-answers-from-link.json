@@ -1,0 +1,117 @@
+{
+  "id": "owner-answers-from-link",
+  "title": "An owner who approved in the master chat answers as themselves from the item link the refusal names",
+  "description": "GY-3415: an item parked on an owner decision; an agent relaying the owner's chat approval is refused with the item's dashboard link (install URL + /#GY-N). The signed-in owner opens that link, lands on the item with its Answer ready (the recommended choice first), and one click records the answer attributed to them; the item leaves Needs you and waits for a worker again.",
+  "tags": [
+    "api",
+    "dashboard",
+    "human-decision"
+  ],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "park an item on an owner decision; an agent's answer is refused naming /#GY-EOWNER",
+      "run": "node --import tsx scripts/e2e-seed-owner-answer.mjs",
+      "timeoutSeconds": 60
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard as the owner",
+      "action": "open",
+      "path": "/?sign-in"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the main dashboard has loaded",
+      "action": "expectText",
+      "role": "navigation",
+      "text": "Primary"
+    },
+    {
+      "kind": "browser",
+      "name": "open the link the refusal named",
+      "action": "open",
+      "path": "/#GY-EOWNER"
+    },
+    {
+      "kind": "browser",
+      "name": "the link lands on the item page, which says it waits on the owner",
+      "action": "expectText",
+      "text": "Waiting on your decision about goals and priorities.",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "its Answer is ready: the recommended choice first",
+      "action": "expectText",
+      "text": "Ship the export first?",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "one click answers",
+      "action": "click",
+      "role": "button",
+      "text": "Go ahead as asked",
+      "exact": false
+    },
+    {
+      "kind": "http",
+      "name": "the answer is recorded as the owner's and the item is unblocked",
+      "method": "GET",
+      "path": "/api/work/GY-EOWNER",
+      "status": 200,
+      "waitSeconds": 30,
+      "expect": [
+        {
+          "path": "humanRequest",
+          "equals": null
+        },
+        {
+          "path": "blocker",
+          "equals": null
+        },
+        {
+          "path": "humanRequests",
+          "includes": {
+            "answer": {
+              "by": "e2e-operator",
+              "outcome": "provided"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the item proceeds: it waits for a worker again",
+      "method": "GET",
+      "path": "/api/board",
+      "status": 200,
+      "expect": [
+        {
+          "path": "groups.up-next",
+          "includes": {
+            "key": "GY-EOWNER",
+            "group": "up-next"
+          }
+        }
+      ]
+    }
+  ]
+}
