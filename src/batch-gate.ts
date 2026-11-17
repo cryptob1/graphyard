@@ -38,6 +38,12 @@ import type { PreviewCaseRun } from './merge-writer/served-previews.js';
 
 /** How long one gate may run before it counts as failed (gate timeout). */
 export const gateLimitMs = 45 * 60_000;
+/**
+ * GY-3444: one gate run's bound — the limit above, or 1.5x the last measured full catalog run when
+ * that is longer (61 minutes on vishrog on 2026-11-17), so a loaded host's own catalog never outlasts it.
+ */
+export const gateBoundMs = (record: Pick<GateRecord, 'catalogMs'>) => Math.max(gateLimitMs, Math.ceil(1.5 * (record.catalogMs ?? 0)));
+const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */
 export const diagnosticsIntervalMs = 24 * 60 * 60_000;
 /** The gate runs the whole catalog only when its measured time fits this share of the limit. */
@@ -212,7 +218,7 @@ export type GateOutcome =
   | { outcome: 'idle' }
   | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[] }
   | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string; fallback?: string }
-  | { outcome: 'timeout'; tip: string }
+  | { outcome: 'timeout'; tip: string; boundMs: number }
   | { outcome: 'retry'; tip: string; reason: string }
   | { outcome: 'held'; tip: string; reason: string };
 
@@ -249,7 +255,7 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
 /** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
 export function gateOutcomeReason(outcome: GateOutcome): string | null {
   if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}${outcome.fallback ? ` (${outcome.fallback})` : ''}`;
-  if (outcome.outcome === 'timeout') return `past ${gateLimitMs / 60_000} minutes`;
+  if (outcome.outcome === 'timeout') return `past ${minutes(outcome.boundMs)} minutes`;
   return 'reason' in outcome ? outcome.reason : null;
 }
 
@@ -314,7 +320,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
   const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
   // The clock is the batch's own, so a restart between steps never lengthens the gate.
-  const deadline = Date.parse(record.inFlight.startedAt) + gateLimitMs;
+  const bound = gateBoundMs(record), deadline = Date.parse(record.inFlight.startedAt) + bound;
   const finished = results;
   const stepKey = (commit: string, runChecks: readonly string[]) => `${commit} ${[...runChecks].sort().join(' ')}`;
   // A whole-catalog batch run measures the catalog's gate-run time, a timeout its elapsed time.
@@ -423,8 +429,8 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     if (!(mainKey in finished)) measure(ports.now() - Date.parse(record.inFlight.startedAt));
     // A timeout blames nobody: the batch is recut once, and a second timeout holds.
     record.attempt = { ...record.attempt, timeouts: record.attempt.timeouts + 1 };
-    if (record.attempt.timeouts >= 2) return hold(`the batch gate timed out twice (past ${gateLimitMs / 60_000} minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`);
-    return { outcome: 'timeout', tip };
+    if (record.attempt.timeouts >= 2) return hold(`the batch gate timed out twice (past ${minutes(bound)} minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`);
+    return { outcome: 'timeout', tip, boundMs: bound };
   }
 }
 
