@@ -105,8 +105,8 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * detached — is one heavy job of the host: it waits here for a slot of the budget every Graphyard
  * project on the host shares, naming the holders as its step, before anything of it starts.
  */
-export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>) =>
-  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal });
+export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal) =>
+  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until });
 
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
