@@ -11,7 +11,7 @@ import type { RegistrySlot } from '../master/registry-slot.js';
 import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
-import type { CheckoutTrustRefusal } from '../harness.js';
+import type { CheckoutTrustFleet, CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import type { MasterMessage } from './master-stalled-delivery.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
@@ -136,8 +136,10 @@ export interface DaemonEffects {
    * would refuse — the checkout carries repository Claude configuration, and the account's config
    * records neither it nor an ancestor trusted. The dispatch step holds the roles it names with one
    * standing attention line and launches nothing until it answers empty; absent, nothing is held.
+   * GY-3410: it judges the registry document the dispatch step already read (null when that read
+   * failed), so an unanswering registry costs the step one bounded read, not two in a row.
    */
-  checkoutTrust?: () => Promise<CheckoutTrustRefusal[]>;
+  checkoutTrust?: (registry: CheckoutTrustFleet | null) => Promise<CheckoutTrustRefusal[]>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
   setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */
