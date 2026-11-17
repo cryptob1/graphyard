@@ -103,6 +103,7 @@ async function fixture(label: string) {
     return git(pusher, 'rev-parse', 'HEAD');
   };
   await writeFile(join(pusher, 'README.md'), 'base\n');
+  await writeFile(join(pusher, 'graphyard.json'), '{}');
   git(pusher, 'add', '.');
   git(pusher, 'commit', '-q', '-m', 'base');
   git(pusher, 'push', '-q', 'origin', 'HEAD:main');
