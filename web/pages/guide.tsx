@@ -48,7 +48,7 @@ const faq: [string, string, ReactNode][] = [
   ['faq-failure', 'What if a worker fails or a provider’s quota runs out?', <>A session that goes quiet gets one re-prompt. One that still fails ends its attempt, and the loop starts another that continues from the committed work. When a provider says an account hit its limit, Graphyard holds that account until the reset (an hour if none is named) and uses the next account in the same role. Settings → Agents shows every account and its state.</>],
   ['faq-logs', 'Where are the logs, and what is a blocker?', <>Each item’s page keeps every attempt’s output (credentials masked), its reviews, trials and proofs. A blocker is an agent’s reason it cannot continue: the item shows under Blocked and the Master resolves it. On the host, <code>journalctl --user -u graphyard-master-OWNER-NAME.service</code> shows the loop and <code>docker logs graphyard-OWNER-NAME-server-1</code> the server; {link('docs-reference', 'Reference')} lists every part.</>],
   ['faq-access', 'How do I and my teammates sign in, across installs?', <>Each repository has its own install, with its own dashboard, port and sign-ins. The first install serves at <code>http://127.0.0.1:4310</code>; the next takes the first free port after it, and <code>up --port N</code> picks one. On a Tailscale host <code>up</code> also serves each install on the tailnet at <code>http://HOST:PORT</code>, its own port, never a public address: one machine, many installs, one port each. Sign in with the link <code>up</code> prints, or <code>graphyard login</code> for a new one. A teammate passes two locks: the machine’s Tailscale share, then this install’s own sign-in. Use <strong>Invite someone</strong> on Setup for one message carrying both, or <code>graphyard invite NAME --role viewer</code> for the sign-in alone: a viewer reads everything, a maintainer also files work. The sign-in link works once, within 24 hours, on that install only, so invite them on each install they need.</>],
-  ['faq-decisions', 'Which decisions are left to me?', <>Three kinds: goals and priorities, money and accounts, and sign-ins for people. When an item needs one, it shows under Needs you with the question and a recommended answer; answer it there. Agents decide everything else: a blocker, however long it waits, is the Master&rsquo;s — the Master page lists the ones waiting.</>],
+  ['faq-decisions', 'Which decisions are left to me?', <>Three kinds: goals and priorities, money and accounts, and sign-ins for people. When an item needs one, it shows under Needs you with the question and a recommended answer; answer it there. Agents decide everything else: a blocker is the Master&rsquo;s, listed on the Master page.</>],
 ];
 
 const commands: [string, string][] = [
@@ -100,7 +100,7 @@ export default function GuidePage() {
         <li><strong>State a goal.</strong> On Work, press <strong>New work item</strong> and give it a title. The Master writes the criteria.</li>
         <li><strong>Watch it move.</strong> Under Moving it goes from build to deploy. Open it to see who acts next.</li>
         <li><strong>Find the result.</strong> Shipped lists what merged and went live.</li>
-        <li><strong>Meet a blocker.</strong> Stuck items show under Blocked with the reason, and the Master clears them; your decisions wait under Needs you.</li>
+        <li><strong>Meet a blocker.</strong> Stuck items show under Blocked for the Master to clear; your decisions wait under Needs you.</li>
       </ol>
     </section>
 
