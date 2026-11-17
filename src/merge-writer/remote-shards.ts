@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { probeHost, readHosts } from '../hosts.js';
+import { probeHost, readHosts, sshTarget } from '../hosts.js';
 import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
 /** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
@@ -102,7 +102,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   const repo = mirrorName(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
   const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
-  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target, verb];
+  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', ...sshTarget(target), verb];
   /** One shim verb on `target`, with `source`'s output as its input; any failure turns the host away. */
   const shim = async (target: string, verb: string, source?: string) => {
     try {
