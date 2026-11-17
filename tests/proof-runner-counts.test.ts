@@ -154,7 +154,7 @@ test(`${own} — the run on the base tip counts through the runner too: a vitest
   try {
     const fixture = await repository(root, { 'package.json': vitestPackage(), 'src/proof.test.ts': vitestProof('pass') });
     const run = await trial(fixture, root, ['unit:declared'], direct, true);
-    assert.deepEqual(run.notReproduced, { proofs: ['unit:declared'], tip: fixture.baseTip });
+    assert.deepEqual(run.notReproduced, { proofs: ['unit:declared'], tip: fixture.baseTip, files: [] });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

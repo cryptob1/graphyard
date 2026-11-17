@@ -12,7 +12,7 @@
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master/profiles.js';
-import { trialFailurePrefix } from '../model/rework-ground.js';
+import { proofPassesOnBasePrefix, trialFailurePrefix } from '../model/rework-ground.js';
 import type { DaemonState, FailureRun } from './state.js';
 
 /** The cursor key of an item's early-exit incident (worker-launch-health.ts records it). */
@@ -99,16 +99,18 @@ export function advanceFailureRuns(state: DaemonState, work: readonly Work[], ac
 /** Two lease losses or three other equal failures hold dispatch until the run ends. */
 export const failureHeld = (run: FailureRun | undefined) => (run?.count ?? 0) >= (run?.kind === 'lease' ? 2 : 3);
 const repeating = (run: FailureRun | undefined): run is FailureRun => (run?.count ?? 0) >= 2;
+/** GY-3423: a proof that passes on the base needs a case that fails there, not a different approach to the change. */
+const passesOnBase = (run: FailureRun) => run.kind === 'trial' && !!run.reasons.at(-1)?.startsWith(proofPassesOnBasePrefix);
 const quoted = (run: FailureRun) => run.reasons.map((reason, index) => `(${index + 1}) ${reason}`).join(' ');
 
 /** The master's one wake for a run: on the second equal failure, and again when the third holds the item. */
 export function repeatedFailureCause(run: FailureRun | undefined): { key: string; detail: string } | null {
   if (!repeating(run)) return null;
   const key = `repeat:${createHash('sha1').update(`${run.key}:${run.signature}`).digest('hex')}`;
-  const label = labels[run.kind];
+  const label = labels[run.kind], onBase = passesOnBase(run);
   return failureHeld(run)
-    ? { key, detail: `${run.key}: the same ${label} ${run.kind === 'lease' ? 'twice' : 'a third time'}; the loop stopped dispatching it. Decide: resume it with node graphyard master rework ${run.key} REASON naming a different approach, or close or park it. The last two: ${quoted(run)}` }
-    : { key, detail: `${run.key}: the same ${label} twice; its next worker is asked to state a diagnosis and a different approach before changing code. Both: ${quoted(run)}${run.kind === 'review' ? ' If a lint rule, type or test could enforce this review reason, record it with graphyard master lesson add REASON --enforceable so it becomes code.' : ''}` };
+    ? { key, detail: `${run.key}: the same ${label} ${run.kind === 'lease' ? 'twice' : 'a third time'}; the loop stopped dispatching it. Decide: resume it with node graphyard master rework ${run.key} REASON naming ${onBase ? 'the case that must fail on the base tip' : 'a different approach'}, or close or park it. The last two: ${quoted(run)}` }
+    : { key, detail: `${run.key}: the same ${label} twice; its next worker is asked to ${onBase ? 'change the named case so it fails on the base tip' : 'state a diagnosis and a different approach before changing code'}. Both: ${quoted(run)}${run.kind === 'review' ? ' If a lint rule, type or test could enforce this review reason, record it with graphyard master lesson add REASON --enforceable so it becomes code.' : ''}` };
 }
 
 /** Whether the item's per-failure wake causes give way to its run's single cause. */
@@ -117,5 +119,6 @@ export const repeatingItems = (runs: DaemonState['failureRuns']) => new Set(Obje
 /** The worker prompt's section for a run of two equal failures. */
 export function diagnosisSection(run: FailureRun | undefined): string {
   if (!repeating(run)) return '';
+  if (passesOnBase(run)) return `The last two attempts of ${run.key} were refused because the proof already passes before the change: ${quoted(run)} The change itself may be right; change the named case file so a case fails on the base tip and passes with the change. `;
   return `The last two attempts of ${run.key} ended with the same ${labels[run.kind]}: ${quoted(run)} Retrying the same approach will fail the same way. Before changing any code, state your diagnosis of why it failed twice and the different approach you will take, then carry out that approach. `;
 }
