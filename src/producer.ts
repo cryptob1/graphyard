@@ -535,7 +535,7 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
   const memory = await readProjectMemory(root).catch(() => null);
   // The headless run's child receives them in its own environment, never on a command line.
-  const environment = { ...sessionVerificationEnvironment(root, config), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`, ...dependencies.producerEnv };
+  const environment = { ...sessionVerificationEnvironment(config), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`, ...dependencies.producerEnv };
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id, root,
