@@ -1,0 +1,15 @@
+{
+  "id": "batch-gate-first",
+  "title": "The batch gate has first claim and retries a timeout at once on the newest main",
+  "description": "Runs the real gate step over a git origin with the one merge slot taken: the gate starts anyway, master status shows it holding first claim on trial slots with implementation launches paused, and a forced timeout restarts the gate in the same flight on main's newest tip, which it verifies.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the gate holds first claim; a timeout retries on the newest tip",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:batch-gate-first tests/batch-gate-first.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

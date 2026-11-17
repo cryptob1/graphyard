@@ -55,8 +55,12 @@ if [ "$1" = image ] && [ "$2" = inspect ]; then
   echo "No such image: $3" >&2; exit 1
 fi
 if [ "$1" = build ] && [ -e '${failMarker}' ]; then echo 'failed to solve: the stub refuses to build' >&2; exit 1; fi
-eval context=\\\${$#}
-if [ "$1" = build ] && grep -q 'RUN false' "$context/${trialDockerfile}"; then echo 'process "/bin/sh -c false" did not complete successfully' >&2; exit 1; fi
+if [ "$1" = build ]; then
+  file=; prev=
+  for a in "$@"; do [ "$prev" = --file ] && file=$a; prev=$a; done
+  [ -f "$file" ] || { echo "failed to read dockerfile: open $file: no such file or directory" >&2; exit 1; }
+  if grep -q 'RUN false' "$file"; then echo 'process "/bin/sh -c false" did not complete successfully' >&2; exit 1; fi
+fi
 exit 0
 `, { mode: 0o755 });
   writeFileSync(join(stub, 'gofake'), `#!/bin/sh
@@ -124,11 +128,11 @@ test('unit:tests/repository-trial-image.test.ts — a first build checks out the
   const build = calls.find(([command, first]) => command === 'docker' && first === 'build')!;
   assert.ok(build, 'the image is built');
   assert.deepEqual(build.slice(2, 5), ['--build-arg', `GRAPHYARD_TRIAL_IMAGE=${trialImage()}`, '--file']);
-  assert.equal(build[5], trialDockerfile);
   assert.equal(build[6], '--tag');
   assert.equal(build[7], built);
   const worktreeAdd = calls.find(([command, , , first, second]) => command === 'git' && first === 'worktree' && second === 'add');
   assert.ok(worktreeAdd, 'the build context is a worktree of the tip');
+  assert.equal(build[5], join(worktreeAdd![6]!, trialDockerfile), 'the Dockerfile is named inside the context worktree');
   assert.equal(worktreeAdd![7], fixture.tip, 'the context is the tip it was given');
   assert.equal(existsSync(worktreeAdd![6]!), false, 'the context worktree is removed after the build');
   assert.ok(calls.some(([command, , , first, second]) => command === 'git' && first === 'worktree' && second === 'remove'), 'the worktree is unregistered');
@@ -252,4 +256,90 @@ test('live:repository-trial-image — a real trial builds the image and runs the
   for (const tag of [repositoryTrialImageTag(fixture.root, trialImage(), baseDockerfile)]) {
     try { execFileSync('docker', ['image', 'rm', tag], { stdio: 'ignore' }); } catch { /* already gone */ }
   }
+});
+
+// GY-3420: docker reads --file against its working directory, not the context, so a relative name
+// found the file only where the merge writer's own checkout happened to carry it.
+test('integration:trial-dockerfile-path — a head that first introduces graphyard.trial.Dockerfile builds it from the path inside the context worktree', { timeout: 60_000 }, async () => {
+  const fixture = await repository({ 'README.md': 'no trial image yet\n', 'graphyard.json': policy() });
+  const tip = head(fixture.root, 'adds the trial image', root => writeFileSync(join(root, trialDockerfile), baseDockerfile));
+  assert.equal(existsSync(trialDockerfile), false, 'the process working directory carries no Dockerfile');
+  let file: string | null = null;
+  const run: ChildRun = (command, args, options = {}) => {
+    if (command === 'docker' && args[0] === 'image') throw Object.assign(new Error('no such image'), { status: 1, stdout: '', stderr: 'No such image' });
+    if (command === 'docker') {
+      file = args[args.indexOf('--file') + 1]!;
+      if (!existsSync(file)) throw Object.assign(new Error('build failed'), { status: 1, stdout: '', stderr: `failed to read dockerfile: open ${file}: no such file or directory` });
+      assert.equal(file, join(args.at(-1)!, trialDockerfile), 'the Dockerfile lies inside the build context');
+      return '';
+    }
+    return defaultChildRun(command, args, options);
+  };
+  const built = await repositoryTrialImage({ root: fixture.root, tip, scratch: fixture.base, env: { PATH: process.env.PATH! }, timeoutMs: 60_000, run });
+  assert.equal(built, repositoryTrialImageTag(fixture.root, trialImage(), baseDockerfile));
+  assert.ok(file, 'the image was built');
+});
+
+/** Runs `body` with the docker and gofake stubs first on the trial's PATH (see the e2e test above). */
+async function withStubs(body: (stub: Awaited<ReturnType<typeof dockerStub>>) => Promise<void>) {
+  const stub = await dockerStub(join(await temporaryDirectory('trial-image-fail'), 'fail'));
+  const execPath = process.execPath;
+  symlinkSync(process.execPath, join(stub.stub, 'node'));
+  process.execPath = join(stub.stub, 'node');
+  try { await body(stub); } finally { process.execPath = execPath; }
+}
+const trialOf = (fixture: { root: string; base: string; tip: string }, mergeSha: string, changedFiles: string[], wrappers: (readonly string[])[]) => runTrial({ root: fixture.root, base: fixture.base, mergeSha,
+  baseTip: fixture.tip, changedFiles, timeoutMs: 120_000, key: 'GY-3420', retries: 0, environment: { PATH: process.env.PATH! }, run: recordingRun(wrappers) });
+const builds = (stub: Awaited<ReturnType<typeof dockerStub>>) => existsSync(stub.dockerLog) ? stub.lines(stub.dockerLog).filter(line => line.startsWith('build ')) : [];
+
+test('integration:trial-image-follows-commit — a commit deleting the Dockerfile runs the standard image and never builds the base copy; adding or editing builds its own copy; unchanged uses the base copy', { timeout: 300_000 }, async () => {
+  await withStubs(async stub => {
+    // Deleted at the trialled commit: the base tip's copy is neither built nor used.
+    const deleting = await repository({ [trialDockerfile]: baseDockerfile, gofake, 'graphyard.json': policy() });
+    const deleteWrappers: (readonly string[])[] = [];
+    const deleted = await trialOf(deleting, head(deleting.root, 'deletes the dockerfile', root => rmSync(join(root, trialDockerfile))), [trialDockerfile], deleteWrappers);
+    assert.equal(deleted.build, 'pass', deleted.logTail);
+    assert.deepEqual(builds(stub), [], 'no build of the base tip copy is attempted');
+    assert.ok(confinedWrappers(deleteWrappers).every(wrapper => runsIn(wrapper, trialImage())), 'the standard image runs the trial');
+
+    // Unchanged: the base copy is built and used.
+    const unchangedWrappers: (readonly string[])[] = [];
+    const keeping = await repository({ [trialDockerfile]: baseDockerfile, gofake, 'graphyard.json': policy(), 'README.md': 'base\n' });
+    const kept = await trialOf(keeping, head(keeping.root, 'readme', root => writeFileSync(join(root, 'README.md'), 'changed\n')), ['README.md'], unchangedWrappers);
+    assert.deepEqual(kept.tests, { passed: 1, failed: [], files: 1 }, kept.logTail);
+    const baseTag = repositoryTrialImageTag(keeping.root, trialImage(), baseDockerfile);
+    assert.equal(builds(stub).length, 1);
+    assert.ok(builds(stub)[0]!.includes(`--tag ${baseTag}`), 'the base copy is built');
+    assert.ok(confinedWrappers(unchangedWrappers).every(wrapper => runsIn(wrapper, baseTag)), 'the base copy runs the trial');
+
+    // Edited: the head's own copy is built.
+    const edited = `${baseDockerfile}# edited\n`;
+    const editing = await trialOf(keeping, head(keeping.root, 'edits', root => writeFileSync(join(root, trialDockerfile), edited)), [trialDockerfile], []);
+    assert.deepEqual(editing.tests, { passed: 1, failed: [], files: 1 }, editing.logTail);
+    assert.ok(builds(stub).some(line => line.includes(`--tag ${repositoryTrialImageTag(keeping.root, trialImage(), edited)}`)), 'the edited copy is built');
+
+    // Added: the head's own copy is built and runs the trial.
+    const adding = await repository({ gofake, 'graphyard.json': policy() });
+    const addWrappers: (readonly string[])[] = [];
+    const added = await trialOf(adding, head(adding.root, 'adds the dockerfile', root => writeFileSync(join(root, trialDockerfile), baseDockerfile)), [trialDockerfile], addWrappers);
+    assert.deepEqual(added.tests, { passed: 1, failed: [], files: 1 }, added.logTail);
+    const ownTag = repositoryTrialImageTag(adding.root, trialImage(), baseDockerfile);
+    assert.ok(builds(stub).some(line => line.includes(`--tag ${ownTag}`)), 'the added copy is built');
+    assert.ok(confinedWrappers(addWrappers).every(wrapper => runsIn(wrapper, ownTag)), 'the added copy runs the trial');
+  });
+});
+
+test('e2e:trial-image-first-introduction — a fixture whose head first adds graphyard.trial.Dockerfile runs its trial checks in the built image', { timeout: 300_000 }, async () => {
+  await withStubs(async stub => {
+    const fixture = await repository({ gofake, 'graphyard.json': policy(), 'README.md': 'no trial image yet\n' });
+    const wrappers: (readonly string[])[] = [];
+    const trial = await trialOf(fixture, head(fixture.root, 'adds the trial image', root => writeFileSync(join(root, trialDockerfile), `${baseDockerfile}ENV GRAPHYARD_FIXTURE_IMAGE=1\n`)), [trialDockerfile], wrappers);
+    assert.deepEqual(trial.tests, { passed: 1, failed: [], files: 1 }, trial.logTail);
+    const tag = repositoryTrialImageTag(fixture.root, trialImage(), `${baseDockerfile}ENV GRAPHYARD_FIXTURE_IMAGE=1\n`);
+    assert.equal(builds(stub).filter(line => line.includes(`--tag ${tag}`)).length, 1, 'the head\'s image is built once');
+    const confined = confinedWrappers(wrappers);
+    assert.equal(confined.length, 1);
+    assert.ok(runsIn(confined[0]!, tag), 'the check runs in the built image, whose ENV it sees');
+    assert.deepEqual(stub.lines(stub.gofakeLog), ['verify'], 'the check ran the tool the image adds');
+  });
 });

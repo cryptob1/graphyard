@@ -9,10 +9,12 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 ## More hosts
 
-- A host lends Graphyard its compute and nothing else; work does not run there yet, the loop only watches it. Run `graphyard host prepare` here and the script it prints once on the host with sudo: it creates the unprivileged `gy-compute` user (no sudo, not in the docker group) with rootless Docker, and lets this machine's SSH key run only `graphyard-host-shim`, never a shell.
+- A host lends Graphyard its compute and nothing else: merge trials send it test shards. Run `graphyard host prepare` here and the script it prints once on the host with sudo: it creates the unprivileged `gy-compute` user (no sudo, not in the docker group) with rootless Docker, and lets this machine's SSH key run only `graphyard-host-shim`, never a shell. The host needs no rootless extras preinstalled: when `dockerd-rootless-setuptool.sh` and `slirp4netns` are missing, the script itself fetches the static Docker rootless extras for the host's Docker version and a static slirp4netns into `gy-compute`'s home, checks them, and uses those; when the tools (or its own fetched copy) are there it downloads nothing. It needs `curl`, `python3` and `git`.
 - `graphyard host add gy-compute@HOST` refuses a host it cannot reach, one without Docker, a key that opens a plain shell, root, and a docker-group user, each with the reason. Workers lists every host, this machine first, with cores, temperature, CPU steal and runs now; one that stops answering shows Away.
 - `graphyard host remove USER@HOST` stops reading one; `graphyard host list` shows the one host list.
-- Accepted risk: a host can forge its own shard results, so add only machines you own. When remote shard runs come, they will read this same host list.
+- Accepted risk: a host can forge its own shard results, so add only machines you own. Remote shard runs read this same host list.
+- Each trial sends each test shard to the host with the most free CPU under its heat limit. There the shard gets a clone of the commit and runs with no network, under CPU, memory and process limits. A host that drops a shard hands it back: capacity, never a fault. `master status` → `remoteShards` shows each host.
+- Tests that need namespaces (bwrap), Docker or the network — confinement, compose, trial-container and e2e tests, anything starting a server or a database — stay on this machine: a host's shard has no network and no Docker socket, so they would only fail there. Every other test file may run on a host.
 
 ## Onboarding a project
 
