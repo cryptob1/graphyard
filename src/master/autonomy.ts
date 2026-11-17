@@ -114,7 +114,9 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
   if (insideMasterConfinement() && work?.candidate) {
     const request = liveReviewRequest(work);
     if (!request) throw new Error(`${work.key} has no pending control-plane review request; host dispatch launches reviews when its review gate requests one`);
-    return { work: work.key, requestId: request.id, queued: true, recorded: 'The durable review request is queued for the host master loop.' };
+    // GY-3428: the request is asked afresh, so the host loop launches a reviewer for it on its next cycle even when it had stopped relaunching the old one.
+    const renewed = await mutate(`work/${work.id}/review-request`, {}) as { requestId: string | null };
+    return { work: work.key, requestId: renewed.requestId, previous: request.id, queued: true, recorded: 'The review request is renewed; the host master loop launches a reviewer for it on its next cycle.' };
   }
   if (!work?.candidate || !profile) return launch();
   const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;

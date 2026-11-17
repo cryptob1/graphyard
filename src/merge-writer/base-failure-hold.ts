@@ -1,16 +1,28 @@
-// Concern: GY-3140 — while a base failure stands on main's tip, the merge writer trials only a head that can repair it.
+// Concern: GY-3140, GY-3451 — while a base failure stands on main, the merge writer trials only a head that can repair it.
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { parseBaseFailureReason } from './executor.js';
 
 type Git = (args: string[]) => Promise<string>;
 const codeExtension = /\.(?:[cm]?[jt]sx?)$/;
 
-/** The base failure the ledger records on `tip`: its refusal reason and the failing test files it names, or null. */
-export function standingBaseFailure(ledger: Readonly<Record<string, MergeLedgerState>>, tip: string): { reason: string; files: string[] } | null {
+/**
+ * GY-3451: the base failure that still stands on main's `tip`, with its failing test files and their scope: one the
+ * ledger records on `tip` itself, or on an earlier tip when nothing main changed since touches the failing tests or
+ * the files they select — a change that misses them cannot have turned main green. Null once one does.
+ */
+export async function standingBaseFailure(git: Git, ledger: Readonly<Record<string, MergeLedgerState>>, tip: string): Promise<{ reason: string; files: string[]; scope: Set<string> } | null> {
+  const seen = new Set<string>();
   for (const state of Object.values(ledger)) {
     const reason = state.state === 'refused' ? state.refusal?.reason ?? '' : '';
     const parsed = parseBaseFailureReason(reason);
-    if (parsed && parsed.tip === tip.toLowerCase()) return { reason, files: parsed.files };
+    if (!parsed || seen.has(`${parsed.tip}:${parsed.files.join(',')}`)) continue;
+    seen.add(`${parsed.tip}:${parsed.files.join(',')}`);
+    try {
+      const scope = await scopeOf(git, parsed.tip, parsed.files);
+      if (parsed.tip === tip.toLowerCase()) return { reason, files: parsed.files, scope };
+      const since = (await git(['diff', '--name-only', parsed.tip, tip])).split('\n').map(line => line.trim()).filter(Boolean);
+      if (!since.some(file => scope.has(file))) return { reason, files: parsed.files, scope };
+    } catch { continue; } // a tip the checkout no longer holds stands for nothing
   }
   return null;
 }
@@ -40,19 +52,23 @@ export async function baseFailureScope(git: Git, tip: string, tests: readonly st
   return seen;
 }
 
-let cached: { key: string; scope: Set<string> } | null = null;
+const scopes = new Map<string, Set<string>>();
+async function scopeOf(git: Git, tip: string, files: string[]) {
+  const key = `${tip}:${files.join(',')}`;
+  if (!scopes.has(key)) { if (scopes.size >= 8) scopes.clear(); scopes.set(key, await baseFailureScope(git, tip, files)); }
+  return scopes.get(key)!;
+}
+
 /**
  * The heads of `heads` a trial would be wasted on: while `failure` stands on `tip`, a head whose
  * own change (against its merge base with the tip) touches neither the failing tests nor any file
  * they select. A head that touches them is the possible repair and is trialled.
  */
-export async function heldByBaseFailure(git: Git, tip: string, failure: { files: string[] }, heads: readonly { id: string; head: string }[]): Promise<Set<string>> {
-  const key = `${tip}:${failure.files.join(',')}`;
-  if (cached?.key !== key) cached = { key, scope: await baseFailureScope(git, tip, failure.files) };
-  const scope = cached.scope, held = new Set<string>();
+export async function heldByBaseFailure(git: Git, tip: string, failure: { scope: Set<string> }, heads: readonly { id: string; head: string }[]): Promise<Set<string>> {
+  const held = new Set<string>();
   for (const { id, head } of heads) {
     const changed = (await git(['diff', '--name-only', `${tip}...${head}`])).split('\n').map(line => line.trim()).filter(Boolean);
-    if (!changed.some(file => scope.has(file))) held.add(id);
+    if (!changed.some(file => failure.scope.has(file))) held.add(id);
   }
   return held;
 }

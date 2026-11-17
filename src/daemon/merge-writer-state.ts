@@ -39,7 +39,8 @@ export const mergeWriterStateSchema = z.object({
   trials: z.array(z.object({ mergeSha: shaField, startedAt: instant, finishedAt: instant, heads: z.array(z.object({ key: z.string(), head: shaField }).strict()),
     steps: z.array(z.object({ step: z.string(), durationMs: z.number().min(0) }).strict()) }).strict()).max(20).optional(),
   lastMergeAt: instant.nullable().default(null),
-  queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
+  queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0),
+    /** GY-3451: what the head waits for before its trial starts — a green base while main fails — or absent when it is due. */ waiting: z.string().max(500).optional() }).strict()).max(mergeWriterKeptQueue).default([]),
   /** The merge in flight; `attempt` identifies the flight across loop restarts, persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(),
     step: z.string().max(100).optional(), stepStartedAt: instant.optional(), revert: revertFlightSchema.optional(),

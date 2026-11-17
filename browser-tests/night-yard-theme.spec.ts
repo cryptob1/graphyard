@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3272 AC-1: Night Yard is the default look, Daylight is selectable and remembered, both hold
 // WCAG AA for text (the audit below walks every visible text element), and with reduced motion the
@@ -21,6 +22,7 @@ async function serve(page: Page, work: any[]) {
     if (path.includes('/work/')) return route.fulfill({ json: state.work.find(w => path.endsWith(w.id)) ?? {} });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
@@ -136,7 +138,7 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   // The choice is this browser's: a reload serves Daylight again, and Night Yard is one button away.
   expect(await page.evaluate(() => localStorage.getItem('graphyard.theme'))).toBe('daylight');
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'daylight');
   expect(await background(page)).toEqual([243, 244, 239]);
   await page.getByRole('button', { name: 'Switch theme to Night Yard' }).click();
