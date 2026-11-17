@@ -76,7 +76,7 @@ test('integration:worker-verify-not-queued — with both slots held by a merge t
   assert.equal(heavyRunLabel('browser', []), 'npm run test:browser');
   const list = join(host.scratch, 'none.txt');
   writeFileSync(list, '');
-  const environment = { ...process.env, [slotsDirectoryVariable]: host.directory, [projectVariable]: 'acme/app' };
+  const environment: NodeJS.ProcessEnv = { ...process.env, [slotsDirectoryVariable]: host.directory, [projectVariable]: 'acme/app' };
   delete environment[heldVariable];
   const runner = spawn(process.execPath, ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list], { cwd: checkout, env: environment, stdio: ['ignore', 'ignore', 'pipe'] });
   let runnerErr = '';
