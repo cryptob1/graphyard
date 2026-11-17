@@ -47,6 +47,11 @@ export function heavyJobLimit(directory: string) {
 }
 /** Slot numbers from here up are declarations (a trial's shard files), never part of the limit. */
 export const declarationSlot = 1000;
+/**
+ * GY-3450: the batch gate's reserved slot, beside the limit. The gate's check takes it first and
+ * starts at once however many item trials and worker verifications fill the limit; no other job takes it.
+ */
+export const gateSlot = declarationSlot - 1;
 /** The memory one running suite file is planned at: GY-1821 measured a full suite's swing on a 24-CPU host at about this much a file. */
 export const bytesPerSuiteFile = 3 * 2 ** 28;
 
@@ -69,14 +74,16 @@ export interface AcquireOptions {
   pollMs?: number; firstSlot?: number; files?: number;
   /** GY-3304: wait while the host's heavy work is drained (`master drain`); a running trial's own declaration never waits. */
   drainable?: boolean;
+  /** GY-3450: the batch gate's check — takes the reserved slot when it is free, else an ordinary one. */
+  reserved?: boolean;
 }
 
 /**
  * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
  * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
- * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
- * batch gate, declared checks, host worker verification and sessions' own suites and type checks wait;
- * jobs already running finish, and claims, heartbeats and status go on. A file, so a restart keeps it.
+ * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials,
+ * declared checks, host worker verification and sessions' own suites and type checks wait;
+ * jobs already running finish, and claims, heartbeats and status go on. GY-3450: the batch gate is never drained — it is the deploy path. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
 export const heavyDrainDirectory = (directory: string) => join(directory, 'drain');
@@ -97,7 +104,7 @@ export function resumeHeavyDrain(directory: string): HeavyDrain | null {
   rmSync(heavyDrainFile(directory), { force: true });
   return drain;
 }
-export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish; new merge trials, batch gates, declared checks, worker verification and session suites wait until graphyard master resume.`;
+export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish and the batch gate goes on; new merge trials, declared checks, worker verification and session suites wait until graphyard master resume.`;
 
 // flock locks the inherited open file description; this process retains its fd after
 // the short-lived utility exits. The kernel releases it on death, across PID namespaces.
@@ -174,16 +181,16 @@ async function reclaimStale(path: string) {
   } finally { closeSync(fd); }
 }
 
-/** The heavy jobs running now: every live slot below the declarations, dead owners' reclaimed first. */
+/** The heavy jobs the limit counts now: every live slot below the gate's and the declarations, dead owners' reclaimed first. */
 async function running(directory: string) {
   for (const entry of heldSlots(directory)) await reclaimStale(join(directory, `slot-${entry.slot}`));
-  return heldSlots(directory).filter(entry => entry.slot < declarationSlot);
+  return heldSlots(directory).filter(entry => entry.slot < gateSlot);
 }
 
 async function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): Promise<HeldSlot | null> {
   // The limit counts jobs, not slot numbers: a job admitted under a higher limit keeps running on its
   // number, and nothing new starts until fewer than the limit run.
-  if (firstSlot < declarationSlot && (await running(directory)).length >= slots) return null;
+  if (firstSlot < gateSlot && (await running(directory)).length >= slots) return null;
   for (let slot = firstSlot; slot < firstSlot + slots; slot++) {
     const path = join(directory, `slot-${slot}`);
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -244,6 +251,8 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
       await new Promise(done => setTimeout(done, pollMs));
       continue;
     }
+    const reserved = options.reserved ? await tryTake(options.directory, 1, owner, gateSlot) : null;
+    if (reserved) return reserved;
     const held = await tryTake(options.directory, options.slots ?? heavyJobLimit(options.directory), owner, options.firstSlot);
     if (held) {
       // Jobs that passed the count together and took different numbers are too many: each steps back and tries again.
@@ -283,11 +292,11 @@ export const heldJobEnvironment = (): Record<string, string> =>
  * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
  * slot. A process that never joined the budget runs the job as it always did.
  */
-export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal } = {}): Promise<T> {
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal; gate?: boolean } = {}): Promise<T> {
   const directory = process.env[slotsDirectoryVariable];
   if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
   let held: HeldSlot;
-  try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: true }); }
+  try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: !options.gate, reserved: options.gate }); }
   catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
   // GY-3449: a cancelled job (`signal`), or one whose owner's run ended (`until`: a gate run that
   // verified, timed out, held or stopped for a restart), gives its slot back at once, even while a

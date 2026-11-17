@@ -19,6 +19,7 @@ import { faultItem } from './control-plane.js';
 import { currentEvidence } from '../model/evidence.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
+import { declarationSlot, heavyJobsDirectory, heldSlots } from '../master/verification-slots.js';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -225,6 +226,30 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
 }
 
 const stopped = new WeakSet<object>(), gateRuns = new WeakMap<object, AbortController>();
+/** GY-3450: when the gate flight began and whether one of its checks has started (holds its host heavy-job slot). */
+const gateStarts = new WeakMap<object, { since: number; started: boolean }>();
+/** GY-3450: a gate in flight this long with no check started raises the stall alarm, naming the slot holders. */
+export const gateStartStallMs = 5 * 60_000;
+export const gateStallKey = 'batch-gate:stalled';
+/** Who holds the host's heavy-job slots, as the alarm names them. */
+const slotHolders = () => heldSlots(heavyJobsDirectory()).filter(entry => entry.slot < declarationSlot)
+  .map(entry => entry.owner ? `${entry.owner.label}${entry.owner.project ? ` (${entry.owner.project})` : ''} [pid ${entry.owner.pid}]` : `slot-${entry.slot}`).join('; ') || 'nothing';
+
+/** GY-3450: raise the stall alarm while the gate in flight has started no check for five minutes; clear it otherwise. */
+async function gateStartAlarm(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'log'>, file: string) {
+  const watch = gateStarts.get(cycle.state), standing = cycle.state.actions[gateStallKey];
+  if (watch && !watch.started && cycle.now() - watch.since >= gateStartStallMs) {
+    if (standing?.state === 'failed') return;
+    const tip = readGateRecord(file)?.inFlight?.tip;
+    const entry = storeAction(cycle.state, gateStallKey, { kind: 'attention', work: null, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString(),
+      detail: `The batch gate${tip ? ` on ${tip.slice(0, 12)}` : ''} has started no check in ${Math.round((cycle.now() - watch.since) / 60_000)} minutes; the host heavy-job slots are held by ${slotHolders()}`.slice(0, actionDetailMax) });
+    cycle.log(actionLine(cycle.state.cycle, entry));
+    await cycle.effects.persist?.(cycle.state);
+  } else if (standing) {
+    delete cycle.state.actions[gateStallKey];
+    await cycle.effects.persist?.(cycle.state);
+  }
+}
 /**
  * The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last
  * checkpointed for the next loop (GY-3161). Its host heavy-job slot is freed now (GY-3449); its
@@ -260,8 +285,8 @@ async function rolloutCommit(root: string, repository: string, reads: MergeWrite
  */
 export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'snapshot' | 'now' | 'log'>) {
   const reads = cycle.effects.mergeWriter, gate = reads?.gate;
-  // GY-3304: while the host's heavy work is drained no gate or diagnostics run starts; the batch waits on its record.
-  if (!reads?.git || !gate || reads.drain?.()) return null;
+  // GY-3450: a drain never stops the gate — it is the deploy path; the diagnostics wait it out (GY-3304).
+  if (!reads?.git || !gate) return null;
   const file = gateRecordPath(gate.root);
   const git = reads.git;
   // GY-3336: while the fetch-refusal backoff stands, neither the gate nor its bootstrap fetches —
@@ -299,11 +324,18 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   const trial: MergeWriterReads['trial'] = async (sha, files, item, base, step, timing, heads, _share, signal, timeout) => {
     const share = Math.max(1, busyTrialSlots(cycle.state)), flight = gated.inFlight, proofs = criterionProofs(item);
     const input = createHash('sha256').update(JSON.stringify([proofs, files])).digest('hex');
-    if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments || flight?.tip !== sha) return reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout);
+    // The diagnostics trial another commit and take an ordinary slot; the gate's own check takes the reserved one (GY-3450).
+    if (flight?.tip !== sha) return reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout);
+    const heavy = <T>(job: () => Promise<T>) => heavyTrial(gateKey, line => { heavyWait = true; step?.(line); }, signal, () => {
+      heavyWait = false;
+      const watch = gateStarts.get(cycle.state);
+      if (watch) watch.started = true;
+      return job();
+    }, ended.signal, true);
+    if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments) return heavy(() => reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout));
     const launch = reads.launchTrialRun, adopt = reads.adoptTrialRun;
     const run = flight.run?.commit === sha && flight.run.input === input ? flight.run : null;
-    return heavyTrial(gateKey, line => { heavyWait = true; step?.(line); }, signal, async () => {
-      heavyWait = false;
+    return heavy(async () => {
       const adopted = run ? await adopt({ key: gateKey, head: sha, mergeSha: sha, directory: run.directory }) : null;
       if (adopted) return adopted.trial(step, timing, signal);
       await reads.ensureTrialImage?.();
@@ -312,7 +344,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
       await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
       return launched.trial(step, timing, signal);
-    }, ended.signal);
+    });
   };
   const ports = batchGatePorts({ ...reading, git, trial }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
@@ -358,6 +390,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   if (!live.gate) {
     const current = record;
     gateRuns.set(cycle.state, ended);
+    gateStarts.set(cycle.state, { since: cycle.now(), started: false });
     live.gate = (async () => {
       try {
         // A timed-out run starts again at once: runGate cleared its batch, so the retry is cut from
@@ -380,7 +413,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
             const reason = gateOutcomeReason(outcome);
             note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}${outcome.outcome === 'timeout' ? '; retrying now on the newest main' : ''}`);
           }
-          if (outcome.outcome !== 'timeout' || stopped.has(cycle.state) || reads.drain?.()) break;
+          if (outcome.outcome !== 'timeout' || stopped.has(cycle.state)) break;
         }
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
@@ -389,13 +422,14 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }
-      finally { live.gate = null; ended.abort(); gateRuns.delete(cycle.state); }
+      finally { live.gate = null; ended.abort(); gateRuns.delete(cycle.state); gateStarts.delete(cycle.state); }
     })();
   }
+  await gateStartAlarm(cycle, file);
   // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy
   // trial slot (trial-slots.ts): the merge flights and the gate size around them, and their own trial
   // takes its share of the lanes.
-  if (!live.diagnostics) {
+  if (!live.diagnostics && !reads.drain?.()) {
     live.diagnostics = (async () => {
       try {
         const fresh = readGateRecord(file) ?? record;

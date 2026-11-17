@@ -20,8 +20,8 @@ import { join } from 'node:path';
 const hostDirectory = (base: string) => process.env[slotsDirectoryVariable] = join(base, 'heavy-jobs');
 
 // GY-3304: the Chief drains the host's heavy work for another project's verification window. A job
-// already running finishes; new merge trials, batch gates, declared checks, host worker verification
-// and sessions' own suites wait, while the loop keeps cycling and reporting. Resume admits what
+// already running finishes; new merge trials, declared checks, host worker verification and
+// sessions' own suites wait (GY-3450: never the batch gate, the deploy path), while the loop keeps cycling and reporting. Resume admits what
 // waited with every gate it had; a restart keeps the drain and who asked for it.
 
 const start = Date.parse('2030-06-01T00:00:00Z');
@@ -73,7 +73,7 @@ function world(directory: string) {
   return { trials, finish, effects, kinds };
 }
 
-test('e2e:heavy-work-drain — a running trial finishes under a drain while queued merge trials and the batch gate wait and the loop keeps cycling; resume admits them with every gate, and a restart keeps the drain', { timeout: 60_000 }, async () => {
+test('e2e:heavy-work-drain — a running trial finishes under a drain while queued merge trials wait, the batch gate runs, and the loop keeps cycling; resume admits them with every gate, and a restart keeps the drain', { timeout: 60_000 }, async () => {
   const base = await temporaryDirectory('heavy-drain'), directory = hostDirectory(base);
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: base, mergeWriter: { deployKeyFile: '/keys/deploy' } } });
@@ -101,12 +101,14 @@ test('e2e:heavy-work-drain — a running trial finishes under a drain while queu
   assert.equal(state.cycle, 4, 'the loop keeps cycling: claims, heartbeats and status go on');
   assert.deepEqual(mergeWriterSummary(state.mergeWriter, start).queue.map(entry => entry.key), ['GY-2'], 'the waiting head keeps its queue place');
 
-  // The batch gate starts nothing while drained.
+  // GY-3450: the batch gate is the deploy path — a drain never stops it.
   let gitCalls = 0;
   const gateReads = { ...effects.mergeWriter!, git: async () => { gitCalls++; throw new Error('git'); }, gate: { root: base, repository: 'owner/project' } } as MergeWriterReads;
   const gateCycle = { state, effects: { ...effects, mergeWriter: gateReads }, snapshot: { work: [], now: iso(start) }, now: () => start, log: () => {} } as unknown as Parameters<typeof batchGateStep>[0];
-  assert.equal(await batchGateStep(gateCycle), null);
-  assert.equal(gitCalls, 0, 'no batch gate starts while drained');
+  // The step hands the gate's flights back rather than awaiting them; both must settle before the assertion.
+  const flights = await batchGateStep(gateCycle) as { gate: Promise<unknown> | null; diagnostics: Promise<unknown> | null };
+  await Promise.allSettled([flights.gate, flights.diagnostics].filter((flight): flight is Promise<unknown> => !!flight));
+  assert.ok(gitCalls > 0, 'the batch gate runs while drained');
 
   // A restart — a fresh loop state reading the same host — keeps the drain, its reason and who asked.
   state = emptyDaemonState(config); effects = yard.effects();
@@ -120,11 +122,6 @@ test('e2e:heavy-work-drain — a running trial finishes under a drain while queu
   for (let minute = 6; minute <= 8; minute++) { await runCycle(config, state, effects, () => start + minute * 60_000); await mergeWriterIdle(state); }
   assert.deepEqual(yard.trials, [1, 2], 'the waiting head is trialled after resume');
   assert.deepEqual(yard.kinds(2).slice(0, 3), ['intent', 'trial', 'pushed'], 'it lands through its own trial, as before the drain');
-  // The step hands the gate's flights back rather than awaiting them; both must settle before the
-  // assertion, or it races the detached runs (main's GY-3296 added a hop before the gate's first read).
-  const flights = await batchGateStep(gateCycle) as { gate: Promise<unknown> | null; diagnostics: Promise<unknown> | null };
-  await Promise.allSettled([flights.gate, flights.diagnostics].filter((flight): flight is Promise<unknown> => !!flight));
-  assert.ok(gitCalls > 0, 'the batch gate runs again after resume');
 });
 
 test('e2e:heavy-work-drain — declared checks and worker verification stay queued, and a session suite waits while one already running finishes', { timeout: 30_000 }, async () => {
