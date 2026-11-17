@@ -103,6 +103,7 @@ export function activityLabel(kind: string): string {
     settle: 'A worker’s attempt ended', autosettle: 'A worker’s attempt ended', release: 'A worker stopped working on it', workspace: 'The worker said where the code lives',
     submit: 'Handed in', blocked: 'The worker reported it blocked', defer: 'The worker found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated',
     resubmit: 'Graphyard handed in the finished head the blocker named',
+    taste: 'Tasted from the Work page',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', reading: 'The loop recorded its reading', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
     repair: 'Asked to repair the branch', mergerefused: 'The merge kept being refused, so a fresh review or rework was asked for',
     refresh: 'Asked to merge the repaired base in', adopt: 'An existing change was adopted into it',

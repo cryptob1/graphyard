@@ -1,0 +1,13 @@
+{
+  "id": "gate-known-flaky-no-revert",
+  "title": "The batch gate keeps a batch whose only failure is a check with an open flaky item",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane and a scratch bare Git remote: with an open \"Flaky check on main: e2e:smoke\" item, a landing that fails smoke on the tip is not reverted; the failure is recorded on the flaky item, the tip verifies and the deploy watch serves it, and master status names the flaky item.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Gate a batch whose only failure has an open flaky item through the real loop",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-gate-known-flaky.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

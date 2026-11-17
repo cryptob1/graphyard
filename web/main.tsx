@@ -39,6 +39,8 @@ function App() {
   // The last snapshot's cursor (GY-3231): a poll asks for what changed since it, and a delta answer
   // keeps the settled summaries it already holds, so a poll carries the open items, not the ledger.
   const snapshotCursor = useRef('');
+  // A mutation refresh supersedes background reads already in flight, including their errors.
+  const refreshVersion = useRef(0);
   const keepSnapshot = (items: { work: Work[]; cursor?: string; delta?: boolean }) => {
     snapshotCursor.current = items.cursor ?? '';
     setWork(previous => {
@@ -83,13 +85,14 @@ function App() {
     const items = await response.json(), served = await fetch('/api/board', { headers, signal }).then(r => r.ok ? r.json() : null, () => null); if (signal.aborted || epoch !== sessionEpoch.current) throw new Error('Superseded');
     keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError('');
   }
-  async function refresh(epoch: number) { const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current) return; keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+  async function refresh(epoch: number) { const version = ++refreshVersion.current; const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current || version !== refreshVersion.current) return; keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   // The sign-in page verifies the token first (web/pages/login.tsx); polling starts once it is accepted.
   const live = !!status;
   useEffect(() => {
     if (!live) return;
     const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true;
     const load = async () => {
+      const version = refreshVersion.current;
       try {
         const read = async (path: string) => {
           const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
@@ -98,9 +101,9 @@ function App() {
           return response.json();
         };
         const [items, system, served] = await Promise.all([read(snapshotCursor.current ? `work-snapshot?since=${encodeURIComponent(snapshotCursor.current)}` : 'work-snapshot'), read('status'), read('board').catch(() => null)]);
-        if (active && epoch === sessionEpoch.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+        if (active && epoch === sessionEpoch.current && version === refreshVersion.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
-        if (!active || epoch !== sessionEpoch.current) return;
+        if (!active || epoch !== sessionEpoch.current || version !== refreshVersion.current) return;
         if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
       }
