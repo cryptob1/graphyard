@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 import { readProjectMemory, writeProjectMemory } from '../project-memory.js';
 import { masterLessons, recordMasterLesson, removeMasterLesson } from '../model/project-memory.js';
 
-export const lessonUsage = 'Use master lesson add TEXT [--for workers] | master lesson remove ID | master lesson list';
+export const lessonUsage = 'Use master lesson add TEXT [--for workers] [--enforceable] | master lesson remove ID | master lesson list';
 
 /** What `master lesson` needs beyond the checkout: the control plane's word on a credential. */
 export interface LessonDependencies {
@@ -29,12 +29,12 @@ export async function lessonCommand(root: string, by: string, args: string[], de
   }
   const now = () => new Date(typeof deps.now === 'function' ? deps.now() : Date.now()).toISOString();
   if (args[0] === 'add') {
-    const { values, positionals } = parseArgs({ args, options: { for: { type: 'string' } }, allowPositionals: true });
+    const { values, positionals } = parseArgs({ args, options: { for: { type: 'string' }, enforceable: { type: 'boolean' } }, allowPositionals: true });
     if (values.for !== undefined && values.for !== 'workers') throw new Error(lessonUsage);
     const text = positionals.slice(1).join(' ').trim();
     if (!text) throw new Error(lessonUsage);
     const memory = await readProjectMemory(root);
-    const lesson = recordMasterLesson(memory, { id: randomUUID(), text, by, at: now(), forWorkers: values.for === 'workers' });
+    const lesson = recordMasterLesson(memory, { id: randomUUID(), text, by, at: now(), forWorkers: values.for === 'workers', enforceable: values.enforceable });
     await writeProjectMemory(root, memory);
     return { recorded: lesson, lessons: masterLessons(memory).length };
   }
@@ -48,7 +48,7 @@ export async function lessonCommand(root: string, by: string, args: string[], de
   }
   if (args[0] === 'list') {
     const lessons = masterLessons(await readProjectMemory(root));
-    return { lessons: lessons.map(lesson => ({ id: lesson.id, at: lesson.at, forWorkers: lesson.forWorkers ?? false, text: lesson.text })) };
+    return { lessons: lessons.map(lesson => ({ id: lesson.id, at: lesson.at, forWorkers: lesson.forWorkers ?? false, ...(lesson.enforceable ? { enforceable: true, filedAs: lesson.filedAs ?? null } : {}), text: lesson.text })) };
   }
   throw new Error(lessonUsage);
 }
