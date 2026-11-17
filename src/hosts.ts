@@ -56,10 +56,41 @@ home=$(getent passwd "$user" | cut -d: -f6)
 install -d -m 700 -o "$user" -g "$user" "$home/.ssh"
 echo 'restrict,command="graphyard-host-shim" ${publicKey.trim()}' > "$home/.ssh/authorized_keys"
 chown "$user:$user" "$home/.ssh/authorized_keys"; chmod 600 "$home/.ssh/authorized_keys"
-command -v dockerd-rootless-setuptool.sh >/dev/null || { echo "Install Docker's rootless extras (dockerd-rootless-setuptool.sh), then run this again." >&2; exit 1; }
 uid=$(id -u "$user")
+# Rootless Docker for $user (GY-3419): the host's own extras when both tools are installed, else the
+# static rootless extras for the host's reported Docker version plus a static slirp4netns fetched
+# into $user's home — nothing is fetched when a copy is already there. The setup tool writes the
+# daemon's unit with its own directory first on PATH, so the fetched rootlesskit and slirp4netns are
+# the ones the daemon runs.
+dir="$home/.graphyard/rootless/docker-rootless-extras"
+if command -v dockerd-rootless-setuptool.sh >/dev/null && command -v slirp4netns >/dev/null; then
+  setuptool=$(command -v dockerd-rootless-setuptool.sh)
+elif [ -x "$dir/dockerd-rootless-setuptool.sh" ] && [ -x "$dir/slirp4netns" ]; then
+  setuptool="$dir/dockerd-rootless-setuptool.sh"
+else
+  command -v curl >/dev/null || { echo "Install curl, then run this again." >&2; exit 1; }
+  version=\$(docker --version 2>/dev/null | sed -n 's/^Docker version \\([0-9][0-9.]*\\).*/\\1/p')
+  [ -n "$version" ] || { echo "docker --version answered no version: install Docker, then run this again." >&2; exit 1; }
+  arch=\$(uname -m)
+  case "$arch" in x86_64|aarch64) ;; *) echo "No static Docker rootless extras for $arch: install dockerd-rootless-setuptool.sh and slirp4netns, then run this again." >&2; exit 1 ;; esac
+  slirp=v1.3.7
+  mkdir -p "$dir"
+  echo "Fetching Docker rootless extras $version and slirp4netns $slirp into gy-compute's home..."
+  curl -fsSL --retry 3 -o "$home/.graphyard/rootless/extras-$version.tgz" "https://download.docker.com/linux/static/stable/$arch/docker-rootless-extras-$version.tgz"
+  tar -xzf "$home/.graphyard/rootless/extras-$version.tgz" -C "$home/.graphyard/rootless"
+  curl -fsSL --retry 3 -o "$dir/slirp4netns-$arch" "https://github.com/rootless-containers/slirp4netns/releases/download/$slirp/slirp4netns-$arch"
+  curl -fsSL --retry 3 -o "$dir/SHA256SUMS" "https://github.com/rootless-containers/slirp4netns/releases/download/$slirp/SHA256SUMS"
+  grep "slirp4netns-$arch\\$" "$dir/SHA256SUMS" | (cd "$dir" && sha256sum -c -) || { echo "The fetched slirp4netns did not verify." >&2; exit 1; }
+  chmod 755 "$dir/slirp4netns-$arch"; ln -sfn "slirp4netns-$arch" "$dir/slirp4netns"
+  for tool in dockerd-rootless-setuptool.sh dockerd-rootless.sh rootlesskit; do
+    [ -x "$dir/$tool" ] || { echo "The fetched Docker rootless extras lack $tool." >&2; exit 1; }
+  done
+  "$dir/rootlesskit" --version >/dev/null && "$dir/slirp4netns" --version >/dev/null || { echo "The fetched rootless tools do not run on $arch." >&2; exit 1; }
+  setuptool="$dir/dockerd-rootless-setuptool.sh"
+fi
+chown -R "$user:$user" "$home/.graphyard"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
-sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" dockerd-rootless-setuptool.sh install
+sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$(dirname "$setuptool"):$PATH" "$setuptool" install
 # Tailscale SSH on port 22 ignores authorized_keys, so the shim: give $user its own OpenSSH on port ${computePort}.
 if tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": *true'; then
   sshd=$(command -v sshd) || { echo "Install the OpenSSH server (sshd), then run this again." >&2; exit 1; }

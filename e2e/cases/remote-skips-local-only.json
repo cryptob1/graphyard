@@ -1,0 +1,14 @@
+{
+  "id": "remote-skips-local-only",
+  "title": "A two-host merge trial keeps local-only test files on this machine and gives the one-host verdict",
+  "description": "The same commit trialled on one host and on two (the second is this same machine reached over SSH at 127.0.0.1 through graphyard-host-shim with its own host folders). The selection mixes plain test files with files that need Docker: on the second host, where a shard runs with no Docker socket, those would fail. Local-only marking keeps them on this machine, the plain files run on both hosts, and the two-host verdict equals the one-host verdict.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run the trial on one host, then on two, with plain and Docker-needing test files",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/remote-skips-local-only.test.ts",
+    "timeoutSeconds": 900
+  }]
+}
