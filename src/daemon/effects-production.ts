@@ -1,4 +1,5 @@
 import { sessionInventory } from '../session-inventory.js';
+import { readHostReadings, type HostReading } from '../hosts.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
@@ -18,7 +19,7 @@ import { runDispatchTick } from '../dispatch/tick.js';
 import { launchBoundMs } from '../master/launch-bound.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
-import { agentToken } from '../master/autonomy.js';
+import { agentToken, intentInput } from '../master/autonomy.js';
 import { listHerdrAgents, closeHerdrPane, observeHerdrAgents } from '../master/herdr.js';
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { checkoutTrustRefusals } from '../harness.js';
@@ -35,6 +36,7 @@ import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
 import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
+import { ensureTrialImage } from '../install/trial-image.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
@@ -44,6 +46,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
+import { cpuCelsius } from './cpu-pressure.js';
 import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
@@ -69,10 +72,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   fetcher?: typeof fetch;
   /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
   verify?: typeof runWorkerVerification;
+  /** GY-3345: the messages to this install's Master. */
+  messages?: DaemonEffects['masterMessages'];
 }): DaemonEffects {
   const current = typeof source === 'function' ? source : () => source;
   const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   let leftoversSweptAt = 0, releasesSweptAt = 0;
+  let hostsReading: Promise<void> | null = null, hostsLatest: HostReading[] | null = null;
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
@@ -215,11 +221,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
-    // GY-3348: the host's CPU before every launch; null where /proc/pressure/cpu is missing (not Linux).
+    // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
-      const pressure = await read('/proc/pressure/cpu');
-      return pressure === null ? null : { pressure, stat: await read('/proc/stat') };
+      return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await cpuCelsius() };
+    },
+    // GY-3407: the read runs beside the cycle, so a host taking its SSH timeout never slows the loop; the cycle takes the latest finished one.
+    hostReadings: async previous => {
+      hostsReading ??= readHostReadings(previous, { run }).then(readings => { hostsLatest = readings; }, () => {}).finally(() => { hostsReading = null; });
+      return hostsLatest ?? previous;
     },
     stopOrphanTrials: () => stopOrphanTrialContainers(run, trialContainerMaxAgeMs(current().run)),
     // GY-3188: hourly, so the builder and Docker are not asked every cycle.
@@ -257,6 +267,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       live: () => liveMasterSessions(config),
       exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
     }),
+    masterMessages: deps.messages,
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
@@ -275,8 +286,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get mergeWriter() { const config = current();
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => { const snapshot = await deps.snapshot(); return mergeCandidateHold(snapshot.work.find(item => item.id === work.id), work, snapshot.work); }, holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
+        ensureTrialImage: () => ensureTrialImage(),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
-        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey),
+          attest: (work: Work, proof: string, reason: string, idempotencyKey: string) => asOperatorAgent(`work/${work.id}/evidence`, intentInput('attest', work, { proof, reason }), idempotencyKey) } : {}),
         gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },
       };
     },

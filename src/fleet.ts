@@ -3,17 +3,19 @@ import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { launchRecipe } from './harness.js';
 import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
-import { runtimeAdapter, cursorSignInFile, accountHomeEnvironment } from './master/runtimes.js';
+import { runtimeAdapter, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
 import { readCredentialFile } from './private-file.js';
+import { masterConfinementVariable } from './master/confinement.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
 import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { clearEndedHostAccountSessions, clearHostAccountSession, hostAccountExhaustion, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -25,7 +27,7 @@ export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
  * actions beyond the probe's own short cache, so a registry change takes effect on the next
  * action with no restart and no file edit. Every role must be defined before it can launch.
  */
-export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
+export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run' | 'repository'>>;
 export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
   /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
   runtime?: RuntimeInventory;
@@ -37,7 +39,7 @@ export interface RuntimeInventory { agents: { name?: string | null }[]; availabl
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[]; /** Live sessions other installs on this host hold on its accounts (GY-3333). */ hostSessions?: { account: string; install: string; at: string }[] }): Promise<FleetSelection>;
   /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
   end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
   /** Report what the executor observed of its own host's accounts without asking for a session, as a hold is seen (GY-1573). */
@@ -109,11 +111,15 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request).catch(error => {
-    // A control plane served before this coordinator rejects the fields it does not know (GY-1746); the selection is asked again in the older form.
-    if (!(request.prefer || request.exclude?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
-    const { prefer: _prefer, exclude: _exclude, ...older } = request;
+    // A control plane served before this coordinator rejects the fields it does not know (GY-1746, GY-3333); the selection is asked again in the older form.
+    if (!(request.prefer || request.exclude?.length || request.hostSessions?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
+    const { prefer: _prefer, exclude: _exclude, hostSessions: _host, ...older } = request;
     return call('agent-registry/select', older);
-  }), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
+  }), end: async (session, reason, outcome) => {
+    // GY-3333: a registry session this executor ends frees the host-level record its launch took.
+    clearHostAccountSession(session);
+    await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) });
+  },
     observe: request => call('agent-registry/observe', request) };
 }
 
@@ -153,20 +159,26 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
  */
 export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
-  if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
+  const unknown = { quota: { loggedIn: null, state: 'unknown' as const, usage: [], resetsAt: null, reason: null }, health: null };
+  if (!home) return unknown;
+  // GY-3414: a confined session (the master's) masks every other account's home with an empty,
+  // unreadable tmpfs, so what it reads there is unknown, never a logout.
+  if (await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES')) return unknown;
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable, model }, probe);
+    // A Pi account is read through the OpenCode probe's files only: `opencode auth list` knows nothing of Pi's login.
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable, model }, runtime.launch.kind === 'pi' ? { ...probe, opencodeAuth: null, opencodeModels: null } : probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     // No Z.AI credential found for a Pi account is not proof it is logged out: Pi may hold another provider's login,
     // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
-    return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
+    // A logged-in account that is not ready (its model is unavailable) is held like a logged-out one, with its reason (GY-3414).
+    return { health, quota: { loggedIn: health.loggedIn && health.quota !== 'exhausted' ? health.healthy : health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity } };
   }
-  if (!runtime.launch.loginFile) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
-  const loggedIn = await access(resolve(home, runtime.launch.loginFile)).then(() => true, () => false);
-  return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
+  if (!runtime.launch.loginFile) return unknown;
+  const file = resolve(home, runtime.launch.loginFile), loggedIn = await access(file).then(() => true, () => false);
+  return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in: ${file} does not exist${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
 /** The smoke test running for each account in this process, keyed by control plane, host, account and registry revision. */
@@ -224,17 +236,43 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });
   }));
   const now = probe.now?.() ?? Date.now();
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
+  // GY-3333: the login homes on this host are shared with every other Graphyard install on it, so
+  // what those installs hold there — live sessions, an exhaustion until a time — is read beside the
+  // home and reported with the selection: the per-account limit counts every install's sessions,
+  // and a quota hold one install marked holds the account everywhere until it resets. A record
+  // directory that cannot be read holds nothing, and the install counts as it did before.
+  const install = config.repository ?? config.url ?? host;
+  // A session the control plane ended on its own side (a sweep, a removed account) frees its record here too.
+  clearEndedHostAccountSessions(install, new Set(liveSessions(registry).map(session => session.id)));
+  const hostSessions: { account: string; install: string; at: string }[] = [];
+  for (const observation of observations) {
+    const home = local.find(account => account.name === observation.account)?.credential.home;
+    if (!home) continue;
+    const mark = hostAccountExhaustion(home, now);
+    // This install's own mark is already its registry's hold; only another install's is news here.
+    if (mark && mark.by !== install) observation.quota = { ...observation.quota, state: 'exhausted', session: mark.session, resetsAt: mark.until, since: mark.at,
+      reason: `${observation.account} is held exhausted until ${mark.until} by the Graphyard install ${mark.by}: ${mark.reason}`.slice(0, 500) };
+    try {
+      for (const session of await hostAccountSessions(home)) if (session.install !== install) hostSessions.push({ account: observation.account, install: session.install, at: session.at });
+    } catch { /* an unreadable record holds nothing */ }
+  }
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, hostSessions, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
     throw Object.assign(new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped), roleAtCapacity(chosen.reason) ? { roleAtCapacity: chosen.reason } : {});
+  // GY-3333: this install's session on the account is registered beside the login home for as long
+  // as it lives — every other install on the host counts it — and cleared when the session ends.
+  // The kernel drops it if this process dies first, so a killed launcher leaks nothing.
+  const record = chosen.account.credential.home
+    ? await registerHostAccountSession(chosen.session.id, chosen.account.credential.home, { install, at, role, work: probe.work ?? null, account: chosen.account.name })
+    : null;
   // `release` ends the selected session and says whether the registry was told: a caller that
   // cannot end it keeps its id, the only way to free the role's slot later.
   const policy = chosen.policy ?? rolePolicy(registry.roles.find(entry => entry.name === role));
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home, key: chosen.account.credential.key ?? null,
     fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason, role, policy, revision: chosen.revision } };
-  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => client.end(chosen.session!.id, reason, outcome).then(() => true, () => false) };
+  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => { record?.clear(); return client.end(chosen.session!.id, reason, outcome).then(() => true, () => false); } };
 }
 
 /**
@@ -528,7 +566,7 @@ export const connectProviders: readonly ConnectProvider[] = [
     // GY-3329: the login also runs with XDG_CONFIG_HOME on the account home, so on a host with no
     // desktop keyring the sign-in lands at ACCOUNT_HOME/cursor/auth.json, where a confined session
     // reads it — never in the operator's own ~/.config.
-    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: cursorSignInFile,
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: cursorLoginFile,
     smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },

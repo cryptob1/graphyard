@@ -202,6 +202,18 @@ export async function createContext(command: string, id: string | undefined, arg
   };
 }
 
+/**
+ * The checkout a command runs in. GY-3344: outside one, a reporter's credential (another install's
+ * Master) is told plainly that the command is not its own, instead of git's "not a git repository".
+ */
+export async function checkoutRoot(context: CliContext, command: string) {
+  try { return context.repositoryRoot(); } catch (error) {
+    const actor = await context.api('status').then(status => status?.actor, () => null);
+    if (actor?.role === 'reporter') throw new Error(`Reporter ${actor.id} may only file items, message this install's Master and read back its own items and the Master's replies; ${command} is none of those`);
+    throw error;
+  }
+}
+
 /** Read the whole of stdin as one credential, refusing oversized input before it is kept. */
 export async function readSecretFromStdin(limit: number, tooLarge = 'Token input is too large') {
   let input = ''; for await (const chunk of process.stdin) { input += chunk; if (input.length > limit) throw new Error(tooLarge); }

@@ -9,6 +9,10 @@ import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { readLandlockAbi } from '../landlock.js';
 import { trialTemporaryRootReport, trialTestGateStatus } from '../merge-writer/trial.js';
+import { browserToolStatus } from '../browser-tool.js';
+import { accountRuntimeChecks, gitRemoteCheck, herdrPluginCheck } from '../host-readiness.js';
+import { remoteFetchProbe } from '../master/worktrees.js';
+import { loadStoredMasterConfig } from '../master/config.js';
 
 /** `graphyard doctor [--profile PROFILE]`: local discovery, live integration readiness and the readiness checklist for a completion profile. */
 export async function runDoctor(context: CliContext) {
@@ -35,6 +39,18 @@ export async function runDoctor(context: CliContext) {
   });
   // The machine-local prerequisites the README's setup steps depend on (GY-1352), each naming its step.
   const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot(), landlockAbi: readLandlockAbi });
+  const browserTool = browserToolStatus();
+  checks.push({ id: 'agent-browser', status: browserTool.present ? 'pass' : 'fail',
+    detail: browserTool.path ? `product reviews use ${browserTool.path}` : 'agent-browser is missing from the product review PATH',
+    step: browserTool.install ?? '' });
+  // GY-3351: every registry account's runtime on this host, the Herdr plugin, and one read of origin.
+  const path = process.env.PATH ?? '';
+  const plugin = await herdrPluginCheck(path);
+  if (plugin) checks.push(plugin);
+  const document = live ? await api('agent-registry/document').catch(() => null) : null;
+  const host = (await loadStoredMasterConfig(root).catch(() => null))?.hostId ?? context.individualHostId();
+  if (Array.isArray(document?.accounts)) checks.push(...accountRuntimeChecks(document, host, path));
+  checks.push(gitRemoteCheck(await remoteFetchProbe(root)));
   const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
   // A ready checklist still deploys nothing: once every item is ready, capacity drift and
   // an undeployed merge are the next actions; until then the checklist's own gap comes first.
@@ -53,6 +69,8 @@ export async function runDoctor(context: CliContext) {
     repositoryPolicy: doctorRepositoryPolicy(root),
     // GY-2958: whether the merge trial has a test check for this checkout (ci-tests, preMerge / npm test, or none).
     trialTests: trialTestGateStatus(root),
+    // GY-3370: the browser tool product reviews walk the app with, and the one command that installs it.
+    browserTool,
     // GY-3332: where trials make their temporary and HOME directories, and the fix when that volume can never keep the disk floor free.
     trialTemporaryRoot: trialTemporaryRootReport(root),
     setupFromZero,

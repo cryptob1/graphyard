@@ -59,6 +59,20 @@ export const settingsSuggestionAnswer: ConsentRule = {
   choose: /\b(esc)\b[^a-z\n]{0,3}(?:not now|to dismiss)/i,
   answer: 'Not now (settings unchanged)',
 };
+/**
+ * GY-3336: the one folder-trust prompt the launcher answers itself — a session launched in the
+ * install's own checkout, the folder the operator connected Graphyard to. The master session runs
+ * there confined, its HOME a scratch home, so the trust record the launch wrote never reaches the
+ * runtime and it stops at the dialog; the operator already chose that folder, so the launcher
+ * accepts its "Yes" for that folder alone. It is never in the global allow-list: a trust prompt in
+ * any other folder — a fresh worktree, a review checkout — still fails the launch naming it.
+ */
+export const ownCheckoutTrustAnswer: ConsentRule = {
+  id: 'folder-trust-own-checkout', kind: 'folder',
+  asks: /\btrust\b[^\n]*\b(?:folder|directory|workspace|project|files in)\b|\b(?:folder|directory|workspace)\b[^\n]*\btrust|\ballow\b[^\n]*\bwork in this (?:folder|directory)/i,
+  choose: /^\W{0,4}(\d)[.)]\s*(?:Yes,\s*I trust (?:this|the) folder|Yes,\s*proceed)\b/im,
+  answer: "Yes, I trust this folder (the install's own checkout)",
+};
 /** What a prompt asks, for every kind the launcher recognises, answered or not. */
 const promptKinds: [ConsentKind, RegExp][] = [
   ['payment', /\b(?:payment|credit card|billing|purchase|subscribe|subscription|upgrade to|pay\b)/i],
@@ -142,8 +156,12 @@ function settingsSuggestionPrompt(lines: string[]): ConsentPrompt | null {
   return { kind: 'settings', text, rule: key ? settingsSuggestionAnswer : null, keys: key ? [key] : null };
 }
 
-/** The consent prompt on a pane's screen, or null when the screen is not stopped on one. */
-export function detectConsentPrompt(screen: string | null | undefined): ConsentPrompt | null {
+/**
+ * The consent prompt on a pane's screen, or null when the screen is not stopped on one. `answers`
+ * are the rules the launcher may answer with — the allow-list, plus the install's own checkout's
+ * folder-trust rule for a launch that runs there (GY-3336).
+ */
+export function detectConsentPrompt(screen: string | null | undefined, answers: readonly ConsentRule[] = consentAnswers): ConsentPrompt | null {
   if (!screen) return null;
   const tail = screen.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(-consentScreenLines);
   const dialog = trailingDialog(tail);
@@ -164,8 +182,11 @@ export function detectConsentPrompt(screen: string | null | undefined): ConsentP
   const shown = lines.slice(Math.max(0, first)).join(' / ');
   const text = shown.length > consentTextLimit ? `${shown.slice(0, consentTextLimit - 1)}…` : shown;
   if (neverAnswered.includes(kind)) return { kind, text, rule: null, keys: null };
-  for (const rule of consentAnswers) {
-    if (!rule.asks.test(asked)) continue;
+  // A rule matches the question; a launch that carries the install's own checkout's folder-trust
+  // rule (GY-3336) also matches its options' labels, so the wrapped dialog GY-1561 classifies from
+  // its options is answered too — that rule never rides the global allow-list.
+  for (const rule of answers) {
+    if (!rule.asks.test(asked) && !(rule === ownCheckoutTrustAnswer && answers !== consentAnswers && rule.asks.test(options.join('\n')))) continue;
     const option = rule.choose.exec(bottom)?.[1];
     if (option) return { kind: rule.kind, text, rule, keys: [option] };
   }

@@ -8,6 +8,7 @@ import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installId
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
+import { moveInstall } from '../install/move.js';
 import { upCommand } from '../up.js'; import { runDoctor } from './install-doctor.js';
 
 /** GY-2009: install registers no GitHub App, so `up --reuse-app` would reuse nothing; it is refused rather than silently ignored. */
@@ -124,10 +125,23 @@ export const installCommands = defineCommands([
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
+      '  install move --to HOST [--into DIR] [--plan]',
+      '                                Move this install to HOST: refuses while an item is leased, trialled or queued',
+      '                                to merge; re-points the registry accounts on this host, stops the install, copies',
+      '                                the database, install files, the credential directory and every credential file',
+      '                                master.json names (0600), copies the main Git repository the checkout',
+      '                                and its CLI releases are worktrees of, provisions the merge-trial image on HOST, sets',
+      '                                hostId to HOST and prints what to start there. --plan lists all of it and',
+      '                                changes nothing.',
     ],
     // The installer creates the connection file; it must never read a stale one.
     readsConnection: () => false,
     async run(context) {
+      if (context.id === 'move') {
+        const { values } = parseArgs({ args: context.args, options: { to: { type: 'string' }, into: { type: 'string' }, plan: { type: 'boolean' } }, allowPositionals: false });
+        if (!values.to) throw new Error('Use install move --to HOST [--into DIR] [--plan]');
+        return context.print(await moveInstall(context.repositoryRoot(), { to: values.to, ...(values.into ? { into: values.into } : {}), plan: !!values.plan }));
+      }
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const mergeToken = values['merge-token-stdin'] ? await readSecretFromStdin(10000) : undefined;
       if (values['merge-token-stdin'] && !mergeToken) throw new Error('--merge-token-stdin requires a nonempty token on stdin');
@@ -212,7 +226,7 @@ export const installCommands = defineCommands([
     ],
     async run(context) { return runDoctor(context); },
   },
-  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human]',
+  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer|reporter [--session-kind ai|human]',
     '              [--grant external-runs:import|delivery:observe-sha] [--proof unit:*|integration:*|e2e:*|manual:*]...',
     '              [--token-file PATH] [--repo OWNER/NAME]',
     '  principal remove ID [--repo OWNER/NAME]',
@@ -221,6 +235,8 @@ export const installCommands = defineCommands([
     '                                roster back from the control plane. A producer needs an explicit --grant or --proof; --token-file',
     '                                restores an existing credential instead of minting one; delivery:observe-sha is held alone, by a',
     '                                dedicated observer principal; a later install --apply keeps the entry. Repeating either command',
-    '                                changes nothing.'], readsConnection: () => false,
+    '                                changes nothing. A reporter is another install\'s Master: with GRAPHYARD_URL and its token file it',
+    '                                files items (create), messages this install\'s Master (message) and reads back its own items',
+    '                                and the replies (status GY-N, messages), and nothing else.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
 ]);

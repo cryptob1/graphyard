@@ -1,0 +1,16 @@
+{
+  "id": "product-review-headless-inputs",
+  "title": "A headless product reviewer can read its criteria, trial results and CLI",
+  "description": "Launch a product review of a feature with criteria and exact-head trial evidence. A deterministic runtime inspects the delivered prompt, then returns APPROVE; the real launcher posts and settles that verdict through the control plane. Also verify the posted prompt and exclusion of stale trial evidence.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product review inputs and headless verdict",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-review-environment.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

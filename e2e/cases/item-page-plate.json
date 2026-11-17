@@ -1,0 +1,16 @@
+{
+  "id": "item-page-plate",
+  "title": "An item's page leads with why, the evidence from the real app, and who acts next",
+  "description": "Owner direction 2026-11-15 (kitchen, not factory): a work item's page opens on its why sentence, then the evidence from the proof that ran the real app — the merge trial's browser screenshot — then one plain line on what changed for the user, and one who-acts-next line, with no \"What is left\" count and no pull request wording; the gate detail sits inside a collapsed Details block. A real control plane and Postgres carry a fixture item whose recorded trial kept a browser case's screenshots while a real browser holds the served dashboard open, at 1440 and at 390 wide. The case fails on the base tip, whose page opens on the summary and the pipeline state instead.",
+  "tags": ["dashboard", "work"],
+  "target": "uat",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the item page opens on why, the proof screenshot, what changed and one who-acts-next line",
+      "run": "npm run test:browser -- browser-tests/item-page-plate.spec.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

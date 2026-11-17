@@ -1,3 +1,4 @@
+import type { HostReading } from '../hosts.js';
 import type { Conversation } from '../master/conversation.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import type { SessionInventory } from '../session-inventory.js';
@@ -12,6 +13,7 @@ import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
 import type { CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
+import type { MasterMessage } from './master-stalled-delivery.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
@@ -99,7 +101,9 @@ export interface DaemonEffects {
    * the pressure file is missing (not Linux), in which case nothing is held. Absent, no reading is
    * kept and no launch waits on the CPU.
    */
-  cpuPressure?: () => Promise<{ pressure: string; stat: string | null } | null>;
+  cpuPressure?: () => Promise<{ pressure: string | null; stat: string | null; celsius?: number | null } | null>;
+  /** GY-3407: this machine and every added host read once, steal measured from the previous readings. */
+  hostReadings?: (previous: HostReading[]) => Promise<HostReading[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
@@ -155,6 +159,8 @@ export interface DaemonEffects {
   dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
+  /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */
+  masterMessages?: () => Promise<MasterMessage[]>;
   personalMasterSession?: (config: MasterConfig) => MasterSessionEffects;
   /** The control-plane merge executor's reads (cycle-merge-writer.ts); absent, the merge writer does nothing. */
   mergeWriter?: MergeWriterReads | null;

@@ -11,7 +11,7 @@ import { intentCommand } from '../src/cli/master/intent.js';
 import type { MasterSession } from '../src/cli/master/session.js';
 
 const cli = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const fields = { type: 'chore', priority: 3, criteria: [{ id: 'AC-1', text: 'Priority works', proofs: ['e2e:change-priority'] }] };
+const fields = { type: 'chore', priority: 3, why: 'w', simplest: 's', criteria: [{ id: 'AC-1', text: 'Priority works', proofs: ['e2e:change-priority'] }] };
 
 test('change-priority: authenticated roles, validation, audit, CLI and next dispatch', async () => {
   const f = await priorityServer();

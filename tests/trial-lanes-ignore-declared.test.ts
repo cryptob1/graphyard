@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { othersDeclaredFiles, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { othersDeclaredFiles, slotsDirectoryVariable } from '../src/master/verification-slots.js';
 import { runTrial, trialAffordableFiles, trialShardBreadth } from '../src/merge-writer/trial.js';
 import { launchTrialRun, trialRunsDirectory, type TrialRunSpec } from '../src/merge-writer/trial-run.js';
 
@@ -60,14 +60,14 @@ async function otherRun(directory: string, files: number) {
   return async () => { const closed = once(child, 'close'); child.kill('SIGKILL'); await closed; };
 }
 
-test('unit:tests/trial-lanes-ignore-declared.test.ts — with 36 GiB available of 62 GiB and other runs declaring 60 suite files, the trial budget is memory-only and 9 shards on 8 cores run in 4 lanes', { timeout: 120_000 }, async () => {
+test('unit:tests/trial-lanes-ignore-declared.test.ts — with 36 GiB available of 62 GiB and other runs declaring 60 suite files, the trial budget is memory-only and 9 shards on 8 cores run in 8 lanes', { timeout: 120_000 }, async () => {
   // (36 GiB − max(10% of 62 GiB, 4 GiB) − 1 GiB) / 0.75 GiB a file.
   const budget = await trialAffordableFiles(memory);
   assert.equal(budget, Math.floor((36 - 6.2 - 1) / 0.75));
-  assert.deepEqual(trialShardBreadth(8, 9, budget), { lanes: 4, breadth: 2 });
-  // The trial itself, while another run holds 60 declared files on the slots it reads: still 4 lanes.
+  assert.deepEqual(trialShardBreadth(8, 9, budget), { lanes: 8, breadth: 1 });
+  // The trial itself, while another run holds 60 declared files on the slots it reads: still 8 lanes.
   const fixture = await repository();
-  const slots = verificationSlotsDirectory(fixture.base);
+  const slots = process.env[slotsDirectoryVariable] = join(fixture.base, 'heavy-jobs');
   const stop = await otherRun(slots, 60);
   try {
     assert.equal(await othersDeclaredFiles(slots), 60);
@@ -75,8 +75,8 @@ test('unit:tests/trial-lanes-ignore-declared.test.ts — with 36 GiB available o
     const verdict = await runTrial({ root: fixture.root, base: fixture.base, mergeSha: fixture.mergeSha, changedFiles: testFiles, timeoutMs: 120_000, key: 'GY-1',
       cores: 8, groupSize: 1, memory, environment: { PATH: process.env.PATH! }, onTiming: step => timings.push(step) });
     assert.deepEqual(verdict.tests, { passed: 9, failed: [], files: 9 }, verdict.logTail);
-    assert.deepEqual(timings.filter(step => /lanes/.test(step)), ['tests: 4 lanes, breadth 2']);
-  } finally { await stop(); }
+    assert.deepEqual(timings.filter(step => /lanes/.test(step)), ['tests: 8 lanes, breadth 1']);
+  } finally { await stop(); delete process.env[slotsDirectoryVariable]; }
 });
 
 test('unit:tests/trial-lanes-ignore-declared.test.ts — a trial\'s steps.jsonl carries one timing entry naming its lanes and breadth', { timeout: 120_000 }, async () => {

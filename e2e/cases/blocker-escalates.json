@@ -1,7 +1,7 @@
 {
   "id": "blocker-escalates",
-  "title": "A worker blocker becomes attention at once, prompts the master, and after 30 unanswered minutes reaches Needs you",
-  "description": "GY-3280: on a fixture install, a worker blocker on an item becomes an attention line in master status within one cycle naming the item, the blocker and how long it has waited, and delivers a prompt to the master session naming both. With no master action for 30 minutes (clock advanced), a Needs you alert appears on the dashboard naming the item and the blocker; unblocking clears both. The command step proves the loop-side behaviour on the cycle fixture; the seed, HTTP and browser steps prove the served fixture's dashboard: the aged blocker is a Needs you row and the board groups it there, the fresh one stays Blocked, and the operator's unblock from the item page clears the alert and returns the item to waiting for a worker.",
+  "title": "A worker blocker becomes attention at once, prompts the master, and stays with the Master however long it waits",
+  "description": "GY-3280: on a fixture install, a worker blocker on an item becomes an attention line in master status within one cycle naming the item, the blocker and how long it has waited, and delivers a prompt to the master session naming both. GY-3394: the blocker is the Master's however long it stands — 40 minutes unanswered raises nothing on Needs you. The command step proves the loop-side behaviour on the cycle fixture; the seed, HTTP and browser steps prove the served fixture's dashboard: both the aged and the fresh blocker stay in the board's Blocked group, the human-only list carries neither, the Master page shows the aged one, and the operator's unblock clears it and returns the item to waiting for a worker.",
   "tags": [
     "api",
     "dashboard",
@@ -12,7 +12,7 @@
   "steps": [
     {
       "kind": "command",
-      "name": "one cycle: attention line and master prompt; 30 minutes: Needs you; unblock clears both",
+      "name": "one cycle: attention line and master prompt; the blocker stays the Master's; unblock clears both",
       "run": "node --import tsx --test tests/blocker-escalates.test.ts",
       "timeoutSeconds": 600
     },
@@ -24,41 +24,7 @@
     },
     {
       "kind": "http",
-      "name": "the aged blocker is a Needs you alert naming the item",
-      "method": "GET",
-      "path": "/api/human-requests",
-      "status": 200,
-      "expect": [
-        {
-          "path": "requests",
-          "includes": {
-            "rule": "blocker-escalation",
-            "work": "GY-EBLOCKED",
-            "decision": "an unresolved worker blocker"
-          }
-        }
-      ]
-    },
-    {
-      "kind": "http",
-      "name": "the board groups the aged blocker under Needs you",
-      "method": "GET",
-      "path": "/api/board",
-      "status": 200,
-      "expect": [
-        {
-          "path": "groups.needs-you",
-          "includes": {
-            "key": "GY-EBLOCKED",
-            "group": "needs-you",
-            "who": "You"
-          }
-        }
-      ]
-    },
-    {
-      "kind": "http",
-      "name": "the fresh blocker has not escalated: it stays Blocked",
+      "name": "the board keeps both blockers in Blocked, Needs you out of it",
       "method": "GET",
       "path": "/api/board",
       "status": 200,
@@ -66,8 +32,56 @@
         {
           "path": "groups.blocked",
           "includes": {
+            "key": "GY-EBLOCKED",
+            "group": "blocked"
+          }
+        },
+        {
+          "path": "groups.blocked",
+          "includes": {
             "key": "GY-EFRESH",
             "group": "blocked"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the aged blocker clears with the operator's unblock",
+      "method": "POST",
+      "path": "/api/work/GY-EBLOCKED/unblock",
+      "body": {
+        "expectedRevision": 1,
+        "reason": "Granted the worker sandbox 127.0.0.1:5432; the blocker's one-line fix is applied"
+      },
+      "status": 200
+    },
+    {
+      "kind": "http",
+      "name": "the unblock cleared the blocker",
+      "method": "GET",
+      "path": "/api/work/GY-EBLOCKED",
+      "status": 200,
+      "waitSeconds": 30,
+      "expect": [
+        {
+          "path": "blocker",
+          "equals": null
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "unblocking returned the item to waiting for a worker",
+      "method": "GET",
+      "path": "/api/board",
+      "status": 200,
+      "expect": [
+        {
+          "path": "groups.up-next",
+          "includes": {
+            "key": "GY-EBLOCKED",
+            "group": "up-next"
           }
         }
       ]
@@ -93,83 +107,18 @@
     },
     {
       "kind": "browser",
-      "name": "open the Needs you group",
+      "name": "open the Master page",
       "action": "click",
       "role": "button",
-      "text": "Needs you",
+      "text": "Master",
       "exact": false
     },
     {
       "kind": "browser",
-      "name": "the escalated blocker is listed under Needs you",
+      "name": "the fresh blocker still waits on the Master",
       "action": "expectText",
-      "text": "Escalated worker blocker",
+      "text": "GY-EFRESH Fresh worker blocker",
       "exact": false
-    },
-    {
-      "kind": "browser",
-      "name": "open the item from Needs you",
-      "action": "click",
-      "text": "Escalated worker blocker",
-      "exact": false
-    },
-    {
-      "kind": "browser",
-      "name": "the card says what waited and offers the unblock",
-      "action": "expectText",
-      "text": "has waited",
-      "exact": false
-    },
-    {
-      "kind": "browser",
-      "action": "expectText",
-      "text": "Unblock GY-EBLOCKED with this reason",
-      "exact": false
-    },
-    {
-      "kind": "browser",
-      "name": "write the reason the blocker named",
-      "action": "fill",
-      "label": "Reason for GY-EBLOCKED",
-      "value": "Granted the worker sandbox 127.0.0.1:5432; the blocker's one-line fix is applied"
-    },
-    {
-      "kind": "browser",
-      "name": "record the unblock",
-      "action": "click",
-      "role": "button",
-      "text": "Unblock GY-EBLOCKED with this reason",
-      "exact": false
-    },
-    {
-      "kind": "http",
-      "name": "the unblock cleared the blocker",
-      "method": "GET",
-      "path": "/api/work/GY-EBLOCKED",
-      "status": 200,
-      "waitSeconds": 30,
-      "expect": [
-        {
-          "path": "blocker",
-          "equals": null
-        }
-      ]
-    },
-    {
-      "kind": "http",
-      "name": "unblocking cleared the alert: the item waits for a worker again",
-      "method": "GET",
-      "path": "/api/board",
-      "status": 200,
-      "expect": [
-        {
-          "path": "groups.up-next",
-          "includes": {
-            "key": "GY-EBLOCKED",
-            "group": "up-next"
-          }
-        }
-      ]
     }
   ]
 }

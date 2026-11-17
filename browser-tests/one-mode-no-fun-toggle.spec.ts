@@ -2,7 +2,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
+import { emptyRegistry, fleetView } from '../src/model/registry';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3320: the dashboard has one mode. There is no Fun control anywhere, a Fun preference stored
 // before the change does nothing, and the menu and the Master page read Master and Workers.
@@ -15,8 +17,11 @@ test('e2e:one-mode-no-fun-toggle — no Fun control on any page, a stored Fun pr
     if (path.endsWith('/status')) return route.fulfill({ json: boardStatus('admin') });
     if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work, now: new Date(NOW).toISOString() } });
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(work, NOW, null) });
+    // Settings › Agents renders the registry view; an empty registry, not the catch-all [], keeps the page up.
+    if (path.endsWith('/agent-registry')) return route.fulfill({ json: fleetView(emptyRegistry(), NOW) });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
@@ -44,6 +49,7 @@ test('e2e:one-mode-no-fun-toggle — no Fun control on any page, a stored Fun pr
   await noFun();
   await menu.nth(5).click();
   const tabs = page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button');
+  await expect(tabs.first()).toBeVisible(); // allInnerTexts does not wait: read the tab names once the bar has rendered.
   for (const name of await tabs.allInnerTexts()) {
     await tabs.filter({ hasText: name }).first().click();
     await noFun();

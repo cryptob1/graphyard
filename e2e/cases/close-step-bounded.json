@@ -1,0 +1,8 @@
+{
+  "id": "close-step-bounded",
+  "title": "A hung session close does not strand the rest of the cycle",
+  "description": "Twelve Postgres-backed sessions, one hung closer and one failed closer: ten finish within the step deadline, the hung session is named once, and the next cycle retries only the two unfinished closes.",
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Bound independent session closes", "run": "node --import tsx tests/helpers/run-tests.ts tests/close-step-bounded.test.ts", "timeoutSeconds": 180 }]
+}

@@ -4,6 +4,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
+import { unownedFamilySql } from './store/tables/work.js';
 import { registryRoles, RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
@@ -57,7 +58,7 @@ async function lastWorkerRoleSetReason(db: Pick<pg.PoolClient, 'query'>): Promis
 }
 
 export async function readRegistry(db: Pick<pg.PoolClient, 'query'>): Promise<RegistryDocument> {
-  const row = (await db.query(`SELECT payload->'registry' AS registry FROM events WHERE work_id IS NULL AND kind LIKE '${registryEventPrefix}%' ORDER BY seq DESC LIMIT 1`)).rows[0];
+  const row = (await db.query(`SELECT payload->'registry' AS registry FROM events WHERE ${unownedFamilySql(registryEventPrefix)} ORDER BY seq DESC LIMIT 1`)).rows[0];
   if (!row?.registry) return emptyRegistry();
   const registry = row.registry as RegistryDocument;
   return registry.workerConcurrencyPerAccount === true ? registry : upgradeWorkerConcurrency(registry, await lastWorkerRoleSetReason(db));
@@ -143,7 +144,7 @@ export class AgentRegistry {
     const bounded = z.number().int().min(1).max(500).parse(limit);
     // A refusal carries how often it repeated and when it was last seen (GY-3095).
     return (await this.store.pool.query(`SELECT e.seq,e.actor,e.kind,e.payload->'change' AS change,(e.payload->'registry'->>'revision')::int AS revision,e.created_at,r.count,r.last_at FROM events e
-      LEFT JOIN registry_refusal_repeats r ON r.seq = e.seq WHERE e.work_id IS NULL AND e.kind LIKE '${registryEventPrefix}%' ORDER BY e.seq DESC LIMIT $1`, [bounded]))
+      LEFT JOIN registry_refusal_repeats r ON r.seq = e.seq WHERE ${unownedFamilySql(registryEventPrefix, 'e')} ORDER BY e.seq DESC LIMIT $1`, [bounded]))
       .rows.map(row => {
         const kind = String(row.kind).slice(registryEventPrefix.length), at = row.created_at.toISOString();
         return { seq: String(row.seq), at, actor: row.actor, kind, revision: row.revision, change: row.change,

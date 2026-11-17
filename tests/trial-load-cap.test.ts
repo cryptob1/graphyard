@@ -38,7 +38,7 @@ async function machine(label: string) {
   };
   const launch = (load: { cap?: number; order?: number } = {}) => {
     const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
+      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600 } });
     const child = spawn(program!, [...words, 'sleep', '600'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
     let said = '';
     child.stderr!.on('data', chunk => { said += chunk; });
@@ -77,7 +77,7 @@ test(`${proof} — a CPU sensor at 95C holds a start until it cools; a hot non-C
     await host.sensor('nvme', 99_000);
     await host.sensor('coretemp', 95_000);
     const held = host.launch();
-    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C, at or over 95C'), 'the start says the CPU is hot');
+    await host.until(() => held.said().includes('waiting: a CPU sensor reads 95C, at or over its 95C limit'), 'the start says the CPU is hot');
     assert.equal(await host.started(), 0, 'nothing starts while the CPU is at 95C');
     await host.sensor('coretemp', 94_000);
     await host.until(async () => await host.started() === 1, 'the start goes once the sensor clears');
@@ -107,25 +107,25 @@ test(`${proof} — at normal readings a start proceeds at once, without waiting`
   } finally { await host.close(); }
 });
 
-test(`${proof} — a freed slot goes to the merge trial before the gate, and the gate before worker verification`, async () => {
+test(`${proof} — a freed slot goes to the gate before the merge trial, and the merge trial before worker verification (GY-3444)`, async () => {
   const host = await machine('load-order');
   try {
     const occupant = host.launch({ cap: 1 });
     await host.until(async () => await host.started() === 1, 'the slot is taken');
     const verification = host.launch({ cap: 1, order: trialStartOrder.verification });
     await host.until(() => verification.said().includes('waiting'), 'verification waits');
-    const gate = host.launch({ cap: 1, order: trialStartOrder.gate });
-    await host.until(() => gate.said().includes('waiting'), 'the gate waits');
     const merge = host.launch({ cap: 1, order: trialStartOrder.merge });
     await host.until(() => merge.said().includes('waiting'), 'the merge trial waits');
+    const gate = host.launch({ cap: 1, order: trialStartOrder.gate });
+    await host.until(() => gate.said().includes('waiting'), 'the gate waits');
     await host.end(occupant.child);
-    await host.until(() => merge.said().includes('starting'), 'the merge trial goes first');
+    await host.until(() => gate.said().includes('starting'), 'the gate goes first');
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.equal(gate.said().includes('starting') || verification.said().includes('starting'), false);
-    await host.end(merge.child);
-    await host.until(() => gate.said().includes('starting'), 'the gate goes second');
-    assert.equal(verification.said().includes('starting'), false);
+    assert.equal(merge.said().includes('starting') || verification.said().includes('starting'), false);
     await host.end(gate.child);
+    await host.until(() => merge.said().includes('starting'), 'the merge trial goes second');
+    assert.equal(verification.said().includes('starting'), false);
+    await host.end(merge.child);
     await host.until(() => verification.said().includes('starting'), 'worker verification goes last');
   } finally { await host.close(); }
 });

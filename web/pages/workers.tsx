@@ -9,6 +9,7 @@ import DeliverySlices from '../components/delivery-slices';
 import LiveRun from '../components/live-run';
 import { shortShas } from '../candidate';
 import { Agent } from '../fun';
+import { EmptyState, PageHeader } from '../components/page-layout';
 
 /**
  * The Workers tab (GY-116, one compact line per agent since GY-3314): every agent session across
@@ -179,10 +180,32 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   </table>;
 }
 
+type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
+/**
+ * GY-3407: the hosts the loop watches — this machine first, then each one added with
+ * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
+ * reads Away and is read again next cycle. Merge trials send test shards to added hosts (GY-3412), which the note says.
+ */
+function Hosts({ hosts }: { hosts: HostRow[] }) {
+  if (!hosts.length) return null;
+  const figure = (value: number | null, unit = '') => value === null ? '—' : `${Math.round(value)}${unit}`;
+  return <section className="hosts-section"><h2>Hosts</h2><table className="sessions-table hosts" aria-label="Hosts" data-hosts>
+    <thead><tr><th scope="col">Host</th><th scope="col">Cores</th><th scope="col">Temperature</th><th scope="col">Steal</th><th scope="col">Runs now</th></tr></thead>
+    <tbody>{hosts.map(host => <tr key={host.host} data-host={host.host} data-away={host.away || undefined}>
+      <th scope="row" data-label="Host">{host.host}{host.local ? <span className="muted"> (this machine)</span> : null}</th>
+      {host.away ? <td data-label="State" colSpan={4}><span className="muted" title={host.reason}>Away: not answering, tried again each cycle</span></td> : <>
+        <td data-label="Cores">{figure(host.cores)}</td>
+        <td data-label="Temperature">{figure(host.celsius, '°C')}</td>
+        <td data-label="Steal">{figure(host.steal, '%')}</td>
+        <td data-label="Runs now">{figure(host.runs)}</td></>}
+    </tr>)}</tbody>
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Merge trials send test shards to added hosts too; previews run on this machine.</p> : null}</section>;
+}
+
 function ProjectMemorySection({ memory }: { memory?: any }) {
   if (!memory || (!memory.notes?.length && !memory.changes?.length)) return null;
   const count = (memory.notes?.length ?? 0) + (memory.changes?.length ?? 0);
-  return <details className="finished-sessions project-memory" data-project-memory open>
+  return <details className="panel finished-sessions project-memory" data-project-memory open>
     <summary>Shared project memory <span className="count">{count}</span></summary>
     <div className="memory-content">
       {memory.notes?.length ? (
@@ -219,7 +242,8 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
  * words and how long it has held it — where each row unfolds its session's live, read-only view,
  * with the sessions that ended and the per-account summary folded below.
  * The heading carries the host's CPU as the loop last read it (GY-3348): pressure and steal, the
- * two figures that explain why nothing new is launching when the host is saturated.
+ * two figures that explain why nothing new is launching when the host is saturated. Below the
+ * sessions, the hosts table (GY-3407) lists this machine and every added host it watches.
  */
 export default function WorkersPage({ work, observedAt, setSelected, setView, token, status }: Pick<Dashboard, 'work' | 'observedAt' | 'setSelected' | 'setView' | 'token'> & { status?: Dashboard['status'] }) {
   const now = useLiveNow(observedAt);
@@ -230,21 +254,26 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
   const stale = view.running.filter(row => row.stale).length;
   const openCount = view.running.length - stale;
   const table = (rows: WorkerRow[], label: string) => <Table rows={rows} label={label} work={work} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>;
-  const cpu = status?.cpu as { avg60: number; steal: number | null } | null | undefined;
+  const cpu = status?.cpu as { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null } | null | undefined;
+  // GY-3401: each new session's share of test parallelism, and the trial cap — halved while the CPU is hot.
+  // GY-3416: and the guard's own word while it holds every new launch.
+  const cpuFigures = cpu ? [cpu.avg60 === null ? null : `Host CPU pressure ${Math.round(cpu.avg60)}% · steal ${cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}`,
+    cpu.celsius == null ? null : `${cpu.avg60 === null ? 'Host CPU ' : ''}temperature ${Math.round(cpu.celsius)}°C`,
+    cpu.testBudget == null ? null : `${cpu.testBudget} test workers per session`,
+    cpu.trialCap ? `trials ${cpu.trialCap.now < cpu.trialCap.full ? `${cpu.trialCap.now} of ${cpu.trialCap.full}` : cpu.trialCap.full}` : null,
+    cpu.waiting ? 'launches waiting' : null].filter(Boolean).join(' · ') : '';
   return <>
-    <div className="page-heading"><div>
-      <h1>Workers</h1>
-      <p className="summary">{openCount} agent {openCount === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p>
-      {cpu ? <p className="summary host-cpu" data-host-cpu>Host CPU pressure {Math.round(cpu.avg60)}% · steal {cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}</p> : null}
-    </div></div>
-    {view.running.length ? table(view.running, 'Agent sessions') : <p className="muted">No agent session is open.</p>}
+    <PageHeader title="Workers" fact={`${openCount} agent ${openCount === 1 ? 'session' : 'sessions'} open.${stale ? ` ${stale} not seen recently.` : ''} ${view.finished.length} ended.`}>
+      {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
+    {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
+    <Hosts hosts={status?.hosts ?? []}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
-    <details className="finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
+    <details className="panel finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? table(view.finished, 'Ended sessions') : <p className="muted">No session has ended yet.</p>}
     </details>
-    <details className="finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
+    <details className="panel finished-sessions accounts"><summary>By account <span className="count">{view.principals.length}</span></summary>
       {view.principals.length ? <Accounts principals={view.principals} setSelected={setSelected}/> : <p className="muted">No agent has worked here yet.</p>}
     </details>
     <DeliverySlices status={status}/>

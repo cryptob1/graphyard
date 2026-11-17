@@ -136,6 +136,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.equal(second.skipped, 1);
   // A normal-risk pre-merge request waits for the merge instead of launching a session.
   const pending = planeHead('GY-16', ['src/feature.ts']); reconcileAutoDispatch(pending, [pending], new Date(clock));
+  pending.postMergeReview = postMergeReviewMark(pending, 'normal', false).postMergeReview; // as the review gate marks a normal delta
   assert.equal(reviewedAfterMerge(pending), true);
   items = [pending];
   const waited = await runDispatchTick(config, cursor, effects, () => clock + 20_000);
