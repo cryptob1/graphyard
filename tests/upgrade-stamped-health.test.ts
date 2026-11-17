@@ -3,7 +3,7 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { databaseUrl as createDatabaseUrl } from './helpers/postgres.js';
 import { composeAdapter, type AdapterContext, type AdapterObservation } from '../src/install/adapters.js';
@@ -11,6 +11,7 @@ import type { InstallRecord } from '../src/install/secrets.js';
 import { cliChangesOf, liveEffects, resolveTarget, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
 import { checkoutRelease, imageRepository } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { pulledTrialImageFile } from '../src/merge-writer/trial-container.js';
 
 const previousVersion = '2026.10.18.1', version = '2026.10.18.2';
 
@@ -113,7 +114,13 @@ process.stdout.write(JSON.stringify(calls));
 `);
   const { GRAPHYARD_VERSION: _v, GRAPHYARD_BUILD_REVISION: _r, GRAPHYARD_BUILD_SHA: _s, ...env } = process.env;
   const calls = JSON.parse(execFileSync(process.execPath, ['--import', 'tsx', script, new URL(`file://${join(cliRoot, 'src/install/adapters.ts')}`).href, image, workdir, String(port)], { cwd: cliRoot, env, encoding: 'utf8' })) as [string, string[]][];
-  for (const [program, args] of calls) await docker.exec(program, args);
+  for (const [program, args] of calls) {
+    if (program === 'rm') {
+      // Trial-image provisioning removes its stale pull marker on the install host.
+      assert.deepEqual(args, ['-f', pulledTrialImageFile(cliRoot)]);
+      await rm(pulledTrialImageFile(cliRoot), { force: true });
+    } else await docker.exec(program, args);
+  }
   return servedHealth(port);
 }
 
