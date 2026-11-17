@@ -126,7 +126,7 @@ export default function GuidePage() {
           <ul>{outside.map(([part, line]) => <li key={part} className="guide-card"><strong>{part}</strong><span>{line}</span></li>)}</ul>
         </div>
       </figure>
-      <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s names.</p>
+      <p className="muted">OWNER-NAME is your repository’s slug; Setup shows this install’s names.</p>
     </section>
 
     <section id="docs-faq" className="panel" aria-labelledby="docs-faq-title">
