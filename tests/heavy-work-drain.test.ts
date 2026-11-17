@@ -102,13 +102,12 @@ test('e2e:heavy-work-drain — a running trial finishes under a drain while queu
   assert.deepEqual(mergeWriterSummary(state.mergeWriter, start).queue.map(entry => entry.key), ['GY-2'], 'the waiting head keeps its queue place');
 
   // GY-3450: the batch gate is the deploy path — a drain never stops it.
-  let gitCalls = 0;
-  const gateReads = { ...effects.mergeWriter!, git: async () => { gitCalls++; throw new Error('git'); }, gate: { root: base, repository: 'owner/project' } } as MergeWriterReads;
+  const gateReads = { ...effects.mergeWriter!, git: async () => { throw new Error('git'); }, gate: { root: base, repository: 'owner/project' } } as MergeWriterReads;
   const gateCycle = { state, effects: { ...effects, mergeWriter: gateReads }, snapshot: { work: [], now: iso(start) }, now: () => start, log: () => {} } as unknown as Parameters<typeof batchGateStep>[0];
-  // The step hands the gate's flights back rather than awaiting them; both must settle before the assertion.
-  const flights = await batchGateStep(gateCycle) as { gate: Promise<unknown> | null; diagnostics: Promise<unknown> | null };
-  await Promise.allSettled([flights.gate, flights.diagnostics].filter((flight): flight is Promise<unknown> => !!flight));
-  assert.ok(gitCalls > 0, 'the batch gate runs while drained');
+  const flights = await batchGateStep(gateCycle);
+  assert.ok(flights?.gate, 'the batch gate starts while drained');
+  assert.equal(flights.diagnostics, null, 'the diagnostics wait out the drain');
+  await flights.gate.catch(() => undefined);
 
   // A restart — a fresh loop state reading the same host — keeps the drain, its reason and who asked.
   state = emptyDaemonState(config); effects = yard.effects();
