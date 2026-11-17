@@ -6,7 +6,10 @@
 // honours the authorized_keys the script wrote the way sshd does: a restrict,command="graphyard-
 // host-shim" line runs only the shim with the caller's command in SSH_ORIGINAL_COMMAND, a bare key
 // line gives a plain shell. Key material is never read, exactly as tests/helpers/ssh-origin.ts does
-// not. A host with no directory refuses the connection exactly as OpenSSH words it.
+// not. A host with no directory refuses the connection exactly as OpenSSH words it. GY-3440: a
+// `tailscale` host's port 22 is Tailscale SSH (auth none: any account gets a plain shell, keys
+// ignored); another port answers only as the sshd_graphyard_config the script wrote says (Port,
+// AllowUsers, ForceCommand). `ssh -G` and connections resolve aliases from $HOME/.ssh/config.
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -23,6 +26,8 @@ export interface FakeHost {
   dockerGroup?: boolean;
   /** the prepared rootless Docker does not answer, as one installed but not running. */
   docker?: boolean;
+  /** GY-3440: port 22 is Tailscale SSH, so prepare adds the compute-only OpenSSH on port 2222. */
+  tailscale?: boolean;
   /** GY-3419: the host has neither dockerd-rootless-setuptool.sh nor slirp4netns installed; the printed script must fetch the static extras itself. */
   rootlessExtrasMissing?: boolean;
   /** with rootlessExtrasMissing: the served slirp4netns checksum is wrong, so the script must refuse. */
@@ -143,6 +148,24 @@ D='${dir}'
 case "$3" in /etc/*) exec /usr/bin/grep "$1" "$2" "$D$3" ;; esac
 exec /usr/bin/grep "$@"
 `,
+  tailscale: `#!/bin/sh
+[ "$1 $2" = "debug prefs" ] && echo '{ "RunSSH": ${host.tailscale ? 'true' : 'false'} }'
+`,
+  sshd: `#!/bin/sh
+D='${dir}'
+echo "sshd $*" >> "$D/log"
+`,
+  'ssh-keygen': `#!/bin/sh
+D='${dir}'
+echo "ssh-keygen $*" >> "$D/log"
+`,
+  systemctl: `#!/bin/sh
+D='${dir}'
+echo "systemctl $*" >> "$D/log"
+`,
+  ufw: `#!/bin/sh
+echo 'Status: inactive'
+`,
   sleep: `#!/bin/sh
 # The fixture host does not wait out the session bus.
 exit 0
@@ -230,7 +253,7 @@ echo "dockerd-rootless-setuptool.sh install for $USER at $XDG_RUNTIME_DIR/docker
 
 /** Run the printed script itself against the stand-in host: gy-compute, linger, subuid, shim, key, rootless Docker. */
 async function runPrepareScript(host: FakeHost, dir: string) {
-  await Promise.all(['etc', 'usr-local-bin', 'standins'].map(part => mkdir(join(dir, part), { recursive: true })));
+  await Promise.all(['etc/ssh', 'etc/systemd/system', 'usr-local-bin', 'standins'].map(part => mkdir(join(dir, part), { recursive: true })));
   await Promise.all([
     writeFile(join(dir, 'etc', 'passwd'), 'root:x:0:0:root:/root:/bin/sh\n'),
     writeFile(join(dir, 'etc', 'group'), 'root:x:0:\n'),
@@ -241,9 +264,11 @@ async function runPrepareScript(host: FakeHost, dir: string) {
   const entries = standins(dir, host);
   if (host.rootlessExtrasMissing) Object.assign(entries, { curl: curlStandIn(dir, await buildServeDirectory(dir, host)) });
   for (const [name, text] of Object.entries(entries)) await executable(join(dir, 'standins', name), text);
-  // The one rewrite of the printed script: the test is not root, so the shim's /usr/local/bin lands
-  // inside the fixture. Every other line runs exactly as printed.
-  const script = hostPrepareScript(fixturePublicKey).replaceAll('/usr/local/bin/graphyard-host-shim', join(dir, 'usr-local-bin', 'graphyard-host-shim'));
+  // The one rewrite of the printed script: the test is not root, so the shim's /usr/local/bin and the
+  // files it writes under /etc/ssh and /etc/systemd/system land inside the fixture. Every other line
+  // runs exactly as printed.
+  const script = hostPrepareScript(fixturePublicKey).replaceAll('/usr/local/bin/graphyard-host-shim', join(dir, 'usr-local-bin', 'graphyard-host-shim'))
+    .replaceAll('/etc/ssh/', `${dir}/etc/ssh/`).replaceAll('/etc/systemd/system/', `${dir}/etc/systemd/system/`);
   const file = join(dir, 'prepare.sh');
   await writeFile(file, script);
   const result = spawnSync('sh', [file], { encoding: 'utf8', env: { ...process.env, PATH: `${join(dir, 'standins')}:${process.env.PATH}` } });
@@ -288,29 +313,53 @@ export async function fakeHosts(label: string, hosts: FakeHost[]): Promise<FakeH
       await writeFile(join(home, '.ssh', 'authorized_keys'), `${restrictLine()}\n`);
     }
     if (host.dockerGroup) await writeFile(join(dir, 'etc', 'group'), `${await readFile(join(dir, 'etc', 'group'))}docker:x:998:${hostUser}\n`);
+    if (host.tailscale) await writeFile(join(dir, 'tailscale-ssh'), '');
     if (host.docker === false) await writeFile(join(dir, 'home', hostUser, 'bin', 'docker'), '#!/bin/sh\nexit 1\n');
   }
   await executable(join(bin, 'ssh'), `#!/bin/sh
-for last; do :; done
-for arg; do case "$arg" in *@*) target="$arg";; esac; done
-host="\${target#*@}"; user="\${target%@*}"; dir="${root}/hosts/$host"
-if [ ! -d "$dir" ]; then echo "ssh: connect to host $host port 22: Connection refused" >&2; exit 255; fi
-home="$dir/home/$user"; keys="$home/.ssh/authorized_keys"
-if [ ! -f "$keys" ]; then echo "$target: Permission denied (publickey)." >&2; exit 255; fi
-cd "$home" || exit 255
-line=$(cat "$keys")
-case "$line" in
-  'restrict,command="graphyard-host-shim"'*)
-    HOME="$home"; export HOME FAKE_SSH_USER="$user"
-    PATH="$home/bin:$dir/usr-local-bin:$dir/standins:/usr/bin:/bin"
-    SSH_ORIGINAL_COMMAND="$last" exec graphyard-host-shim
-    ;;
-  *)
-    HOME="$home"; export HOME
-    PATH="$home/bin:/usr/bin:/bin"
-    exec sh -c "$last"
-    ;;
+G= port= target= last=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -G) G=1 ;;
+    -p) port="$2"; shift ;;
+    -o) shift ;;
+    *) if [ -z "$target" ]; then target="$1"; else last="$1"; fi ;;
+  esac
+  shift
+done
+case "$target" in
+  *@*) user="\${target%@*}"; host="\${target#*@}" ;;
+  *) user=$(/usr/bin/id -un); host="$target"
+     eval "$(awk -v a="$target" '$1 == "Host" { on = ($2 == a) } on && $1 == "HostName" { print "host=" $2 } on && $1 == "User" { print "user=" $2 } on && $1 == "Port" { print "cport=" $2 }' "$HOME/.ssh/config" 2>/dev/null)"
+     port="\${port:-$cport}" ;;
 esac
+port="\${port:-22}"
+if [ -n "$G" ]; then printf 'user %s\\nhostname %s\\nport %s\\n' "$user" "$host" "$port"; exit 0; fi
+dir="${root}/hosts/$host"
+refused() { echo "ssh: connect to host $host port $port: Connection refused" >&2; exit 255; }
+[ -d "$dir" ] || refused
+if [ "$port" = 22 ] && [ -f "$dir/tailscale-ssh" ]; then
+  # Tailscale SSH, auth none: any account gets a plain shell, authorized_keys and the shim ignored.
+  cd "$dir" && exec sh -c "$last"
+fi
+home="$dir/home/$user"; keys="$home/.ssh/authorized_keys"; force=
+if [ "$port" != 22 ]; then
+  conf="$dir/etc/ssh/sshd_graphyard_config"
+  /usr/bin/grep -qx "Port $port" "$conf" 2>/dev/null || refused
+  /usr/bin/grep -qx "AllowUsers $user" "$conf" || { echo "$user@$host: Permission denied (publickey)." >&2; exit 255; }
+  force=$(sed -n 's/^ForceCommand //p' "$conf")
+fi
+if [ ! -f "$keys" ]; then echo "$user@$host: Permission denied (publickey)." >&2; exit 255; fi
+cd "$home" || exit 255
+case "$(cat "$keys")" in 'restrict,command="graphyard-host-shim"'*) force=graphyard-host-shim ;; esac
+HOME="$home"; export HOME
+if [ -n "$force" ]; then
+  export FAKE_SSH_USER="$user"
+  PATH="$home/bin:$dir/usr-local-bin:$dir/standins:/usr/bin:/bin"
+  SSH_ORIGINAL_COMMAND="$last" exec "$force"
+fi
+PATH="$home/bin:/usr/bin:/bin"
+exec sh -c "$last"
 `);
   return { root, bin, publicKey: fixturePublicKey, host: (name: string) => join(root, 'hosts', name), home: (name: string, user = hostUser) => join(root, 'hosts', name, 'home', user), prepareOutput: (name: string) => outputs.get(name) ?? '',
     prepare: async (name: string) => runPrepareScript(byName.get(name)!, join(root, 'hosts', name)) };
