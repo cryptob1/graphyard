@@ -24,6 +24,7 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
 import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPasses, testResultKeys, warmDependencies } from './trial-caches.js';
+import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
@@ -756,6 +757,8 @@ export interface RunTrialInput {
   services?: typeof startCheckServices;
   /** GY-3283: run only the declared check of this name, whatever paths it is limited to (a worker's `graphyard check NAME`). */
   only?: string;
+  /** GY-3412: the hosts a selection's shards fan out to — those `graphyard host add` recorded unless a test names others — and how they are read. */
+  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[]) => Promise<HostReading[]> };
 }
 const tailLength = 4000;
 /**
@@ -1004,7 +1007,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
-  let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>;
+  let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>, runImage: string | undefined;
   let dependencies: string | null = null, warm: string | null = null, caches = '';
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
@@ -1071,6 +1074,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     }
     boundary = trialContainerBoundary([checkout.directory, place, temporary, home], [...trialContainerDependencies(input.root), ...(warm ? [warm] : [])], Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), chosen ?? undefined);
     wrapper = boundary();
+    runImage = chosen ?? undefined;
   };
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
@@ -1414,37 +1418,70 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
     // shard named one: a named failing test is the merge's, and stays a failing verdict.
     const cores = cpu.cores();
-    const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
+    // GY-3412: with added hosts, every host is read once and the selection is cut for this machine's
+    // lanes plus the real free cores of every remote host under its heat limit.
+    const hosts = input.remote?.hosts ?? await shardHosts();
+    const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
+    const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
+    const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores) + remoteLanes, await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
     const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[] } | undefined)[] = [];
-    let next = 0, stopped: unknown = null;
-    const lane = async () => {
-      // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
-      while (stopped === null && next < shards.length) {
-        const index = next++, group = shards[index]!, entries: string[] = [];
+    let stopped: unknown = null;
+    // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
+    const dropped: string[] = [];
+    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
+    // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
+    const shard = async (index: number, remote?: string) => {
+      const group = shards[index]!, entries: string[] = [];
+      try {
+        const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
+        const argv = (list: string, records: string) => [...check.argv.slice(1), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'];
+        const shardAt = now();
+        let tests: Ended, recordText: string;
         try {
-          const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
-          await writeFile(list, `${group.join('\n')}\n`);
-          const shardAt = now();
-          const tests = await child('tests', check.argv[0]!, [...check.argv.slice(1), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries }).finally(() => input.onTiming?.(`tests: shard ${index + 1}`, Math.max(0, now() - shardAt)));
-          const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-          // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
-          const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
-          const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
-          // GY-3418: the files that passed — the whole shard when it exited 0 naming none, else those its records name passing.
-          const passed = tests.ok && !failing.length ? group : recorded.filter(record => record.passed && group.includes(record.file) && !failing.includes(record.file)).map(record => record.file);
-          settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
-            unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
-        } catch (error) { log.push(...entries); stopped ??= error; }
+          if (remote) {
+            const ended = await session!.run(remote, index, group, (list, records) => [check.argv[0]!, ...argv(list, records)], breadth);
+            entries.push(`$ [${remote}] ${check.argv.join(' ')} (shard ${index + 1})\n${ended.out}`);
+            tests = { ok: ended.ok, out: ended.out, status: ended.status, signal: null, cause: undefined };
+            recordText = ended.records;
+          } else {
+            await writeFile(list, `${group.join('\n')}\n`);
+            tests = await child('tests', check.argv[0]!, argv(list, records), { entries });
+            recordText = await readFile(records, 'utf8').catch(() => '');
+          }
+        } finally { input.onTiming?.(`tests: shard ${index + 1}${remote ? ` on ${remote}` : ''}`, Math.max(0, now() - shardAt)); }
+        const recorded = runnerRecords(recordText);
+        // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
+        const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
+        const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
+        // GY-3418: the files that passed — the whole shard when it exited 0 naming none, else those its records name passing.
+        const passed = tests.ok && !failing.length ? group : recorded.filter(record => record.passed && group.includes(record.file) && !failing.includes(record.file)).map(record => record.file);
+        settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
+          unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
+      } catch (error) {
+        if (error instanceof HostDroppedError) { dropped.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
+        log.push(...entries);
+        // A remote shard past the deadline ends the trial as a timeout, as a local one does.
+        stopped ??= (error as { timedOut?: boolean }).timedOut ? new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail()) : error;
       }
     };
     // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
     const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
-    try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { await release(); }
+    try {
+      // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
+      const local: PlacedHost<string> = { name: readings[0]?.name ?? 'local', room: lanes, reading: readings[0] ?? { name: 'local', cores, busy: 0, steal: 0, celsius: null, limit: Infinity, away: false } };
+      const placed = [local, ...hosts.map((host, index) => ({ name: host, remote: host, reading: readings[index + 1]!, room: Math.floor(realFreeCores(readings[index + 1]!) / breadth) }))];
+      const placement = await runShardsOnHosts({ count: shards.length, hosts: placed, breadth, stopped: () => stopped !== null,
+        run: (host, index) => shard(index, host.remote) });
+      if (hosts.length) await recordRemoteShardRun(input.root, { at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
+        queuedWhileIdle: placement.queuedWhileIdle, host: local.name, celsius: local.reading.celsius,
+        hosts: readings.map(reading => ({ name: reading.name, away: reading.away || placement.dropped.includes(reading.name), celsius: reading.celsius, freeCores: Math.round(realFreeCores(reading) * 10) / 10 })) }).catch(() => {});
+    } finally { await release(); await session?.close(); }
     const ran = settledShards.filter(shard => shard !== undefined);
     for (const shard of ran) log.push(...shard.entries);
+    log.push(...dropped);
     // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
     if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
     if (stopped !== null) throw stopped;
