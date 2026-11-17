@@ -14,6 +14,11 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - `graphyard host remove USER@HOST` stops reading one; `graphyard host list` shows the one host list.
 - Accepted risk: a host can forge its own shard results, so add only machines you own. When remote shard runs come, they will read this same host list.
 
+## Your app's address
+
+- Onboarding step: add `"app": { "url": "https://HOST.TAILNET.ts.net:PORT" }` to `graphyard.json` on main, with the tailnet or public address where the app runs. The dashboard's top bar then shows Open app, and Work's Where it runs card shows the link, the machine, the serving commit, its deploy time and the dashboard's own link.
+- The master refuses `127.0.0.1`, `localhost` and `::1`, which open only on that machine, and says why; `graphyard master status` names the setting while none is set.
+
 ## Accounts and access
 
 - Workers and reviewers run headless, logged per item (`graphyard guide runtimes`).

@@ -20,6 +20,8 @@ import { graphyardRepository } from '../../scenarios.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { boardFromStatus } from '../../model/board.js';
 import { resolve } from 'node:path';
+import { hostname } from 'node:os';
+import { appRelease } from '../../app-url.js';
 import { thisWeekReport } from '../../project-memory.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
@@ -68,7 +70,10 @@ export const statusRoutes = defineRoutes('status', [
       // its own working directory's git toplevel, so a served head reports its own serving.
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
-      return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
+      // GY-3434: where the app runs — main's app.url, the machine the loop names as its own, the served commit and deploy time.
+      const app = await appRelease(runner ? async args => { const read = await runner(args); if (read.status !== 0) throw new Error(read.stderr); return read.stdout; } : null,
+        serving, loopRegistry(engine).live(observedAt)?.hosts?.find(host => host.local)?.host ?? hostname());
+      return { actor, humanOnly, app, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,

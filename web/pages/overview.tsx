@@ -13,6 +13,7 @@ import type { Dashboard } from './dashboard';
 import { BuildLine, ShippedToday } from '../fun';
 import { useGlide } from '../glide';
 import { EmptyState } from '../components/page-layout';
+import { WhereItRuns } from '../components/where-it-runs';
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
@@ -98,6 +99,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
     </>}
+    <WhereItRuns status={status} now={now}/>
     <Replay api={api} onOpen={setSelected}/>
   </>;
 }

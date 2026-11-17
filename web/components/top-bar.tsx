@@ -4,6 +4,7 @@ import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { cityCounts } from '../city';
 import type { Work } from '../../src/model';
+import { OpenApp } from './where-it-runs';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
@@ -138,6 +139,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
         <CityStrip work={work} observedAt={observedAt}/>
+        <OpenApp status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>
