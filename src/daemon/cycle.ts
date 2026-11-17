@@ -324,6 +324,21 @@ async function closeWithin(body: () => void | Promise<void>): Promise<void> {
   } finally { clearTimeout(timer); }
 }
 
+/**
+ * GY-3397: a worktree's removal runs beside the cycle on its launcher, never inside the close step:
+ * deleting an attempt's tree with its dependency install can take longer than the step's timeout,
+ * and the step then stalls every cycle that finds an ended attempt. One removal per key runs at a
+ * time; its outcome is recorded when it settles and reported with the next cycle's actions.
+ */
+function removeBeside(cycle: Cycle, key: string, work: string, path: string, force: boolean, done: string, failed: string) {
+  const { state, effects } = cycle;
+  cycle.launcher.submit(key, [], async sink => {
+    const outcome = (detail: string, result: DaemonAction['state']) => record(state, key, { kind: 'reclaim', work, principal: null, state: result, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist);
+    try { if (await effects.removeWorktree!(path, force)) { tallyLeftovers(state, 'worktrees'); sink.push(await outcome(done, 'done')); } }
+    catch (error) { sink.push(await outcome(`${failed}: ${message(error)}`, 'failed')); }
+  });
+}
+
 async function closeStep(cycle: Cycle) {
   // Each pane gets one attempt per cycle, including the later leftover-pane sweep. A slow
   // runtime must not hold every other session behind it or outlive the step's 60s deadline.
@@ -386,8 +401,7 @@ async function closeStep(cycle: Cycle) {
     // GY-3226: a failed removal is tried again on the next cycles, up to three attempts per key.
     const prior = state.actions[key];
     if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
-    try { if (await effects.removeWorktree(space.path, force)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); } }
-    catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
+    removeBeside(cycle, key, item.key, space.path, force, `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`, `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}`);
   }
   // GY-3341: a settled delivery's worktree never reaches this loop's snapshot again (the coordination
   // view the loop polls reads open items and what they reference), so the disk names the leftovers:
@@ -402,8 +416,7 @@ async function closeStep(cycle: Cycle) {
     const key = `worktree:${named[1].toLowerCase()}-${named[2]}:forced`;
     const prior = state.actions[key];
     if (prior && (prior.state === 'done' || prior.attempts >= 3)) continue;
-    try { if (await effects.removeWorktree(leftover.path, true)) { tallyLeftovers(state, 'worktrees'); await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'done', `Removed the worktree ${leftover.path} of settled ${named[1].toUpperCase()} epoch ${named[2]}: it last changed ${Math.round((clock - leftover.changedAt) / 3_600_000)} hour(s) ago and nothing will resume in it`); } }
-    catch (error) { await note(cycle, key, 'reclaim', named[1].toUpperCase(), 'failed', `Could not remove the worktree ${leftover.path} of settled ${named[1].toUpperCase()}: ${message(error)}`); }
+    removeBeside(cycle, key, named[1].toUpperCase(), leftover.path, true, `Removed the worktree ${leftover.path} of settled ${named[1].toUpperCase()} epoch ${named[2]}: it last changed ${Math.round((clock - leftover.changedAt) / 3_600_000)} hour(s) ago and nothing will resume in it`, `Could not remove the worktree ${leftover.path} of settled ${named[1].toUpperCase()}`);
   }
   // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
   // the stage it was launched for, or whose pane Herdr no longer reports is over — and so is the
