@@ -6,8 +6,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
 import { hostAccountsVariable } from '../../src/host-accounts.js';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
-import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
+import { isolatedTestEnvironment, reserveTestPorts, sharedClusterPort, suiteRunEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { hostMemoryFloor, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
 import { stopServersUnder } from '../../src/postgres-stop.js';
@@ -197,14 +197,16 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     if (options.stdio !== 'pipe') console.log('No test files selected for this run.');
     return { code: 0, base: 0, environment: {}, stdout: '', stderr: '' };
   }
-  // The browser window is the dev server's port and the sentinel above it that holds the window.
-  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
+  // The browser window is the dev server's port with a spare beside it, then one window above both
+  // the run's shared Postgres cluster and the sentinel that holds the window (GY-3356); a Node
+  // run's window is its shared cluster's own.
+  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2 + testPortSpan, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
   let postgres: Awaited<ReturnType<typeof import('./postgres.js').startPostgres>> | undefined;
   try {
-    if (!options.browser) {
-      const { startPostgres } = await import('./postgres.js');
-      postgres = await startPostgres(reservation.base);
-    }
+    // One shared warm cluster for the whole run, whichever suite runs (GY-3356).
+    const { startPostgres } = await import('./postgres.js');
+    const clusterPort = sharedClusterPort(reservation.base, options.browser);
+    postgres = await startPostgres(clusterPort);
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
     // A run of the suite reads no host memory (GY-612): a host the suite itself loaded low must not
@@ -218,9 +220,9 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     // bound. tests/host-heavy-budget.test.ts drives the real limit in its own directories.
     mkdirSync(join(dataHome, 'heavy-jobs'), { recursive: true });
     try { writeFileSync(join(dataHome, 'heavy-jobs', 'limit'), '64\n'); } catch { /* the default bound stands */ }
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome,
+    const set = { ...suiteRunEnvironment({ browser: options.browser, browserPort: reservation.base, clusterPort, clusterUrl: postgres.url, dataHome, tmpRoot }),
       // GY-3333: the suite's host-level account records live under the test data home, never the real ~/.gy.
-      [hostAccountsVariable]: join(dataHome, 'host-accounts'), ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+      [hostAccountsVariable]: join(dataHome, 'host-accounts') };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
