@@ -283,13 +283,18 @@ export const heldJobEnvironment = (): Record<string, string> =>
  * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
  * slot. A process that never joined the budget runs the job as it always did.
  */
-export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal } = {}): Promise<T> {
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal } = {}): Promise<T> {
   const directory = process.env[slotsDirectoryVariable];
   if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
   let held: HeldSlot;
   try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: true }); }
   catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
-  try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { held.release(); }
+  // GY-3449: a cancelled job (`signal`), or one whose owner's run ended (`until`: a gate run that
+  // verified, timed out, held or stopped for a restart), gives its slot back at once, even while a
+  // step that cannot be cancelled — an image build, an adoption — is still settling.
+  const ended = AbortSignal.any([options.signal, options.until].filter((signal): signal is AbortSignal => !!signal));
+  if (ended.aborted) held.release(); else ended.addEventListener('abort', held.release, { once: true });
+  try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { ended.removeEventListener('abort', held.release); held.release(); }
 }
 
 const heavyScript = /^(test|build|typecheck)\b/;

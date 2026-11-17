@@ -5,10 +5,10 @@ import { PageHeader } from '../components/page-layout';
 
 /** The delivery flow, one card per step (GY-3295): a short line each, read left to right and top to bottom. */
 const flow: [string, string][] = [
-  ['Goal', 'You or the Master files a work item with the criteria it must meet.'],
+  ['Goal', 'You or the Master files a work item with required criteria.'],
   ['Build', 'A worker writes it in its own worktree, a private copy of the repository.'],
   ['Review', 'A different agent checks it against every criterion.'],
-  ['Merge trial', 'Tested on top of the latest main.'],
+  ['Merge trial', 'Tested on the latest main.'],
   ['Merge', 'The loop merges it to main. No pull request is opened.'],
   ['Deploy and verify', 'Verified in batches; a failing batch reverts its culprit. Main deploys.'],
 ];
@@ -75,7 +75,7 @@ export default function GuidePage() {
       .then(([video, guide]) => setMedia({ video: video.default, setup: guide.guideText('setup'), infra: guide.guideText('infra') }));
   }, []);
   return <article className="guide">
-    <PageHeader title="How Graphyard works" fact="Graphyard is a coding factory. You say what you want built; AI agents build, check, merge and ship it, with no person in the loop."/>
+    <PageHeader title="How Graphyard works" fact="Graphyard is a coding factory. You say what to build; AI agents build, check, merge and ship it, with no person in the loop."/>
     <nav className="guide-contents" aria-label="On this page">
       {link('docs-overview', 'Who decides what')}{link('docs-first-item', 'Your first item')}{link('docs-flow', 'How a change ships')}{link('docs-where', 'Where things run')}{link('docs-faq', 'FAQ')}{link('docs-reference', 'Reference')}
     </nav>

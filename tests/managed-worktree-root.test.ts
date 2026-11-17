@@ -479,27 +479,12 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     assert.ok(!existsSync(managedRoot), 'nothing is written until a run takes a slot');
 
     // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
-    const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
-    const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by tsc --noEmit \(owner\/project\) \[pid \d+/;
-    const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
-      const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
-      child.stderr.on('data', chunk => { stderrs[index] += chunk; });
-      child.on('close', code => done({ code, stderr: stderrs[index] }));
-    })));
-    // Two runs hold the slots and the other three wait, saying so; only then do the holders finish.
-    const deadline = Date.now() + 30_000;
-    while (stderrs.filter(stderr => waitPattern.test(stderr)).length < runs - 2 && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
-    const heldWhileWaiting = heldSlots(directory).length;
-    await writeFile(gate, '');
-    const outcomes = await finished;
+    const runs = 5, { heldWhileWaiting, outcomes, events, waitPattern } = await fiveRunsTwoSlots(scratch, environment, log);
     assert.equal(heldWhileWaiting, 2, 'the bound is held while the others wait');
     assert.deepEqual(outcomes.map(outcome => outcome.code), Array(runs).fill(0), 'every run completes');
-    const events = (await readFile(log, 'utf8')).trim().split('\n').map(line => line.split(' ')[0]);
-    let running = 0, peak = 0;
-    for (const event of events) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
     assert.equal(events.filter(event => event === 'start').length, runs);
     assert.equal(events.filter(event => event === 'end').length, runs);
-    assert.equal(peak, 2, 'no more than the bound ran at once, and the bound was used');
+    assert.equal(peakOf(events), 2, 'no more than the bound ran at once, and the bound was used');
     const waited = outcomes.filter(outcome => waitPattern.test(outcome.stderr));
     assert.equal(waited.length, runs - 2, 'each run that waited said it waits, on what, and who holds the slots');
     assert.deepEqual(heldSlots(directory), [], 'every slot is given back');
@@ -512,17 +497,63 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     assert.equal(heldSlots(directory)[0].owner?.pid, process.pid);
     taken.release();
 
-    // In one process too: more acquisitions than slots, never more than the bound held at once.
+    // In one process too: more acquisitions than slots, never more than the bound held at once. A
+    // holder keeps its slot until both slots were held together and both waiters said they wait, so
+    // the overlap and the waiting are observed rather than left to a sleep a slow host outlasts (GY-3354).
     let held = 0, most = 0; const lines: string[] = [];
     await Promise.all(Array.from({ length: 4 }, async (_, index) => {
       const slot = await acquireVerificationSlot({ directory, slots: 2, label: `run ${index}`, pollMs: 5, onWait: line => lines.push(line) });
       held++; most = Math.max(most, held);
-      // Held until a second run joins it, however slowly a loaded host takes the lock.
-      for (const deadline = Date.now() + 20_000; most < 2 && Date.now() < deadline;) await new Promise(done => setTimeout(done, 5));
+      for (const deadline = Date.now() + 20_000; (most < 2 || lines.filter(line => line.includes('waits for')).length < 2) && Date.now() < deadline;) await new Promise(done => setTimeout(done, 5));
       held--; slot.release();
     }));
     assert.equal(most, 2);
     assert.ok(lines.some(line => line.includes('waits for a host heavy-job slot')));
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+/**
+ * Five `tsc --noEmit` runs through the session wrapper, two slots. The fake `tsc` holds its slot
+ * until the gate opens, and the gate opens only once three runs say they wait and both holders'
+ * runs have started: a held slot is not yet a started run, and a gate opened between the two let
+ * the first holder finish before the second began (GY-3354).
+ */
+async function fiveRunsTwoSlots(scratch: string, environment: Record<string, string>, log: string) {
+  const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
+  const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by tsc --noEmit \(owner\/project\) \[pid \d+/;
+  const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
+    const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr.on('data', chunk => { stderrs[index] += chunk; });
+    child.on('close', code => done({ code, stderr: stderrs[index] }));
+  })));
+  const events = async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => line.split(' ')[0]);
+  const deadline = Date.now() + 30_000;
+  while ((stderrs.filter(stderr => waitPattern.test(stderr)).length < runs - 2 || (await events()).length < 2) && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+  const heldWhileWaiting = heldSlots(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR).length;
+  await writeFile(gate, '');
+  return { heldWhileWaiting, outcomes: await finished, events: await events(), waitPattern };
+}
+
+function peakOf(events: string[]) {
+  let running = 0, peak = 0;
+  for (const event of events) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
+  return peak;
+}
+
+test('unit:managed-worktree-root-pinned — a holder whose run starts late still runs alongside the other: the five-run gate waits for both holders to start (GY-3354)', async () => {
+  const scratch = await temporaryDirectory('slots-straggler');
+  try {
+    // The second holder's run starts a second after it took its slot, as a starved host delays it.
+    // Opened on the waiters' lines alone, the gate let the first holder finish before it began.
+    const fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\nif mkdir "$RUN_LOG.1" 2>/dev/null; then :; elif mkdir "$RUN_LOG.2" 2>/dev/null; then sleep 1; fi\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
+    await chmod(join(fakeBin, 'tsc'), 0o755);
+    const environment = verificationEnvironment('owner/project', { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_DATA_HOME: join(scratch, 'managed') });
+    const { heldWhileWaiting, outcomes, events } = await fiveRunsTwoSlots(scratch, environment, log);
+    assert.equal(heldWhileWaiting, 2);
+    assert.deepEqual(outcomes.map(outcome => outcome.code), Array(5).fill(0), 'every run completes');
+    assert.equal(peakOf(events), 2, 'both holders ran at once: the bound was used');
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
@@ -561,7 +592,8 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
 });
 
 async function failedReview(root: string, id: string) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // Settlement runs in the background after the launch returns; a loaded host can take seconds.
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
     const record = (await readReviewLedger(root)).reviews.find(entry => entry.id === id)!;
     if (record.state === 'failed') return record;
     await new Promise(resolve => setTimeout(resolve, 10));
