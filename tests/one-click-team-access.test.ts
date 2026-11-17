@@ -11,6 +11,7 @@ import { guideTopics as guides } from '../src/guide.js';
 import { credentialMaskFor, masterCredentialMask } from '../src/master/confinement.js';
 import { aclGuidance, teamAccessSummary } from '../src/team-access.js';
 import { syncTeamAccess } from '../src/master/team-access.js';
+import { settleHostLoops } from './helpers/team-access-hosts.js';
 import { sealForHost } from '../web/seal.js';
 import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -261,6 +262,25 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
     await a.close(); await b.close();
     await new Promise<void>(resolve => provider.close(() => resolve()));
   }
+});
+
+// GY-3411: the browser spec retried sync-and-reload because one pass of the loops shows a change
+// only to the installs whose loop ran after the saving one's; settled loops need one read.
+test('unit:test-browser-tests-one-click-team-access-spec-ts-pinned — settling the host loops once shows a saved share link on every install, whichever install saved it', async () => {
+  const host = await temporaryDirectory('team-access-settle'), machineDir = join(host, 'machine');
+  await mkdir(machineDir);
+  await writeFile(join(machineDir, 'tailnet.json'), JSON.stringify({ dnsName: 'yard.tail-test.ts.net.', ip: '100.64.0.7', deviceId: 'nFAKE123CNTRL' }));
+  const a = await install('team_access_settle_a', host, Date.now), b = await install('team_access_settle_b', host, Date.now);
+  const settle = () => settleHostLoops([a, b].map(entry => ({ url: entry.base, credentialFile: entry.credentialFile })), { machineDir });
+  const shown = async (entry: typeof a) => (await entry.call('/api/team-access')).body.shareLink?.url ?? null;
+  try {
+    // The last loop in turn saves: the first has already run when the machine learns of it.
+    for (const [saver, link] of [[b, 'https://login.tailscale.com/admin/invite/saved-on-b'], [a, 'https://login.tailscale.com/admin/invite/saved-on-a']] as const) {
+      assert.equal((await saver.call('/api/team-access/share-link', { url: link })).status, 200);
+      await settle();
+      assert.deepEqual([await shown(a), await shown(b)], [link, link], 'both installs show the link after one settle');
+    }
+  } finally { await a.close(); await b.close(); }
 });
 
 test('unit:tests/one-click-team-access.test.ts — the machine directory holding the Tailscale token is masked from confined sessions and the Chief', async () => {
