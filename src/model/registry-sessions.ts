@@ -201,6 +201,8 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
     if (!account || account.credential.host !== request.host) continue;
     if (foldObservation(account, observed.quota, context)) changed = true;
     if (observed.smoke) { account.smoke = { result: observed.smoke.result, reason: observed.smoke.reason, at: context.at, by: context.actor }; changed = true; }
+    // A passing smoke test answered on the account, so its agent's not-logged-in report no longer holds (GY-3441).
+    if (observed.smoke?.result === 'pass' && account.quota.session === 'login' && account.quota.loggedIn === false) account.quota = { ...account.quota, loggedIn: null, session: undefined, reason: null };
   }
   return changed;
 }
