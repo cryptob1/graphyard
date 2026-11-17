@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
 import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { defaultChildRun } from '../src/child-runner.js';
 import { hostPrepareScript } from '../src/hosts.js';
 import { remoteShardSession } from '../src/merge-writer/remote-shards.js';
@@ -73,6 +74,12 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     assert.match(words, new RegExp(`--host unix:///run/user/${process.getuid!()}/docker\\.sock`), 'the user\'s rootless Docker');
     const mounts = create!.filter((_, index) => create![index - 1] === '--mount');
     assert.equal(mounts.length, 1, words);
+    const runDirectory = /src=([^,]+)/.exec(mounts[0]!)![1]!;
+    for (const path of [runDirectory, join(runDirectory, 'repo'), join(runDirectory, 'repo', 'tests')]) {
+      assert.equal((await stat(path)).mode & 0o2070, 0o2070, `mapped group can write and traverse ${path}`);
+    }
+    assert.equal((await stat(join(runDirectory, 'repo', 'tests', 'a.test.ts'))).mode & 0o060, 0o060);
+    assert.equal((await stat(join(hosts.home('box'), '.graphyard', 'mirrors'))).mode & 0o020, 0, 'shared mirror stays outside the writable run');
     assert.match(mounts[0]!, new RegExp(`^type=bind,src=${hosts.home('box')}/\\.graphyard/runs/trial-\\w+,dst=`), 'only the run directory is mounted');
   } finally { await session.close(); listening.close(); }
 });
