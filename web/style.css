@@ -356,6 +356,12 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 .main:has(>.live-terminal){gap:var(--space-4)}
 /* GY-3345: threads with other installs' Masters, above the terminal; long words wrap, never widen the page. */
 .master-messages{display:grid;gap:8px;margin-bottom:8px;max-height:30dvh;overflow-y:auto;min-width:0}
+/* GY-3394: the blockers the Master owes — one row each, the item, its wait and the recorded blocker. */
+.master-owes{list-style:none;margin:0;padding:0}
+.master-owes li{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px}
+.master-owes li:last-child{border-bottom:0;padding-bottom:0}
+.master-owes .text-button{font-size:13px;color:var(--text);text-align:left}
+.master-owes span{overflow-wrap:anywhere}
 .master-thread{border:1px solid var(--border);border-radius:6px;padding:6px 10px;min-width:0}
 .master-thread h2{font-size:var(--type-small);margin:0 0 4px;color:var(--text-2)}
 .master-thread ol{list-style:none;margin:0;padding:0;display:grid;gap:6px}
