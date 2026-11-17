@@ -21,7 +21,7 @@ RUN npm run build
 FROM node:24-trixie-slim AS trial
 # Reverts require merge-tree --merge-base (Git >= 2.43); trixie supplies it.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/graphyard-browsers
-RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap python3 python3-venv git ripgrep ca-certificates openssh-client && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap python3 python3-venv git ripgrep ca-certificates openssh-client openssh-server && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/local/bin/node /usr/bin/node && ln -s /usr/local/bin/npm /usr/bin/npm && ln -s /usr/local/bin/npx /usr/bin/npx \
     && touch /etc/graphyard-trial
 # Independent exact-math producer dependencies, immutable to the unprivileged trial.

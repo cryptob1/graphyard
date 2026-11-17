@@ -1,7 +1,7 @@
 import { defineCommands } from './registry.js';
 import { addHost, hostPrepareScript, localPublicKey, readHosts, removeHost } from '../hosts.js';
 
-/** GY-3407: lend a spare machine's compute, nothing else. Work does not run there yet; the loop watches it. */
+/** GY-3407: lend a spare machine's compute, nothing else; merge trials send it test shards (GY-3412). */
 export const hostCommands = defineCommands([{
   name: 'host',
   help: [
@@ -19,7 +19,7 @@ export const hostCommands = defineCommands([{
       process.stdout.write(hostPrepareScript(await localPublicKey()));
     } else if (context.id === 'add' && target) {
       const result = await addHost(target);
-      console.log(result.added ? `Added ${target}: ${result.probe?.cores ?? '?'} cores, rootless Docker answers through the shim. Workers lists it from the loop's next cycle; work still runs on this machine.` : `${target} is already added.`);
+      console.log(result.added ? `Added ${target}: ${result.probe?.cores ?? '?'} cores, rootless Docker answers through the shim. Workers lists it from the loop's next cycle, and merge trials send it test shards.` : `${target} is already added.`);
     } else if (context.id === 'remove' && target) {
       console.log((await removeHost(target)).removed ? `Removed ${target}.` : `${target} was not added.`);
     } else if (context.id === 'list' || !context.id) {
