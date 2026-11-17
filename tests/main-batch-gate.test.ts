@@ -286,6 +286,7 @@ test('integration:main-batch-gate-failures — smoke, bound and core cases must 
     assert.deepEqual(outcome, { outcome: 'reverted', tip, check: 'e2e:case-3', culprit: 'GY-3', revertSha: `${'e'.repeat(39)}1` });
     assert.deepEqual(runs.slice(2).map(entry => [entry.commit, entry.checks]), [[sha(2), ['e2e:case-3']], [sha(3), ['e2e:case-3']]], 'only the failing check, on the prefixes in merge order');
     assert.deepEqual(reverted, ['GY-3']);
+    assert.deepEqual(record.reverts?.map(entry => entry.item), ['GY-3'], 'the revert is kept with its time for the week\'s count (GY-3399)');
     assert.equal(record.verified, verified, 'nothing is verified yet');
     // The recut (main now holds the revert) passing verifies it, so the other items ship.
     const recut = gatePorts(batch, () => false);

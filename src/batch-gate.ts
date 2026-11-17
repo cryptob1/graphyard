@@ -95,6 +95,8 @@ export interface GateRecord {
   results: Record<string, Record<string, boolean>>;
   /** The last merges judged, oldest first. */
   merges: GateMerge[];
+  /** GY-3399: the gate's reverts, oldest first, the last 50 kept: what the week's revert count reads. Optional only for records an older loop wrote. */
+  reverts?: { item: string; at: string }[];
   /** How long the whole E2E catalog took when the diagnostics last ran it. */
   catalogMs: number | null;
   /**
@@ -413,6 +415,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     // A push the moving main rejected blames nothing new: the next cycle gates again.
     if ('retry' in reverted) return { outcome: 'retry', tip, reason: reverted.retry };
     record.merges = [...record.merges.filter(merge => merge.sha !== culprit.sha), { sha: culprit.sha, item: culprit.item.key, reverted: true }].slice(-revertRateWindow);
+    record.reverts = [...record.reverts ?? [], { item: culprit.item.key, at: at() }].slice(-50);
     record.attempt = { ...record.attempt, recuts: record.attempt.recuts + 1 };
     return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha, ...(fallback ? { fallback } : {}) };
   } catch (error) {

@@ -65,11 +65,11 @@ export function recordNoteInMemory(memory: ProjectMemory, note: MemoryNote): boo
 }
 
 /** Record one of the master's own lessons (GY-3274): a short note the next master launch prompt carries. */
-export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at: string; forWorkers?: boolean }): MemoryNote {
+export function recordMasterLesson(memory: ProjectMemory, input: { id: string; text: string; by: string; at: string; forWorkers?: boolean; enforceable?: boolean }): MemoryNote {
   const text = input.text.trim();
   if (!text) throw new Error('A lesson needs its text');
   if (text.length > masterLessonCharacterLimit) throw new Error(`A lesson is at most ${masterLessonCharacterLimit} characters and this one is ${text.length}: ${text.slice(0, 120)}…`);
-  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at, ...(input.forWorkers ? { forWorkers: true } : {}) };
+  const note: MemoryNote = { id: input.id, key: 'master', kind: masterLessonKind, text, by: input.by, at: input.at, ...(input.forWorkers ? { forWorkers: true } : {}), ...(input.enforceable ? { enforceable: true } : {}) };
   recordNoteInMemory(memory, note);
   // The stored total stays under the word budget, dropping the oldest lessons first.
   while (memory.notes.filter(entry => entry.kind === masterLessonKind).length > 1
@@ -91,11 +91,14 @@ export function removeMasterLesson(memory: ProjectMemory, id: string): MemoryNot
 /**
  * Adopt the file's master lessons and product brief into the loop's copy (GY-3274): the master
  * session records them straight to `.graphyard/project-memory.json`, so the file — never the loop's
- * older copy — is their truth, additions and removals alike. `null` (no readable file) changes nothing.
+ * older copy — is their truth, additions and removals alike — except a lesson the loop already removed
+ * once its item turned it into code (GY-3399), which a stale write of the file never brings back.
+ * `null` (no readable file) changes nothing.
  */
 export function reconcileMasterMemory(memory: ProjectMemory, recorded: { lessons: MemoryNote[]; brief: ProductBrief | null } | null): ProjectMemory {
   if (!recorded) return memory;
-  memory.notes = boundMemoryNotes([...recorded.lessons, ...memory.notes.filter(note => note.kind !== masterLessonKind)]);
+  const removed = new Set((memory.removedGates ?? []).map(entry => entry.id));
+  memory.notes = boundMemoryNotes([...recorded.lessons.filter(lesson => !removed.has(lesson.id)), ...memory.notes.filter(note => note.kind !== masterLessonKind)]);
   memory.brief = recorded.brief;
   return memory;
 }

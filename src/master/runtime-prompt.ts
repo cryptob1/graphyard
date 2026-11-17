@@ -229,9 +229,12 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
 /**
  * A headless run's limit notice (GY-3389): the reply inside its JSON report (`claude -p`'s usage-credits
  * result), else a line it printed — such as OpenCode's Z.AI `{"type":"provider.quota",…}` error, which a
- * text reply before it must not hide.
+ * text reply before it must not hide. OpenCode's worker run prints that error inside its JSON error
+ * event (`{"type":"error",…,"error":{"type":"provider.quota","message":…}}`), a line too long to read as
+ * a notice, so the event's own error message is what is judged (GY-3427).
  */
 export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   const reply = runtimeReport(output).reply;
-  return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
+  const errors = output.split('\n').map(line => { try { return JSON.parse(line)?.error?.message; } catch { return null; } }).filter(message => typeof message === 'string');
+  return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? (errors.length ? detectRuntimeExhaustion(errors.join('\n'), runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
 }
