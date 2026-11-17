@@ -46,6 +46,7 @@ import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
 import { cpuPressureStep, cpuWaiting, implementationWaiting } from './cpu-pressure.js';
+import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -643,7 +644,9 @@ async function dispatchStep(cycle: Cycle) {
   // workers wait, so the reviews and trials that finish work drain the heat.
   const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !implementationWaiting(state) && !refusedRoles.has('worker')) for (const item of claimable) {
+  // GY-3444: while a batch gate runs no implementation session starts, so the gate's checks finish
+  // inside their bound and deploys go on; reviews and producers still launch.
+  if (!state.diskHeadroom && !implementationWaiting(state) && !refusedRoles.has('worker') && !batchGateRunning(state)) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
