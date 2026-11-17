@@ -9,7 +9,7 @@ import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import { gateTrialKey, trialStartWaiting } from '../merge-writer/trial-load.js';
 import { cpuWaiting } from './cpu-pressure.js';
-import { trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
+import { heavyTrial, trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
 import { criterionProofs, e2eProofsOf } from '../merge-writer/executor.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
@@ -264,23 +264,29 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   // GY-3444: the gate's checks run as detached trial runs, as merge trials do (GY-3159): the run's
   // directory rides the record, so a loop restart — a CLI upgrade among them — adopts the run in
   // place of orphaning it. The diagnostics, and a check with named environments, trial in process.
+  // Like every trial it is one heavy job of the host (GY-3290); its wait for that slot is a wait, not its own time.
+  let heavyWait = false;
   const trial: MergeWriterReads['trial'] = async (sha, files, item, base, step, timing, heads, _share, signal, timeout) => {
     const share = Math.max(1, busyTrialSlots(cycle.state)), flight = gated.inFlight, proofs = criterionProofs(item);
     const input = createHash('sha256').update(JSON.stringify([proofs, files])).digest('hex');
     if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments || flight?.tip !== sha) return reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout);
+    const launch = reads.launchTrialRun, adopt = reads.adoptTrialRun;
     const run = flight.run?.commit === sha && flight.run.input === input ? flight.run : null;
-    const adopted = run ? await reads.adoptTrialRun({ key: gateKey, head: sha, mergeSha: sha, directory: run.directory }) : null;
-    if (adopted) return adopted.trial(step, timing, signal);
-    await reads.ensureTrialImage?.();
-    const launched = reads.launchTrialRun({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
-      reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
-    gated.inFlight = { ...flight, run: { commit: sha, input, directory: launched.directory } };
-    await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
-    return launched.trial(step, timing, signal);
+    return heavyTrial(gateKey, line => { heavyWait = true; step?.(line); }, signal, async () => {
+      heavyWait = false;
+      const adopted = run ? await adopt({ key: gateKey, head: sha, mergeSha: sha, directory: run.directory }) : null;
+      if (adopted) return adopted.trial(step, timing, signal);
+      await reads.ensureTrialImage?.();
+      const launched = launch({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
+        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
+      gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
+      await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
+      return launched.trial(step, timing, signal);
+    });
   };
   const ports = batchGatePorts({ ...reading, git, trial }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
-  ports.waiting = () => cpuWaiting(cycle.state) !== null || trialStartWaiting('gate', gate.slots);
+  ports.waiting = () => heavyWait || cpuWaiting(cycle.state) !== null || trialStartWaiting('gate', gate.slots);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
