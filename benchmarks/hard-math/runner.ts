@@ -19,7 +19,7 @@ import { generate } from './generator.js';
 import { configSchema, validateReceipt, reviewedDeliveries, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
 import { listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
-import { trackedDocuments, lifecycleCounts, failureStack, receiptSession } from './snapshot.js';
+import { trackedDocuments, lifecycleCounts, failureStack, receiptSession, serialReads } from './snapshot.js';
 import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
@@ -144,8 +144,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     receipt.failures.push({at:new Date().toISOString(),component:'starter-baseline',head:receipt.startingCommit,reason:baseline[0].reason});
     enforce();plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
-    let reading:Promise<any[]>|undefined;
-    const readSnapshot=()=>reading??=(async()=>{
+    const readSnapshot=serialReads(async()=>{
       const items=await trackedDocuments(await plane!.call('work',coordinator.token),receipt.work,path=>plane!.call(path,coordinator.token));
       let gateFailure:string|undefined;
       for(const w of receipt.work) {
@@ -177,7 +176,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       await checkpoint();
       if(!stopping) {if(gateFailure) throw new Error(gateFailure);enforce();}
       return items;
-    })().finally(()=>{reading=undefined;});
+    });
     const snapshot=async(checkSource=false)=>{
       if(source && checkSource && !stopping) {
         const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
