@@ -46,7 +46,7 @@ import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
-import { hottestCpuCelsius } from './cpu-pressure.js';
+import { cpuCelsius } from './cpu-pressure.js';
 import { sweepCliReleases } from '../install/cli-release.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
@@ -224,7 +224,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
-      return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await hottestCpuCelsius() };
+      return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await cpuCelsius() };
     },
     // GY-3407: the read runs beside the cycle, so a host taking its SSH timeout never slows the loop; the cycle takes the latest finished one.
     hostReadings: async previous => {

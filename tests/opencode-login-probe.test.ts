@@ -16,6 +16,7 @@ await mkdir(bin);
 // A stand-in OpenCode 2.x: it records what it was asked and under which data home, and lists a
 // provider only for a home OpenCode itself took the login into (marked `taken`).
 await writeFile(join(bin, 'opencode'), `#!/bin/sh
+[ "$2" = --help ] && { echo '  --standalone  Run with a private server'; exit 0; }
 echo "$* XDG_DATA_HOME=$XDG_DATA_HOME" >> ${JSON.stringify(calls)}
 if [ -e "$XDG_DATA_HOME/opencode/taken" ]; then echo 'Z.AI Coding Plan  API key  stored'; else echo 'No authenticated integrations'; fi
 `, { mode: 0o755 });

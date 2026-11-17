@@ -1,0 +1,14 @@
+{
+  "id": "opencode-worker-starts",
+  "title": "A headless opencode worker launch runs past start",
+  "description": "Builds the headless opencode worker command line the launcher runs and runs it against this host's installed opencode (a stand-in without --standalone where none is installed): it prints no usage text or flag refusal and does not exit at once.",
+  "tags": ["workers", "regression"],
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "opencode worker starts",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/opencode-worker-starts.test.ts",
+    "timeoutSeconds": 120
+  }]
+}

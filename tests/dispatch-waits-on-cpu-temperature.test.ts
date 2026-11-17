@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { daemonStatePath, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { hottestCpuCelsius, trialHalfCelsius } from '../src/daemon/cpu-pressure.js';
+import { cpuCelsius, trialHalfCelsius } from '../src/daemon/cpu-pressure.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -156,10 +156,11 @@ test(`${proof} — at 96C a ready item gets no launch and no trial, master statu
   }), submitted.id]);
 
   // CPU pressure is low throughout (20 percent): only the heat holds launches.
-  let sensors = await hwmon(96), stat = 0;
-  const { daemon, seen } = effects(config, herdr, async () => ({ ...calm(stat += 1000), celsius: await hottestCpuCelsius(sensors) }));
+  // GY-3426: the guard averages the last 60 s, so each reading here is a minute after the last.
+  let sensors = await hwmon(96), stat = 0, clock = Date.now();
+  const { daemon, seen } = effects(config, herdr, async () => ({ ...calm(stat += 1000), celsius: await cpuCelsius(sensors) }));
 
-  await runCycle(config, state, daemon);
+  await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
   assert.deepEqual(seen.dispatched, [], 'a CPU at 96C launches no worker');
   assert.equal(seen.trials, 0, 'a CPU at 96C starts no trial');
@@ -174,7 +175,8 @@ test(`${proof} — at 96C a ready item gets no launch and no trial, master statu
   assert.equal(report.cpuPressure?.waiting, 'launches waiting: CPU 96C', 'master status shows one waiting line with the temperature');
 
   sensors = await hwmon(trialHalfCelsius - 1);
-  await runCycle(config, state, daemon);
+  clock += 61_000;
+  await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
   assert.deepEqual(seen.dispatched, [readyItem.key], `the ready item launches the first cycle at ${trialHalfCelsius - 1}C`);
   assert.ok(seen.trials >= 1, `the submitted head is trialled the first cycle at ${trialHalfCelsius - 1}C`);
@@ -194,7 +196,7 @@ test(`${proof} — with no readable CPU sensor launches proceed`, async () => {
   const readyItem = await file('No sensor');
   await ok(token(operator.id), 'POST', `work/${readyItem.id}/ready`, {});
   const sensors = await hwmon(null);
-  const { daemon, seen } = effects(config, { agents: [] }, async () => ({ ...calm(1000), celsius: await hottestCpuCelsius(sensors) }));
+  const { daemon, seen } = effects(config, { agents: [] }, async () => ({ ...calm(1000), celsius: await cpuCelsius(sensors) }));
   await runCycle(config, state, daemon);
   await mergeWriterIdle(state);
   assert.deepEqual(seen.dispatched, [readyItem.key], 'the check is skipped where no CPU sensor is readable');

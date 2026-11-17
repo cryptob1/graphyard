@@ -1,5 +1,5 @@
 import { type Work } from '../model.js';
-import { reportedHandle, type SessionReportEntry } from '../model/session-state.js';
+import { reportedHandle, sessionHandleKey, type SessionReportEntry } from '../model/session-state.js';
 import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from '../model/sessions.js';
 import { runtimeEndedStates } from '../harness.js';
 import { type DispatchRequest } from '../model/dispatch.js';
@@ -52,7 +52,7 @@ export interface SessionClosure { workId: string; key: string; id: string; kind:
   /** The session report entry that closed it, when the runtime's observation did rather than the item. */
   report?: SessionReportEntry }
 /** How one handle is named between ticks: the item it sits on, and its own id. */
-export const sessionHandleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
+export { sessionHandleKey };
 /** Whose vocabulary a reported state is judged by, whose runtime answers for a handle, and how long a handle the runtime has stopped reporting is left alone. */
 export type ReconcileOptions = LivenessOptions & { graceMs?: number;
   /** This host: a handle another host launched is not judged against this host's runtime listing. */
