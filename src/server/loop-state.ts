@@ -41,7 +41,11 @@ export function storedLoopState(store: Store, actor: Principal, scope: string): 
         // each id once — dispatch names its one cursor row however many records it wrote.
         await db.query('INSERT INTO events(actor,kind,payload) VALUES($1,$2,$3)', [actor.id, `loop-state.${migrate ? 'migrated' : 'saved'}`, JSON.stringify({ scope, kind, ids: [...new Set(ids)], removed })]);
       }, { coordinationLock: false }).catch(error => {
-        if (['55P03', '40P01'].includes((error as { code?: string }).code ?? '')) throw new Refusal(`Loop state ${kind} is being written by another writer; retry`, 409, { code: 'loop-state-conflict' });
+        const code = (error as { code?: string }).code ?? '';
+        if (['55P03', '40P01'].includes(code)) throw new Refusal(`Loop state ${kind} is being written by another writer; retry`, 409, { code: 'loop-state-conflict' });
+        // GY-3424: a record the database cannot store (class 22, e.g. a NUL in jsonb) is the writer's to fix, so the
+        // refusal names Postgres's reason for master status rather than a bare 500 the loop retries every cycle.
+        if (code.startsWith('22')) throw new Refusal(`Loop state ${kind} was refused by the database: ${(error as Error).message}`, 422, { code: 'loop-state-invalid' });
         throw error;
       });
     },

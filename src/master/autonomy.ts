@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { writeHarnessPermissions } from '../harness.js';
 import type { Work } from '../model.js';
-import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema } from './profiles.js';
+import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, selectReviewerProfile } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { setupAgentEnvironments } from './environments.js';
@@ -110,7 +110,7 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
  */
 export async function registeredReview<T>(config: MasterConfig, args: string[], snapshot: { work: Work[] }, mutate: (path: string, body: unknown) => Promise<unknown>, launch: () => Promise<T>) {
   const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
-  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : selectReviewerProfile(config).profile ?? undefined;
   if (insideMasterConfinement() && work?.candidate) {
     const request = liveReviewRequest(work);
     if (!request) throw new Error(`${work.key} has no pending control-plane review request; host dispatch launches reviews when its review gate requests one`);

@@ -1,0 +1,9 @@
+{
+  "id": "sensitive-review-launches",
+  "title": "A dependency change gets an independent reviewer",
+  "description": "A fixture item whose head changes go.mod, implemented on a claude account, has its sensitive-delta review request launched on a logged-in cursor reviewer within one dispatch tick and its verdict recorded; with no eligible reviewer, master status names the item, the reason and the remedy, and master review relaunches it.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [{ "kind": "command", "name": "sensitive review launch and verdict", "run": "node --import tsx tests/helpers/run-tests.ts tests/sensitive-review-executor.test.ts", "timeoutSeconds": 600 }]
+}
