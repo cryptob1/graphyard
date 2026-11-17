@@ -1,9 +1,9 @@
 // Concern: OS-level host filesystem and coordinator confinement for every launched role.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
-import { slotsDirectoryVariable } from './verification-slots.js';
+import { heavyDrainDirectory, heavyJobsDirectory, slotsDirectoryVariable } from './verification-slots.js';
 import { herdrTarget } from './herdr.js';
 import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
@@ -203,11 +203,26 @@ const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (is
  * runs from another install's directory keeps only its checkout, read-only.
  */
 export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
-  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined });
+  // GY-3385: a peer's configDirectory keeps that install masked — only its peers directory is bound in, never its credentials.
+  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined, peers: (config as { peers?: { tokenFile: string }[] }).peers?.map(peer => peer.tokenFile) });
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
   return { configHome: '', extraPaths: [], own: [], cli: keptCli(config, operatorHome),
     hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
+}
+
+/** GY-3385: the `peers` directory of an install's config directory — where the reporter tokens exchanged between two installs on a host live, each placed by the issuing side. */
+export const peerTokenDirectory = (installDirectory: string) => join(installDirectory, 'peers');
+/**
+ * GY-3385: the peer exchange a master session's launch prepares — this install's own `peers`
+ * directory created (so a peer's session can place a token in it), and each recorded peer's
+ * returned for the launch to grant writable, where this Master places the tokens it issues.
+ */
+export function preparePeerExchange(config: { credentialFile: string; peers?: readonly { configDirectory?: string }[] | null }): string[] {
+  const foreign = [...new Set((config.peers ?? []).flatMap(peer => peer.configDirectory ? [peer.configDirectory] : []))];
+  for (const directory of [peerTokenDirectory(dirname(dirname(resolve(config.credentialFile)))), ...foreign.map(peerTokenDirectory)])
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return foreign.map(peerTokenDirectory);
 }
 
 /**
@@ -287,6 +302,37 @@ const repositoryMaskPaths = (root: string): string[] => {
       .map(path => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path).filter(isAbsolute);
   } catch { return []; }
 };
+/** GY-3384: the absolute or `~/` sibling paths the repository's own graphyard.json declares readable
+ * (`confinement.readonlyPaths`): checkouts beside the project — a private dependency, a read-only
+ * key — that confined sessions keep as readable as the read-only host itself; once any is declared,
+ * every unlisted sibling is unreadable. An unreadable declaration adds none. */
+const repositoryReadonlyPaths = (root: string): string[] => {
+  try {
+    const declared = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.confinement?.readonlyPaths;
+    return (Array.isArray(declared) ? declared : []).filter((path): path is string => typeof path === 'string')
+      .map(path => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path).filter(isAbsolute);
+  } catch { return []; }
+};
+/**
+ * GY-3384: the sibling entries beside the checkout — the host user's other checkouts — that a
+ * confined session cannot read: every entry of the checkout's parent except the checkout itself,
+ * every entry a declared path covers, every symlink (its target stays as reachable as the
+ * read-only host makes any other tree of the host user's), and every entry the wrapper mounts
+ * under (a masked entry carries no mount point of its own). A parent that is the user's home or
+ * `/` masks nothing: the host user's home keeps its ordinary files readable, its credential paths
+ * masked on their own, and the scratch the session runs on already replaces the temporary
+ * directories (`/tmp`, `/var/tmp`) inside the namespace, so a checkout directly under one has no
+ * sibling there to mask.
+ */
+const siblingMaskEntries = (root: string, declared: readonly string[], mounted: readonly string[]): string[] => {
+  const parent = dirname(root);
+  if (parent === '/' || parent === '/tmp' || parent === '/var/tmp' || canonicalPath(parent) === canonicalPath(homedir())) return [];
+  let names: string[];
+  try { names = readdirSync(parent); } catch { return []; /* an unreadable parent hides its entries already */ }
+  return names.filter(name => name !== basename(root)).map(name => join(parent, name))
+    .filter(path => !((path): boolean => { try { return lstatSync(path).isSymbolicLink(); } catch { return true; } })(path))
+    .filter(path => ![root, ...declared, ...mounted].some(other => other === path || withinCheckout(other, path) || withinCheckout(path, other)));
+};
 /** The session's own credential paths that exist here, canonical: what the wrapper re-exposes after the masks. */
 const keptCredentialPaths = (mask: CredentialMask | undefined): string[] =>
   [...new Set((mask?.own ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))];
@@ -338,11 +384,18 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
   // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
   // only that public resolver file back, never systemd's directory or sockets.
   const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
+  // GY-3384: the system ssh include directory holds files owned by ids the user namespace cannot
+  // map (root reads as nobody inside), and ssh refuses a config file its owner check rejects —
+  // "Bad owner or permissions on /etc/ssh/ssh_config.d/*.conf" — so every git over SSH failed
+  // inside a confined session. An empty directory in its place leaves ssh its defaults; the
+  // system config itself is never owner-checked, and the session's scratch HOME has no include
+  // to check.
+  const sshIncludes = isDirectoryPath('/etc/ssh/ssh_config.d') ? ['--tmpfs', '/etc/ssh/ssh_config.d'] : [];
   // GY-3108: Antigravity (agy) ignores AGY_CONFIG_DIR and reads its login only from
   // `$HOME/.gemini/antigravity-cli`, so the account's login home is bound there.
   const home = variable('HOME', '/tmp/home'), agy = variable('AGY_CONFIG_DIR', '')[2];
   const agyHome = agy && join(home[2], '.gemini', 'antigravity-cli') !== agy ? ['--bind', agy, join(home[2], '.gemini', 'antigravity-cli')] : [];
-  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
+  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshIncludes,
     '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
     '--dir', '/tmp/home', ...home, ...agyHome,
@@ -369,6 +422,8 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv;
+  /** GY-3445: the master session writes the host's heavy-work drain record; every other session reads it. */
+  drainWritable?: boolean;
   /** GY-3237: Herdr socket and config directories the session reaches read-only (the master session's own grant): bound after the masks, kept from the process-launch masks, and allowed socket resolution under Landlock. */
   herdrPaths?: readonly string[] }): readonly string[] {
   const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
@@ -406,6 +461,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   if (mask && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
   const masks = credentialMaskWords(mask, [root, directory], blank);
   const environment = { ...process.env, ...input.environment };
+  // GY-3445: a session granted the heavy-jobs folder to take slots gets its drain folder back read-only.
+  const drain = input.drainWritable ? [] : writable.filter(path => path === heavyJobsDirectory(environment)).map(heavyDrainDirectory);
+  for (const path of drain) mkdirSync(path, { recursive: true });
   // The Herdr grant covers the sockets under it (GY-3237): a pane-inherited HERDR_SOCKET_PATH
   // would otherwise carry the keyring proxy over the very socket the session must reach.
   const launchTargets = hostProcessLaunchTargets(undefined, environment);
@@ -430,8 +488,20 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks,
+  // GY-3384: a repository that declares `confinement.readonlyPaths` reads only those beside its
+  // checkout; one that declares none keeps the read-only host as before. Every other
+  // sibling entry of the checkout's parent is masked unreadable with the same exact-path words as
+  // the credential mask, before every re-exposure, so the checkout, its Git directories, the
+  // session's own directories and every writable grant stay as reachable as before. An entry the
+  // wrapper itself mounts under is never masked: a masked entry carries no mount point of its own.
+  const mounted = [...writable, ...commonGitDir, ...sharedDirectories, ...own, ...shared, ...kept, ...cli, ...herdr, ...busSockets].filter(path => isAbsolute(path));
+  const declared = repositoryReadonlyPaths(root);
+  const siblings = declared.length ? siblingMaskEntries(root, declared, mounted) : [];
+  if (siblings.length && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
+  const siblingMasks = siblings.length ? credentialMaskWords({ configHome: '', extraPaths: [], own: [], cli: [], hostPaths: siblings }, [root, directory], blank) : [];
+  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks, ...siblingMasks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
+    ...drain.flatMap(path => ['--ro-bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
     ...ownGitState.flatMap(path => ['--ro-bind', path, path]),

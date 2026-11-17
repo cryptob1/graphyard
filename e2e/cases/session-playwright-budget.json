@@ -1,0 +1,16 @@
+{
+  "id": "session-playwright-budget",
+  "title": "A worker session's npx playwright test starts no more browser workers than its test budget",
+  "description": "A fixture worker session launched on a 24-core host with 12 sessions running gets a test budget of 2 as PLAYWRIGHT_WORKERS; its npx playwright test under the repository's playwright.config runs eight tests with at most two workers at once.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the session's Playwright run keeps to its budget",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/playwright-session-budget.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

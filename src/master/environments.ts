@@ -19,6 +19,7 @@ import { installIdFor } from '../install/types.js';
 import { failureText } from '../disk-space.js';
 import { shellQuote } from '../shell-quote.js';
 import { heldObservation, describeObservedExhaustion, providerIdentity } from './account-identity.js';
+import { markHostAccountExhausted } from '../host-accounts.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
@@ -92,6 +93,10 @@ export interface EnvironmentProbe {
   fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
   /** false reads only the login, never the provider: for reports that must not reach the network. */
   quota?: boolean;
+  /** GY-3414: lists the providers OpenCode holds for a home (`opencode auth list`); null reads only its files, as for a Pi account. */
+  opencodeAuth?: ((home: string) => Promise<string>) | null;
+  /** GY-3414: lists the models OpenCode offers a home (`opencode models`); null skips the check. */
+  opencodeModels?: ((home: string) => Promise<string>) | null;
 }
 export const defaultQuotaCeilingPercent = 95;
 const healthCache = new Map<string, { at: number; health: EnvironmentHealth }>();
@@ -140,7 +145,8 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
   const spent = account.usage.filter(usage => usage.percent >= ceiling && future(usage));
   const exhausted = spent.length > 0 || !!account.reached && account.usage.some(future);
   const quota = !account.loggedIn ? 'unknown' as const : exhausted ? 'exhausted' as const : account.usage.length ? 'available' as const : 'unknown' as const;
-  const reason = !account.loggedIn ? `${environment.name} is not logged in`
+  const reason = !account.loggedIn ? `${environment.name} is not logged in${account.loggedOutReason ? `: ${account.loggedOutReason}` : ''}`
+    : account.unready ? `${environment.name} is not ready: ${account.unready}`
     : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
   const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
     loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment),
@@ -220,7 +226,7 @@ export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialF
   catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {} }; }
 }
 /** Report a runtime's exhaustion directly to the registry; failures remain errors for reconciliation to retry. */
-export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
+export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId' | 'repository'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
   report?: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch }) {
   const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
   const future = Number.isFinite(reset) && reset > now;
@@ -228,12 +234,18 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
     reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString() };
   const registry = report?.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report?.fetch ?? fetch) : null);
   if (!registry?.observe || !config.hostId) throw new Error('Reporting account exhaustion requires the control-plane registry');
-  if (entry.identity === undefined && registry.document) {
-    const document = await registry.document();
-    const account = document.accounts.find(account => account.name === environment && account.credential.host === config.hostId);
-    const runtime = document.runtimes.find(runtime => runtime.name === account?.runtime);
+  const document = registry.document ? await registry.document() : null;
+  const account = document?.accounts.find(account => account.name === environment && account.credential.host === config.hostId);
+  if (entry.identity === undefined) {
+    const runtime = document?.runtimes.find(runtime => runtime.name === account?.runtime);
     const identity = account?.credential.home && runtime ? await providerIdentity(runtime.launch.kind, account.credential.home) : undefined;
     entry.identity = identity === undefined ? account?.quota.identity : identity;
+  }
+  // GY-3333: the hold is recorded beside the login home too, so every install on this host reads
+  // the account as exhausted until the same reset rather than rediscovering it with a session.
+  if (account?.credential.home) {
+    try { markHostAccountExhausted(account.credential.home, { by: config.repository ?? config.url ?? config.hostId, reason: entry.reason, at: entry.at, until: entry.until, session: entry.resetsAt ? 'named' : 'guessed' }); }
+    catch { /* the registry hold stands; only the shared record could not be written */ }
   }
   await registry.observe({ host: config.hostId, observations: [{ account: environment, quota: heldObservation(environment, entry) }] });
   return entry;
@@ -395,7 +407,9 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
     }
   }
   const extra = kind === 'codex' && plan.applied ? ['-c', 'sandbox_workspace_write.network_access=true', ...(reach.writable ?? []).flatMap(path => ['--add-dir', path])] : [];
-  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null, contract };
+  // `home` names the login home the launch runs on, so a limit notice it stops on (GY-3333) is
+  // recorded beside that home for every install on the host to read.
+  return { kind, args: [...plan.args, ...extra], environment, plan, account: account?.name ?? null, home: account?.home ?? null, contract };
 }
 
 /** The Git directory every worktree of the repository commits into. */

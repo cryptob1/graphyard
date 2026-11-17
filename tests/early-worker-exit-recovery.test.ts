@@ -63,7 +63,7 @@ test(`${proof} — a headless worker run that exits nonzero at once is a diagnos
   await api(operator, 'agent-registry/accounts', { account: { name: 'codex-account', runtime: 'codex', model: 'gpt', credential: { host, home: null }, maxSessions: 5 }, reason: 'fixture account' });
   await api(operator, 'agent-registry/roles', { role: { name: 'worker', accounts: ['codex-account'], concurrency: 5 }, reason: 'fixture role' });
   const fileItem = async (title: string) => {
-    const item = await api(operator, 'work', { title, type: 'chore', priority: title === 'Crash' ? 2 : 0, criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof, 'e2e:early-worker-exit-recovery'] }] }) as Work;
+    const item = await api(operator, 'work', { why: 'w', simplest: 's', title, type: 'chore', priority: title === 'Crash' ? 2 : 0, criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof, 'e2e:early-worker-exit-recovery'] }] }) as Work;
     await api(operator, `work/${item.id}/ready`, {}); return item;
   };
   const target = await fileItem('Crash');

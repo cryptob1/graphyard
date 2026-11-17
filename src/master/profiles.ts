@@ -401,10 +401,13 @@ export const masterConfigSchema = forwardTolerant(z.object({
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
   }).strict().optional(),
   // GY-3345: the other installs this Master messages (`master peer add`), each with a reporter token that install issued.
+  // GY-3385: `configDirectory` names a peer install's directory on this host — where `master peer
+  // issue` places the reporter token this Master mints for it, granted writable at launch.
   peers: z.array(z.object({
     name: z.string().regex(/^[\w.-]{1,60}$/),
     url: z.string().url().max(500),
     tokenFile: z.string().min(1).max(1000).refine(isAbsolute, 'peers[].tokenFile must be absolute'),
+    configDirectory: z.string().min(1).max(1000).refine(isAbsolute, 'peers[].configDirectory must be absolute').optional(),
   }).strict()).max(50).optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
@@ -423,6 +426,21 @@ export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 
   const automatic = config.run.reviewerProfile;
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
   return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
+}
+/**
+ * The reviewer profile that answers automatic requests: the configured one, else the only one.
+ * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
+ */
+export function selectReviewerProfile(input: Pick<MasterConfig, 'reviewers' | 'run'>): { profile: ReviewerProfile | null; reason: string | null } {
+  // Every review posts through the API under a one-time token (GY-1525): it needs a profile, not a reviewer App.
+  const config = withReviewerDefaults(input);
+  if (config.run.reviewerProfile) {
+    const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
+    return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
+  }
+  // GY-3421: the registry chooses the account (an independent provider first); the profile is only
+  // where the launch starts, and the others are its failover, so several profiles never hold a review.
+  return config.reviewers.length ? { profile: config.reviewers[0], reason: null } : { profile: null, reason: 'no reviewer profile is configured; add one with master reviewer add' };
 }
 export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(config: T): T {
   if (!config.producers.some(profile => profile.concurrency === undefined)) return config;

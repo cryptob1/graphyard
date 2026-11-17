@@ -1,7 +1,7 @@
 {
   "id": "tests-page",
   "title": "The Tests page lists the test cases and their history",
-  "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in. A case linked by many items shows the count, the latest three and an 'and N more items' summary.",
+  "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in. In its By item and criterion view a case linked by many items shows the count, the latest three and an 'and N more items' summary.",
   "tags": [
     "dashboard",
     "tests"
@@ -31,7 +31,7 @@
       "name": "link item 1 to this case",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} link 1",
         "description": "Created by the tests-page E2E case so its row has many linked items.",
         "type": "chore",
@@ -59,7 +59,7 @@
       "name": "link item 2 to this case",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} link 2",
         "description": "Created by the tests-page E2E case so its row has many linked items.",
         "type": "chore",
@@ -87,7 +87,7 @@
       "name": "link item 3 to this case",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} link 3",
         "description": "Created by the tests-page E2E case so its row has many linked items.",
         "type": "chore",
@@ -115,7 +115,7 @@
       "name": "link item 4 to this case",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} link 4",
         "description": "Created by the tests-page E2E case so its row has many linked items.",
         "type": "chore",
@@ -143,7 +143,7 @@
       "name": "link item 5 to this case",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}} link 5",
         "description": "Created by the tests-page E2E case so its row has many linked items.",
         "type": "chore",
@@ -199,8 +199,14 @@
     {
       "kind": "browser",
       "action": "expectText",
-      "text": "its latest trusted result, and its history",
+      "text": "its latest trusted result. A result is recorded only from a trusted run",
       "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "By item and criterion"
     },
     {
       "kind": "browser",

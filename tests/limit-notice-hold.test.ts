@@ -48,7 +48,7 @@ test('unit:limit-notice-hold-persists — a session ended on its provider limit 
   const select = (registry: AgentRegistry, role: 'worker' | 'reviewer', work: string) =>
     registry.select(coordinator, { role, host: HOST, work, principal: worker.id, observations: loggedIn }, randomUUID()) as Promise<{ session: { id: string; account: string } | null; skipped: { account: string; reason: string }[] }>;
 
-  const filed = await ok(operator, 'work', { title: 'Spend an account', type: 'chore', criteria: [{ id: 'AC-1', text: 'Held', proofs: ['unit:limit-notice-hold-persists', 'e2e:create-work-item'] }] }) as Work;
+  const filed = await ok(operator, 'work', { why: 'w', simplest: 's', title: 'Spend an account', type: 'chore', criteria: [{ id: 'AC-1', text: 'Held', proofs: ['unit:limit-notice-hold-persists', 'e2e:create-work-item'] }] }) as Work;
   await ok(operator, `work/${filed.id}/ready`, {});
   // The loop that dispatched the attempt: the registry hands it claude-c.
   const first = (await select(new AgentRegistry(store), 'worker', filed.key)).session!;

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { emptyDaemonState, daemonStateSchema, daemonStatePath } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
@@ -10,17 +12,19 @@ import { masterConfigSchema } from '../src/master.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { buildBoard } from '../src/model/board.js';
-import { blockerEscalationMinutes, openHumanOnly } from '../src/model/human-request.js';
+import { openHumanOnly } from '../src/model/human-request.js';
+import MasterPage from '../web/pages/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3280: a worker blocker raises attention at once and the master acts on it within one cycle.
 // The cycle the blocker lands, master status carries it as an attention line naming the item, the
-// blocker and how long it has waited, and the master session is prompted naming both. With no
-// master action for 30 minutes (clock advanced), the dashboard raises a Needs you alert for the
-// owner; unblocking clears both. The 2026-11-13 hwd-backend incident: a worker recorded a precise
-// blocker at 08:42Z, the item went back to ready, master status attention stayed [] and the
-// repo's master did nothing for six hours while a worker sat free.
+// blocker and how long it has waited, and the master session is prompted naming both. The 2026-11-13
+// hwd-backend incident: a worker recorded a precise blocker at 08:42Z, the item went back to ready,
+// master status attention stayed [] and the repo's master did nothing for six hours while a worker
+// sat free. GY-3394 (owner direction 2026-11-15): however long a blocker stands it is the Master's —
+// Needs you carries only the owner's three decisions, and the Master page shows the blocker until
+// an unblock clears it.
 
 const minute = 60_000;
 const start = Date.parse('2026-11-13T12:00:00Z');
@@ -71,10 +75,10 @@ async function fixture(visible = true) {
       execFileSync('git', ['init', '-q', root]);
       return masterStatusReport(root, config, async () => ({ work, now: iso(now) }), async (command, args) => isHerdrCommand(command) ? (herdrSubcommand(args)[1] === 'list' ? JSON.stringify({ agents: [{ name: 'master', pane_id: 'pM', agent_status: 'working' }] }) : 'Coordinating work.') : `${'b'.repeat(40)}\n`);
     },
-    /** The Needs you rows and the board the dashboard serves over this fixture's work. */
+    /** The Needs you rows, the board the dashboard serves and the Master page, over this fixture's work. */
     dashboard: () => {
       const rows = openHumanOnly(work.map(item => ({ work: item })), now);
-      return { rows, board: buildBoard(work, now, rows) };
+      return { rows, board: buildBoard(work, now, rows), master: renderToStaticMarkup(createElement(MasterPage, { work, observedAt: now, token: '', api: async () => ({}), setSelected: () => {} })) };
     },
   };
 }
@@ -90,6 +94,7 @@ test('integration:blocker-escalates — one cycle after the blocker: an attentio
   assert.match(line.text, /GY-1's blocker has waited 1m/);
   assert.ok(line.text.includes(blocker), 'the attention line names the blocker');
   assert.match(line.next, /graphyard master unblock GY-1 REASON/);
+  assert.doesNotMatch(line.next, /Needs you/, 'the attention line no longer promises a Needs you escalation');
   // Unchanged, the blocker prompts nobody again and the attention line stands as it was.
   f.restart();
   await f.cycle();
@@ -98,40 +103,38 @@ test('integration:blocker-escalates — one cycle after the blocker: an attentio
   assert.equal(still.attention.filter((entry: { subject?: string }) => entry.subject === 'GY-1').length, 1);
 });
 
-test('integration:blocker-escalates — no master action for 30 minutes (clock advanced) raises a Needs you alert for the owner; the fresh blocker stays Blocked', async () => {
+test('integration:blocker-escalates — however long the blocker waits it never reaches Needs you: it stays Blocked and the Master page carries it', async () => {
   const f = await fixture();
   await f.cycle();
-  // The blocker is one minute old at the start of the fixture: 28 more minutes make 29 — under the bound.
-  f.advance(blockerEscalationMinutes - 2);
+  // The blocker is one minute old at the start of the fixture: 29 more minutes make 30 — the bound
+  // GY-3280 once escalated at, and past it (35 minutes) nothing changes for the owner.
+  f.advance(29);
   let dashboard = f.dashboard();
-  assert.deepEqual(dashboard.rows, [], 'a 29-minute-old blocker has not escalated');
+  assert.deepEqual(dashboard.rows, [], 'a 30-minute-old blocker raises nothing on Needs you');
   assert.equal(dashboard.board.groups.blocked.find(entry => entry.key === 'GY-1') !== undefined, true, 'it is still Blocked');
-  f.advance(1);
+  f.advance(5);
   dashboard = f.dashboard();
-  const row = dashboard.rows.find(entry => entry.work === 'GY-1');
-  assert.ok(row, `past 30 minutes the blocker reaches Needs you: ${JSON.stringify(dashboard.rows)}`);
-  assert.equal(row.rule, 'blocker-escalation');
-  assert.ok(row.request.ask?.includes("A worker's blocker has waited"), 'the alert says what waited');
-  assert.ok(row.request.needed.includes(blocker), 'the alert carries the blocker text');
-  assert.match(row.answer.cli, /graphyard master unblock GY-1 REASON/);
-  assert.equal(row.waitedMs >= blockerEscalationMinutes * minute, true, 'the wait is the blocker age itself');
-  assert.equal(dashboard.board.groups['needs-you'].find(entry => entry.key === 'GY-1') !== undefined, true, 'the board groups it under Needs you');
-  assert.equal(dashboard.board.groups['needs-you'].find(entry => entry.key === 'GY-1')?.who, 'You', 'the owner acts next');
-  assert.equal(dashboard.board.groups.blocked.some(entry => entry.key === 'GY-1'), false, 'never also Blocked');
+  assert.deepEqual(dashboard.rows, [], 'a 35-minute-old blocker still raises nothing on Needs you');
+  assert.equal(dashboard.board.groups['needs-you'].some(entry => entry.key === 'GY-1'), false, 'never grouped under Needs you');
+  assert.equal(dashboard.board.groups.blocked.find(entry => entry.key === 'GY-1') !== undefined, true, 'it stays Blocked');
+  assert.ok(dashboard.master.includes('GY-1') && dashboard.master.includes('Fix the export'), 'the Master page lists it');
+  assert.ok(dashboard.master.includes('blocked 35m ago'), `the Master page says how long it has stood: ${dashboard.master}`);
 });
 
-test('integration:blocker-escalates — a blocker with no recorded instant (a record older than blockedAt) never escalates by accident', async () => {
+test('integration:blocker-escalates — a blocker with no recorded instant (a record older than blockedAt) never reads as freshly raised', async () => {
   const f = await fixture();
   f.work([{ ...blockedItem(), blockedAt: null, pipeline: undefined }]);
   f.advance(24 * 60);
-  assert.deepEqual(f.dashboard().rows, [], 'nothing is read as freshly raised without a recorded instant');
+  const dashboard = f.dashboard();
+  assert.deepEqual(dashboard.rows, [], 'nothing is read as freshly raised without a recorded instant');
+  assert.ok(dashboard.master.includes('GY-1'), 'the Master page still carries the blocker itself');
 });
 
-test('integration:blocker-escalates — unblocking clears both the attention line and the Needs you alert, and the item waits for a worker again', async () => {
+test('integration:blocker-escalates — unblocking clears the attention line, the Master page row and the blocker, and the item waits for a worker again', async () => {
   const f = await fixture();
   await f.cycle();
-  f.advance(blockerEscalationMinutes + 5);
-  assert.ok(f.dashboard().rows.some(entry => entry.work === 'GY-1'), 'the alert stands before the unblock');
+  f.advance(35);
+  assert.ok(f.dashboard().master.includes('GY-1'), 'the Master page row stands before the unblock');
   // `graphyard master unblock GY-1 REASON` clears the blocker and its stamp in one write.
   f.work([{ ...blockedItem(), blocker: null, blockedAt: null, gates: [{ name: 'ready', passed: false, reasons: [] }] }]);
   f.restart();
@@ -139,7 +142,8 @@ test('integration:blocker-escalates — unblocking clears both the attention lin
   const status = await f.status();
   assert.equal(status.attention.find((entry: { subject?: string }) => entry.subject === 'GY-1'), undefined, 'the attention line is gone');
   const dashboard = f.dashboard();
-  assert.deepEqual(dashboard.rows, [], 'the Needs you alert is gone');
+  assert.deepEqual(dashboard.rows, [], 'Needs you stays clear of it');
+  assert.equal(dashboard.master.includes('GY-1'), false, 'the Master page row is gone');
   assert.equal(dashboard.board.groups['up-next'].some(entry => entry.key === 'GY-1'), true, 'the item waits for a worker again');
   assert.equal(f.prompts.length, 1, 'no new prompt for a cleared blocker');
 });

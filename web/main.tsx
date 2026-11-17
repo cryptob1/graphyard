@@ -14,7 +14,9 @@ import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
 import { requestedView } from '../src/model/setup-checklist';
+const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-[A-Z0-9]+)$/.exec(hash)?.[1] ?? null;
 import { idempotencyKey } from './idempotency-key';
+import { poll } from './poll';
 import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
@@ -86,9 +88,8 @@ function App() {
   const live = !!status;
   useEffect(() => {
     if (!live) return;
-    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
+    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true;
     const load = async () => {
-      if (pending) return; pending = true;
       try {
         const read = async (path: string) => {
           const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
@@ -102,12 +103,12 @@ function App() {
         if (!active || epoch !== sessionEpoch.current) return;
         if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
-      } finally { pending = false; }
+      }
     };
     // A hidden tab's timers are throttled to once a minute, so returning to the tab reads at once.
-    const visible = () => { if (document.visibilityState === 'visible') void load(); };
-    void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
-    return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+    const polling = poll(load, 5000), visible = () => { if (document.visibilityState === 'visible') polling.now(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { active = false; controller.abort(); polling.stop(); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
   // The browser tab names the project it serves (GY-3306): gh · OWNER/REPO from the same status
   // reply the header's project name renders, so an operator's tabs tell installs apart. Graphyard
@@ -136,6 +137,10 @@ function App() {
     const follow = () => { const page = requestedView(location.hash, views.map(entry => entry.id)).view; if (page) { setSelected(null); setView(page); } };
     addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow);
   }, []);
+  // GY-3415: #GY-N is an item's address, so the link the master hands an owner opens that item with its Answer.
+  const [linked, setLinked] = useState(() => itemLink(location.hash));
+  useEffect(() => { const follow = () => setLinked(itemLink(location.hash)); addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow); }, []);
+  useEffect(() => { const found = linked && work.find(w => w.key === linked); if (found) { setSelected(found.id); setLinked(null); } }, [work, linked]);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));

@@ -73,10 +73,10 @@ const reasons = (work: Work) => work.gates.find(gate => gate.name === 'review')!
 test('unit:human-proof-request-and-answer — create refuses a human: proof whose criterion names nothing physical', async () => {
   assert.match(physicalCheckRefusal([{ id: 'AC-1', text: 'The wording feels right', proofs: [proof] }])!, /^AC-1 names a human: proof but nothing physical/);
   assert.equal(physicalCheckRefusal([{ id: 'AC-1', text, proofs: [proof] }]), null);
-  const refused = await post(human, 'work', { title: 'Check', type: 'chore', criteria: [{ id: 'AC-1', text: 'Should we ship this', proofs: [proof, 'e2e:fixture'] }], policy: { checks: ['test'], review: true } });
+  const refused = await post(human, 'work', { why: 'w', simplest: 's', title: 'Check', type: 'chore', criteria: [{ id: 'AC-1', text: 'Should we ship this', proofs: [proof, 'e2e:fixture'] }], policy: { checks: ['test'], review: true } });
   assert.equal(refused.status, 400, JSON.stringify(refused.body));
   assert.match(JSON.stringify(refused.body), /nothing physical/);
-  const filed = await post(human, 'work', { title: 'Check', type: 'chore', criteria: [{ id: 'AC-1', text, proofs: [proof, 'e2e:fixture'] }], policy: { checks: ['test'], review: true } });
+  const filed = await post(human, 'work', { why: 'w', simplest: 's', title: 'Check', type: 'chore', criteria: [{ id: 'AC-1', text, proofs: [proof, 'e2e:fixture'] }], policy: { checks: ['test'], review: true } });
   assert.equal(filed.status, 200, JSON.stringify(filed.body));
   assert.deepEqual(filed.body.proofGaps, ['e2e:fixture'], 'only the E2E proof owes a producer; the person\'s check does not');
 });

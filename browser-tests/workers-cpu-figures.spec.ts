@@ -9,7 +9,8 @@ import { coordinationViewHeader } from '../src/server/work-view';
 // CPU on its coordination read exactly as `master run` sends it (X-Graphyard-Loop-Cpu beside its
 // presence), the Workers page's header shows CPU pressure (avg60), steal and, since GY-3373, the
 // hottest CPU sensor —
-// both on a desktop viewport and on a phone's, where the header wraps.
+// both on a desktop viewport and on a phone's, where the header wraps. e2e:hot-host-budget (GY-3401):
+// and the test budget each new session gets, with the trial cap halved while the CPU is hot.
 
 /** The real control plane serving the built dashboard, proxying the page's API reads to it. */
 async function plane(context: BrowserContext) {
@@ -38,7 +39,8 @@ async function seedLoopRead(url: string) {
     Authorization: 'Bearer test-loop',
     [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: '15', [loopSupervisionHeader]: 'autonomous',
     // The rexera reading (GY-3348's episode): avg60 94 with 12 percent steal; and core's 96C (GY-3373).
-    [loopCpuHeader]: encodeLoopCpu({ avg60: 94, steal: 12, celsius: 96 }),
+    // GY-3401: 9 sessions running on 24 cores, and the cap of 4 trials halved at 96C.
+    [loopCpuHeader]: encodeLoopCpu({ avg60: 94, steal: 12, celsius: 96, testBudget: 2, trialCap: { now: 2, full: 4 } }),
   } });
   expect(read.status).toBe(200);
 }
@@ -57,7 +59,7 @@ async function openWorkers(page: Page, url: string) {
 const viewportWidth = (page: Page) => page.viewportSize()?.width ?? 1280;
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
-  test(`e2e:dispatch-waits-on-cpu-pressure e2e:dispatch-waits-on-cpu-temperature — the Workers page header shows CPU pressure, steal and temperature at ${viewport.width} px`, async ({ page, context }) => {
+  test(`e2e:dispatch-waits-on-cpu-pressure e2e:dispatch-waits-on-cpu-temperature e2e:hot-host-budget — the Workers page header shows CPU pressure, steal, temperature, test budget and trial cap at ${viewport.width} px`, async ({ page, context }) => {
     test.setTimeout(90_000);
     await page.setViewportSize(viewport);
     const { url, close } = await plane(context);
@@ -69,6 +71,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(figures).toContainText('Host CPU pressure 94%');
       await expect(figures).toContainText('steal 12%');
       await expect(figures).toContainText('temperature 96°C');
+      await expect(figures).toContainText('2 test workers per session');
+      await expect(figures).toContainText('trials 2 of 4');
     } finally { await page.close(); await close(); }
   });
 }

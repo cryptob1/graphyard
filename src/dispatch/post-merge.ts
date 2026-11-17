@@ -2,16 +2,20 @@ import { type Work } from '../model.js';
 import { type DispatchRequest } from '../model/dispatch.js';
 import { postMergeFindingsMax, type ReviewRecord } from '../reviewer.js';
 import { parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from '../model/post-merge-review.js';
-import { reviewedBeforeMerge } from '../model/risk-class.js';
-import { riskOf } from '../model-boundary/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from '../review-cap.js';
 import type { DispatchEffects } from './effects.js';
 /** What the loop did with one post-merge verdict (GY-1525): the follow-up item per BLOCKING finding, the nits kept in memory, and a filing failure to retry. */
 export type PostMergeOutcome = NonNullable<ReviewRecord['postMergeFollowUps']>;
 /** The wait a normal-risk control-plane head's pre-merge review request reports (GY-1525): it merges on its trial and is reviewed after. */
 export const postMergeWaitReason = 'normal-risk delta in control-plane mode: it merges on its trial and is reviewed after the merge, so no pre-merge reviewer session is launched';
-/** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal (the one merge rule, model/gates.ts). */
-export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !reviewedBeforeMerge(riskOf(work).risk);
+/**
+ * Whether the item's pre-merge review request is answered by a post-merge review instead: the
+ * control plane's review gate passed a normal delta and marked its review owed (model/gates.ts).
+ * GY-3421: read from that mark, never re-judged here — the loop's own checkout can declare another
+ * risk policy than the one the control plane serves, and a sensitive delta it read as normal waited
+ * forever for a review nothing launched.
+ */
+export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && work.postMergeReview === 'owed';
 /**
  * The dispatch request a post-merge review is launched under: one per delivered merge commit, bound
  * to nothing else. Its base is the merge commit's first parent, the tip the merge writer's ledger

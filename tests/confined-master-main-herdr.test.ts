@@ -160,7 +160,7 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
       "try { review = run(process.execPath, [process.env.GRAPHYARD_CLI, 'master', 'review', 'GY-1'], { cwd: process.env.GRAPHYARD_REPOSITORY_ROOT }); }",
       "catch (error) { console.log('MASTER-REVIEW-FAILED ' + String(error.stderr || error.message).replace(/\\s+/g, ' ').slice(0, 1500)); process.exit(1); }",
       "const record = JSON.parse(review);",
-      "if (record.work !== 'GY-1' || !record.queued || record.requestId !== 'fixture-review-request') throw new Error(`master review did not queue the durable review request: ${review.slice(0, 400)}`);",
+      "if (record.work !== 'GY-1' || !record.queued || record.previous !== 'fixture-review-request' || !record.requestId || record.requestId === record.previous) throw new Error(`master review did not renew the durable review request: ${review.slice(0, 400)}`);",
       "console.log('MASTER-REVIEW-OK ' + record.requestId);",
       '',
     ].join('\n'));
@@ -246,7 +246,8 @@ test(`e2e:confined-master-main-herdr — a fixture install migrated from its pri
     assert.equal(reviewLaunches.length, 0, 'a confined review caller never starts a Herdr reviewer');
     assert.equal(reviewPaneLines.length, 0);
     const queued = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
-    assert.equal(queued.autoDispatch.review.id, 'fixture-review-request', 'the host loop owns execution of this durable request');
+    // GY-3428: master review asks the request afresh, so the host loop launches a reviewer for it even if it had abandoned the old one.
+    assert.ok(queued.autoDispatch.review.id !== 'fixture-review-request' && masterOutput.includes(`MASTER-REVIEW-OK ${queued.autoDispatch.review.id}`), 'the host loop owns execution of the renewed durable request');
     assert.ok(connections >= 1, 'the master inventory came through the main server socket');
 
   } finally {
