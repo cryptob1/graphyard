@@ -1,0 +1,16 @@
+{
+  "id": "review-skips-broken-account",
+  "title": "A reviewer account whose sessions fail on missing credentials is used once, then skipped",
+  "description": "A stub muse reviewer account on another provider than the implementer exits 1 with muse's missing-credentials error. The first review starts on it once, holds it with that error and completes on the claude account; the next review never starts on muse; master status names the held account and its reason.",
+  "tags": ["review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "missing-credentials reviewer held and skipped",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/review-skips-broken-account.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
