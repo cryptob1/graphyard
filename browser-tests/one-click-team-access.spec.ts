@@ -38,7 +38,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
   // here whenever a page is about to read what the other install saved, and a short ticker only
   // while the page polls for the single-use invite its host must answer (setup.tsx polls every second).
   // GY-3411: the loops are settled before the one reload, so the page's read is waited for, not raced:
-  // retrying sync-and-reload gave each reloaded page 1 s to read team access, which a loaded host lost.
+  // retrying sync-and-reload cut short the page's read on a loaded host, even with GY-3412's 5 s wait.
   const sync = () => settleHostLoops(installs, { machineDir, tailscaleApi });
   await sync();
   const [a, b] = installs;
