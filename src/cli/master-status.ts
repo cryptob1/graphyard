@@ -11,7 +11,7 @@ import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
 import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
-import { heavyDrainLine, heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
+import { heavyDrainLine, heavyJobLimit, heavyJobsDirectory, readHeavyDrain, slotHolders } from '../master/verification-slots.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -215,6 +215,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // GY-3122: free space below the floor after the loop reclaimed its own leftovers: no new trial or worker starts.
     diskHeadroom: state?.diskHeadroom ?? null,
     heavyDrain: drain,
+    // GY-3447: who holds the host's heavy-job slots (trials, gates, whole suites, deploy builds) and the limit they share.
+    heavyJobs: { limit: heavyJobLimit(heavyJobsDirectory()), holders: slotHolders(heavyJobsDirectory()) },
     // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
     // same figures the Workers page shows, with the hottest CPU sensor (GY-3373) — and the one
     // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.

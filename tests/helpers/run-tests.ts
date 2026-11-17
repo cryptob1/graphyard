@@ -19,8 +19,9 @@ import { stopServersUnder } from '../../src/postgres-stop.js';
 //   node --import tsx tests/helpers/run-tests.ts --browser [ARGS...]  the Playwright suite
 //   node --import tsx tests/helpers/run-tests.ts --typecheck          tsc --noEmit (npm run typecheck)
 //
-// Started from a Graphyard session, each of the three first takes a host verification slot
-// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held. The
+// Started from a Graphyard session, a whole suite first takes a host verification slot
+// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held; a type
+// check and a run of selected files take none (GY-3447). The
 // Node suite then runs at the breadth the host's memory affords (GY-1821): the files in flight
 // stay inside what is available beyond the floor and the deferral margin, less what runs on the
 // other slots declared — a suite alone runs at node's full breadth, and however many suites the
@@ -245,6 +246,14 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   } finally { try { await postgres?.stop(); } finally { reservation.release(); } }
 }
 
+/**
+ * GY-3447: the host heavy-job slot a session's run takes, named, or null. Only a whole suite (no
+ * file, list or shard selecting part of it) is a heavy job; a type check (`npm run build`) and
+ * selected files start at once, under the session's share of the host's test parallelism.
+ */
+export const heavyRunLabel = (mode: 'test' | 'browser' | 'typecheck', args: string[]) =>
+  mode === 'typecheck' || args.length ? null : mode === 'browser' ? 'npm run test:browser' : 'npm test';
+
 /** `tsc --noEmit` under the caller's environment, marked as holding the slot this process took. */
 export async function typecheck(cwd = process.cwd(), args: string[] = []) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.resolve('typescript/bin/tsc')), '--noEmit', ...args], { cwd, stdio: 'inherit', env: { ...process.env, [heldVariable]: '1' } });
@@ -256,7 +265,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const browserPaths = process.argv.length > 2 && process.argv.slice(2).every(arg => arg.startsWith('browser-tests'));
   const mode = process.argv[2] === '--browser' || browserPaths ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
   const args = process.argv.slice(mode === 'test' || browserPaths ? 2 : 3);
-  const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
+  const label = heavyRunLabel(mode, args), held = label ? await sessionVerificationSlot(label) : null;
   // The breadth the host affords is computed with the slot already held, so a run that starts later
   // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
   const breadth = mode === 'test' ? sessionSuiteBreadth(await hostSuiteBreadth()) : null;

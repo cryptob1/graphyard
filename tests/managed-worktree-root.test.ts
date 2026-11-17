@@ -458,31 +458,32 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
 test('unit:host-verification-slots — heavy verification runs started by a session take a host-wide slot: more runs than slots never exceed the bound at once, the rest wait saying on what, and all complete', async () => {
   const scratch = await temporaryDirectory('slots');
   try {
-    assert.equal(heavyCommand('tsc', ['--noEmit']), true);
-    assert.equal(heavyCommand('npx', ['tsc', '--noEmit']), true);
-    assert.equal(heavyCommand('npx', ['vite', 'build']), false);
-    assert.equal(heavyCommand('tsc', ['--version']), false);
+    // GY-3447: a whole suite is a heavy job; a type check, a build and selected tests are not.
+    assert.equal(heavyCommand('npm', ['test'], scratch), true);
+    assert.equal(heavyCommand('npm', ['test', '--', 'tests/a.test.ts'], scratch), false);
+    assert.equal(heavyCommand('tsc', ['--noEmit'], scratch), false);
+    assert.equal(heavyCommand('npm', ['run', 'build'], scratch), false);
 
     // The session harness's environment: the host's lock directory (two jobs at once unless its limit file
-    // says otherwise), the project, and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
+    // says otherwise), the project, and the wrapper directory first on PATH. A fake `npm` stands in for the real one after it.
     const managedRoot = join(scratch, 'managed'), fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
     await mkdir(fakeBin, { recursive: true });
     // It holds its slot until the test opens the gate, so how many runs wait never depends on how fast five wrappers start.
-    await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
-    await chmod(join(fakeBin, 'tsc'), 0o755);
+    await writeFile(join(fakeBin, 'npm'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
+    await chmod(join(fakeBin, 'npm'), 0o755);
     const environment = verificationEnvironment('owner/project', { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_DATA_HOME: managedRoot });
     const directory = hostHeavyJobsDirectory({ GRAPHYARD_DATA_HOME: managedRoot });
     assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR, directory);
     assert.equal(environment.GRAPHYARD_HEAVY_JOB_PROJECT, 'owner/project');
     assert.equal(environment.PATH.split(delimiter)[0], verificationBin);
-    assert.ok(existsSync(join(verificationBin, 'tsc')) && existsSync(join(verificationBin, 'npx')));
+    assert.ok(existsSync(join(verificationBin, 'npm')) && existsSync(join(verificationBin, 'pnpm')));
     assert.ok(!existsSync(managedRoot), 'nothing is written until a run takes a slot');
 
-    // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
+    // Five runs, two slots: `npm test` as a session types it, through the wrapper on its PATH.
     const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
-    const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by tsc --noEmit \(owner\/project\) \[pid \d+/;
+    const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by npm test \(owner\/project\) \[pid \d+/;
     const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
-      const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
+      const child = spawn('npm', ['test'], { cwd: scratch, env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
       child.stderr.on('data', chunk => { stderrs[index] += chunk; });
       child.on('close', code => done({ code, stderr: stderrs[index] }));
     })));
