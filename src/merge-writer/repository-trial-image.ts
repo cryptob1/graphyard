@@ -69,7 +69,7 @@ export async function repositoryTrialImage(input: {
   input.log?.(`building ${trialDockerfile} of ${input.tip.slice(0, 12)} as ${tag} over ${base}`);
   await input.run('git', ['-C', input.root, 'worktree', 'add', '--detach', context, input.tip], { timeoutMs: input.timeoutMs });
   try {
-    await docker(['build', '--build-arg', `GRAPHYARD_TRIAL_IMAGE=${base}`, '--file', trialDockerfile, '--tag', tag, context]);
+    await docker(['build', '--build-arg', `GRAPHYARD_TRIAL_IMAGE=${base}`, '--file', join(context, trialDockerfile), '--tag', tag, context]);
     return tag;
   } catch (error) {
     if ((error as { timedOut?: boolean }).timedOut) throw error; // the trial's deadline ended it, not the Dockerfile
