@@ -29,6 +29,10 @@ async function containerServer(site: string) {
 }
 
 test('e2e:master-page-compose-install — a server with no herdr streams the master pane through the host supervisor, and typed input reaches it', async ({ browser }) => {
+  // GY-3367: the embedded Postgres boot alone took 10 s of the 30 s default on a loaded trial host, and
+  // the server fork, sign-in and terminal handshake follow it; like every database-booting spec it carries
+  // a budget that load cannot eat.
+  test.setTimeout(90_000);
   const site = await mkdtemp(join(tmpdir(), 'graphyard-compose-terminal-'));
   process.env.PATH = `${stub}${delimiter}${process.env.PATH}`; process.env.HERDR_STUB_LOG = join(site, 'herdr.log');
   process.env.GRAPHYARD_HERDR_CONFIG_HOME = ''; process.env.GRAPHYARD_HERDR_SESSION = '';

@@ -14,7 +14,7 @@ import { commitFile, dockerCalls, dockerCount, dockerCreates, git, shardHosts, s
 
 const image = 'graphyard-trial:remote-fixture', digest = `sha256:${'ab12'.repeat(16)}`;
 const files = Array.from({ length: 4 }, (_, index) => `tests/file-${index}.test.ts`);
-const box = 'gy-compute@box';
+const box = 'gy-compute@box:2222';
 const argv = (list: string, records: string) => ['node', 'scripts/tests.mjs', '--files-from', list, '--durations', records];
 let hosts: ShardHostsFixture;
 
@@ -74,7 +74,7 @@ test('integration:remote-shard-transport — an unreachable host and a shard tha
   const session = remoteShardSession({ root, sha, image, run: defaultChildRun, deadline: Date.now() + 60_000 });
   const died = await session.run(box, 0, ['tests/dies.test.ts'], argv, 1).then(() => null, error => error);
   assert.ok(died instanceof HostDroppedError, String(died));
-  assert.match(died.message, /host gy-compute@box dropped a shard: .*history 1/s, 'the shard\'s output tail rides the reason');
+  assert.match(died.message, /host gy-compute@box:2222 dropped a shard: .*history 1/s, 'the shard\'s output tail rides the reason');
   await hosts.down('box', true);
   try { await assert.rejects(session.run(box, 1, files.slice(0, 1), argv, 1), (error: unknown) => error instanceof HostDroppedError && /Connection refused/.test(error.message)); }
   finally { await hosts.down('box', false); await session.close(); }

@@ -77,6 +77,8 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     for (const part of ['graphyard-master-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', '127.0.0.1:4310']) await expect(diagram).toContainText(part);
     await expect(page.locator('.guide')).toContainText('Where things run');
   } finally {
-    await new Promise<void>(resolve => http.close(() => resolve()));
+    // The page still polls through the proxy's keep-alive connection: close() waits on a poll in
+    // flight and the next poll reuses its socket, so it never returns unless the connections drop (GY-3358).
+    await new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); });
   }
 });

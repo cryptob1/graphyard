@@ -7,18 +7,20 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey, trialSlotCount } from '../merge-writer/trial-load.js';
-import { trialAffordableFiles } from '../merge-writer/trial.js';
-import { availableParallelism } from 'node:os';
-import type { MergeWriterReads } from './cycle-merge-writer.js';
+import { gateTrialKey, trialStartWaiting } from '../merge-writer/trial-load.js';
+import { cpuWaiting } from './cpu-pressure.js';
+import { heavyTrial, trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
+import { criterionProofs, e2eProofsOf } from '../merge-writer/executor.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
 import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
 import { faultItem } from './control-plane.js';
+import { currentEvidence } from '../model/evidence.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 /** The gate's own item key in the trial (a proofless pseudo-item, like a revert's). */
 const gateKey = gateTrialKey;
@@ -52,14 +54,14 @@ export function fetchRefusalLine(repository: string, baseBranch: string, error: 
  * the failing step's for a case, the trial log's for the build or a test file); the trial is bounded
  * by `timeoutMs`, the gate's own clock, never the merge-trial deadline (GY-3142).
  */
-async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, trusted: () => string | null = () => null, skipFaults = false): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
+async function trialFailures(reads: MergeWriterReads, commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, trusted: () => string | null = () => null, skipFaults = false, signal?: AbortSignal): Promise<{ failed: string[]; details: Record<string, string>; outputs: Record<string, string[]> }> {
   const cases = checks.filter(check => check.startsWith('e2e:'));
   const tests = checks.includes('affected') ? files : checks.filter(check => check.startsWith('test:')).map(check => check.slice(5));
   const environments = await gateEnvironments(reads, commit, cases, trusted());
   const runCases = cases.filter(proof => !(proof in environments.unknown) && !environments.untrusted.includes(proof));
   const trial = (origins: Record<string, string>, skipped: readonly string[]) => {
     const proofs = runCases.filter(proof => !skipped.includes(proof));
-    return reads.trial(commit, tests, { key: gateKey, criteria: proofs.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs }] as Work['criteria'] : [], ...(Object.keys(origins).length ? { environments: origins } : {}) }, undefined, undefined, undefined, undefined, undefined, undefined, timeoutMs);
+    return reads.trial(commit, tests, { key: gateKey, criteria: proofs.length ? [{ id: 'AC-1', text: 'The batch gate cases pass', proofs }] as Work['criteria'] : [], ...(Object.keys(origins).length ? { environments: origins } : {}) }, undefined, undefined, undefined, undefined, undefined, signal, timeoutMs);
   };
   // GY-3296: each named environment is provisioned around the one trial, its URL handed to its cases.
   // An environment wait or fault throws for the gate, which retries; the diagnostics (`skipFaults`)
@@ -138,9 +140,32 @@ async function gateEnvironments(reads: MergeWriterReads, commit: string, cases: 
 export const pinningProof = (key: string) =>
   `unit:${key.slice(key.indexOf(':') + 1).toLowerCase().replace(/^test:tests\//, '').replace(/\.test\.ts$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-pinned`;
 
+/** The proof a gate filing owes once the batch gate passes again; the loop records it itself (GY-3443). */
+export const repairedProof = 'manual:batch-gate-repaired';
+
 /** A batch gate filing's item: its pinning test is named from its check. */
 export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) =>
-  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: 'manual:batch-gate-repaired' }, reason: `Filed by the batch gate on ${baseBranch}` });
+  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: repairedProof }, reason: `Filed by the batch gate on ${baseBranch}` });
+
+/**
+ * GY-3443: while the gate's last outcome is verified, every open item owing `manual:batch-gate-repaired`
+ * whose candidate head has no current evidence for it gets a trusted pass citing the verified tip.
+ * A held, reverted or failed last outcome records nothing; a head already recorded is skipped, so a
+ * cycle writes at most once per item head.
+ */
+async function recordRepaired(record: GateRecord, work: readonly Work[], attest: NonNullable<MergeWriterReads['attest']>, now: number, note: (key: string, state: 'done' | 'failed', detail: string) => void) {
+  const last = record.lastOutcome;
+  if (last?.outcome !== 'verified' || !last.tip) return;
+  const owing = work.filter(item => item.stage !== 'done' && item.candidate && item.criteria?.some(criterion => criterion.proofs.includes(repairedProof))
+    && !currentEvidence(item, repairedProof, new Date(now)));
+  for (const item of owing) {
+    const head = item.candidate!.sha;
+    try {
+      await attest(item, repairedProof, `The batch gate verified ${last.tip} at ${last.finishedAt}`, `batch-gate-repaired:${item.id}:${head}:${item.policyRevision}:${last.tip}`);
+      note(`batch-gate-repaired:${item.key}`, 'done', `Recorded ${repairedProof} on ${item.key} head ${head.slice(0, 12)}: the batch gate verified ${last.tip.slice(0, 12)}`);
+    } catch (error) { note(`batch-gate-repaired:${item.key}`, 'failed', `Could not record ${repairedProof} on ${item.key}: ${message(error)}`); }
+  }
+}
 
 /** The gate's ports over the merge writer's reads. */
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
@@ -167,7 +192,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     core: async commit => {
       try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
     },
-    run: (commit, checks, files, timeoutMs) => trialChecks(reads, commit, checks, files, timeoutMs, trusted),
+    run: (commit, checks, files, timeoutMs, signal) => trialChecks(reads, commit, checks, files, timeoutMs, trusted, false, signal),
     revert: async (landing, gated, check) => {
       // Merges may have landed while the gate ran: the revert goes onto main as it stands now.
       const tip = (await reads.fetch()).toLowerCase();
@@ -184,6 +209,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
+    flaky: check => work.find(item => item.stage !== 'done' && item.title === `Flaky check on main: ${check}`)?.key ?? null,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
@@ -199,9 +225,13 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const stopped = new WeakSet<object>();
-/** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
-export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
+const stopped = new WeakSet<object>(), gateRuns = new WeakMap<object, AbortController>();
+/**
+ * The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last
+ * checkpointed for the next loop (GY-3161). Its host heavy-job slot is freed now (GY-3449); its
+ * detached run keeps going for the next loop to adopt.
+ */
+export const noteBatchGateStopping = (state: object) => { stopped.add(state); gateRuns.get(state)?.abort(); };
 
 /**
  * One record writer at a time per file: the gate's mid-flight checkpoints and the diagnostics'
@@ -259,10 +289,35 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     record = bootstrapGate(gate.repository, await rolloutCommit(gate.root, gate.repository, reading));
     await writeGateRecord(file, record);
   }
-  const ports = batchGatePorts({ ...reading, git,
-    trial: (sha, files, item, base, step, timing, heads, _share, signal, timeout) =>
-      reads.trial(sha, files, item, base, step, timing, heads, Math.max(1, busyTrialSlots(cycle.state)), signal, timeout),
-  }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
+  const gated = record;
+  // GY-3444: the gate's checks run as detached trial runs, as merge trials do (GY-3159): the run's
+  // directory rides the record, so a loop restart — a CLI upgrade among them — adopts the run in
+  // place of orphaning it. The diagnostics, and a check with named environments, trial in process.
+  // Like every trial it is one heavy job of the host (GY-3290); its wait for that slot is a wait, not its own time.
+  let heavyWait = false;
+  // GY-3449: the gate flight's lifetime; its end — any outcome, a throw, or the loop stopping — frees the slot its checks hold.
+  const ended = new AbortController();
+  const trial: MergeWriterReads['trial'] = async (sha, files, item, base, step, timing, heads, _share, signal, timeout) => {
+    const share = Math.max(1, busyTrialSlots(cycle.state)), flight = gated.inFlight, proofs = criterionProofs(item);
+    const input = createHash('sha256').update(JSON.stringify([proofs, files])).digest('hex');
+    if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments || flight?.tip !== sha) return reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout);
+    const launch = reads.launchTrialRun, adopt = reads.adoptTrialRun;
+    const run = flight.run?.commit === sha && flight.run.input === input ? flight.run : null;
+    return heavyTrial(gateKey, line => { heavyWait = true; step?.(line); }, signal, async () => {
+      heavyWait = false;
+      const adopted = run ? await adopt({ key: gateKey, head: sha, mergeSha: sha, directory: run.directory }) : null;
+      if (adopted) return adopted.trial(step, timing, signal);
+      await reads.ensureTrialImage?.();
+      const launched = launch({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
+        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
+      gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
+      await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
+      return launched.trial(step, timing, signal);
+    }, ended.signal);
+  };
+  const ports = batchGatePorts({ ...reading, git, trial }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
+  // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
+  ports.waiting = () => heavyWait || cpuWaiting(cycle.state) !== null || trialStartWaiting('gate', gate.slots);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
@@ -282,6 +337,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('batch-gate:verified-ref', 'failed', `Could not publish the verified commit ${record!.verified!.slice(0, 12)} at refs/graphyard/verified: ${message(error)}`);
     }
   }
+  if (reads.attest) await recordRepaired(record, cycle.snapshot.work, reads.attest, cycle.now(), note);
   // The deploy watch writes this after health, CLI publication and pinning. Re-read every cycle,
   // including after restart; a kept/failed deployment is not a successful release. The deploy
   // record retains verification even when the gate has already advanced to a newer commit.
@@ -298,27 +354,34 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('publish-tag', 'done', `Pushed ${tag}; GitHub Actions publishes the package and images`);
     } catch (error) { note('publish-tag', 'failed', `Could not push the release tag: ${message(error)}`); }
   }
-  const slots = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? Infinity, await trialAffordableFiles(reads.memory));
-  if (!live.gate && busyTrialSlots(cycle.state) < slots) {
+  // GY-3444: the gate has first claim on trial slots — it starts without waiting for a free merge
+  // slot, and its trial containers start before queued merge trials (trialStartOrder).
+  if (!live.gate) {
     const current = record;
+    gateRuns.set(cycle.state, ended);
     live.gate = (async () => {
       try {
-        // Each mid-flight write keeps the diagnostics' fields and both writers' filings (GY-3147),
-        // as the settled gate's own write does: the batch it carries — tip, files, checks, finished
-        // steps — is what the next loop adopts after a restart (GY-3135).
-        const before = current.verified;
-        const write = () => mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) }));
-        const outcome = await runGate({ ...ports, checkpoint: write }, current);
-        // The diagnostics' fields and filings are theirs: a gate's write keeps what they recorded meanwhile.
-        await write();
-        if (outcome.outcome === 'verified' && before) {
-          const landings = await ports.landings(before, outcome.tip);
-          const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-          await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
-        }
-        if (outcome.outcome !== 'idle') {
-          const reason = gateOutcomeReason(outcome);
-          note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}`);
+        // A timed-out run starts again at once: runGate cleared its batch, so the retry is cut from
+        // main's newest tip; a second timeout holds (GY-3383), which ends the loop.
+        for (;;) {
+          // Each mid-flight write keeps the diagnostics' fields and both writers' filings (GY-3147),
+          // as the settled gate's own write does: the batch it carries — tip, files, checks, finished
+          // steps — is what the next loop adopts after a restart (GY-3135).
+          const before = current.verified;
+          const write = () => mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) }));
+          const outcome = await runGate({ ...ports, checkpoint: write }, current);
+          // The diagnostics' fields and filings are theirs: a gate's write keeps what they recorded meanwhile.
+          await write();
+          if (outcome.outcome === 'verified' && before) {
+            const landings = await ports.landings(before, outcome.tip);
+            const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+            await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
+          }
+          if (outcome.outcome !== 'idle') {
+            const reason = gateOutcomeReason(outcome);
+            note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}${outcome.outcome === 'timeout' ? '; retrying now on the newest main' : ''}`);
+          }
+          if (outcome.outcome !== 'timeout' || stopped.has(cycle.state) || reads.drain?.()) break;
         }
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
@@ -327,7 +390,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }
-      finally { live.gate = null; }
+      finally { live.gate = null; ended.abort(); gateRuns.delete(cycle.state); }
     })();
   }
   // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy

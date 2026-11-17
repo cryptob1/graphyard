@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { probeHost, readHosts } from '../hosts.js';
+import { probeHost, readHosts, sshTarget } from '../hosts.js';
 import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
 /** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
@@ -23,6 +23,29 @@ export const shardHosts = async () => (await readHosts().catch(() => [])).map(ho
 export const realFreeCores = (reading: HostReading) => Math.max(0, reading.cores - reading.busy - reading.steal * reading.cores);
 /** A host takes shards while it answers and its hottest CPU sensor is under its limit. */
 export const underHeatLimit = (reading: HostReading) => !reading.away && (reading.celsius === null || reading.celsius < reading.limit);
+
+/**
+ * GY-3419: the words a test file names when it needs what a remote shard lacks — namespaces
+ * (bwrap, unshare), the Docker socket, or the network: servers and sockets, requests, databases,
+ * SSH, browsers, e2e machinery. A shard on an added host runs with no network and no Docker
+ * socket, so such a file there would fail as a red verdict that measures neither the merge nor
+ * the host. Naming any word keeps the file on this machine; over-marking only costs a host
+ * shards, under-marking reads as a false failure.
+ */
+export const localOnlyTestPattern = /bwrap|unshare|landlock|docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e/i;
+/** Whether a test file's text may run on a remote shard: it names none of the local-only words. */
+export const remoteableTestFile = (text: string) => !localOnlyTestPattern.test(text);
+
+/**
+ * Split `files` (reading each through `read`, the checkout's copy) into those a remote host may
+ * run and those that stay on this machine (GY-3419). A file that cannot be read stays local: the
+ * safe side is this machine, where everything works.
+ */
+export async function splitLocalOnlyTests(files: readonly string[], read: (file: string) => Promise<string>): Promise<{ remoteable: string[]; localOnly: string[] }> {
+  const remoteable: string[] = [], localOnly: string[] = [];
+  for (const file of files) (await read(file).then(remoteableTestFile, () => false) ? remoteable : localOnly).push(file);
+  return { remoteable, localOnly };
+}
 
 /** This machine's reading and every host's, read at once through the shim's probe; a host that does not answer is away for this trial. */
 export async function readShardHosts(targets: readonly string[], run: ChildRun, cores: number): Promise<HostReading[]> {
@@ -49,17 +72,19 @@ export interface ShardPlacement { ran: string[]; queuedWhileIdle: number; droppe
  * its heat limit that has the most real free CPU left once its running shards (`breadth` cores each)
  * are counted, so one trial's shards spread across hosts and none waits while a host has room. With
  * no host able to take one and none running, it goes to this machine, whose launcher waits on heat as
- * before. A host that throws `HostDroppedError` takes no more shards this trial and its shard is
+ * before. `pinned` (GY-3419) names shards that may run only on this machine: a shard holding a
+ * local-only test file never reaches a host, which could not run it. A host that throws
+ * `HostDroppedError` takes no more shards this trial and its shard is
  * re-queued first. `stopped` ends placement once a shard ended the trial; running shards are awaited.
  */
-export async function runShardsOnHosts<R>(input: { count: number; hosts: readonly PlacedHost<R>[]; breadth: number; run: (host: PlacedHost<R>, index: number) => Promise<void>; stopped?: () => boolean }): Promise<ShardPlacement> {
+export async function runShardsOnHosts<R>(input: { count: number; hosts: readonly PlacedHost<R>[]; breadth: number; run: (host: PlacedHost<R>, index: number) => Promise<void>; stopped?: () => boolean; pinned?: readonly boolean[] }): Promise<ShardPlacement> {
   const queue = Array.from({ length: input.count }, (_, index) => index), ran: string[] = [], dropped = new Set<string>();
   const running = new Map(input.hosts.map(host => [host.name, 0]));
   const inFlight = new Set<Promise<void>>();
   let queuedWhileIdle = 0, failure: { error: unknown } | null = null;
   const usable = (host: PlacedHost<R>) => !dropped.has(host.name) && underHeatLimit(host.reading);
   const left = (host: PlacedHost<R>) => realFreeCores(host.reading) - running.get(host.name)! * input.breadth;
-  const pick = () => input.hosts.filter(host => usable(host) && running.get(host.name)! < host.room).reduce<PlacedHost<R> | undefined>((best, host) => !best || left(host) > left(best) ? host : best, undefined)
+  const pick = (index: number) => input.hosts.filter(host => usable(host) && (!input.pinned?.[index] || host === input.hosts[0]) && running.get(host.name)! < host.room).reduce<PlacedHost<R> | undefined>((best, host) => !best || left(host) > left(best) ? host : best, undefined)
     ?? (inFlight.size ? undefined : input.hosts[0]);
   const start = (host: PlacedHost<R>, index: number) => {
     running.set(host.name, running.get(host.name)! + 1);
@@ -71,9 +96,11 @@ export async function runShardsOnHosts<R>(input: { count: number; hosts: readonl
   };
   while (queue.length || inFlight.size) {
     if (queue.length && !failure && !input.stopped?.()) {
-      const host = pick();
+      const host = pick(queue[0]!);
       if (host) { start(host, queue.shift()!); continue; }
-      if (input.hosts.some(other => usable(other) && running.get(other.name) === 0)) queuedWhileIdle++;
+      // A pinned shard can only queue behind this machine's room; only a free-roaming shard that
+      // waited while a usable host idled counts as a placement wait.
+      if (!input.pinned?.[queue[0]!] && input.hosts.some(other => usable(other) && running.get(other.name) === 0)) queuedWhileIdle++;
     }
     if (!inFlight.size) break;
     await Promise.race(inFlight);
@@ -102,7 +129,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   const repo = mirrorName(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
   const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
-  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', target, verb];
+  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', ...sshTarget(target), verb];
   /** One shim verb on `target`, with `source`'s output as its input; any failure turns the host away. */
   const shim = async (target: string, verb: string, source?: string) => {
     try {

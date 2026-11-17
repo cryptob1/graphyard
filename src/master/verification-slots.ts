@@ -73,18 +73,20 @@ export interface AcquireOptions {
 
 /**
  * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
- * removes it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
+ * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
+ * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
  * batch gate, declared checks, host worker verification and sessions' own suites and type checks wait;
  * jobs already running finish, and claims, heartbeats and status go on. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
-export const heavyDrainFile = (directory: string) => join(directory, 'drain.json');
+export const heavyDrainDirectory = (directory: string) => join(directory, 'drain');
+export const heavyDrainFile = (directory: string) => join(heavyDrainDirectory(directory), 'drain.json');
 export function readHeavyDrain(directory: string): HeavyDrain | null {
   try { const drain = JSON.parse(readFileSync(heavyDrainFile(directory), 'utf8')); return typeof drain?.reason === 'string' ? drain : null; } catch { return null; }
 }
 export function requestHeavyDrain(directory: string, reason: string, requestedBy: string, now = new Date()): HeavyDrain {
   const drain: HeavyDrain = { reason: reason.slice(0, 500), requestedBy, at: now.toISOString() }, pending = `${heavyDrainFile(directory)}.${randomUUID()}`;
-  mkdirSync(directory, { recursive: true });
+  mkdirSync(heavyDrainDirectory(directory), { recursive: true });
   writeFileSync(pending, JSON.stringify(drain));
   renameSync(pending, heavyDrainFile(directory));
   return drain;
@@ -281,13 +283,18 @@ export const heldJobEnvironment = (): Record<string, string> =>
  * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
  * slot. A process that never joined the budget runs the job as it always did.
  */
-export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal } = {}): Promise<T> {
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal } = {}): Promise<T> {
   const directory = process.env[slotsDirectoryVariable];
   if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
   let held: HeldSlot;
   try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: true }); }
   catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
-  try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { held.release(); }
+  // GY-3449: a cancelled job (`signal`), or one whose owner's run ended (`until`: a gate run that
+  // verified, timed out, held or stopped for a restart), gives its slot back at once, even while a
+  // step that cannot be cancelled — an image build, an adoption — is still settling.
+  const ended = AbortSignal.any([options.signal, options.until].filter((signal): signal is AbortSignal => !!signal));
+  if (ended.aborted) held.release(); else ended.addEventListener('abort', held.release, { once: true });
+  try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { ended.removeEventListener('abort', held.release); held.release(); }
 }
 
 const heavyScript = /^(test|build|typecheck)\b/;

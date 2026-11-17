@@ -46,6 +46,7 @@ args = docker + ['create', '--name', container_name, '-i', '--init',
         *(['--cpus=' + str(limits['cpus']), '--memory=' + str(limits['memory']), '--pids-limit=' + str(limits['pids'])] if limits else
           ['--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined']), '--network=' + spec['network'],
         *(['--security-opt=apparmor=' + spec['apparmor']] if spec.get('apparmor') else []),
+        *(['--cpu-shares=' + str(load['cpuShares'])] if load and load.get('cpuShares') else []),
         '--ulimit', 'core=0', '--user', spec.get('user') or str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
