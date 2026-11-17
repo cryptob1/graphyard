@@ -7,7 +7,7 @@
 ## Why Graphyard
 
 - **You decide goals, money, credentials.** They wait under Needs you; blockers are the Master's.
-- **Every change is proven.** Workers build, agents review, heads are trialled on main.
+- **Every change is proven.** Workers build, agents review, main trials each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
 Prerequisites: Linux 7.0+ with Landlock ABI 9+ (`uname -r`; Ubuntu 26.04: `sudo apt install linux-image-oem-7.3`); Node 24+/npm (`node --version`, `npm --version`; Ubuntu/Debian: `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt install nodejs`, Arch: `sudo pacman -S nodejs npm`, macOS: `brew install node@24`); Git (`git --version`, `git remote -v`); Docker (`docker version`, `docker compose version`); GitHub CLI (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`; install: `curl -fsSL https://herdr.dev/install.sh | sh`); systemd (`systemctl --user status`). [Setup guide](docs/setup.md).
@@ -31,12 +31,11 @@ The Setup link connects worker and reviewer accounts, file goals under **New wor
 
 ## Where things run
 
-![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
+![Where every Graphyard part runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
 `graphyard guide infra` lists every part.
 
 ## Learn more
 
-- `graphyard guide TOPIC` and `graphyard master guide` print procedures.
-- `graphyard guide setup` and `graphyard guide publishing` cover the details.
-- [Shared server](docs/shared-server.md) · [Re-render the walkthrough](docs/walkthrough.md) · [Contributing](AGENTS.md) · [Apache 2.0](LICENSE)
+- `graphyard guide setup`, `graphyard guide publishing`, `graphyard guide TOPIC` and `graphyard master guide` print procedures.
+- [Shared server](docs/shared-server.md), [Re-render the walkthrough](docs/walkthrough.md), [Contributing](AGENTS.md), [Apache 2.0](LICENSE)
