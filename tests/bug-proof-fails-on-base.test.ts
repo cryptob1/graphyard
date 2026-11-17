@@ -9,7 +9,7 @@ import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { mergeOne, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { masterGuide } from '../src/master/guide.js';
 import { masterConfigSchema } from '../src/master.js';
-import { trialFailurePrefix } from '../src/model/rework-ground.js';
+import { proofPassesOnBasePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -79,7 +79,7 @@ test(`${own} — a bug or feature item whose proof passes on the base tip is ref
   for (const type of ['bug', 'feature'] as const) {
     const refused = await merge(fixed, type);
     assert.equal(refused.outcome.outcome, 'refused', `${type}: ${JSON.stringify(refused.outcome)}`);
-    assert.equal((refused.outcome as { reason: string }).reason, `${trialFailurePrefix}: not reproduced: ${proof} passes on the base tip ${fixed.base}`);
+    assert.equal((refused.outcome as { reason: string }).reason, `${proofPassesOnBasePrefix}: ${proof} already passes on the base tip ${fixed.base} without this change, so it shows nothing the change does. Change tests/fix.test.ts so a case fails on the base tip and passes with the change.`);
     assert.ok(refused.events.some(event => event.kind === 'refused'), 'the refusal is recorded, grounding the rework');
   }
 
@@ -103,12 +103,12 @@ test(`${own} — a feature whose proof file is new on the head merges even thoug
 
 test(`${own} — the master guide's e2e rule says a feature's or bug's proofs must include one failing on the base tip, else the trial refuses it as not reproduced, and chores are exempt`, () => {
   const paragraph = masterGuide.split('\n').find(line => line.startsWith('Every item needs an `e2e:NAME` criterion')) ?? '';
-  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the test merge refuses it as not reproduced; chores are exempt\./);
+  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the test merge refuses it because the proof already passes before the change; chores are exempt\./);
 });
 
 test(`${own} — a bug item whose unit proof and E2E proof both pass on the base tip is refused as not reproduced naming both: the bound case is served from the base too`, { timeout: 300_000 }, async () => {
   const fixed = await repository(true, true);
   const bug = await merge(fixed, 'bug', [proof, e2eProof]);
   assert.equal(bug.outcome.outcome, 'refused', JSON.stringify(bug.outcome));
-  assert.equal((bug.outcome as { reason: string }).reason, `${trialFailurePrefix}: not reproduced: ${proof}, ${e2eProof} pass on the base tip ${fixed.base}`);
+  assert.equal((bug.outcome as { reason: string }).reason, `${proofPassesOnBasePrefix}: ${proof}, ${e2eProof} already pass on the base tip ${fixed.base} without this change, so they show nothing the change does. Change tests/fix.test.ts, e2e/cases/home-shows-fix.json so a case fails on the base tip and passes with the change.`);
 });

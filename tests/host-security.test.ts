@@ -41,7 +41,9 @@ test(`${proof} — host prepare prints a one-time sudo script: an unprivileged g
   assert.match(script, /gpasswd -d "\$user" docker/, 'never in the docker group');
   assert.doesNotMatch(script, /usermod[^\n]*-aG|sudoers|wheel/, 'gains no group and no sudo');
   assert.match(script, /loginctl enable-linger "\$user"/);
-  assert.match(script, /dockerd-rootless-setuptool\.sh install/);
+  // GY-3419: the host's own tools when both are installed, else the static extras fetched into gy-compute's home; either way the install runs through $setuptool.
+  assert.match(script, /command -v dockerd-rootless-setuptool\.sh >\/dev\/null && command -v slirp4netns/);
+  assert.match(script, /"\$setuptool" install/);
   assert.match(script, /'restrict,command="graphyard-host-shim" ssh-ed25519 AAAAC3NzaOperatorKey operator@vishrog' > "\$home\/\.ssh\/authorized_keys"/);
 });
 
@@ -66,7 +68,7 @@ test(`${proof} — the script host prepare prints, run, prepares the host: gy-co
 
 test(`${proof} — the shim the script installed answers only its verbs: a plain shell command is refused`, async () => {
   const box = hosts.host('box');
-  const run = (command: string) => spawnSync('sh', [join(box, 'usr-local-bin', 'graphyard-host-shim')], {
+  const run = (command: string) => spawnSync(join(box, 'usr-local-bin', 'graphyard-host-shim'), {
     env: { PATH: `${join(box, 'home', 'gy-compute', 'bin')}:${join(box, 'standins')}:/usr/bin:/bin`, FAKE_SSH_USER: 'gy-compute', SSH_ORIGINAL_COMMAND: command },
     encoding: 'utf8',
   });

@@ -12,10 +12,10 @@
 // fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
 // merge order (from the landing that added a failing case, GY-3409): the last item of the smallest
 // failing prefix is reverted through the serve-revert path — the case's own landing when that revert
-// does not apply — and the batch recut. A recut that fails again, or a second timeout, holds the last verified
-// commit served and wakes the master; a hold for timeouts is the host's, not the change's, so after
-// a cool-off it expires and the gate reruns its tip on its own, while a hold for a failing case
-// waits for main to move (GY-3383), and any held gate is one master status attention line. The
+// does not apply — and the batch recut. A recut that fails again holds the last verified commit
+// served and wakes the master until main moves, and any held gate is one master status attention
+// line. A timeout is the host's, not the change's: it never holds, and the loop retries at once on
+// main's newest tip (GY-3444); the bound counts the gate's own work, not its waits for a slot or CPU. The
 // full suite and catalog run daily against the verified
 // commit as diagnostics that file items and never block; the three preview cases run with them on
 // the host, the verified commit in its own scratch install (GY-3193), and each one's last run and
@@ -38,6 +38,12 @@ import type { PreviewCaseRun } from './merge-writer/served-previews.js';
 
 /** How long one gate may run before it counts as failed (gate timeout). */
 export const gateLimitMs = 45 * 60_000;
+/**
+ * GY-3444: one gate run's bound — the limit above, or 1.5x the last measured full catalog run when
+ * that is longer (61 minutes on vishrog on 2026-11-17), so a loaded host's own catalog never outlasts it.
+ */
+export const gateBoundMs = (record: Pick<GateRecord, 'catalogMs'>) => Math.max(gateLimitMs, Math.ceil(1.5 * (record.catalogMs ?? 0)));
+const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */
 export const diagnosticsIntervalMs = 24 * 60 * 60_000;
 /** The gate runs the whole catalog only when its measured time fits this share of the limit. */
@@ -46,8 +52,6 @@ export const catalogBudgetMs = gateLimitMs / 2;
 export const gateRunsWindow = 5, gateRunsMaxAgeMs = 7 * 24 * 60 * 60_000;
 /** The merges the revert rate reads, and the rate above which the master is woken. */
 export const revertRateWindow = 20, revertRateLimit = 1 / 5;
-/** GY-3383: how long a gate held for two timeouts cools off before the gate reruns its tip on its own. */
-export const gateHoldCoolOffMs = 30 * 60_000;
 
 /** One merge the gate judged: its landing commit, its item, and whether the gate reverted it. */
 export interface GateMerge { sha: string; item: string; reverted: boolean }
@@ -75,7 +79,9 @@ export interface GateRecord {
    * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
    * `results` fields are optional only for records an older loop wrote.
    */
-  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string } | null;
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string; /** GY-3444: the time its checks waited for a trial slot or CPU, or the loop was down, which its bound does not count. */ waitedMs?: number;
+    /** GY-3444: when the loop last saw the run going, so the time a restart took is not the gate's own. */ seenAt?: string;
+    /** GY-3444: the detached trial run of its current check, which the loop after a restart adopts. */ run?: { commit: string; /** A digest of the check's proofs and files. */ input: string; directory: string } } | null;
   /** The last settled run (GY-3141), so status names why nothing has verified instead of guessing. */
   lastOutcome: GateLastOutcome | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
@@ -95,6 +101,8 @@ export interface GateRecord {
   results: Record<string, Record<string, boolean>>;
   /** The last merges judged, oldest first. */
   merges: GateMerge[];
+  /** GY-3399: the gate's reverts, oldest first, the last 50 kept: what the week's revert count reads. Optional only for records an older loop wrote. */
+  reverts?: { item: string; at: string }[];
   /** How long the whole E2E catalog took when the diagnostics last ran it. */
   catalogMs: number | null;
   /**
@@ -157,7 +165,9 @@ export interface GatePorts {
    * (the selection over `files`) or `test:<file>` — and answers the failing ones, a failing
    * affected test as `test:<file>`. The run is bounded by `timeoutMs`, what is left of the gate's own limit.
    */
-  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]>;
+  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, signal?: AbortSignal): Promise<string[]>;
+  /** GY-3444: whether the gate's checks wait for a trial slot or CPU now: time the gate's bound does not count. */
+  waiting?(): boolean;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`; answers the item it filed, when it names one. */
@@ -210,7 +220,7 @@ export type GateOutcome =
   | { outcome: 'idle' }
   | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[] }
   | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string; fallback?: string }
-  | { outcome: 'timeout'; tip: string }
+  | { outcome: 'timeout'; tip: string; boundMs: number }
   | { outcome: 'retry'; tip: string; reason: string }
   | { outcome: 'held'; tip: string; reason: string };
 
@@ -247,7 +257,7 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
 /** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
 export function gateOutcomeReason(outcome: GateOutcome): string | null {
   if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}${outcome.fallback ? ` (${outcome.fallback})` : ''}`;
-  if (outcome.outcome === 'timeout') return `past ${gateLimitMs / 60_000} minutes`;
+  if (outcome.outcome === 'timeout') return `past ${minutes(outcome.boundMs)} minutes`;
   return 'reason' in outcome ? outcome.reason : null;
 }
 
@@ -293,11 +303,10 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const adopted = record.inFlight && record.inFlight.tip !== verified ? record.inFlight : null;
   const tip = adopted?.tip ?? (await ports.fetch()).toLowerCase();
   if (tip === verified) return { outcome: 'idle' };
-  // GY-3383: a hold for a failing case waits for main to move; a hold for timeouts is the host's,
-  // not the change's — once its cool-off has passed it expires and the gate reruns the held tip
-  // itself, so a slow host never strands a project on its last verified commit for good.
+  // GY-3383: a hold for a failing case waits for main to move. GY-3444: a timeout hold an older loop
+  // wrote clears at once, and the gate runs on main's newest tip.
   const held = record.held;
-  if (held && held.tip === tip && (!timeoutHold(held) || ports.now() - Date.parse(held.at) < gateHoldCoolOffMs)) return { outcome: 'idle' };
+  if (held && held.tip === tip && !timeoutHold(held)) return { outcome: 'idle' };
   if (held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
   const at = () => new Date(ports.now()).toISOString();
   const landings = await ports.landings(verified, tip);
@@ -308,11 +317,15 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const checks = adopted?.checks?.length ? adopted.checks : await gateChecks(ports, record, tip, landings, whole);
   const results: Record<string, string[]> = adopted?.results ?? {};
   record.inFlight = adopted ? { ...adopted, files, checks, results, whole } : { tip, startedAt: at(), files, checks, results, whole };
-  if (!adopted) await ports.checkpoint?.();
+  // GY-3444: the time the loop was down — between its last sight of the run and this adoption — is not the gate's own.
+  if (adopted?.seenAt) record.inFlight.waitedMs = (adopted.waitedMs ?? 0) + Math.max(0, ports.now() - Date.parse(adopted.seenAt));
+  await ports.checkpoint?.();
   // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
   const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
-  // The clock is the batch's own, so a restart between steps never lengthens the gate.
-  const deadline = Date.parse(record.inFlight.startedAt) + gateLimitMs;
+  // The clock is the batch's own, so a restart between steps never lengthens the gate. GY-3444: it
+  // counts the gate's own work — the time its checks waited for a slot or CPU is added back, and kept
+  // on the record so a restart keeps it too.
+  const bound = gateBoundMs(record), deadline = () => Date.parse(record.inFlight!.startedAt) + bound + (record.inFlight!.waitedMs ?? 0);
   const finished = results;
   const stepKey = (commit: string, runChecks: readonly string[]) => `${commit} ${[...runChecks].sort().join(' ')}`;
   // A whole-catalog batch run measures the catalog's gate-run time, a timeout its elapsed time.
@@ -321,17 +334,27 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const run = (commit: string, runChecks: readonly string[], runFiles: readonly string[]) => {
     const key = stepKey(commit, runChecks);
     if (key in finished) return Promise.resolve(finished[key]!); // a step the last loop finished
-    const left = deadline - ports.now();
+    const left = deadline() - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
-    let timer: NodeJS.Timeout | undefined;
-    return Promise.race([ports.run(commit, runChecks, runFiles, left), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new GateTimeout()), left); })])
+    let last = ports.now(), saved = last, timer: NodeJS.Timeout | undefined;
+    const tick = () => {
+      const now = ports.now();
+      record.inFlight = { ...record.inFlight!, seenAt: new Date(now).toISOString(), ...(ports.waiting?.() ? { waitedMs: (record.inFlight!.waitedMs ?? 0) + now - last } : {}) };
+      last = now;
+      if (now - saved >= 30_000) { saved = now; void ports.checkpoint?.(); }
+    };
+    // The check's budget is the gate's own remaining time (AC-7): the gate's clock stops it, through
+    // `stop`, however long its waits run; the trial's own wall clock is only a backstop of two more bounds.
+    const stop = new AbortController();
+    return Promise.race([ports.run(commit, runChecks, runFiles, left + 2 * bound, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
       .then(async failed => {
-        if (ports.now() > deadline) throw new GateTimeout();
+        tick();
+        if (ports.now() > deadline()) throw new GateTimeout();
         finished[key] = failed; // the finished step survives a restart
         await ports.checkpoint?.();
         return failed;
       })
-      .finally(() => clearTimeout(timer));
+      .finally(() => clearInterval(timer));
   };
   const hold = (reason: string): GateOutcome => { record.held = { tip, reason, at: at() }; return { outcome: 'held', tip, reason }; };
   try {
@@ -411,6 +434,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     // A push the moving main rejected blames nothing new: the next cycle gates again.
     if ('retry' in reverted) return { outcome: 'retry', tip, reason: reverted.retry };
     record.merges = [...record.merges.filter(merge => merge.sha !== culprit.sha), { sha: culprit.sha, item: culprit.item.key, reverted: true }].slice(-revertRateWindow);
+    record.reverts = [...record.reverts ?? [], { item: culprit.item.key, at: at() }].slice(-50);
     record.attempt = { ...record.attempt, recuts: record.attempt.recuts + 1 };
     return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha, ...(fallback ? { fallback } : {}) };
   } catch (error) {
@@ -418,10 +442,9 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     if (error instanceof EnvironmentFault) return { outcome: 'retry', tip, reason: error.message };
     if (!(error instanceof GateTimeout)) throw error;
     if (!(mainKey in finished)) measure(ports.now() - Date.parse(record.inFlight.startedAt));
-    // A timeout blames nobody: the batch is recut once, and a second timeout holds.
+    // A timeout blames nobody and never holds: the loop recuts the batch from main's newest tip at once (GY-3444).
     record.attempt = { ...record.attempt, timeouts: record.attempt.timeouts + 1 };
-    if (record.attempt.timeouts >= 2) return hold(`the batch gate timed out twice (past ${gateLimitMs / 60_000} minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`);
-    return { outcome: 'timeout', tip };
+    return { outcome: 'timeout', tip, boundMs: bound };
   }
 }
 
@@ -468,7 +491,9 @@ export function gateSummary(record: GateRecord | null) {
   if (!record) return null;
   const rate = revertRate(record);
   return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt,
-    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null } : null,
+    // GY-3444: a run in flight holds first claim on trial slots and pauses implementation launches until it settles.
+    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null,
+      holds: 'first claim on trial slots; implementation launches paused until the gate settles' } : null,
     // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
     lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
     held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()),
@@ -490,11 +515,7 @@ export function gateCauses(record: GateRecord | null): { key: string; detail: st
   ];
 }
 
-/**
- * GY-3383: a hold raised for timeouts is the host's, not the change's — it expires and its tip is
- * gated again after a cool-off — while a hold for a failing case waits for main to move. Read from
- * the reason's words, so a hold a loop before this change wrote still counts.
- */
+/** A timeout hold an older loop wrote (GY-3383), read from its words: GY-3444 clears it on the next gate run. */
 export const timeoutHold = (held: GateRecord['held']): boolean => !!held && /timed out twice/.test(held.reason);
 
 /** GY-3383: any held gate is one master status attention line naming the hold and its reason, with what clears it. */
@@ -505,7 +526,7 @@ export function gateHoldAttention(record: Pick<GateRecord, 'held'> | null, now: 
     subject: 'the batch gate',
     text: `The batch gate is held on ${held.tip.slice(0, 12)} (for ${formatAge(held.at, now)}): ${held.reason}`,
     next: timeoutHold(held)
-      ? `A timeout is the host, not the change: the gate reruns the held tip on its own once its ${gateHoldCoolOffMs / 60_000}-minute cool-off passes; look at what loads the host only if it times out again`
+      ? 'A timeout is the host, not the change: the gate retries on the newest main within one cycle'
       : 'The hold clears when a merge moves main off the held tip: repair what the reason names',
   }];
 }
