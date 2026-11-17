@@ -11,6 +11,7 @@ import { coordinatorCheckoutRoot } from './master/profiles.js';
 import { installDirectory } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
 import { knownGoodDirectory } from './master/known-good.js';
+import { currentCliPath } from './install/cli-release.js';
 
 export interface UnitCode {
   unit: string; path: string;
@@ -50,7 +51,11 @@ export { systemdCommandLineWords };
 export function unitLauncherCheckout(text: string, home: string): string | null {
   const start = unitCheckout(text, home).execStart;
   const launcher = start ? systemdCommandLineWords(start).find(part => /(?:bin\/graphyard\.mjs|dist\/cli\.js)$/.test(part)) : undefined;
-  return launcher ? dirname(dirname(launcher)) : null;
+  if (!launcher) return null;
+  // GY-3337: the install's launcher is itself a symlink to the release's own; the checkout whose
+  // code the loop starts is the release tree that symlink resolves into.
+  const resolved = canonicalPath(launcher);
+  return dirname(dirname(/(?:bin\/graphyard\.mjs|dist\/cli\.js)$/.test(resolved) ? resolved : launcher));
 }
 /** Under the test runner only a unit directory under the system temporary directory is read, as legacyUnitFiles guards: the operator's real units belong to no checkout a test made. */
 const readableUnitsDirectory = (unitDirectory: string) => {
@@ -84,7 +89,7 @@ export interface LoopCodeFacts {
   /** The loop cursor's text; null when none is written. */
   cursor: string | null;
   host?: string | null;
-  /** The install's pinned coordinator snapshots (GY-2937): the `coordinator/current` links a loop unit starts by design. */
+  /** The install's pinned coordinator snapshots (GY-2937) and the release its launcher serves (GY-3337): code roots a loop unit starts by design. */
   snapshots?: string[];
   /** How a path is compared: realpath on this machine, the path itself on a host. */
   canonical?: (path: string) => string;
@@ -171,10 +176,13 @@ export async function readLoopCode(root: string, options: {
     const credentialFile = typeof master?.credentialFile === 'string' ? resolve(master.credentialFile) : null;
     const cursor = !loop ? null : options.cursor !== undefined ? options.cursor : credentialFile ? await files.read(loopCursorPath(credentialFile)) : null;
     // GY-2937: the install's pinned coordinator snapshot, whose launcher the loop's unit names by design.
+    // GY-3337: the published release the install's launcher starts is the loop's own code root the
+    // same way — the deploy unit moves it and the loop restarts onto it by design.
     const snapshots = await (async () => {
       if (!repository) return [];
       try {
-        return [join(knownGoodDirectory(installDirectory(installIdFor(repository))), 'current')];
+        const installDir = installDirectory(installIdFor(repository));
+        return [join(knownGoodDirectory(installDir), 'current'), currentCliPath(installDir)];
       } catch { return []; }
     })();
     return judgeLoopCode({ cli: { root: cliRoot, commit: cliCommit }, primary, repository, loop, cursor, snapshots });

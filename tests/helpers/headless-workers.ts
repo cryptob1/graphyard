@@ -49,7 +49,7 @@ export interface HeadlessWorkers {
   stored: (id: string) => Promise<Work>;
   readyItem: (key: string) => Promise<Work>;
   /** One registry account per entry, each with a stub model executable for its runtime kind. */
-  configure: (entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) => Promise<void>;
+  configure: (entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; wait?: boolean; afterWait?: string }[]) => Promise<void>;
   /** One host dispatch invocation: the real launcher, its origin fetch answered from the local base. */
   dispatch: (work: Work) => Promise<Awaited<ReturnType<typeof dispatchWork>>>;
   submitted: (id: string, epoch: number) => Promise<Work>;
@@ -107,7 +107,7 @@ export async function headlessWorkers(label: string, leaseSeconds = 120): Promis
     await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
     return work;
   }
-  async function configure(entries: { name: string; kind: string; failure?: string; wait?: boolean; afterWait?: string }[]) {
+  async function configure(entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; wait?: boolean; afterWait?: string }[]) {
     const accounts = (await registry.document(coordinator)).accounts.filter(account => !entries.some(entry => entry.name === account.name)).map(({ quota, quotaDecision, smoke, unjudged, ...account }) => ({ ...account, enabled: false }));
     const runtimes = [];
     for (const entry of entries) {
@@ -115,6 +115,9 @@ export async function headlessWorkers(label: string, leaseSeconds = 120): Promis
       await writeFile(join(home, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_API_KEY: 'fixture-key' } }));
       await writeFile(join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'fixture-key', anthropic: { type: 'api', key: 'fixture-key' } }));
       await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: entry.name } }));
+      // GY-3329: a cursor account's usable sign-in is cursor/auth.json under its home.
+      await mkdir(join(home, 'cursor'), { recursive: true });
+      await writeFile(join(home, 'cursor', 'auth.json'), JSON.stringify({ accessToken: 'fixture-sign-in' }));
       await mkdir(join(home, 'opencode'), { recursive: true });
       await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'fixture-key' } }));
       const executable = entry.kind === 'cursor' ? 'cursor-agent' : entry.kind;
@@ -130,6 +133,10 @@ const [, key, epoch] = /complete (GY-\\d+) (\\d+) --head/.exec(args.join(' ')) ?
 console.log('stub ${entry.kind} working on ' + key + ' epoch ' + epoch);
 console.error('stub ${entry.kind} diagnostics token=leaked-secret-value');
 fs.writeFileSync('notes-' + epoch + '.txt', 'partial work of epoch ' + epoch + '\\n');
+// \`result\`: the run ends at once with this error reply in its JSON report, as \`claude -p --output-format json\` does.
+if (${JSON.stringify(entry.result ?? '')}) { console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, duration_ms: 412, num_turns: 1, result: ${JSON.stringify(entry.result ?? '')}, session_id: 'fixture', total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, modelUsage: {} })); process.exit(1); }
+// \`printed\`: the run prints this line and exits at once, as OpenCode does on Z.AI's quota error.
+if (${JSON.stringify(entry.printed ?? '')}) { console.log(${JSON.stringify(entry.printed ?? '')}); process.exit(1); }
 if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); }
 (async () => {
   while (${!!entry.wait} && !fs.existsSync(home + '/release')) await new Promise(resolve => setTimeout(resolve, 20));

@@ -10,9 +10,13 @@
 // is re-run once (a pass is a filed flake), an affected test — or, when the whole catalog ran, a
 // catalog case no batch item binds, gate.core does not name and smoke is not (GY-3147) — that also
 // fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
-// merge order: the last item of the smallest failing prefix is reverted through the serve-revert
-// path and the batch recut. A recut that fails again, or a second timeout, holds the last verified
-// commit served and wakes the master. The full suite and catalog run daily against the verified
+// merge order (from the landing that added a failing case, GY-3409): the last item of the smallest
+// failing prefix is reverted through the serve-revert path — the case's own landing when that revert
+// does not apply — and the batch recut. A recut that fails again, or a second timeout, holds the last verified
+// commit served and wakes the master; a hold for timeouts is the host's, not the change's, so after
+// a cool-off it expires and the gate reruns its tip on its own, while a hold for a failing case
+// waits for main to move (GY-3383), and any held gate is one master status attention line. The
+// full suite and catalog run daily against the verified
 // commit as diagnostics that file items and never block; the three preview cases run with them on
 // the host, the verified commit in its own scratch install (GY-3193), and each one's last run and
 // verdict stays on the record for master status.
@@ -27,6 +31,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { EnvironmentFault } from './app-environments.js';
+import { formatAge } from './model/duration.js';
 import type { Work } from './model.js';
 import type { ServeLanding } from './merge-writer/serve-revert.js';
 import type { PreviewCaseRun } from './merge-writer/served-previews.js';
@@ -41,6 +46,8 @@ export const catalogBudgetMs = gateLimitMs / 2;
 export const gateRunsWindow = 5, gateRunsMaxAgeMs = 7 * 24 * 60 * 60_000;
 /** The merges the revert rate reads, and the rate above which the master is woken. */
 export const revertRateWindow = 20, revertRateLimit = 1 / 5;
+/** GY-3383: how long a gate held for two timeouts cools off before the gate reruns its tip on its own. */
+export const gateHoldCoolOffMs = 30 * 60_000;
 
 /** One merge the gate judged: its landing commit, its item, and whether the gate reverted it. */
 export interface GateMerge { sha: string; item: string; reverted: boolean }
@@ -82,12 +89,14 @@ export interface GateRecord {
   published?: string | null;
   /** Last successfully deployed commit handed to the release workflow; retained across loop restarts. */
   releaseTagged?: string | null;
-  /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves. */
+  /** A batch that failed again after its recut, or timed out twice: the master is woken; cleared once main moves — except a timeout hold, which expires after a cool-off and reruns its tip (GY-3383). */
   held: { tip: string; reason: string; at: string } | null;
   /** Per commit, whether a check fails there (the known-red cache: an affected test, or a catalog-only e2e case). */
   results: Record<string, Record<string, boolean>>;
   /** The last merges judged, oldest first. */
   merges: GateMerge[];
+  /** GY-3399: the gate's reverts, oldest first, the last 50 kept: what the week's revert count reads. Optional only for records an older loop wrote. */
+  reverts?: { item: string; at: string }[];
   /** How long the whole E2E catalog took when the diagnostics last ran it. */
   catalogMs: number | null;
   /**
@@ -202,7 +211,7 @@ export function mergeFilings(latest: Pick<GateRecord, 'filed' | 'notes'> | null,
 export type GateOutcome =
   | { outcome: 'idle' }
   | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[] }
-  | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string }
+  | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string; fallback?: string }
   | { outcome: 'timeout'; tip: string }
   | { outcome: 'retry'; tip: string; reason: string }
   | { outcome: 'held'; tip: string; reason: string };
@@ -239,7 +248,7 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
 
 /** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
 export function gateOutcomeReason(outcome: GateOutcome): string | null {
-  if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}`;
+  if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}${outcome.fallback ? ` (${outcome.fallback})` : ''}`;
   if (outcome.outcome === 'timeout') return `past ${gateLimitMs / 60_000} minutes`;
   return 'reason' in outcome ? outcome.reason : null;
 }
@@ -255,7 +264,8 @@ function gatedCases(flight: GateRecord['inFlight']): Record<string, 'pass' | 'fa
 
 /**
  * One gate of the batch from the last verified commit to the main tip, updating `record` in place.
- * Nothing to gate (main is the verified commit, or a held tip has not moved) answers idle. A batch a
+ * Nothing to gate (main is the verified commit, or a held tip has not moved and, for a timeout
+ * hold, its cool-off has not passed) answers idle. A batch a
  * previous gate cut and never settled is adopted as it was cut — the same candidate tip, files and
  * checks, its finished steps' results with it — so a loop restart never recuts a batch onto a newer
  * tip: merges that landed meanwhile ride the next batch.
@@ -284,8 +294,13 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   // since the cut stay outside the batch and wait for the next one.
   const adopted = record.inFlight && record.inFlight.tip !== verified ? record.inFlight : null;
   const tip = adopted?.tip ?? (await ports.fetch()).toLowerCase();
-  if (tip === verified || record.held?.tip === tip) return { outcome: 'idle' };
-  if (record.held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
+  if (tip === verified) return { outcome: 'idle' };
+  // GY-3383: a hold for a failing case waits for main to move; a hold for timeouts is the host's,
+  // not the change's — once its cool-off has passed it expires and the gate reruns the held tip
+  // itself, so a slow host never strands a project on its last verified commit for good.
+  const held = record.held;
+  if (held && held.tip === tip && (!timeoutHold(held) || ports.now() - Date.parse(held.at) < gateHoldCoolOffMs)) return { outcome: 'idle' };
+  if (held) { record.held = null; record.attempt = { recuts: 0, timeouts: 0 }; }
   const at = () => new Date(ports.now()).toISOString();
   const landings = await ports.landings(verified, tip);
   // The cut is the cut: an adopted batch keeps the files and checks it was cut with, re-derived only
@@ -375,17 +390,32 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     // The smallest failing prefix in merge order names the culprit: its last item. Only the whole batch failing names the batch's last item.
     const owned = landings.filter((landing): landing is ServeLanding & { item: Work } => !!landing.item && !record.merges.some(merge => merge.sha === landing.sha && merge.reverted));
     if (!owned.length) return hold(`${tip.slice(0, 12)} fails ${check} and no merged item in the batch is left to revert`);
-    let culprit = owned[owned.length - 1]!;
+    // GY-3409: a case a batch landing added fails, as missing, on every prefix before it, so the
+    // search starts at the landing that added it — and that landing is the fallback when the
+    // culprit's revert does not apply.
+    const id = check.startsWith('e2e:') ? check.slice(4) : null;
+    let introduced: (typeof owned)[number] | undefined;
+    if (id && !(await ports.catalog(verified)).includes(id))
+      for (const landing of owned) if ((await ports.catalog(landing.sha)).includes(id)) { introduced = landing; break; }
+    const searched = introduced ? owned.slice(owned.indexOf(introduced)) : owned;
+    let culprit = searched[searched.length - 1]!;
     await step(`bisecting ${check} over the batch's prefixes`);
-    for (const landing of owned.slice(0, -1)) if ((await run(landing.sha, [check], files)).includes(check)) { culprit = landing; break; }
+    for (const landing of searched.slice(0, -1)) if ((await run(landing.sha, [check], files)).includes(check)) { culprit = landing; break; }
     await step(`reverting ${culprit.item.key} for ${check}`);
-    const reverted = await ports.revert(culprit, tip, check);
+    let reverted = await ports.revert(culprit, tip, check), fallback: string | undefined;
+    if ('held' in reverted && introduced && introduced !== culprit) {
+      fallback = `${reverted.held}; reverted ${introduced.item.key}, which added ${check}, instead`;
+      culprit = introduced;
+      await step(`reverting ${culprit.item.key}, which added ${check}`);
+      reverted = await ports.revert(culprit, tip, check);
+    }
     if ('held' in reverted) return hold(reverted.held);
     // A push the moving main rejected blames nothing new: the next cycle gates again.
     if ('retry' in reverted) return { outcome: 'retry', tip, reason: reverted.retry };
     record.merges = [...record.merges.filter(merge => merge.sha !== culprit.sha), { sha: culprit.sha, item: culprit.item.key, reverted: true }].slice(-revertRateWindow);
+    record.reverts = [...record.reverts ?? [], { item: culprit.item.key, at: at() }].slice(-50);
     record.attempt = { ...record.attempt, recuts: record.attempt.recuts + 1 };
-    return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha };
+    return { outcome: 'reverted', tip, check, culprit: culprit.item.key, revertSha: reverted.revertSha, ...(fallback ? { fallback } : {}) };
   } catch (error) {
     // GY-3296: a wait for environment capacity or an environment fault blames, fails and reverts nothing: the next cycle gates again.
     if (error instanceof EnvironmentFault) return { outcome: 'retry', tip, reason: error.message };
@@ -461,6 +491,26 @@ export function gateCauses(record: GateRecord | null): { key: string; detail: st
     ...(record.held ? [{ key: 'batch-gate', detail: `Batch gate held: ${record.held.reason}` }] : []),
     ...(rate.rate > revertRateLimit ? [{ key: 'revert-rate', detail: `Revert rate ${rate.reverted}/${rate.merges} over the last ${revertRateWindow} merges is above 1 in 5` }] : []),
   ];
+}
+
+/**
+ * GY-3383: a hold raised for timeouts is the host's, not the change's — it expires and its tip is
+ * gated again after a cool-off — while a hold for a failing case waits for main to move. Read from
+ * the reason's words, so a hold a loop before this change wrote still counts.
+ */
+export const timeoutHold = (held: GateRecord['held']): boolean => !!held && /timed out twice/.test(held.reason);
+
+/** GY-3383: any held gate is one master status attention line naming the hold and its reason, with what clears it. */
+export function gateHoldAttention(record: Pick<GateRecord, 'held'> | null, now: number): { subject: string; text: string; next: string }[] {
+  const held = record?.held;
+  if (!held) return [];
+  return [{
+    subject: 'the batch gate',
+    text: `The batch gate is held on ${held.tip.slice(0, 12)} (for ${formatAge(held.at, now)}): ${held.reason}`,
+    next: timeoutHold(held)
+      ? `A timeout is the host, not the change: the gate reruns the held tip on its own once its ${gateHoldCoolOffMs / 60_000}-minute cool-off passes; look at what loads the host only if it times out again`
+      : 'The hold clears when a merge moves main off the held tip: repair what the reason names',
+  }];
 }
 
 /** The commit the deploy watch serves for `owner`: the verified one; null while no gate record names that repository (the loop writes it at rollout). */

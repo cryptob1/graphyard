@@ -13,8 +13,10 @@ import LoginPage, { HUMAN_SESSION_KEY, REJECTED_NOTICE, SIGN_IN_NEEDED, storedTo
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { initialView } from './pages/setup';
+import { requestedView } from '../src/model/setup-checklist';
+const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-[A-Z0-9]+)$/.exec(hash)?.[1] ?? null;
 import { idempotencyKey } from './idempotency-key';
-import { ShippedToast, confetti } from './fun';
+import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
 import KeyboardNav from './keyboard';
@@ -49,7 +51,7 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [view, setView] = useState(initialView);
+  const [view, setView] = useState(() => initialView(views.map(page => page.id)));
   const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
@@ -127,9 +129,18 @@ function App() {
     const fresh = merged.current ? work.filter(w => isMerged(w) && merged.current!.get(w.id) === false) : [];
     merged.current = new Map(work.map(w => [w.id, isMerged(w)]));
     if (!fresh.length) return;
-    setShipped(fresh.at(-1)!); confetti();
+    setShipped(fresh.at(-1)!);
   }, [work]);
   useEffect(() => { if (!shipped) return; const timer = setTimeout(() => setShipped(null), 8000); return () => clearTimeout(timer); }, [shipped]);
+  // Every page has an address (GY-3322): following a link to #costs opens Costs without a reload.
+  useEffect(() => {
+    const follow = () => { const page = requestedView(location.hash, views.map(entry => entry.id)).view; if (page) { setSelected(null); setView(page); } };
+    addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow);
+  }, []);
+  // GY-3415: #GY-N is an item's address, so the link the master hands an owner opens that item with its Answer.
+  const [linked, setLinked] = useState(() => itemLink(location.hash));
+  useEffect(() => { const follow = () => setLinked(itemLink(location.hash)); addEventListener('hashchange', follow); return () => removeEventListener('hashchange', follow); }, []);
+  useEffect(() => { const found = linked && work.find(w => w.key === linked); if (found) { setSelected(found.id); setLinked(null); } }, [work, linked]);
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
@@ -140,7 +151,7 @@ function App() {
     <main className="main">{error && <div role="alert" className="notice danger">{error}{error === SIGN_IN_NEEDED && <> <button type="button" onClick={signOut}>Sign in</button></>}</div>}
       <TopBar {...dashboard} onPalette={() => setPalette(true)}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
-    {shipped && <ShippedToast item={shipped} onClose={() => setShipped(null)}/>}
+    {shipped && <ShippedToast key={shipped.id} item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
     <VersionLabel status={status}/>
   </div>;

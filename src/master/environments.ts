@@ -23,7 +23,7 @@ import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
 import type { PlanReading } from './environment-quota.js';
-import { runtimeAdapter, type AccountReading } from './runtimes.js';
+import { accountHomeEnvironment, runtimeAdapter, type AccountReading } from './runtimes.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -73,8 +73,10 @@ export async function prepareAgentEnvironment(environment: AgentEnvironment) {
 
 export function loginCommand(environment: AgentEnvironment) {
   const home = shellQuote(environment.home);
+  // GY-3329: cursor-agent writes the sign-in it later reads to `$XDG_CONFIG_HOME/cursor/auth.json`,
+  // so the login runs with the account's home on XDG_CONFIG_HOME too, never on the operator's.
   return { claude: `CLAUDE_CONFIG_DIR=${home} claude, then /login`, codex: `CODEX_HOME=${home} codex login`,
-    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} agent login` }[environment.kind];
+    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} XDG_CONFIG_HOME=${home} agent login` }[environment.kind];
 }
 
 export interface AccountUsage { window: string; percent: number; resetsAt: string | null }
@@ -90,6 +92,10 @@ export interface EnvironmentProbe {
   fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
   /** false reads only the login, never the provider: for reports that must not reach the network. */
   quota?: boolean;
+  /** GY-3414: lists the providers OpenCode holds for a home (`opencode auth list`); null reads only its files, as for a Pi account. */
+  opencodeAuth?: ((home: string) => Promise<string>) | null;
+  /** GY-3414: lists the models OpenCode offers a home (`opencode models`); null skips the check. */
+  opencodeModels?: ((home: string) => Promise<string>) | null;
 }
 export const defaultQuotaCeilingPercent = 95;
 const healthCache = new Map<string, { at: number; health: EnvironmentHealth }>();
@@ -138,7 +144,8 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
   const spent = account.usage.filter(usage => usage.percent >= ceiling && future(usage));
   const exhausted = spent.length > 0 || !!account.reached && account.usage.some(future);
   const quota = !account.loggedIn ? 'unknown' as const : exhausted ? 'exhausted' as const : account.usage.length ? 'available' as const : 'unknown' as const;
-  const reason = !account.loggedIn ? `${environment.name} is not logged in`
+  const reason = !account.loggedIn ? `${environment.name} is not logged in${account.loggedOutReason ? `: ${account.loggedOutReason}` : ''}`
+    : account.unready ? `${environment.name} is not ready: ${account.unready}`
     : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
   const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
     loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment),
@@ -380,6 +387,10 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
     const variable = contract?.homeVariable ?? (Object.hasOwn(environmentVariable, account.kind) ? environmentVariable[account.kind as EnvironmentKind] : null);
     if (!variable && account.home) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: its home ${account.home} cannot be applied because ${contract && 'fleet' in account ? `runtime ${account.fleet.runtime}` : 'its environment'} names no login-home variable and the ${account.kind} kind has none known, so the session would run on the default login instead of ${account.name}. Set the runtime's home variable with master registry runtime set NAME --home-variable VAR.`);
     if (variable && account.home) environment[variable] = account.home;
+    // GY-3329: cursor-agent reads its sign-in from `$XDG_CONFIG_HOME/cursor/auth.json`, never from
+    // CURSOR_CONFIG_DIR, so the account's home is applied there too — per account, over any value
+    // a runtime contract pinned to one account's home.
+    Object.assign(environment, accountHomeEnvironment(kind, account.home));
     const modelId = 'fleet' in account ? account.fleet.modelId : null;
     if (kind === 'opencode' && modelId) environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...(environment.OPENCODE_CONFIG_CONTENT ? JSON.parse(environment.OPENCODE_CONFIG_CONTENT) : {}), model: modelId });
     // mise resolves installed runtimes under XDG_DATA_HOME; keep it on the operator's own install.

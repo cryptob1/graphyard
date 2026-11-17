@@ -63,7 +63,7 @@ async function exercise(url: string, principals: unknown[], inventory = createIn
     assert.equal(response.status, status, `Unexpected status for ${path}`); return response.json();
   }
   async function create(title: string) {
-    const work = await request('work', operator, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery', 'e2e:fixture'] }] });
+    const work = await request('work', operator, { title, why: 'w', simplest: 's', type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery', 'e2e:fixture'] }] });
     return request(`work/${work.id}/ready`, operator, {});
   }
   const worktree = (machine: (typeof machines)[number], work: any, epoch: number) => ({ epoch, host: machine.host, path: `/srv/graphyard/${machine.host}/${work.key.toLowerCase()}-${epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` });

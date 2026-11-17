@@ -18,7 +18,8 @@ import { readProjectMemory, type ProjectMemory } from '../project-memory.js';
 import { masterBriefSection, masterLessonsSection } from '../model/project-memory.js';
 import type { MasterConfig } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
-import { masterCredentialMask } from './confinement.js';
+import { masterCredentialMask, preparePeerExchange } from './confinement.js';
+import { accountHomeEnvironment } from './runtimes.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../review-prompt.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -76,7 +77,9 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   // GY-3237: the install state the master session's own recovery commands write — reviewer
   // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
   // the managed worktree root its launches allocate checkouts under — granted writable.
-  const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
+  // GY-3385: and each recorded peer's peers directory, where the session places the reporter
+  // tokens it issues them (master peer issue), created where missing before the confinement binds.
+  const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config), ...preparePeerExchange(config)];
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   const current = previous?.current ?? null;
   const resume = !!current && current.runtime === kind && current.account === selected.account.name;
@@ -150,7 +153,7 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     if (!kind) throw new Error('Cannot identify the existing master runtime; retaining its state instead of starting cold');
     assertConversationRuntime(kind);
     const variable = runtime?.launch.homeVariable ?? (kind === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME');
-    const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}) };
+    const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}), ...accountHomeEnvironment(kind, login?.credential.home) };
     const request = await readFile(master.launchRequestRecord ?? join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
     if (request !== null) {
       const record = join(masterRecords(root), `${createHash('sha256').update(request).digest('hex')}.request`);

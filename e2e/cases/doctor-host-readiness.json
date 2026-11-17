@@ -1,0 +1,13 @@
+{
+  "id": "doctor-host-readiness",
+  "title": "Doctor checks every account's runtime, the Herdr plugin and git fetch on this host",
+  "description": "On a temporary home, a registry account whose runtime executable is missing and one whose PATH entry does not exist each yield one doctor FAIL line naming the account, the path and the fix; a missing Herdr graphyard plugin and a failing git remote each yield one line; with every executable, PATH entry, the plugin and the remote present doctor reports them PASS.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "doctor host-readiness lines",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/doctor-host-readiness.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

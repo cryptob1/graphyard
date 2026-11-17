@@ -73,7 +73,7 @@ after(async () => { http?.close(); await store?.close(); });
 
 test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended unsubmitted attempt the control plane already reconciled has its committed and uncommitted work preserved on the loop\'s next cycle, the replacement\'s handoff names the saved commit before the worktree cleanup, and the expired epoch cannot continue working', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-  const filed = await ok(operator, 'POST', 'work', {
+  const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's',
     title: 'Keep a reconciled attempt\'s partial work',
     type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-real-snapshot-handoff', 'e2e:fixture'] }],
@@ -115,6 +115,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
   // the coordination read is the server's own coordination view, and the dispatch is the next
   // worker's claim whose returned document builds the handoff, exactly as the dispatcher's
   // preparation does (GY-2956: the prompt reads the claimed document, not the older snapshot).
+  // The host's CPU reads nothing (GY-3373): a hot trial host must not hold this redispatch.
   const closed: string[] = [], launched: { key: string; epoch: number; handoff: string }[] = [];
   const snapshot = async () => {
     const response = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(coordinator)}`, 'X-Graphyard-View': 'coordination' } });
@@ -140,6 +141,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
       return { pane: null, epoch: next.epoch };
     },
     dispatchTick: async () => {}, sweepCheckouts: async () => {}, masterSession: undefined, mergeWriter: null,
+    cpuPressure: async () => null,
   };
   const state: DaemonState = emptyDaemonState(config);
 

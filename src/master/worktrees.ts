@@ -2,10 +2,10 @@ import { writeFailure } from '../disk-space.js';
 // Concern: removing ended attempts' worktrees, managed checkouts and shared installs, and preparing assignment worktrees: the dispatch cycle's one shared base fetch.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { statfs, readdir, lstat, chmod, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
+import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
-import type { ChildRun } from '../child-runner.js';
-import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, writableDirectories, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig } from './profiles.js';
 import { assertOutsideWorktrees } from '../private-file.js';
 import { stopProcessesUnder } from '../session-processes.js';
@@ -69,13 +69,6 @@ async function preserveDetachedHead(root: string, target: string, run: ChildRun)
 export async function preservedWorkNote(root: string, key: string, run: ChildRun): Promise<string> {
   const refs = String(await Promise.resolve(run('git', ['-C', root, 'for-each-ref', '--format=%(refname)', `${preservedRefPrefix}${key}-*`])).catch(() => '')).trim().split('\n').filter(Boolean);
   return refs.length ? `Earlier attempts left commits on no branch, kept at ${refs.join(', ')}. Read them with git log and git show, and bring what is sound into your branch with git cherry-pick or git merge instead of redoing it. ` : '';
-}
-
-/** Give the owner write access to `directory` and every directory below it; a symlink is never followed. */
-async function writableDirectories(directory: string): Promise<void> {
-  const { mode } = await lstat(directory);
-  if ((mode & 0o700) !== 0o700) await chmod(directory, mode | 0o700);
-  for (const entry of await readdir(directory, { withFileTypes: true })) if (entry.isDirectory()) await writableDirectories(resolve(directory, entry.name));
 }
 
 /**
@@ -257,6 +250,16 @@ export function cycleBaseTip(root: string, baseBranch: string, cycle: string | u
   cycleBaseFetches.set(key, { cycle, tip: shared });
   trimCycleFetches();
   return shared;
+}
+
+/**
+ * GY-3351: whether this host reaches origin the way cycleBaseTip's fetch does — one `git ls-remote`
+ * under the checkout's own credential, never prompting. Null when origin answered, else git's
+ * failure text, for doctor's git-remote line.
+ */
+export async function remoteFetchProbe(root: string): Promise<string | null> {
+  try { await defaultChildRun('git', ['ls-remote', '--heads', 'origin'], { cwd: root, timeoutMs: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); return null; }
+  catch (error: any) { return (String(error?.stderr ?? '').trim() || String(error?.message ?? error)).split('\n').filter(Boolean).join(' ').slice(0, 400); }
 }
 
 export { diskExhaustion, reclaimAdvice, exhaustedPath, diskExhaustionMessage, writeFailure } from '../disk-space.js';

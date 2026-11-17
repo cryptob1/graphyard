@@ -56,7 +56,7 @@ const coordinationSnapshot = async () => {
   return response.json() as Promise<{ work: Work[]; now: string }>;
 };
 const reload = async (id: string) => (await coordinationSnapshot()).work.find(item => item.id === id)!;
-const file = async (title: string) => ok(token(operator.id), 'POST', 'work', {
+const file = async (title: string) => ok(token(operator.id), 'POST', 'work', { why: 'w', simplest: 's',
   title, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof, 'e2e:dispatch-waits-on-cpu-pressure'] }], policy: { checks: ['test'], review: true },
 }) as Promise<Work>;
 

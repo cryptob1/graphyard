@@ -7,7 +7,7 @@ test('e2e:change-priority — row and item controls persist and show attributed 
   // Every assertion waits on the real server; a loaded merge trial needs longer than the default.
   const settled = { timeout: 15_000 };
   try {
-    const fields = { type: 'chore', criteria: [{ id: 'AC-1', text: 'Priority works', proofs: ['e2e:change-priority'] }] };
+    const fields = { type: 'chore', why: 'w', simplest: 's', criteria: [{ id: 'AC-1', text: 'Priority works', proofs: ['e2e:change-priority'] }] };
     const earlier = await f.ok('work', { ...fields, title: 'Earlier item', priority: 3 });
     const item = await f.ok('work', { ...fields, title: 'Change my priority', priority: 3 });
     const legacy = await f.ok('work', { ...fields, title: 'Keep existing P4', priority: 4 });

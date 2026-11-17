@@ -94,7 +94,7 @@ export async function requestHumanDecision(services: Services, actor: Principal,
  * a declared human session may answer — the three decisions are human by definition, and an
  * agent holding an admin credential is still an agent.
  */
-export async function answerHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+export async function answerHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string, install = '') {
   const data = humanAnswerSchema.parse(body);
   // The receipt's fingerprint never covers the secret, so not even its digest is stored.
   const receiptInput = { id, answer: { ...data, secret: data.secret ? 'sealed' : undefined } };
@@ -102,8 +102,10 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
     // The rule the human surface lists this request under is the rule that refuses the answer,
     // so neither can drift from the other (model/human-request.ts `parkRule`).
     const refusal = humanOnlyRefusal(parkRule.kind, actor);
-    demand(!refusal, refusal!, 403);
-    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const { work, all } = await findWork(db, id);
+    // GY-3415: an owner who approved in the master chat answers here, signed in, in one click.
+    demand(!refusal, work ? `${refusal}. The owner answers it signed in on the dashboard: ${install}/#${work.key}` : refusal!, 403);
+    demand(work, 'Work item not found', 404);
     const request = work!.humanRequest;
     demand(request, `${work!.key} has no open human-only request`, 404);
     demand(request!.id === data.request, `${work!.key}'s open request is ${request!.id}, not ${data.request}; reload before answering`);

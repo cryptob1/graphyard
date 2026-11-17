@@ -25,9 +25,11 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; cpu?: LoopCpu }
-/** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu and the steal percent from /proc/stat. */
-export interface LoopCpu { avg60: number; steal: number | null }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[] }
+/** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373), with GY-3416's launches-waiting word. */
+export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null }
+/** One host as the loop last read it (GY-3407): this machine (`local`) or an added one; `away` while it does not answer. */
+export interface LoopHost { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -38,8 +40,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; cpu?: LoopCpu | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; cpu?: LoopCpu | null; hosts?: LoopHost[] | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}), ...(poll.hosts?.length ? { hosts: poll.hosts } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -118,6 +120,14 @@ export const loopStepFailureHeader = 'X-Graphyard-Loop-Step-Failure';
 export const encodeLoopStepFailure = encodeLoopCheckoutTrust;
 /** The standing repeated step-failure line a loop read names, or null when it names none, `off`, or one that does not parse. */
 export const loopStepFailure = loopCheckoutTrust;
+/**
+ * The header on the loop's coordination reads naming the standing fetch refusal (GY-3336): the
+ * remote refuses the base branch's fetch and the loop backs off, URI-encoded, or `off` while none
+ * stands. /api/status serves it as `setup.fetchRefusal` and the Setup checklist shows it as one
+ * item while it stands, quoting the remote's refusal and the fix.
+ */
+export const loopFetchRefusalHeader = 'X-Graphyard-Loop-Fetch-Refusal';
+export const loopFetchRefusal = loopCheckoutTrust;
 
 /**
  * The header on the loop's coordination reads naming the host's CPU (GY-3348): 'some avg60' from
@@ -133,11 +143,13 @@ export function loopCpu(header: string | string[] | undefined): LoopCpu | null {
   const value = Array.isArray(header) ? header[0] : header;
   if (!value || value.length > 500) return null;
   try {
-    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown };
-    const avg60 = Number(parsed.avg60), steal = parsed.steal === null || parsed.steal === undefined ? null : Number(parsed.steal);
-    return Number.isFinite(avg60) && avg60 >= 0 && avg60 <= 100
-      ? { avg60, steal: steal !== null && Number.isFinite(steal) && steal >= 0 ? Math.min(steal, 100) : null }
-      : null;
+    const parsed = JSON.parse(decodeURIComponent(value)) as { avg60?: unknown; steal?: unknown; celsius?: unknown; testBudget?: unknown; trialCap?: { now?: unknown; full?: unknown } | null; waiting?: unknown };
+    const figure = (raw: unknown, max: number) => { const value = raw === null || raw === undefined ? NaN : Number(raw); return Number.isFinite(value) && value >= 0 ? Math.min(value, max) : null; };
+    const avg60 = figure(parsed.avg60, 100), celsius = figure(parsed.celsius, 200);
+    // GY-3401: the test budget a new session gets and the trial cap now and in full.
+    const testBudget = figure(parsed.testBudget, 1024), now = figure(parsed.trialCap?.now, 1024), full = figure(parsed.trialCap?.full, 1024);
+    return avg60 === null && celsius === null ? null
+      : { avg60, steal: figure(parsed.steal, 100), celsius, testBudget, trialCap: now === null || full === null ? null : { now: Math.floor(now), full: Math.floor(full) }, waiting: parsed.waiting === true ? true : null };
   } catch { return null; }
 }
 
@@ -193,4 +205,24 @@ export function loopPanesRegistry(owner: object): LoopPanesRegistry {
   let registry = loopPanesRegistries.get(owner);
   if (!registry) { registry = new LoopPanesRegistry(); loopPanesRegistries.set(owner, registry); }
   return registry;
+}
+
+/**
+ * The header on the loop's coordination reads naming every host it reads (GY-3407): this machine
+ * and each added one with cores, temperature, steal and runs now, or away, URI-encoded JSON, or
+ * `off` before the first reading. /api/status serves the latest as `hosts` for the Workers page.
+ */
+export const loopHostsHeader = 'X-Graphyard-Loop-Hosts';
+export const encodeLoopHosts = (hosts: LoopHost[]) => encodeURIComponent(JSON.stringify(hosts.map(({ host, local, away, reason, cores, celsius, steal, runs }) => ({ host, ...(local ? { local } : {}), away, ...(away && reason ? { reason: reason.slice(0, 300) } : {}), cores, celsius, steal, runs }))));
+/** The hosts a loop read names, or null when it names none or they do not parse. */
+export function loopHosts(header: string | string[] | undefined): LoopHost[] | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value === 'off' || value.length > 8000) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value)) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const figure = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
+    return parsed.filter(entry => typeof entry?.host === 'string').slice(0, 50)
+      .map(entry => ({ host: String(entry.host).slice(0, 300), ...(entry.local === true ? { local: true } : {}), away: entry.away === true, ...(typeof entry.reason === 'string' && entry.reason ? { reason: entry.reason.slice(0, 300) } : {}), cores: figure(entry.cores), celsius: figure(entry.celsius), steal: figure(entry.steal), runs: figure(entry.runs) }));
+  } catch { return null; }
 }

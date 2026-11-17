@@ -23,9 +23,9 @@ let opened: string | undefined;
  * prints a sign-in link ending `&setup`, which opens this page once the person is signed in. The
  * marker leaves the address bar so the sign-in page redeems the exact link fragment it knows.
  */
-export function initialView(): string {
+export function initialView(pages: readonly string[]): string {
   if (opened !== undefined) return opened;
-  const requested = requestedView(location.hash);
+  const requested = requestedView(location.hash, pages);
   if (requested.hash !== location.hash) history.replaceState(null, '', `${location.pathname}${location.search}${requested.hash}`);
   return opened = requested.view ?? 'work';
 }
@@ -129,12 +129,12 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
   const green = checklistGreen(items) && !open && !workUnread;
   const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;
   return <>
-    <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
+    <PageHeader title="Set up Graphyard" fact={green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged.' : `${left} of ${total} steps left.`}>{!green && 'This page updates by itself as each step finishes.'}</PageHeader>
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
-    <section aria-label="Where things run"><MoreDetails summary="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></MoreDetails></section>
+    <section className="panel" aria-label="Where things run"><MoreDetails summary="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></MoreDetails></section>
   </>;
 }
 

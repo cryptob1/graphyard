@@ -4,13 +4,20 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { asksNothing, trustAgyFolder, trustClaudeFolder, trustCodexFolder, verifyClaudeTrust, verifyCodexTrust, type LaunchRecipe } from '../harness.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
+import { claudeAccount, codexAccount, zaiAccount, type PlanReading } from './environment-quota.js';
+import { defaultChildRun } from '../child-runner.js';
+import { realRuntimeBinary } from '../runtime-binary.js';
+import { underTestRunner } from '../runtime-environment.js';
 import type { AccountUsage, EnvironmentProbe } from './environments.js';
 
 /** An account home as a usage reader probes it: its kind and home, the plan derived for it and the one declared, and its named key file. */
 export interface ProbedHome { name: string; kind: string; home: string; plan?: string | null; declaredPlan?: string | null; keyFile?: string; keyVariable?: string; model?: string }
 /** What a usage reader reports of one account home: its login, the provider's usage windows, and a shared plan reading when it took one. */
-export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }
+export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading;
+  /** Why a logged-out reading is logged out, when the probe can say more than that. */
+  loggedOutReason?: string;
+  /** GY-3414: why a logged-in account still cannot run (its configured model is unavailable). */
+  unready?: string }
 /**
  * Everything Graphyard knows of one runtime kind. Every field is optional but `kind`: a kind with
  * no `recipe` is still a kind profiles may name, and is refused at launch unless an agent-registry
@@ -29,7 +36,8 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
 export interface RuntimeAdapter {
   kind: string;
   recipe?: LaunchRecipe;
-  headless?: { program?: string; before: string[]; flags: string[]; drop?: string[] };
+  /** `optional`: flags passed only when the installed runtime's `BEFORE --help` lists them (acceptedFlags). */
+  headless?: { program?: string; before: string[]; flags: string[]; drop?: string[]; optional?: string[] };
   request?: (reference: string) => string;
   role?: (reference: string) => string;
   screen?: RegExp;
@@ -59,10 +67,68 @@ const zaiLimitExhausted = /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly
 /** The same notice inside Z.AI's own error envelope (`{"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}`), as pi prints it: the envelope, never the bare phrase an agent may write about it, is the provider speaking. */
 const zaiLimitEnvelope = new RegExp(`"code"\\s*:\\s*"?\\d+"?\\s*,\\s*"message"\\s*:\\s*"${zaiLimitExhausted.source}`, 'i');
 
-/** Cursor keeps its login in cli-config.json and exposes no quota. */
+/**
+ * GY-3414: an OpenCode account is logged in only when the runtime itself lists an authenticated
+ * provider for its home: an `opencode/auth.json` that holds a key OpenCode does not take ran on the
+ * free fallback model and failed every review while the file alone read as logged in. It is ready
+ * only when `opencode models` lists its configured model: an installed OpenCode that dropped the
+ * provider falls back to the free model too.
+ */
+async function opencodeAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<AccountReading> {
+  const reading = await zaiAccount(environment, probe, plan);
+  const run = (probed: EnvironmentProbe['opencodeAuth'], args: string[]) => probed === undefined ? (underTestRunner() ? null : (home: string) => opencodeCommand(home, args)) : probed;
+  const list = run(probe.opencodeAuth, ['auth', 'list']), models = run(probe.opencodeModels, ['models']);
+  if (!reading.loggedIn) return reading;
+  // A declared key file reaches OpenCode as an environment variable at launch, never through its store.
+  if (list && !environment.keyFile) {
+    const listed = await list(environment.home).then(output => output.split('\n').some(line => line.trim() && !/no authenticated integrations/i.test(line)) ? null : 'opencode auth list shows no authenticated provider',
+      (error: Error) => `opencode auth list failed: ${error.message.split('\n')[0]!.slice(0, 200)}`);
+    if (listed) return { loggedIn: false, usage: [], note: null, loggedOutReason: listed };
+  }
+  const model = environment.model;
+  if (!models || !model) return reading;
+  const available = await models(environment.home).then(output => output.split('\n').map(line => line.trim()).some(line => line === model || line.startsWith(`${model}/`)), () => false);
+  return available ? reading : { ...reading, unready: `model unavailable: ${model}` };
+}
+/**
+ * GY-3425: which of `flags` the installed `program` lists in its `BEFORE --help`, asked once per
+ * launch or probe: an OpenCode that lacks `--standalone` exits with its usage text when given it.
+ * A runtime whose help cannot be read accepts none of them.
+ */
+export async function acceptedFlags(program: string, before: readonly string[], flags: readonly string[], env: NodeJS.ProcessEnv): Promise<string[]> {
+  if (!flags.length) return [];
+  const help = await defaultChildRun(program, [...before, '--help'], { env, timeoutMs: 30_000 }).then(String, () => '');
+  const words = new Set(help.split(/[\s,=]+/));
+  return flags.filter(flag => words.has(flag));
+}
+/** What OpenCode itself answers for a home: `--standalone` where it has one, or the host's background service answers with its own login. */
+async function opencodeCommand(home: string, args: string[]) {
+  const program = realRuntimeBinary('opencode'), env = { ...process.env, XDG_DATA_HOME: home };
+  return String(await defaultChildRun(program, [...args, ...await acceptedFlags(program, ['run'], ['--standalone'], env)], { env, timeoutMs: 30_000 }));
+}
+export const opencodeAuthList = (home: string) => opencodeCommand(home, ['auth', 'list']);
+export const opencodeModels = (home: string) => opencodeCommand(home, ['models']);
+/** GY-3329: where cursor-agent keeps its sign-in on a host with no desktop keyring: `$XDG_CONFIG_HOME/cursor/auth.json`. */
+export const cursorSignInFile = 'cursor/auth.json';
+/** GY-3414: the file cursor-agent records its login in, under `CURSOR_CONFIG_DIR`: its `authInfo` names the signed-in user. */
+export const cursorLoginFile = 'cli-config.json';
+/** Cursor is logged in when cli-config.json in the account home names a signed-in user, or a keyring-less sign-in sits at `cursor/auth.json` (GY-3329). It exposes no quota. */
 async function cursorAccount(environment: ProbedHome): Promise<AccountReading> {
-  const info = (await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo;
-  return { loggedIn: !!info && !!(info.userId || info.email), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+  const config = await readFile(resolve(environment.home, cursorLoginFile), 'utf8').then(text => JSON.parse(text), () => null);
+  const signIn = await readFile(resolve(environment.home, cursorSignInFile), 'utf8').then(text => text.trim(), () => '');
+  const loggedIn = !!(config?.authInfo?.userId || config?.authInfo?.email) || !!signIn;
+  return { loggedIn, usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit', ...(loggedIn ? {} : { loggedOutReason: `${resolve(environment.home, cursorLoginFile)} names no signed-in user` }) };
+}
+/**
+ * GY-3329: the login-home variables an account's home is applied to beyond its home variable.
+ * cursor-agent ignores `CURSOR_CONFIG_DIR` for its sign-in and reads it from
+ * `$XDG_CONFIG_HOME/cursor/auth.json`, and a confined session has a private HOME and no
+ * XDG_CONFIG_HOME, so a cursor account's home is its XDG config home too — applied per account,
+ * over anything a runtime contract pinned to one account's home, so one cursor account never
+ * reads another's sign-in.
+ */
+export function accountHomeEnvironment(kind: string | null | undefined, home: string | null | undefined): Record<string, string> {
+  return kind === 'cursor' && home ? { XDG_CONFIG_HOME: home } : {};
 }
 
 // Per-runtime startup contracts that remove the approval and workspace-trust prompts a freshly
@@ -78,7 +144,8 @@ const builtInAdapters = {
     // Only Claude Code, which leaves AGENTS.md out under a role file, loads the launch authorization from a file.
     role: reference => `--append-system-prompt-file ${reference}`,
     screen: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
-    limitNotices: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
+    // Headless `-p` runs end with the result `… Switch to another model, or manage usage credits at https://claude.ai/settings/usage` (GY-3389).
+    limitNotices: [...providerUsageErrors, /\bClaude AI usage limit reached\b/, /^.{0,160}\bmanage usage credits at https:\/\/claude\.ai\/settings\/usage\b/i],
     home: { variable: 'CLAUDE_CONFIG_DIR', default: home => resolve(home, '.claude') },
     usage: (environment, probe, { now }) => claudeAccount(environment, probe, now),
     identity: { file: '.claude.json', ids: login => [login?.oauthAccount?.accountUuid, login?.oauthAccount?.organizationUuid] },
@@ -104,12 +171,18 @@ const builtInAdapters = {
     request: reference => reference,
     screen: /\bCursor\b/,
     limitNotices: [...providerUsageErrors],
+    // GY-3329: the sign-in cursor-agent reads is `$XDG_CONFIG_HOME/cursor/auth.json`, so the
+    // account's home is applied to XDG_CONFIG_HOME too (accountHomeEnvironment).
     home: { variable: 'CURSOR_CONFIG_DIR', default: home => resolve(home, '.cursor') },
     usage: environment => cursorAccount(environment),
     identity: { file: 'cli-config.json', ids: login => [login?.authInfo?.userId] },
   },
   opencode: {
-    headless: { before: ['run'], flags: ['--format', 'json'] },
+    // GY-3414: OpenCode 2.x hands every command to a background service on the host's loopback
+    // unless `--standalone`, and that service answers with its own login — none — whatever the
+    // account's XDG_DATA_HOME, so the run fell back to the free model and stopped at once. An
+    // OpenCode without it rejects the flag, so it is passed only where `run --help` lists it (GY-3425).
+    headless: { before: ['run'], flags: ['--format', 'json'], optional: ['--standalone'] },
     recipe: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
       tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
     request: reference => `--prompt ${reference}`,
@@ -117,8 +190,10 @@ const builtInAdapters = {
     // `Ask anything…` input prompt and a hint bar opening with `tab agents`.
     screen: /\btab agents\b|Ask anything…/,
     limitNotices: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
+    // Its Z.AI `provider.quota` error names `2026-11-20 12:49:15` with no zone, in UTC, as pi's does (GY-3389).
+    zonelessUtcResets: true,
     home: { variable: 'XDG_DATA_HOME', default: home => process.env.XDG_DATA_HOME ?? resolve(home, '.local/share') },
-    usage: (environment, probe, { plan, now }) => zaiAccount(environment, probe, { id: plan, now }),
+    usage: (environment, probe, { plan, now }) => opencodeAccount(environment, probe, { id: plan, now }),
     sharedPlan: true,
   },
   pi: {
@@ -130,7 +205,7 @@ const builtInAdapters = {
     limitNotices: [...providerUsageErrors, zaiLimitEnvelope], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
     // pi's 429 code 1310 names `2026-10-17 08:27:35` with no zone, in UTC (GY-1817).
     zonelessUtcResets: true,
-    usage: (environment, probe, { plan, now }) => zaiAccount(environment, probe, { id: plan, now }),
+    usage: (environment, probe, { plan, now }) => opencodeAccount(environment, probe, { id: plan, now }),
     sharedPlan: true,
   },
   gemini: {

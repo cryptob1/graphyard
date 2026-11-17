@@ -1,8 +1,9 @@
-import { takeWorkerVerifications, finishWorkerVerification } from '../worker-verification-queue.js';
+import { takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
 import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
 import { demand, type Principal } from '../../model.js';
+import { whyAndSimplestRefusal } from '../../model-boundary/work.js';
 import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
@@ -10,6 +11,8 @@ import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
+import { installUrl } from '../../team-access.js';
+import { unownedFamilySql } from '../../store/tables/work.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { readTrialScreenshot } from '../trial-screenshots.js';
 import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
@@ -17,6 +20,12 @@ import { save } from '../../store.js';
 import { lockedWork, workIdByRef } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
+
+/** GY-3415: the address the owner opens this install at — its tailnet name once the host reported it (routes/team-access.ts), else the address this request reached. */
+async function installAddress(context: RouteContext) {
+  const report = (await context.services.engine.store.pool.query(`SELECT payload FROM events WHERE ${unownedFamilySql('team-access.')} AND kind = 'team-access.host' ORDER BY seq DESC LIMIT 1`)).rows[0]?.payload;
+  return installUrl(report ?? {}, context.services.teamAccess?.port ?? String(context.req.socket.localPort ?? '')) ?? `http://${context.req.headers.host}`;
+}
 import { hostRunLog } from '../terminal.js';
 import { runTranscript } from '../../model/sessions.js';
 
@@ -43,6 +52,11 @@ export const workRoutes = defineRoutes('work', [
   { method: 'POST', path: '/api/worker-verifications/finish', async handle(context) {
     return finishWorkerVerification(context.services, context.actor, await parseJson(context));
   } },
+  { method: 'POST', path: '/api/worker-verifications/progress', async handle(context) {
+    return progressWorkerVerification(context.services, context.actor, await parseJson(context));
+  } },
+  // GY-3332: what the host's launcher has said so far about this item's verification, for `complete` to print while it waits.
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/worker-verification$/, handle: async ({ actor, services }, [id]) => ({ lines: workerVerificationLines(services, actor, decodeURIComponent(id!)) }) },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/worker-verification$/,
     async handle(context, [id]) {
@@ -63,7 +77,7 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
-        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
+        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key, await installAddress(context))
         : recordCapacity(context.services, context.actor, target, data, key);
     },
   },
@@ -178,6 +192,9 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
+      // GY-3382: every creator — master, loop, dashboard, reporter — files through this route, and each new item states why and simplest.
+      const unstated = id ? null : whyAndSimplestRefusal(input);
+      demand(!unstated, unstated!, 400);
       demand(attempted !== 'submit' || input?.pr === undefined, 'A submission names a commit, never a pull request number: complete GY-N EPOCH --head [SHA]');
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey()); }
       catch (error) {

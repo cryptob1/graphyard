@@ -4,6 +4,7 @@ import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
 import { humanAsk } from '../../src/model/human-ask';
 import type { Dashboard } from './dashboard';
+import { EmptyState, PageHeader } from '../components/page-layout';
 
 /**
  * What waits on the human, and nothing else: every action the server will take from the
@@ -33,15 +34,16 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
   const actor = status?.actor;
   // GY-3299: worker-pool growth the loop could not do caps how many items run at once until its cause is fixed.
   const growth: string | null = typeof status?.setup?.workerGrowth === 'string' ? status.setup.workerGrowth : null;
+  const open = requests.length + (growth ? 1 : 0);
   return <>
-    <div className="page-heading"><h1>Needs you <span className="count" title="Open actions only you may take">{requests.length + (growth ? 1 : 0)}</span></h1></div>
+    <PageHeader title="Needs you" fact={open ? `${open} ${open === 1 ? 'action waits' : 'actions wait'} on you.` : 'Nothing is waiting on you.'}>
+      Agents decide everything except goals and priorities, spending money or opening third-party accounts, issuing credentials to people, and authorizing what no agent identity may authorize. An item that reaches one of those waits here without holding a worker; everything else keeps moving.</PageHeader>
     {actor && <p className="muted signed-in-as">Signed in as <strong>{actor.displayName ?? actor.id}</strong> · {signedInAs(actor)}</p>}
-    <p className="muted">Agents decide everything except goals and priorities, spending money or opening third-party accounts, issuing credentials to people, and authorizing what no agent identity may authorize. An item that reaches one of those waits here without holding a worker; everything else keeps moving.</p>
     {growth && <div className="card human-request" data-worker-growth><div className="card-top"><strong>Worker pool cannot grow</strong></div><p>{growth}</p></div>}
-    {requests.length === 0 ? !growth && <p className="muted">Nothing is waiting on you.</p>
+    {requests.length === 0 ? !growth && <EmptyState title="All clear.">Goals, money, accounts and credentials for people come here when an item needs one of them.</EmptyState>
       : <div className="cards">{requests.map(row => <RequestCard key={row.request.id} row={row} refusal={refusalFor(row)} busy={busy} open={() => setSelected(row.id)} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}</div>}
-    {answered.length > 0 && <section className="work-list" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={request.id}>
+    {answered.length > 0 && <section className="panel" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={request.id}>
       <button className="text-button" onClick={() => setSelected(item.id)}>{item.key} <span data-title>{item.title}</span></button>
       <span className="muted">{humanDecisionLabel[request.kind]} · {request.answer!.outcome} by {request.answer!.by} after {formatDuration(request.answer!.waitedMs / 60000)}</span>
       <span>{shortShas(request.answer!.text)}</span>

@@ -1,0 +1,13 @@
+{
+  "id": "onboard-new-repository-faults",
+  "title": "Onboarding a new repository: the empty E2E catalog, the refused fetch and the master session's folder trust each complete instead of failing every cycle",
+  "description": "A fresh install on a repository with no e2e/cases directory completes its batch-gate diagnostics with an empty case list. With the remote refusing the fetch of the base branch, setup and master status each show one line quoting the remote's refusal and the fix, and the loop retries the fetch with a growing backoff, not every cycle. A stub Claude runtime that shows the folder trust prompt for the install's own checkout is accepted by the launcher and the master session starts, while the same prompt in any other folder still fails its launch; an execvp failure names the missing executable. A master-session launch that fails the same way three times is retried with a doubling backoff and shown as one attention line in master status instead of opening a new pane each cycle.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "onboarding faults",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/onboard-new-repository-faults.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

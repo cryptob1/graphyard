@@ -1,6 +1,6 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { slotsDirectoryVariable } from './verification-slots.js';
@@ -13,7 +13,7 @@ import { realRuntimeBinary } from '../runtime-binary.js';
 import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
-import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
+import { type ConsentPrompt, consentAnswers, detectConsentPrompt, ownCheckoutTrustAnswer, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
 import { assertIsolatableHostControlEndpoints } from './confinement.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { bwrapOnPath, masterConfinementVariable, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, assertCredentialsMasked, type CoordinatorConfinement, type ConfinementInput, type CredentialMask, type MaskProbe } from './confinement.js';
@@ -261,6 +261,8 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
 }
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
 export const launchProgram = (kind: string) => launchRecipe(kind)?.program ?? kind;
+/** Whether two paths name one folder, as each exists on this host: the real paths when both resolve, the resolved ones otherwise (GY-3336). */
+const sameFolder = (a: string, b: string) => { try { return realpathSync(a) === realpathSync(b); } catch { return resolve(a) === resolve(b); } };
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime (its real binary, never a mise shim: GY-3236), its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = [], environment: Record<string, string> = {}) {
   if (wrap.length) args = confinedRuntimeArgs(kind, args);
@@ -320,6 +322,13 @@ export const startedStates = ['idle', 'done', 'working'], promptableStates = ['i
 export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent' | 'exited';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
 export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
+  /**
+   * GY-3336: the launch runs in the install's own checkout — the folder the operator connected — so
+   * its runtime's folder-trust prompt is answered with its "Yes" rather than failing the launch
+   * (startAgentSession sets it; the confined master session's scratch HOME never sees the trust
+   * record the launch wrote). Any other folder's trust prompt still fails the launch.
+   */
+  trustFolder?: boolean;
   /** Where the start's duration is logged (GY-413); standard error unless a caller collects it. */ log?: (line: string) => void }
 export class SessionStartError extends Error {
   constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent' | 'exited', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
@@ -423,7 +432,7 @@ export async function paneForeground(pane: string, run?: ChildRun, program?: str
 export async function shellInForeground(pane: string, run?: ChildRun) {
   return await paneForeground(pane, run) === 'shell';
 }
-export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
+export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates, answers: readonly import('../consent-prompt.js').ConsentRule[] = consentAnswers): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
   try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
   // Herdr can assign an agent name to a shell or pre-runtime wrapper. Read its
@@ -436,7 +445,11 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
   // command not found — and nothing will start in that pane however long the bound (GY-976).
   const printed = outputAfterCommand(screen, command);
-  if (printed && await readForeground() === 'shell') return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
+  // GY-3336: a wrapper's execvp failure names the executable the host does not hold, and is the
+  // exit's own words even when the launch command has scrolled off the screen (bwrap: execvp
+  // claude: No such file or directory).
+  const missingExecutable = /\bexecvp\s+(\S+):\s*No such file or directory/.exec(screen ?? '');
+  if ((printed || missingExecutable) && await readForeground() === 'shell') return { state: 'exited', agent, detail: missingExecutable && !printed ? `the ${kind} runtime's command names ${missingExecutable[1]}, which is not installed on this host` : `the ${kind} runtime exited back to the shell before it was ready`, line: printed ? printed.join(' | ') : missingExecutable![0] };
   // Tool-manager trust happens before the agent exists. Never hold it as agent consent,
   // grant global trust, or let a name assigned to this shell consume a worker lease.
   if (/^\s*mise(?:\s+(?:ERROR|WARN))?[^\n]*\b(?:not trusted|trust config|config[^\n]*trust)/im.test(screen ?? '')) return {
@@ -448,7 +461,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
     state: 'absent', agent: null, line,
     detail: holder === 'shell' ? 'the pane shell is still in the foreground; no agent runtime began' : `the pane foreground is held by ${holder.other}, not the agent runtime`,
   };
-  const prompt = detectConsentPrompt(screen);
+  const prompt = detectConsentPrompt(screen, answers);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
   // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
   // and is refused at once with the rules it named rather than the dialog's key hint.
@@ -498,8 +511,11 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
   const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
   let extended: string | null = null;
   const consent: ConsentAnswer[] = [];
+  // GY-3336: a launch in the install's own checkout answers its runtime's folder-trust prompt; the
+  // global allow-list answers everything it ever did.
+  const answers = bounds.trustFolder ? [...consentAnswers, ownCheckoutTrustAnswer] : consentAnswers;
   for (;;) {
-    const observed = await observeStart(pane, kind, command, run, bounds.readyStates), waitedMs = clock() - startedAt;
+    const observed = await observeStart(pane, kind, command, run, bounds.readyStates, answers), waitedMs = clock() - startedAt;
     if (observed.state === 'ready') return { ...observed, waitedMs, extended, consent };
     if (observed.state === 'consent') {
       const prompt = observed.prompt!, rule = prompt.rule;
@@ -517,13 +533,22 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
         continue;
       }
       // A workspace-trust prompt means the recipe's trust step did not take (GY-1152): the launch
-      // fails naming it, and is never held as a session keeping its lease while it waits.
-      if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane} although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
+      // fails naming it, and is never held as a session keeping its lease while it waits. The one
+      // exception is the install's own checkout (GY-3336), whose "Yes" the launcher answered above
+      // and which still showing here has run out its bounded attempts.
+      if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane}${bounds.trustFolder ? ' although the launcher answered it for the install\'s own checkout' : ' although its launch records the folder trusted'}, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
       const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
       // A prompt nobody here answers refuses the launch with the prompt's own text.
       throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
     }
-    if (observed.state === 'exited') throw new SessionStartError('exited', pane, observed.line, waitedMs, `the ${kind} runtime exited back to the shell in pane ${pane} before it was ready; it last printed: "${observed.line}"`);
+    if (observed.state === 'exited') {
+      // GY-3336: an execvp failure names the executable the host does not hold — the fix is to
+      // install it, not to relaunch — so it is said outright, whatever else the pane printed.
+      const missing = /\bexecvp\s+(\S+):\s*No such file or directory/.exec(observed.line);
+      throw new SessionStartError('exited', pane, observed.line, waitedMs, missing
+        ? `the ${kind} runtime exited back to the shell in pane ${pane} before it was ready: its command names ${missing[1]}, which is not installed on this host, so every launch fails the same way until it is`
+        : `the ${kind} runtime exited back to the shell in pane ${pane} before it was ready; it last printed: "${observed.line}"`);
+    }
     const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
     if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
@@ -591,6 +616,12 @@ export async function startAgentSession(name: string, kind: string, pane: string
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? [], options.environment);
+  // GY-3336: the install's own checkout — the folder the operator connected — is the one folder
+  // whose trust prompt the launcher answers: the confined master session runs there under a
+  // scratch HOME, so the record the trust step wrote never reaches its runtime. Any other folder
+  // (a worktree, a review checkout) still fails its launch on a trust prompt.
+  const coordinator = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
+  const own = !!coordinator && sameFolder(options.cwd ?? options.directory, coordinator);
   // The trust record is read back once more immediately before the runtime starts (GY-1306): the
   // account's config is shared with its running sessions, and one that rewrote it since the trust
   // step dropped the record, so the launch is refused naming that config rather than started into
@@ -608,7 +639,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff, log)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
-    try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
+    try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates, ...(own ? { trustFolder: true } : {}) }); }
     catch (error) {
       if (error instanceof SessionStartError) log(`graphyard: ${name} (${kind}) in pane ${pane}: start failed after ${(error.waitedMs / 1000).toFixed(1)} s (${error.startCase}; bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
       throw error;

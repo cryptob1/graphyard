@@ -343,6 +343,8 @@ test('a delayed post-create refresh cannot restore the signed-out session or lea
   });
   await page.getByRole('button', { name: '＋ New work item' }).click();
   await page.getByLabel('Title', { exact: true }).fill('Delayed creation');
+  await page.getByLabel('Why it helps users').fill('Sessions never leak data.');
+  await page.getByLabel('Why it is the simplest thing that works').fill('One guard on the session epoch.');
   await page.getByText('Advanced', { exact: true }).click();
   await page.getByLabel('Acceptance criterion').fill('No data crosses sessions');
   await page.getByLabel('Required proof').fill('manual:session');
@@ -593,7 +595,7 @@ test('releases view labels verification precisely, shows membership and reports 
 
 const prHref = 'https://github.com/fixture/repository/pull/1', commitHref = `https://github.com/fixture/repository/commit/${work.candidate!.sha}`;
 const cardPrLink = (page: Page) => page.getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
-const detailPrLink = (page: Page) => itemPage(page).getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
+const changeLink = (page: Page) => itemPage(page).getByRole('link', { name: 'The change on GitHub for GY-1' });
 // A commit reads as its first eight characters (GY-168); the whole SHA is its title and link.
 const shortSha = work.candidate!.sha.slice(0, 8);
 const detailShaLink = (page: Page) => itemPage(page).getByRole('link', { name: `${shortSha}, open commit for GY-1 in GitHub` });
@@ -619,18 +621,22 @@ test('card and ownership candidate references link to the exact PR and commit in
   await expect(itemPage(page)).toHaveCount(0);
   await cardSelect(page).click();
   const dialog = itemPage(page);
-  await expect(detailPrLink(page)).toHaveAttribute('href', prHref);
+  // GY-3392: the plate names no pull request; the change is linked once, under Technical details.
+  await expect(dialog.getByText(/pull request/i)).toHaveCount(0);
+  await expect(dialog.getByText('PR #1')).toHaveCount(0);
+  await technicalDetails(page);
+  const prLink = changeLink(page);
+  await expect(prLink).toHaveAttribute('href', prHref);
   const shaLink = detailShaLink(page);
   await expect(shaLink).toHaveAttribute('href', commitHref);
-  for (const link of [detailPrLink(page), shaLink]) {
+  for (const link of [prLink, shaLink]) {
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   }
   await expect(shaLink.locator('code')).toHaveText(shortSha);
   await expect(shaLink.locator('code')).toHaveAttribute('title', work.candidate!.sha);
-  // The pull request is linked once, in the page header.
-  await expect(dialog.locator('.pr-button')).toContainText('PR #1');
-  await expect(dialog.getByRole('link', { name: /open pull request/ })).toHaveCount(1);
+  const [prPopup] = await Promise.all([page.waitForEvent('popup'), prLink.click()]);
+  expect(prPopup.url()).toBe(prHref); await prPopup.close();
   const [commitPopup] = await Promise.all([page.waitForEvent('popup'), shaLink.click()]);
   expect(commitPopup.url()).toBe(commitHref); await commitPopup.close();
   expect(state.writes).toBe(0);
@@ -647,8 +653,10 @@ test('the card selection control and the candidate PR link are sibling interacti
   expect(await page.locator('.work-row').first().evaluate(e => e.getAttribute('role'))).toBe(null);
   expect(await nestedInteractives(page)).toEqual([]);
   await cardSelect(page).click();
-  await expect(detailPrLink(page)).toBeVisible();
-  expect(await detailPrLink(page).evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
+  // GY-3392: the change's links sit under Technical details and nest in no button.
+  await technicalDetails(page);
+  await expect(changeLink(page)).toBeVisible();
+  expect(await changeLink(page).evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
   expect(await detailShaLink(page).evaluate(e => e.closest('button, [role="button"]') !== null)).toBe(false);
   expect(await nestedInteractives(page)).toEqual([]);
 });
@@ -675,11 +683,14 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(dialog.getByRole('button', { name: '← Back' })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(dialog.getByRole('combobox', { name: 'Priority for GY-1' })).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(detailPrLink(page)).toBeFocused();
-    expect(await outline(detailPrLink(page))).toEqual(focusRing);
-    // The commit is in the pull request panel; the requirement's proof names between them are keyboard stops too.
-    for (let stop = 0; stop < 8 && !await detailShaLink(page).evaluate(e => e === document.activeElement); stop++) await page.keyboard.press('Tab');
+    // GY-3392: the plate names no pull request, so the change's links are reached under Technical
+    // details; the link and the commit remain keyboard stops with the same focus treatment.
+    await technicalDetails(page);
+    const prLink = changeLink(page);
+    for (let stop = 0; stop < 4 && !await prLink.evaluate(e => e === document.activeElement); stop++) await page.keyboard.press('Tab');
+    await expect(prLink).toBeFocused();
+    expect(await outline(prLink)).toEqual(focusRing);
+    for (let stop = 0; stop < 4 && !await detailShaLink(page).evaluate(e => e === document.activeElement); stop++) await page.keyboard.press('Tab');
     await expect(detailShaLink(page)).toBeFocused();
     expect(await outline(detailShaLink(page))).toEqual(focusRing);
     // Linking the SHA must not turn it into an unreadable widget: the text stays
@@ -705,7 +716,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.locator('.work-row').first()).toBeVisible();
     await select.focus(); await page.keyboard.press('Enter');
     await expect(itemPage(page)).toBeVisible();
-    await expect(itemPage(page).getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' })).toBeVisible();
+    await expect(itemPage(page).getByText('Who acts next:')).toBeVisible();
   });
 }
 
@@ -717,7 +728,9 @@ test('an unconfigured GitHub repository renders candidate references as non-link
   await expect(page.locator('.card-pr').getByText('PR #1', { exact: true })).toBeVisible();
   await cardSelect(page).click();
   const dialog = itemPage(page);
-  await expect(dialog.locator('.pr-button').getByText('PR #1', { exact: true })).toBeVisible();
+  // The plate names no pull request number (GY-3392); with no repository there is nothing to link.
+  await expect(dialog.getByText('PR #1')).toHaveCount(0);
+  await technicalDetails(page);
   await expect(dialog.getByText(shortSha, { exact: true })).toBeVisible();
   await expect(dialog.getByRole('link', { name: /open pull request|open commit/ })).toHaveCount(0);
 });
@@ -735,8 +748,13 @@ test('legacy abbreviated SHAs and invalid candidate references never become link
     if (expectedPr) await expect(page.locator('.work-row').getByRole('link', { name: /open pull request/ })).toHaveAttribute('href', expectedPr);
     await cardSelect(page).click();
     const dialog = itemPage(page);
+    // The change's commit sits under Technical details (GY-3392); the plate names no pull request.
+    await technicalDetails(page);
     await expect(dialog.getByText(shaText, { exact: true })).toBeVisible();
-    await expect(dialog.getByRole('link', { name: /open pull request/ })).toHaveCount(expectedPr ? 1 : 0);
+    await expect(dialog.getByRole('link', { name: /open pull request/ })).toHaveCount(0);
+    const change = changeLink(page);
+    await expect(change).toHaveCount(expectedPr ? 1 : 0);
+    if (expectedPr) await expect(change).toHaveAttribute('href', expectedPr);
     await expect(dialog.getByRole('link', { name: /open commit/ })).toHaveCount(expectedCommit ? 1 : 0);
     if (expectedCommit) await expect(dialog.getByRole('link', { name: /open commit/ })).toHaveAttribute('href', expectedCommit);
     await page.getByRole('button', { name: '← Back' }).click();
@@ -757,6 +775,8 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [item(trial)], now: '2026-01-01T00:00:00Z' } }));
   await login(page);
   await cardSelect(page).click();
+  // GY-3392: the trials fold with the gate detail, under Technical details.
+  await technicalDetails(page);
   const panel = itemPage(page).locator('section[aria-label="Tests"]');
   await expect(panel.getByText(/Merge trial of eeeeeeee: build passed · 12 test files ran/)).toBeVisible();
   await expect(panel.getByText('1 of 2 passed on the current head')).toBeVisible();
@@ -769,6 +789,7 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [item(null)], now: '2026-01-01T00:00:00Z' } }));
   await login(page);
   await cardSelect(page).click();
+  await technicalDetails(page);
   const waiting = itemPage(page).locator('section[aria-label="Tests"]');
   await expect(waiting.locator('[data-case="a"]')).toContainText('○ not run yet unit:a');
   await expect(waiting.locator('[data-case="b"]')).toContainText('○ not run yet integration:b');

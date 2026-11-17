@@ -9,6 +9,18 @@ export const memoryNoteSchema = z.object({
   at: z.string(),
   /** A master lesson marked for workers (GY-3274): carried in worker prompts too. */
   forWorkers: z.boolean().optional(),
+  /** GY-3399: a master lesson the master marked mechanically enforceable: the loop files an item to turn it into code. */
+  enforceable: z.boolean().optional(),
+  /** GY-3399: the item the loop filed for an enforceable lesson; its delivery removes the lesson. */
+  filedAs: z.string().optional(),
+}).strict();
+
+/** GY-3399: a lesson the loop removed once the item that turned it into code was delivered. */
+export const removedGateSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  key: z.string(),
+  at: z.string(),
 }).strict();
 
 export const memoryChangeSchema = z.object({
@@ -42,4 +54,5 @@ export const projectMemorySchema = z.object({
   notes: z.array(memoryNoteSchema).max(100).default([]),
   changes: z.array(memoryChangeSchema).max(100).default([]),
   brief: productBriefSchema.nullable().default(null),
+  removedGates: z.array(removedGateSchema).max(100).optional(),
 });
