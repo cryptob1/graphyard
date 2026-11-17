@@ -101,13 +101,21 @@ elif verb == 'prepare-run':
             shutil.rmtree(os.path.join(runs, name), ignore_errors=True)
     run = tempfile.mkdtemp(prefix='trial-', dir=runs)
     checkout = os.path.join(run, 'repo')
-    # A clone with history, so tests that read the checkout's git log run as they do on this machine; --local hardlinks the mirror's objects.
-    subprocess.check_call(['git', 'clone', '-q', '--local', '--no-checkout', mirror, checkout])
+    # Keep history, but copy objects: per-run permissions must never change the mirror.
+    subprocess.check_call(['git', 'clone', '-q', '--local', '--no-hardlinks', '--no-checkout', mirror, checkout])
     subprocess.check_call(['git', '-C', checkout, '-c', 'advice.detachedHead=false', 'checkout', '-q', '--detach', args[1]])
     if not args[2].endswith('-none') and not os.path.lexists(os.path.join(checkout, 'node_modules')):
         os.symlink('/deps/node_modules', os.path.join(checkout, 'node_modules'))
     with open(os.path.join(run, 'image'), 'w') as file:
         file.write(args[2])
+    # Container GID 0 maps to the host user's group under rootless Docker. Only this
+    # run is writable by that group; UID 1000 can start Postgres without being root.
+    for directory, dirs, files in os.walk(run):
+        os.chmod(directory, os.stat(directory).st_mode | 0o2070)
+        for name in files:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, os.stat(path).st_mode | 0o060)
     print('run ' + os.path.basename(run))
 else:
     run = os.path.join(runs, args[0])
@@ -140,15 +148,18 @@ else:
             file.write('\\n'.join(files) + '\\n')
         memory = next((int(line.split()[1]) for line in open('/proc/meminfo') if line.startswith('MemTotal:')), 4 << 20) // 1024 // cap
         spec = {'image': open(os.path.join(run, 'image')).read().strip(), 'mounts': [[run, run, False]], 'network': 'none',
-                'deadline': min(deadline, int(time.time() * 1000) + 3 * 3600 * 1000), 'docker': os.environ['DOCKER_HOST'], 'user': '0:0',
+                'deadline': min(deadline, int(time.time() * 1000) + 3 * 3600 * 1000), 'docker': os.environ['DOCKER_HOST'], 'user': '1000:0',
                 'limits': {'cpus': max(1, min(cpus, cores)), 'memory': '%dm' % max(512, memory), 'pids': 4096},
                 'load': {'slots': os.path.join(home, '.gy', 'trial-slots'), 'cap': cap, 'order': ${trialStartOrder.merge}, 'hotCelsius': ${trialHotCelsius},
                          'floorBytes': float(os.environ.get('GRAPHYARD_HOST_FLOOR_GB', ${defaultDiskFloorGb})) * 1e9, 'hwmon': '/sys/class/hwmon', 'pressureBoundSeconds': ${trialPressureBoundSeconds}}}
         command = [{'{list}': listed, '{records}': records}.get(word, word) for word in argv]
+        # Keep new files removable by the host's mapped group too.
+        command = ['/bin/sh', '-c', 'umask 0002; exec "$@"', 'sh'] + command
         os.chdir(os.path.join(run, 'repo'))
         sys.stdout.flush()
         sys.exit(subprocess.call([sys.executable, '-I', '-S', '-c', LAUNCHER, json.dumps(spec)] + command,
-                                 env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': '/tmp', 'CI': '1'}))
+                                 env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': '/tmp', 'CI': '1',
+                                      'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory', 'GIT_CONFIG_VALUE_0': os.getcwd()}))
 GRAPHYARD_VERBS
 )" "$@" ;;
   *) refuse ;;

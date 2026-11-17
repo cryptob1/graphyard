@@ -1,3 +1,4 @@
+import { remotePostgresShard } from './helpers/remote-postgres-shard.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -150,4 +151,9 @@ test(`${proof} — over the second host's key a plain shell command, a read outs
   const shards = await dockerCreates(docker);
   assert.ok(shards.length > 0 && shards.every(create => create.includes('--network=none') && !create.join(' ').includes('unconfined')), 'the shards the second host did run had no network and kept their confinement');
   assert.equal(execFileSync('id', ['-u'], { encoding: 'utf8' }).trim() === '0', false, 'the host user is not root');
+});
+
+// Also exercise the reported Postgres reproducer with real rootless Docker, without fallback.
+test(`${proof} — a Postgres-backed file passes remotely through the shim under rootless Docker`, { timeout: 660_000 }, async () => {
+  await remotePostgresShard();
 });

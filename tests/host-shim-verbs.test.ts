@@ -65,7 +65,7 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     for (const host of ['10.0.0.1', '192.168.1.1', '100.64.0.1', '127.0.0.1']) assert.match(ended.out, new RegExp(`^blocked ${host.replace(/\./g, '\\.')} `, 'm'), ended.out);
     const [create] = await dockerCreates(hosts.state('box'));
     const words = create!.join(' ');
-    for (const flag of ['--network=none', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--read-only', '--pids-limit=4096', '--user 0:0']) assert.ok(words.includes(flag), `${flag}: ${words}`);
+    for (const flag of ['--network=none', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--read-only', '--pids-limit=4096', '--user 1000:0']) assert.ok(words.includes(flag), `${flag}: ${words}`);
     assert.match(words, /--cpus=\d+ /);
     assert.ok(Number(/--cpus=(\d+)/.exec(words)![1]) <= Number(/^cores (\d+)$/m.exec(shim('probe').stdout)![1]), 'CPUs are clamped to the host\'s cores');
     assert.match(words, /--memory=\d+m /);
