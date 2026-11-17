@@ -236,11 +236,11 @@ export function loopHosts(header: string | string[] | undefined): LoopHost[] | n
  */
 export const loopSessionsHeader = 'X-Graphyard-Loop-Sessions';
 export const encodeLoopSessions = (sessions: readonly { unit: string; name?: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null }[]) =>
-  encodeURIComponent(JSON.stringify(sessions.slice(0, 50).map(({ unit, name, cpu, cpuShare, memory, memoryShare, overSince }) => ({ session: (name ?? unit).slice(0, 120), cpu: cpu === null ? null : Number(cpu.toFixed(2)), cpuShare: Number(cpuShare.toFixed(2)), memory, memoryShare, overSince }))));
+  encodeURIComponent(JSON.stringify(sessions.slice(0, 30).map(({ unit, name, cpu, cpuShare, memory, memoryShare, overSince }) => ({ session: (name ?? unit).slice(0, 120), cpu: cpu === null ? null : Number(cpu.toFixed(2)), cpuShare: Number(cpuShare.toFixed(2)), memory, memoryShare, overSince }))));
 /** The sessions a loop read names, or null when it names none or they do not parse. */
 export function loopSessions(header: string | string[] | undefined): LoopSession[] | null {
   const value = Array.isArray(header) ? header[0] : header;
-  if (!value || value === 'off' || value.length > 16000) return null;
+  if (!value || value === 'off' || value.length > 8000) return null;
   try {
     const parsed = JSON.parse(decodeURIComponent(value)) as unknown;
     if (!Array.isArray(parsed)) return null;
