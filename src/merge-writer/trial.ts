@@ -1027,6 +1027,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // the file apply only once they merge. A head that changes the file builds its own copy first: a
   // build that fails is that head's red verdict, and when the base tip's copy cannot build the head
   // that replaces it runs in its own image, so a fix always lands through an ordinary merge.
+  // GY-3420: the image follows the file at the trialled commit: one that deletes it runs the standard
+  // image without building the base tip's copy, and one that first adds it runs in its own image.
   const image = async (): Promise<TrialRun | undefined> => {
     const build = (tip: string) => repositoryTrialImage({ root: input.root, tip, scratch: temporary!, env, run, timeoutMs: remaining(),
       log: line => log.push(line), onStep: label => enterStep(label) });
@@ -1041,13 +1043,14 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         return finish('fail', { passed: 0, failed: [trialDockerfile], files: 0 });
       }
     }
-    let imageTip = input.baseTip ?? null;
-    if (imageTip === null) {
+    const deleted = changed && own === null; // the trialled commit deletes the file: the standard image
+    let imageTip = deleted ? null : input.baseTip ?? null;
+    if (imageTip === null && !deleted) {
       try { imageTip = String(await run('git', ['-C', input.root, 'rev-parse', '--verify', '--quiet', `${input.mergeSha}^1`], { timeoutMs: remaining() })).trim().toLowerCase() || null; }
       catch { imageTip = null; } // a root commit names no base to read the file from
     }
     let chosen: string | null = null;
-    try { chosen = imageTip ? await build(imageTip) : null; }
+    try { chosen = (imageTip ? await build(imageTip) : null) ?? own; }
     catch (error) {
       if (!changed || !(error instanceof TrialRepositoryImageError)) throw error;
       log.push(`the base tip's ${trialDockerfile} does not build and this head replaces it: the trial runs in this head's image`);

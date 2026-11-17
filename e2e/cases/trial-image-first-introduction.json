@@ -1,0 +1,14 @@
+{
+  "id": "trial-image-first-introduction",
+  "title": "A head that first adds graphyard.trial.Dockerfile runs its trial in the image it builds",
+  "description": "A fixture repository without graphyard.trial.Dockerfile gets a head that adds one (an ENV and a stub gofake over the trial image). With a stub docker first on PATH that reads --file the way docker does, the real merge trial builds the head's Dockerfile from its path inside the context worktree and runs the preMerge check 'gofake verify' in that image.",
+  "tags": ["trial", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "a head first introducing the trial Dockerfile builds it and runs its checks in it",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:trial-image-first-introduction tests/repository-trial-image.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
