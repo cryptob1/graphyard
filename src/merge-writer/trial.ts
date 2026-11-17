@@ -23,7 +23,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
-import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
+import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
@@ -1390,7 +1390,16 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const hosts = input.remote?.hosts ?? await shardHosts();
     const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
-    const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores) + remoteLanes, await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
+    // GY-3419: test files naming bwrap, Docker or the network are local-only — a remote shard runs
+    // with no namespaces, network or Docker socket, so they would fail there as red verdicts that
+    // measure nothing. Each pool is cut into its own shards, so a local-only file never pins a whole
+    // shared shard to this machine, and placement keeps the local-only shards here (runShardsOnHosts
+    // `pinned`) while the others may go to any host.
+    const split = await splitLocalOnlyTests(files, file => readFile(join(worktree, file), 'utf8'));
+    const durations = await checkoutDurations(worktree, strategy.durations);
+    const shards: string[][] = [], pinned: boolean[] = [];
+    for (const pool of [{ files: split.remoteable, lanes: trialShardLanes(cores) + remoteLanes, local: false }, { files: split.localOnly, lanes: trialShardLanes(cores), local: true }])
+      for (const group of input.groupSize === undefined ? shardTestFiles(pool.files, pool.lanes, durations) : groupTestFiles(pool.files, input.groupSize)) { shards.push(group); pinned.push(pool.local); }
     const slotsDirectory = process.env[(await import('../master/verification-slots.js')).slotsDirectoryVariable];
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
@@ -1438,7 +1447,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
       const local: PlacedHost<string> = { name: readings[0]?.name ?? 'local', room: lanes, reading: readings[0] ?? { name: 'local', cores, busy: 0, steal: 0, celsius: null, limit: Infinity, away: false } };
       const placed = [local, ...hosts.map((host, index) => ({ name: host, remote: host, reading: readings[index + 1]!, room: Math.floor(realFreeCores(readings[index + 1]!) / breadth) }))];
-      const placement = await runShardsOnHosts({ count: shards.length, hosts: placed, breadth, stopped: () => stopped !== null,
+      const placement = await runShardsOnHosts({ count: shards.length, hosts: placed, breadth, pinned, stopped: () => stopped !== null,
         run: (host, index) => shard(index, host.remote) });
       if (hosts.length) await recordRemoteShardRun(input.root, { at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
         queuedWhileIdle: placement.queuedWhileIdle, host: local.name, celsius: local.reading.celsius,
