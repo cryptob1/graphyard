@@ -97,7 +97,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(added.locator('[data-label="Runs now"]')).toHaveText('2');
       await expect(hosts.locator('[data-host="gy-compute@gone"]')).toContainText('Away');
       await expect(hosts.locator('[data-host="gy-compute@gone"] [data-label="State"] span')).toHaveAttribute('title', /is unreachable over SSH/);
-      await expect(page.locator('[data-hosts-note]')).toHaveText('Added hosts are watched, not given work yet: trials and previews run on this machine.');
+      await expect(page.locator('[data-hosts-note]')).toHaveText('Merge trials send test shards to added hosts too; previews run on this machine.');
       const width = await page.evaluate(() => document.documentElement.scrollWidth);
       expect(width).toBeLessThanOrEqual(viewport.width);
     } finally { await page.close(); await close(); }
