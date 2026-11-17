@@ -562,7 +562,9 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // The proof files the selection discovered are held like those the input named.
   const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, selectFiles, proofFiles: ownProofFiles }, inner, retest);
   if (!input.reproduce || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
-  return reproduceOnBase(attributed, input, ownProofFiles, inner, retest);
+  // GY-3423: the refusal names the proof's files; a repository check selects no files, so they are discovered here.
+  const named = ownProofFiles.length ? ownProofFiles : await proofFiles(undefined).catch(() => ownProofFiles);
+  return reproduceOnBase(attributed, input, ownProofFiles, named, inner, retest);
 }
 
 /**
@@ -571,7 +573,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * ran there and none of its cases failed, the head is `notReproduced`. A proof file or case new on the
  * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
  */
-async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], git: ChildRun,
+async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], named: readonly string[], git: ChildRun,
   retest: (sha: string, files: string[], e2eProofs: readonly string[], counting: 'count', e2eFrom: string) => Promise<{ run: TrialRun; proofs: ProofCounts } | null>): Promise<MergeTrialRun> {
   const e2eProofs = input.e2eProofs ?? [];
   let tip: string, files: string[], baseCases: string[];
@@ -591,7 +593,7 @@ async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proof
   // GY-3267: the base run's kept screenshots are the before side of whatever the trial already kept.
   const shots = mergeTrialShots(run.screenshots ?? [], onBase.run.e2e ?? [], 'before');
   const withBefore = shots.length ? { ...run, screenshots: shots } : run;
-  const caseFiles = [...files, ...e2eProofs.map(proof => `e2e/cases/${proof.slice(4)}.json`)];
+  const caseFiles = [...(files.length ? files : named), ...e2eProofs.map(proof => `e2e/cases/${proof.slice(4)}.json`)];
   return passing ? { ...withBefore, notReproduced: { proofs, tip, files: caseFiles } } : withBefore;
 }
 
