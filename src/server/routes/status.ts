@@ -1,3 +1,4 @@
+import { pendingWorkerVerifications } from '../worker-verification-queue.js';
 import { readWorkReplay } from '../work-replay.js';
 import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
@@ -68,7 +69,7 @@ export const statusRoutes = defineRoutes('status', [
       // its own working directory's git toplevel, so a served head reports its own serving.
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
-      return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
+      return { workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
@@ -140,7 +141,7 @@ export const statusRoutes = defineRoutes('status', [
       if (loopInterval !== null) loopWhereRegistry(services.engine).observe(loopWhere(req.headers[loopWhereHeader.toLowerCase()]));
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
         const visibleWork = operatorVisible(snapshot.work);
-        return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
+        return { ...snapshot, workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
       // Paging (GY-864): a reader that must still walk every document — an export, a migration —
       // asks for `cursor` (the number of the work item it last saw, the suffix of its key) and

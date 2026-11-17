@@ -1,0 +1,9 @@
+{
+  "id": "verification-survives-loop-restart",
+  "title": "Complete preserves its head across a loop restart",
+  "description": "Restart the coordinator while its server holds a complete request, retry the same worker/head through real required trial validation, and retain independent review and proof gates.",
+  "tags": ["workers", "verification"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Complete across coordinator restart", "run": "node --import tsx --test tests/verification-survives-loop-restart.test.ts", "timeoutSeconds": 240 }]
+}
