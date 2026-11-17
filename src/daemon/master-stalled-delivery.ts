@@ -6,7 +6,7 @@ import type { ServingReport } from '../deploy-watch.js';
 import type { Work } from '../model.js';
 import { parseBaseFailureReason } from '../merge-writer/executor.js';
 import { gateCauses, type GateRecord } from '../batch-gate.js';
-import { repeatedFailureCause, repeatingItems } from './repeated-failure.js';
+import { normalizeFailureReason, repeatedFailureCause, repeatingItems } from './repeated-failure.js';
 import { stallAlarmKey } from './stall-alarm.js';
 
 export const stalledDeliveryAction = 'Diagnose the shared base failure, file or advance its repair, and resume delivery with every test and merge requirement intact. Act as the operator-agent; no human review or approval is needed.';
@@ -56,8 +56,8 @@ export function masterCauses(work: readonly Work[], actions: DaemonState['action
   for (const [key, action] of Object.entries(actions)) {
     // GY-3122: a disk shortage the loop could not reclaim names no item, and holds every trial and worker.
     if (key === 'disk-headroom') { if (action.state === 'failed') causes.push(cause('disk-headroom', action.detail)); continue; }
-    // GY-3432: the stall alarm names no single item either.
-    if (key === stallAlarmKey) { causes.push(cause(key, action.detail)); continue; }
+    // GY-3432: the stall alarm names no single item either; numbers and ids aside (a temperature, a request id), an unchanged alarm wakes once.
+    if (key === stallAlarmKey) { causes.push({ ...cause(key, action.detail), digest: cause(key, normalizeFailureReason(action.detail)).digest }); continue; }
     // GY-3103: a failed runtime canary names its runtime, not an item the master would see open.
     if (key.startsWith('runtime-canary:')) { if (action.state === 'failed') causes.push(cause(key, action.detail)); continue; }
     const item = open.find(item => item.key === action.work);

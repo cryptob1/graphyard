@@ -87,7 +87,8 @@ async function stalled(f: Awaited<ReturnType<typeof fixture>>, work: Work[] = [r
 }
 
 test(`${proof} — the last dispatch error, today's loop-state save 500, is the named cause; the master is woken although the dispatch tick keeps failing`, async () => {
-  const f = await fixture({ dispatchTick: async () => { throw new Error('Loop state dispatch: 500 {"error":"internal"}'); } });
+  let error = 'Loop state dispatch: 500 {"error":"internal","request":"1a2b3c4d"}';
+  const f = Object.assign(await fixture({ dispatchTick: async () => { throw new Error(error); } }), { failWith: (next: string) => { error = next; } });
   const alarm = await stalled(f);
   assert.match(alarm, /no launch since 2026-11-16T08:00:00\.000Z/);
   assert.match(alarm, /last dispatch error: .*Loop state dispatch: 500/);
@@ -95,6 +96,11 @@ test(`${proof} — the last dispatch error, today's loop-state save 500, is the 
   f.advance(1);
   await f.cycle();
   assert.equal(f.prompts.length, wakes, 'an unchanged alarm wakes the master once');
+  // The alarm reads the dispatch error the cycle before recorded.
+  f.failWith('Loop state dispatch: 500 {"error":"internal","request":"7f3a9c21"}');
+  for (const _ of [1, 2]) { f.advance(1); await f.cycle(); }
+  assert.match(alarmOf(f.state)!, /7f3a9c21/, 'the alarm keeps the error as it read');
+  assert.equal(f.prompts.length, wakes, 'a new request id in the same error wakes nobody again');
 });
 
 test(`${proof} — launches waiting on heat are the named cause`, async () => {
