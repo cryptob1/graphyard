@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3307: the dashboard names the master agent Master everywhere — the navigation, the Master
 // page's heading and its accessible controls — and the agents page stays
@@ -14,6 +15,7 @@ test('e2e:master-worker-terminology — navigation, the Master heading and its a
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(work, NOW, null) });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
